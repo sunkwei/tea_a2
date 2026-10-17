@@ -6,7 +6,7 @@ rem   scripts\build-mingw.bat              -> Release build into .\build-mingw
 rem   scripts\build-mingw.bat build-gcc14  -> build into .\build-gcc14
 rem
 rem Environment:
-rem   TEA_AGENT_GENERATOR   override the CMake generator (default Ninja)
+rem   TEA_AGENT_GENERATOR   override the CMake generator (default "MinGW Makefiles")
 rem
 rem The toolchain is looked up in this order:
 rem   1. %MINGW_HOME%
