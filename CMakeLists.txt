@@ -243,6 +243,30 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(tea_agent PRIVATE Threads::Threads)
 
+# --- self-contained runtime -------------------------------------------------
+# Single-file deployment: the C++ runtime is linked statically so the binary does
+# not need libstdc++.so.6 / libgcc_s.so.1 on the target device. MinGW already
+# gets -static-libgcc -static-libstdc++ -static above (a MinGW build then needs
+# only Windows' own DLLs: KERNEL32/ADVAPI32/SHELL32/WINHTTP/WS2_32 plus the UCRT).
+#
+# On macOS a static libc++ does not exist, so the option only applies to ELF
+# targets built with GCC or Clang.
+option(TEA_AGENT_STATIC_RUNTIME
+       "Link the C++ runtime statically so the binary is self-contained" ON)
+# Fully static (also libc). Needs a static libc to be installed — musl-based
+# toolchains handle this well; with glibc, static linking still resolves DNS
+# through nsswitch/dlopen and can surprise you, so it stays off by default.
+option(TEA_AGENT_FULLY_STATIC "Also link libc statically (see the glibc caveat)" OFF)
+
+if(TEA_AGENT_STATIC_RUNTIME AND NOT WIN32 AND NOT APPLE AND
+   CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_link_options(tea_agent PRIVATE -static-libstdc++ -static-libgcc)
+  if(TEA_AGENT_FULLY_STATIC)
+    target_link_options(tea_agent PRIVATE -static)
+    message(STATUS "tea_agent: fully static binary requested (-static)")
+  endif()
+endif()
+
 # Put the binary in a predictable place and copy the web sources next to it so
 # that --web-dir can be used for live UI editing.
 set_target_properties(tea_agent PROPERTIES

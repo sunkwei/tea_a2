@@ -535,6 +535,35 @@ cmake --build build-arm64 -j"$(nproc)"
 `-DTEA_AGENT_USE_MBEDTLS=OFF`（体积显著下降，但 Linux 上就没有 `https://` 了）；
 还可以用自定义 `MBEDTLS_CONFIG_FILE` 裁掉 mbedTLS 里用不到的算法。
 
+### 单文件部署（静态链接运行时）
+
+目标设备上不该再装一遍编译器运行时，所以 **C++ 运行时是静态链接的**（`TEA_AGENT_STATIC_RUNTIME`，
+默认 `ON`）：
+
+| 平台 | 链接方式 | 目标机需要什么 |
+| --- | --- | --- |
+| Windows / MinGW-w64 | `-static-libgcc -static-libstdc++ -static` | 只有 Windows 自带的 `KERNEL32/ADVAPI32/SHELL32/WINHTTP/WS2_32` + UCRT，无 `libstdc++-6.dll` / `libwinpthread-1.dll` |
+| Linux / 其它 ELF（GCC/Clang） | `-static-libstdc++ -static-libgcc` | 只剩系统 `libc/libm/libpthread`，无 `libstdc++.so.6` / `libgcc_s.so.1` |
+| macOS | 不适用 | 系统不提供静态 `libc++`，此选项自动跳过 |
+
+实测（MinGW）：6.4 MB，`objdump -p` 里的 DLL 依赖只有上面 6 个系统库，
+`libstdc++/libgcc/winpthread` 命中 **0** 个。
+
+Linux 上用一条命令确认（`libstdc++`/`libgcc_s` 不应出现）：
+
+```bash
+ldd build/bin/tea_agent        # 期待只有 libc、libm、libpthread
+```
+
+想要**连 libc 也静态**（真正的 fully static，适合 musl 工具链的嵌入式板子）：
+
+```bash
+cmake -S . -B build -DTEA_AGENT_FULLY_STATIC=ON
+```
+
+注意 glibc 的坑：静态链接后 DNS 解析仍可能通过 `nsswitch`/`dlopen` 在运行期加载，
+所以 glibc 下不建议开这个选项；musl（或 `TEA_AGENT_USE_MBEDTLS` 场景下自带 TLS）更稳。
+
 ### TLS 与证书
 
 - Windows 默认走 WinHTTP，使用**系统证书库**，无需额外文件；拿不到状态行时自动回退内置 mbedTLS。
