@@ -31,6 +31,10 @@ struct ContextStats {
   std::size_t total = 0;
   long long budget = 0;
   long long used = 0;
+  /// Tokens of the whole unsummarised history (what pressure is measured on).
+  long long live_used = 0;
+  /// Compact once live_used reaches this (budget * compaction_trigger_ratio).
+  long long trigger = 0;
   bool trimmed = false;
 };
 
@@ -63,9 +67,11 @@ class Agent {
   /// Fold the oldest part of the history into a rolling summary when the context
   /// is about to overflow. Never deletes messages: only advances
   /// session->summary_upto so they stop being sent.
+  /// `force` bypasses the pressure threshold; used to recover from a provider
+  /// context-overflow error, mirroring dsh's overflow trigger.
   bool maybe_compact(Workspace& workspace, Session* session, const std::string& provider,
                      const std::string& model, const ModelInfo* model_info,
-                     std::atomic<bool>* cancel, const EventEmitter& emit);
+                     std::atomic<bool>* cancel, const EventEmitter& emit, bool force = false);
 
   /// Exposed so the HTTP layer can show exactly what the model receives.
   std::string build_system_prompt(const Workspace& workspace, const Session& session) const;
@@ -75,7 +81,7 @@ class Agent {
                      std::vector<Message>* out, ContextStats* stats = nullptr) const;
   bool compact_history(Workspace& workspace, Session* session, const std::string& provider,
                        const std::string& model, const ModelInfo* model_info,
-                       std::atomic<bool>* cancel);
+                       std::atomic<bool>* cancel, long long retain_tokens);
 
   AppConfig* config_;
   ToolRegistry* tools_;

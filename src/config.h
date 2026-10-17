@@ -82,6 +82,16 @@ struct Settings {
   // ---- context management ----------------------------------------------
   /// Summarise the oldest part of the history instead of dropping it silently.
   bool enable_compaction = true;
+  /// Compact when the live history reaches this fraction of the message budget.
+  /// Compacting exactly at the hard boundary would re-trigger on the very next
+  /// turn; borrowing dsh's 0.8 leaves hysteresis.
+  double compaction_trigger_ratio = 0.8;
+  /// Fold history until the verbatim tail is at most this fraction of the budget.
+  /// dsh uses 0.16: compacting "just enough" makes every following turn compact
+  /// again, so we aim for a small tail instead.
+  double compaction_retain_ratio = 0.16;
+  /// Extra verbatim messages kept regardless of the token target.
+  int compaction_retries = 1;
   /// Token budget for the generated summary.
   int64_t compaction_summary_max_tokens = 800;
   /// Keep at least this many recent messages no matter what.

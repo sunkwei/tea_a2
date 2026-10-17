@@ -99,10 +99,22 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (yhas(node, "compaction_summary_max_tokens"))
     s.compaction_summary_max_tokens =
         yint(node, "compaction_summary_max_tokens", s.compaction_summary_max_tokens);
+  if (yhas(node, "compaction_trigger_ratio"))
+    s.compaction_trigger_ratio = ydouble(node, "compaction_trigger_ratio", s.compaction_trigger_ratio);
+  if (yhas(node, "compaction_retain_ratio"))
+    s.compaction_retain_ratio = ydouble(node, "compaction_retain_ratio", s.compaction_retain_ratio);
+  if (yhas(node, "compaction_retries"))
+    s.compaction_retries = static_cast<int>(yint(node, "compaction_retries", s.compaction_retries));
   if (yhas(node, "compaction_keep_recent"))
     s.compaction_keep_recent =
         static_cast<int>(yint(node, "compaction_keep_recent", s.compaction_keep_recent));
   if (s.keep_turns < 0) s.keep_turns = 0;
+  if (s.compaction_trigger_ratio < 0.3) s.compaction_trigger_ratio = 0.3;
+  if (s.compaction_trigger_ratio > 0.95) s.compaction_trigger_ratio = 0.95;
+  if (s.compaction_retain_ratio < 0.02) s.compaction_retain_ratio = 0.02;
+  if (s.compaction_retain_ratio >= s.compaction_trigger_ratio)
+    s.compaction_retain_ratio = s.compaction_trigger_ratio / 2;
+  if (s.compaction_retries < 0) s.compaction_retries = 0;
   if (s.max_iterations < 1) s.max_iterations = 1;
   if (s.command_timeout_ms < 1000) s.command_timeout_ms = 1000;
 }

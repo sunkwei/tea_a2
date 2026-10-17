@@ -32,6 +32,20 @@ nlohmann::json usage_json(const ChatUsage& usage) {
   return usage.to_json();
 }
 
+/// Providers word "your request does not fit" differently; recognise the family
+/// so one forced compaction can rescue the request (dsh's overflow trigger).
+bool looks_like_context_overflow(const std::string& lowered) {
+  static const char* const kMarkers[] = {
+      "context length",          "context_length_exceeded", "maximum context",
+      "context window",          "too many tokens",         "prompt is too long",
+      "reduce the length",       "exceeds the model",       "input is too long",
+      "上下文长度",              "超出上下文"};
+  for (std::size_t i = 0; i < sizeof(kMarkers) / sizeof(kMarkers[0]); ++i) {
+    if (lowered.find(kMarkers[i]) != std::string::npos) return true;
+  }
+  return false;
+}
+
 bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provider) {
   bool learned = false;
   if (config.lookup_reasoning_echo(provider.name, &learned)) return learned;
@@ -242,6 +256,9 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
   const long long output_cap = max_context / 3;
   if (max_output > output_cap) max_output = output_cap;
 
+  // dsh compacts at a ratio of the window rather than at the hard boundary:
+  // threshold 0.8 of the message budget, verbatim tail down to 0.16. Compacting
+  // exactly "just enough" would re-trigger on the very next turn.
   const long long tool_schema_cost = 480;  // 3 tool schemas, measured on the wire
   const long long fixed = estimate_tokens(system.content) + tool_schema_cost + 64;
   long long budget = max_context - max_output - fixed;
@@ -298,30 +315,46 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
             " used=", used, " keep_turns=", st.keep_turns,
             session.summary_upto ? " summarised=" : "", session.summary_upto);
   if (stats) {
+    long long live_cost = 0;
+    for (std::size_t i = first; i < session.messages.size(); ++i) {
+      live_cost += message_cost(session.messages[i]);
+    }
     stats->kept = tail.size();
     stats->total = session.messages.size();
     stats->budget = budget;
     stats->used = used;
+    stats->live_used = live_cost;
+    stats->trigger = static_cast<long long>(static_cast<double>(budget) * st.compaction_trigger_ratio);
     stats->trimmed = tail.size() < (session.messages.size() - first);
   }
   for (std::size_t i = 0; i < tail.size(); ++i) out->push_back(tail[i]);
 }
 bool Agent::compact_history(Workspace& workspace, Session* session, const std::string& provider,
                             const std::string& model, const ModelInfo* model_info,
-                            std::atomic<bool>* cancel) {
+                            std::atomic<bool>* cancel, long long retain_tokens) {
   if (!session) return false;
   const Settings& st = workspace.settings();
   const std::size_t total = session->messages.size();
-  const std::size_t keep =
+  const std::size_t min_keep =
       st.compaction_keep_recent > 0 ? static_cast<std::size_t>(st.compaction_keep_recent) : 4;
-  if (total <= keep + 2) return false;
 
-  // Fold everything except the most recent messages into the summary.
-  std::size_t split = total - keep;
-  // Prefer to cut right before a user message, so the kept window starts a turn.
-  while (split > session->summary_upto && session->messages[split - 1].role != "user") --split;
-  if (split <= session->summary_upto) split = total - keep;
-  if (split <= session->summary_upto) return false;
+  // Keep a verbatim tail worth `retain_tokens` (dsh: 16% of the budget) instead of
+  // "the last N messages": compacting just enough makes the next turn compact
+  // again, so we aim well below the trigger.
+  long long accumulated = 0;
+  std::size_t keep_from = total;
+  for (std::size_t i = total; i-- > session->summary_upto;) {
+    accumulated += message_cost(session->messages[i]);
+    keep_from = i;
+    if (accumulated >= retain_tokens && (total - keep_from) >= min_keep) break;
+  }
+  // Never split a turn: the kept window must start at a user message, which also
+  // guarantees no assistant tool-call/result pair is cut in half.
+  while (keep_from > session->summary_upto && session->messages[keep_from - 1].role != "user") {
+    --keep_from;
+  }
+  if (keep_from <= session->summary_upto) return false;
+  const std::size_t split = keep_from;
 
   // Bound the request: the segment can itself be large the first time compaction
   // runs on a long session. Keep the newest part and say so in the transcript.
@@ -385,10 +418,15 @@ bool Agent::compact_history(Workspace& workspace, Session* session, const std::s
                                  "agent. Reply with the updated summary only: terse, factual, "
                                  "bullet points, no preamble.");
   Message user = Message::make(
-      "user", std::string("Existing summary (may be empty):\n") +
-                  (session->summary.empty() ? "(none)" : session->summary) +
-                  "\n\nConversation segment to fold in:\n" + segment +
-                  "\n\nWrite the updated summary that replaces both.");
+      "user",
+      std::string("PRIOR checkpoint (may be empty):\n") +
+          (session->summary.empty() ? "(none)" : session->summary) +
+          "\n\nConversation segment to fold in:\n" + segment +
+          "\n\nWrite the consolidated summary that replaces both.\n"
+          "- If the PRIOR checkpoint exists, do not copy it forward verbatim: keep facts that are "
+          "still true, drop stale ones, merge what is new.\n"
+          "- Preserve exact file paths, commands, error strings, identifiers and numbers.\n"
+          "- Do not mention this summarisation request or that the context was compacted.");
   request.messages.push_back(system.to_wire(false));
   request.messages.push_back(user.to_wire(false));
 
@@ -411,7 +449,7 @@ bool Agent::compact_history(Workspace& workspace, Session* session, const std::s
 
 bool Agent::maybe_compact(Workspace& workspace, Session* session, const std::string& provider,
                           const std::string& model, const ModelInfo* model_info,
-                          std::atomic<bool>* cancel, const EventEmitter& emit) {
+                          std::atomic<bool>* cancel, const EventEmitter& emit, bool force) {
   if (!session) return false;
   const Settings& st = workspace.settings();
   if (!st.enable_compaction) return false;
@@ -420,9 +458,39 @@ bool Agent::maybe_compact(Workspace& workspace, Session* session, const std::str
   std::vector<Message> probe;
   ContextStats stats;
   build_context(workspace, *session, model_info, &probe, &stats);
-  if (!stats.trimmed) return false;
 
-  if (!compact_history(workspace, session, provider, model, model_info, cancel)) return false;
+  // Trigger on pressure, not on the hard boundary: compacting at 100% of the
+  // budget means the next turn is immediately over it again.
+  if (!force && stats.live_used < stats.trigger) return false;
+  if (stats.trigger <= 0) return false;
+
+  const long long retain =
+      static_cast<long long>(static_cast<double>(stats.budget) * st.compaction_retain_ratio);
+  LOG_DEBUG("compaction: pressure live=", stats.live_used, " trigger=", stats.trigger,
+            " retain=", retain, " force=", force ? 1 : 0);
+
+  // dsh retries once and reports a real failure if it still does not fit, rather
+  // than pretending a partial compaction was enough.
+  const int max_attempts = force ? 1 : (st.compaction_retries > 0 ? st.compaction_retries + 1 : 1);
+  bool changed = false;
+  for (int attempt = 0; attempt < max_attempts; ++attempt) {
+    if (cancel && cancel->load()) break;
+    if (!compact_history(workspace, session, provider, model, model_info, cancel, retain)) break;
+    changed = true;
+    probe.clear();
+    build_context(workspace, *session, model_info, &probe, &stats);
+    if (stats.live_used < stats.trigger) break;
+    if (attempt + 1 < max_attempts) {
+      LOG_INFO("compaction: still above threshold (", stats.live_used, " >= ", stats.trigger,
+               "); retrying");
+    } else {
+      LOG_WARN("compaction: still above threshold after ", attempt + 1,
+               " attempt(s) (", stats.live_used, " >= ", stats.trigger,
+               "); the retained tail alone may exceed it");
+    }
+  }
+
+  if (!changed) return false;
   std::string save_err;
   if (!workspace.save_session(*session, &save_err)) {
     LOG_WARN("compaction: cannot persist the session: ", save_err);
@@ -433,6 +501,8 @@ bool Agent::maybe_compact(Workspace& workspace, Session* session, const std::str
     event["covered_messages"] = session->summary_upto;
     event["total_messages"] = session->messages.size();
     event["summary_bytes"] = session->summary.size();
+    event["live_tokens"] = static_cast<long long>(stats.live_used);
+    event["trigger_tokens"] = static_cast<long long>(stats.trigger);
     emit(event);
   }
   return true;
@@ -584,6 +654,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     // sets the initial policy, and if the provider disagrees we flip once,
     // remember the answer for the rest of the process, and retry.
     ChatResult chat;
+    bool overflow_recovered = false;
     for (int attempt = 0;; ++attempt) {
       nlohmann::json wire_messages = nlohmann::json::array();
       for (std::size_t i = 0; i < context.size(); ++i) {
@@ -597,9 +668,27 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
       const bool produced_output =
           !chat.content.empty() || !chat.reasoning.empty() || !chat.tool_calls.empty();
-      if (chat.ok || chat.cancelled || attempt >= 1) break;
-      if (chat.http_status != 400 || produced_output) break;
-      if (!contains(to_lower(chat.error + " " + chat.detail), "reasoning_content")) break;
+      if (chat.ok || chat.cancelled) break;
+
+      const std::string failure = to_lower(chat.error + " " + chat.detail);
+
+      // dsh's overflow trigger: when the provider says the request itself is too
+      // long, the pressure threshold was wrong (bad estimate, huge tool output or
+      // a concurrent growth), so compact below it and retry once.
+      if (!overflow_recovered && !produced_output &&
+          (chat.http_status == 400 || chat.http_status == 413) &&
+          looks_like_context_overflow(failure)) {
+        overflow_recovered = true;
+        LOG_WARN("llm: provider reported a context overflow; compacting and retrying");
+        if (maybe_compact(workspace, session, provider, model, model_info, cancel, emit, true)) {
+          build_context(workspace, *session, model_info, &context);
+          continue;
+        }
+        break;
+      }
+
+      if (attempt >= 1 || produced_output) break;
+      if (chat.http_status != 400 || !contains(failure, "reasoning_content")) break;
 
       echo_reasoning = !echo_reasoning;
       config_->remember_reasoning_echo(provider_info->name, echo_reasoning);
