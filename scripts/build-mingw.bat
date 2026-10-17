@@ -1,9 +1,12 @@
 @echo off
 rem ---------------------------------------------------------------------------
-rem tea_agent build helper (MinGW-w64 / GCC / Ninja)
+rem tea_agent build helper (MinGW-w64 / GCC)
 rem
 rem   scripts\build-mingw.bat              -> Release build into .\build-mingw
 rem   scripts\build-mingw.bat build-gcc14  -> build into .\build-gcc14
+rem
+rem Environment:
+rem   TEA_AGENT_GENERATOR   override the CMake generator (default Ninja)
 rem
 rem The toolchain is looked up in this order:
 rem   1. %MINGW_HOME%
@@ -34,7 +37,24 @@ echo [mingw] using g++ %GCCVER%
 set "BUILD_DIR=%ROOT%\build-mingw"
 if not "%~1"=="" set "BUILD_DIR=%ROOT%\%~1"
 
-cmake -S "%ROOT%" -B "%BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+rem The compiler needs a writable temp directory. Locked-down Windows hosts and
+rem sanitised environments deny C:\...\AppData\Local\Temp, where gcc then fails
+rem during CMake's compiler probe with
+rem   "Cannot create temporary file in ...: Permission denied"
+rem so keep it inside the checkout instead.
+set "BUILD_TMP=%ROOT%\.tmp"
+if not exist "%BUILD_TMP%" mkdir "%BUILD_TMP%" 2>nul
+set "TEMP=%BUILD_TMP%"
+set "TMP=%BUILD_TMP%"
+
+rem MinGW Makefiles by default: mingw32-make ships with the toolchain and works on
+rem hosts where Ninja's jobserver (named pipe) is blocked. Set
+rem TEA_AGENT_GENERATOR=Ninja to use Ninja instead.
+set "GEN=MinGW Makefiles"
+if defined TEA_AGENT_GENERATOR set "GEN=%TEA_AGENT_GENERATOR%"
+echo [mingw] generator %GEN%, temp %TEMP%
+
+cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "%GEN%" -DCMAKE_BUILD_TYPE=Release ^
       -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
 if errorlevel 1 (
   popd

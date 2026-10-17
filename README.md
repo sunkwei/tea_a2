@@ -667,8 +667,18 @@ Linux / macOS 首次构建若报错，最可能集中在 `src/command.cpp`（`fo
 
 ## License
 
-本项目**尚未添加许可证文件**。在补上之前，默认保留所有权利（all rights reserved）。
-如果打算开源，建议补一个 `LICENSE`（MIT / Apache-2.0 都适合，注意 Apache-2.0 与 mbedTLS 的
-双许可组合更省事）。
+本项目代码采用 **MIT** 许可证，见根目录 [`LICENSE`](LICENSE)。
 
-`3rd/` 下各依赖遵循其自身许可证，详见上表与各目录内的 `LICENSE` 文件。
+Copyright (c) 2026 sunkwei
+
+`3rd/` 下的依赖各自遵循其原有许可证，**不被 MIT 覆盖**，详见各目录内的 `LICENSE` 文件：
+
+| 依赖 | 许可证 |
+| --- | --- |
+| nlohmann/json | MIT |
+| cpp-httplib | MIT |
+| yaml-cpp | MIT |
+| mbedTLS | Apache-2.0（双许可，另有 GPL-2.0） |
+
+分发二进制时注意：mbedTLS 的 Apache-2.0 条款要求保留其许可证与声明，`3rd/mbedtls/LICENSE`
+需随发行物一起带上。
