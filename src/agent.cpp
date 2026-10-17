@@ -18,6 +18,9 @@ void accumulate_usage(ChatUsage* total, const ChatUsage& part) {
   total->prompt_tokens += part.prompt_tokens;
   total->completion_tokens += part.completion_tokens;
   total->total_tokens += part.total_tokens;
+  // Cache hits have to be summed as well, otherwise a multi-iteration turn
+  // reports a 0% hit rate even when every single request was a prefix hit.
+  total->cached_tokens += part.cached_tokens;
   total->raw = part.raw;
 }
 
@@ -27,9 +30,44 @@ nlohmann::json usage_json(const ChatUsage& usage) {
     j["prompt_tokens"] = 0;
     j["completion_tokens"] = 0;
     j["total_tokens"] = 0;
+    j["cached_tokens"] = 0;
     return j;
   }
   return usage.to_json();
+}
+
+/// Prompt tokens a tool call adds: its name plus the raw JSON arguments.
+long long estimate_tool_call_tokens(const std::vector<ToolCall>& calls) {
+  long long total = 0;
+  for (std::size_t i = 0; i < calls.size(); ++i) {
+    total += Agent::estimate_tokens(calls[i].name) + Agent::estimate_tokens(calls[i].raw_arguments) + 4;
+  }
+  return total;
+}
+
+/// Output speed is measured over the streaming window, not over the whole
+/// request: queueing and network latency would otherwise drag the number down.
+/// A window shorter than a quarter second is noise (single-chunk replies,
+/// non-streaming requests), so those fall back to the total request time.
+long long effective_generation_ms(const ChatResult& chat) {
+  return chat.generation_ms >= 250 ? chat.generation_ms : chat.elapsed_ms;
+}
+
+/// The `metrics` block of `iteration_end` / `done`: exactly what the UI needs to
+/// render output speed, cache hit rate and context-window usage.
+nlohmann::json metrics_json(long long max_context_tokens, long long context_tokens,
+                            long long output_tokens, long long ttft_ms, long long generation_ms,
+                            bool estimated, long long elapsed_ms) {
+  nlohmann::json j = nlohmann::json::object();
+  j["max_context_tokens"] = max_context_tokens;
+  j["context_tokens"] = context_tokens;
+  j["output_tokens"] = output_tokens;
+  j["ttft_ms"] = ttft_ms;
+  j["generation_ms"] = generation_ms;
+  // true => the provider sent no usage and these are local estimates.
+  j["estimated"] = estimated;
+  j["elapsed_ms"] = elapsed_ms;
+  return j;
 }
 
 /// Providers word "your request does not fit" differently; recognise the family
@@ -530,6 +568,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     model_info = provider_info->find_model(model);
   }
   out.model = model;
+  if (model_info && model_info->max_context_tokens > 0) {
+    out.max_context_tokens = model_info->max_context_tokens;
+  }
 
   if (!provider_info->has_key()) {
     out.error = "provider '" + provider + "' has no api_key configured";
@@ -582,7 +623,8 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     out.iterations = iteration + 1;
 
     std::vector<Message> context;
-    build_context(workspace, *session, model_info, &context);
+    ContextStats ctx_stats;
+    build_context(workspace, *session, model_info, &context, &ctx_stats);
 
     ChatRequest request;
     request.provider = provider;
@@ -644,7 +686,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
     DeltaCallback on_delta = [&emit](DeltaKind kind, const std::string& text) {
       nlohmann::json event = nlohmann::json::object();
-      event["type"] = (kind == DeltaKind::Reasoning) ? "reasoning_delta" : "content_delta";
+      event["type"] = (kind == DeltaKind::Reasoning)
+                          ? "reasoning_delta"
+                          : (kind == DeltaKind::ToolArgs ? "tool_args_delta" : "content_delta");
       event["text"] = text;
       emit(event);
     };
@@ -681,7 +725,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         overflow_recovered = true;
         LOG_WARN("llm: provider reported a context overflow; compacting and retrying");
         if (maybe_compact(workspace, session, provider, model, model_info, cancel, emit, true)) {
-          build_context(workspace, *session, model_info, &context);
+          build_context(workspace, *session, model_info, &context, &ctx_stats);
           continue;
         }
         break;
@@ -714,6 +758,23 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     accumulate_usage(&out.usage, chat.usage);
     if (!chat.content.empty()) out.content = chat.content;
 
+    // --- metrics for the UI --------------------------------------------------
+    // Provider-reported usage wins. Most gateways only report usage when
+    // stream_options.include_usage is on, so without it we fall back to the local
+    // estimator and flag the numbers as estimates rather than showing nothing.
+    const bool has_usage = chat.usage.present && chat.usage.prompt_tokens > 0;
+    const long long iter_gen_ms = effective_generation_ms(chat);
+    const long long iter_output =
+        has_usage ? chat.usage.completion_tokens
+                  : Agent::estimate_tokens(chat.content) + Agent::estimate_tokens(chat.reasoning) +
+                        estimate_tool_call_tokens(chat.tool_calls);
+    const long long iter_context = has_usage ? chat.usage.prompt_tokens : ctx_stats.used;
+    if (!has_usage) out.usage_estimated = true;
+    if (iter_context > out.context_tokens) out.context_tokens = iter_context;
+    out.output_tokens += iter_output;
+    out.generation_ms += iter_gen_ms;
+    if (out.ttft_ms == 0) out.ttft_ms = chat.ttft_ms;
+
     Message assistant;
     assistant.role = "assistant";
     assistant.content = chat.content;
@@ -728,6 +789,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     iteration_event["iteration"] = iteration;
     iteration_event["has_tool_calls"] = !chat.tool_calls.empty();
     iteration_event["usage"] = usage_json(chat.usage);
+    iteration_event["metrics"] =
+        metrics_json(out.max_context_tokens, iter_context, iter_output, chat.ttft_ms, iter_gen_ms,
+                     !has_usage, chat.elapsed_ms);
     emit(iteration_event);
 
     if (chat.tool_calls.empty()) {
@@ -836,6 +900,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     event["iterations"] = out.iterations;
     event["elapsed_ms"] = out.elapsed_ms;
     event["usage"] = usage_json(out.usage);
+    event["metrics"] = metrics_json(out.max_context_tokens, out.context_tokens, out.output_tokens,
+                                    out.ttft_ms, out.generation_ms, out.usage_estimated,
+                                    out.elapsed_ms);
     event["content"] = out.content;
     emit(event);
   }
@@ -844,7 +911,13 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   workspace.log(out.ok ? "info" : "warn",
                 std::string("turn finished ok=") + (out.ok ? "true" : "false") +
                     " iterations=" + std::to_string(out.iterations) +
-                    " elapsed_ms=" + std::to_string(out.elapsed_ms));
+                    " elapsed_ms=" + std::to_string(out.elapsed_ms) +
+                    " output_tokens=" + std::to_string(out.output_tokens) +
+                    " ttft_ms=" + std::to_string(out.ttft_ms) +
+                    " gen_ms=" + std::to_string(out.generation_ms) +
+                    " context=" + std::to_string(out.context_tokens) + "/" +
+                    std::to_string(out.max_context_tokens) +
+                    (out.usage_estimated ? " (token counts estimated)" : ""));
   return out;
 }
 

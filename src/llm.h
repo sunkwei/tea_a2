@@ -49,7 +49,7 @@ struct ChatRequest {
   int max_retries = 2;
 };
 
-enum class DeltaKind { Content, Reasoning };
+enum class DeltaKind { Content, Reasoning, ToolArgs };
 using DeltaCallback = std::function<void(DeltaKind kind, const std::string& text)>;
 
 struct ChatResult {
@@ -64,6 +64,11 @@ struct ChatResult {
   std::string error;
   std::string detail;
   long long elapsed_ms = 0;
+  /// Time to first streamed delta, and the streaming window that follows it.
+  /// `generation_ms` is 0 for a non-streaming response, so callers that want
+  /// tokens/second fall back to `elapsed_ms` in that case.
+  long long ttft_ms = 0;
+  long long generation_ms = 0;
 };
 
 /// Turn a provider base URL into the chat-completions endpoint. Handles

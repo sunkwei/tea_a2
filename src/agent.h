@@ -50,6 +50,15 @@ struct TurnResult {
   std::string detail;
   ChatUsage usage;
   long long elapsed_ms = 0;
+  /// Numbers the Web UI shows under the composer. Provider-reported usage wins;
+  /// when the provider sends no usage at all we fall back to local estimates and
+  /// say so with `usage_estimated`, so the UI never presents a guess as a fact.
+  long long max_context_tokens = 0;  // 0 => model config has no window
+  long long context_tokens = 0;      // prompt tokens of the largest request sent
+  long long output_tokens = 0;       // generated tokens across all iterations
+  long long ttft_ms = 0;             // time to first streamed token (first iteration)
+  long long generation_ms = 0;       // summed streaming window of the turn
+  bool usage_estimated = false;
 };
 
 class Agent {

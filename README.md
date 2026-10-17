@@ -104,6 +104,16 @@ build/bin/tea_agent --workspace . --open
 ```
 
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
+对话页的输入框下方常驻一行指标：输出速度（t/s）、前缀缓存命中率、`max_context_tokens`
+用量（带进度条，超 70% / 90% 变黄变红）以及本轮 token 与首字延迟。此外还有本轮
+**耗时**（流式期间按本地时钟跳动，结束后取 `done` 的 `elapsed_ms`）、**轮次**（该会话
+已发送的用户消息数）与**步数**（本轮 `tool_start` 次数）。
+侧边栏的**会话索引**按更新时间倒序列出当前工作区的会话（标题、相对时间、消息条数），
+点击即切换，当前会话高亮，行内可**改名**、**删除**，右上角 ＋ 新建；一轮对话结束后自动刷新。
+助手输出里的 `![alt](路径)` 会渲染成图片（alt 作为说明文字），工作区相对路径经
+`/api/workspaces/{id}/raw` 取原始字节；围栏代码块、表格、引用、有序/无序列表、标题、
+行内代码、粗斜体与链接都会渲染，链接一律新标签页打开。文件视图里选中图片直接显示，
+选中 `.md` 可在「预览 / 编辑」之间切换。
 
 ```bash
 # 常用参数
@@ -129,8 +139,10 @@ build/bin/tea_agent --workspace . --open
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
 | `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件 |
+| `GET` | `/api/workspaces/{id}/raw?path=` | 读文件原始字节（图片 / PDF 等，16 MB 上限） |
 | `GET` / `POST` | `/api/workspaces/{id}/sessions` | 会话列表 / 新建 |
 | `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果） |
+| `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
@@ -156,17 +168,54 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 | `start` | 本轮开始（session / provider / model） |
 | `reasoning_delta` | 思考流 |
 | `content_delta` | 正文增量 |
+| `tool_args_delta` | 工具调用参数的流式增量（只用于进度/速度统计，不当正文渲染） |
 | `tool_call` | 模型请求的工具（`id` / `name` / `arguments`） |
 | `tool_start` | 即将执行 |
 | `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated` |
-| `iteration_end` | 单轮结束，带 `usage` |
-| `done` | 全部结束 |
+| `iteration_end` | 单轮结束，带 `usage` 与 `metrics` |
+| `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` |
 | `stopped` | 被 `/api/chat/stop` 中断 |
 | `error` | `message` / `detail` |
 | `ping` | 空闲心跳（15s），用于判断链路存活 |
 
 上层 agent 只需要：发一条 `POST /api/chat`，读 SSE，看 `tool_result` 有没成功，`done` 结束。
 需要打断就调 `/api/chat/stop`——它会在下一个模型/工具边界停住，已产生的会话照样落盘。
+
+### `metrics`：指标栏的数据来源
+
+`iteration_end` 与 `done` 都带一个 `metrics` 块，内置 UI 用它渲染输入框下方的
+「输出速度 / 缓存命中率 / 上下文用量」：
+
+```json
+{
+  "max_context_tokens": 128000,  // 模型窗口；模型没配 max_context_tokens 时为 0
+  "context_tokens": 8642,        // 本轮单次请求最大的 prompt tokens（不是各轮累加）
+  "output_tokens": 512,          // 本轮生成的 tokens（多轮工具调用累加）
+  "ttft_ms": 640,                // 首字延迟
+  "generation_ms": 2140,         // 生成窗口（首字→最后一个增量），t/s 的分母
+  "elapsed_ms": 3120,            // 整轮耗时，含工具执行
+  "estimated": false             // true：provider 没回 usage，这些数字是本地估算
+}
+```
+
+输出速度 = `output_tokens / generation_ms`。用生成窗口而不是整轮耗时，是因为后者包含
+网络排队与工具执行时间，会把 t/s 压得没有意义；窗口短于 250ms（单块响应、非流式）时
+退回整轮耗时。多轮工具调用时两边都是**各轮之和**，所以 `done` 里的 t/s 是「纯生成时间」
+的吞吐，而 `elapsed_ms` 会大得多（工具执行不在里面）。
+
+UI 在生成过程中显示的是 `≈` 前缀的**实时估算**：把本轮收到的 `content_delta` /
+`reasoning_delta` / `tool_args_delta` 按字符折算成 token，除以「本轮首字→现在」的窗口
+（窗口在每次 `iteration_end` 重置，因此工具执行时间同样不计入）。服务端数字到达后立刻
+换成真实值——两边的口径一致，实时值不会长时间偏离最终值。
+
+provider 只在 `stream_options.include_usage` 打开时才回传 usage。没回传时后端用同一个
+token 估算器补上 `context_tokens` / `output_tokens` 并置 `estimated: true`，UI 用「≈」
+标出来；缓存命中率无法估算，于是显示 `—` 而不是编一个数字。每轮日志里也有一行：
+
+```
+turn finished ok=true iterations=4 elapsed_ms=3120 output_tokens=512 ttft_ms=640 gen_ms=2140 context=128/128000
+```
+
 
 ---
 
@@ -454,7 +503,7 @@ src/
   util.{h,cpp} log.{h,cpp}  字符串、时间、编码、日志
 web/                        index.html / tokens.css / app.css / app.js（构建期嵌入）
 tools/                      embed_assets.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
-tests/e2e.ps1              端到端测试（52 项）；tests/sse_probe.mjs 严格流客户端
+tests/e2e.ps1              端到端测试（69 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat
 3rd/                        第三方依赖
 ```
@@ -492,11 +541,12 @@ pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
 ```
 
 `tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
-再以独立 `--tea-home` 启动 agent，覆盖 **52 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
-SSE 事件序列、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、目录树与文件读写、
-记忆与日志接口、内置 UI 交付且无 CDN 依赖。全程本地 `http://`，不需要 api_key。
+再以独立 `--tea-home` 启动 agent，覆盖 **69 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
+SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、
+目录树与文件读写、记忆与日志接口、内置 UI 交付（含指标栏）且无 CDN 依赖。全程本地 `http://`，
+不需要 api_key。
 
-其中两条是**回归测试**：
+其中几条是**回归测试**：
 
 1. **思考回传**：mock 像真实 thinking 网关那样，一旦发现被重放的 assistant 消息丢了
    `reasoning_content` 就回 400。用 0.1.0 的二进制跑会挂 7 项。
@@ -507,6 +557,10 @@ SSE 事件序列、两个工具的落盘副作用、`.tea_agent_run/` 全部子�
 3. **流正确收尾**：`tests/sse_probe.mjs` 用 Node 的 fetch 当严格客户端读 SSE。curl 容忍
    未终止的 chunked 响应，浏览器/Node 不容忍（`error: Error in input stream` /
    `TypeError: terminated`），所以必须显式断言。用 0.1.1 的二进制跑，44 项里恰好挂这 1 项。
+4. **指标块**：mock 只在 `stream_options.include_usage` 打开时才回传 usage（真实网关就是这个
+   行为）。默认那一轮因此必须回落成本地估算并置 `estimated: true`；打开 include_usage 后
+   `context_tokens` 必须等于 provider 报的 prompt tokens；再换用忽略该选项的 `mock_nousage`
+   provider，必须又回到估算，而不是 0 或空。
 
 脚本开跑前会检查端口占用，发现残留监听就直接报错退出——否则会静默连到上一次遗留的实例上，
 表现为「卡住」而不是失败。

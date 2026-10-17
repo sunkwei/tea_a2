@@ -14,7 +14,9 @@
     model: null, models: [], modelMenu: false,
     live: null, liveNode: null, streaming: false, abort: null, stopTimer: null,
     ended: false, streamError: null, expanded: {}, stickBottom: true,
-    files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false },
+    stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
+    turnStartAt: 0, turnSteps: 0, mdBase: '',
+    files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 },
     memory: [], logsTimer: null, logsAutoScroll: true
   };
 
@@ -74,6 +76,20 @@
     var p = function (x) { return (x < 10 ? '0' : '') + x; };
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
   }
+  // 会话索引里的相对时间；超过一周就退回日期，避免「37 天前」这种噪音。
+  function fmtRelTime(iso) {
+    if (!iso) return '';
+    var t = Date.parse(iso);
+    if (isNaN(t)) return String(iso);
+    var diff = Math.floor((Date.now() - t) / 1000);
+    if (diff < 0) diff = 0;
+    if (diff < 60) return '刚刚';
+    if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+    if (diff < 172800) return '昨天';
+    if (diff < 604800) return Math.floor(diff / 86400) + ' 天前';
+    return fmtTime(iso).slice(0, 10);
+  }
   var toastTimer = null;
   function toast(msg) {
     var t = $('toast');
@@ -100,16 +116,79 @@
     } else done(legacyCopy(text));
   }
 
-  /* ---------- 3) Markdown 渲染（先转义再解析，绝不注入原始 HTML） ---------- */
+  /* ---------- 3) Markdown 渲染（先转义再解析，绝不注入原始 HTML） ----------
+     renderMarkdown 先把整段源文本转义，之后所有内联处理都只在这份转义文本上做，
+     所以原文里的 <script> / <img onerror> 永远只会变成可见文本。图片与链接另外
+     做协议白名单：只有 http(s)、mailto、页内锚点和工作区相对路径能进入 src/href。 */
+  var ESC_INV = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+  function unesc(s) { return String(s).replace(/&(amp|lt|gt|quot|#39);/g, function (m) { return ESC_INV[m]; }); }
+  function safeHref(raw, isImage) {
+    var s = String(raw == null ? '' : raw).trim();
+    if (!s) return '';
+    if (/^https?:\/\//i.test(s)) return s;
+    if (!isImage && /^mailto:/i.test(s)) return s;
+    if (!isImage && s.charAt(0) === '#') return s;
+    if (/^[a-z][a-z0-9+.\-]*:/i.test(s)) return '';      // javascript:、data:、vbscript: …
+    if (s.indexOf('//') === 0) return '';                // 协议相对 URL 指向外部主机
+    return s;                                            // 工作区相对路径
+  }
+  function rawAssetUrl(rel) {
+    if (!state.workspace) return '';
+    var clean = unesc(rel).replace(/^\.\//, '').replace(/^\/+/, '');
+    if (!clean) return '';
+    if (state.mdBase && !/^\.\.\//.test(clean)) clean = state.mdBase.replace(/\/+$/, '') + '/' + clean;
+    return apiUrl('api/workspaces/' + encodeURIComponent(state.workspace.id) +
+      '/raw?path=' + encodeURIComponent(clean));
+  }
+  function mdImage(alt, src) {
+    var href = safeHref(src, true);
+    if (!href) return alt;
+    var url = /^https?:\/\//i.test(href) ? href : rawAssetUrl(href);
+    if (!url) return alt;
+    var cap = alt ? '<span class="md-cap">' + alt + '</span>' : '';
+    return '<span class="md-figure"><img src="' + url + '" alt="' + alt + '"' +
+      (alt ? ' title="' + alt + '"' : '') + ' loading="lazy" referrerpolicy="no-referrer">' + cap + '</span>';
+  }
+  function mdLink(label, href) {
+    var h = safeHref(href, false);
+    var url = '#';
+    if (h) {
+      if (/^(https?:|mailto:|#)/i.test(h) || h.charAt(0) === '/') url = h;
+      else url = rawAssetUrl(h) || '#';
+    }
+    return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+  }
+  // 表格：| a | b | 加一行 | --- | :---: | 分隔，分隔行决定每列对齐。
+  function mdCells(line) {
+    var s = String(line).trim();
+    if (s.charAt(0) === '|') s = s.slice(1);
+    if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+    return s.split('|').map(function (c) { return c.trim(); });
+  }
+  function mdAlign(cell) {
+    var left = cell.charAt(0) === ':', right = cell.charAt(cell.length - 1) === ':';
+    if (left && right) return 'center';
+    if (right) return 'right';
+    if (left) return 'left';
+    return '';
+  }
+  function isMdTableSep(line) {
+    if (String(line).indexOf('|') < 0) return false;
+    var cells = mdCells(line);
+    if (!cells.length) return false;
+    for (var i = 0; i < cells.length; i++) if (!/^:?-{2,}:?$/.test(cells[i])) return false;
+    return true;
+  }
+  function isMdTableStart(lines, i) {
+    return i + 1 < lines.length && String(lines[i]).indexOf('|') >= 0 && isMdTableSep(lines[i + 1]);
+  }
   function inlineMd(t) {
     return t.split(/(`[^`]+`)/g).map(function (p) {
       if (p.length > 1 && p.charAt(0) === '`' && p.charAt(p.length - 1) === '`') {
         return '<code class="md-inline">' + p.slice(1, -1) + '</code>';
       }
-      var s = p.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, function (m, label, href) {
-        var safe = /^(https?:|mailto:|#|\/|\.)/i.test(href) ? href : '#';
-        return '<a href="' + safe + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
-      });
+      var s = p.replace(/!\[([^\]\n]*)\]\(([^)\s]+)\)/g, function (m, alt, src) { return mdImage(alt, src); });
+      s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, function (m, label, href) { return mdLink(label, href); });
       s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
         .replace(/(^|[\s(（])\*([^*\n]+)\*/g, '$1<em>$2</em>')
         .replace(/(^|[\s(（])_([^_\n]+)_/g, '$1<em>$2</em>')
@@ -127,7 +206,8 @@
     var out = [], i = 0;
     var isUl = function (s) { return /^\s*[-*+]\s+/.test(s); };
     var isOl = function (s) { return /^\s*\d+[.)]\s+/.test(s); };
-    var isQ = function (s) { return /^\s*>\s?/.test(s); };
+    // 注意：src 会先整体转义，所以引用符号到这里已经是 `&gt;`。
+    var isQ = function (s) { return /^\s*(?:&gt;|>)\s?/.test(s); };
     var isHr = function (s) { return /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(s); };
     while (i < lines.length) {
       var line = lines[i], m;
@@ -150,7 +230,7 @@
       if (isHr(line)) { out.push('<hr>'); i++; continue; }               // 分隔线
       if (isQ(line)) {                                                   // 引用
         var q = [];
-        while (i < lines.length && isQ(lines[i])) { q.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+        while (i < lines.length && isQ(lines[i])) { q.push(lines[i].replace(/^\s*(?:&gt;|>)\s?/, '')); i++; }
         out.push('<blockquote>' + inlineMd(q.join('<br>')) + '</blockquote>'); continue;
       }
       if (isUl(line)) {                                                  // 无序列表
@@ -163,9 +243,34 @@
         while (i < lines.length && isOl(lines[i])) { ol.push('<li>' + inlineMd(lines[i].replace(/^\s*\d+[.)]\s+/, '')) + '</li>'); i++; }
         out.push('<ol' + (first > 1 ? ' start="' + first + '"' : '') + '>' + ol.join('') + '</ol>'); continue;
       }
+      if (isMdTableStart(lines, i)) {                                     // 表格
+        var head = mdCells(lines[i]), aligns = mdCells(lines[i + 1]).map(mdAlign), rows = [];
+        i += 2;
+        while (i < lines.length && lines[i].trim() && lines[i].indexOf('|') >= 0) {
+          rows.push(mdCells(lines[i])); i++;
+        }
+        var alignAttr = function (idx) {
+          return aligns[idx] ? ' style="text-align:' + aligns[idx] + '"' : '';
+        };
+        var thead = '<thead><tr>';
+        head.forEach(function (c, k) { thead += '<th' + alignAttr(k) + '>' + inlineMd(c) + '</th>'; });
+        thead += '</tr></thead>';
+        var tbody = '<tbody>';
+        rows.forEach(function (r) {
+          tbody += '<tr>';
+          head.forEach(function (c, k) {
+            tbody += '<td' + alignAttr(k) + '>' + inlineMd(r[k] == null ? '' : r[k]) + '</td>';
+          });
+          tbody += '</tr>';
+        });
+        tbody += '</tbody>';
+        out.push('<div class="md-table-wrap"><table class="md-table">' + thead + tbody + '</table></div>');
+        continue;
+      }
       var p = [];                                                        // 段落（保留换行）
       while (i < lines.length && lines[i].trim() && !/^\s*(```+|~~~+)/.test(lines[i]) &&
-        !/^(#{1,6})\s+/.test(lines[i]) && !isQ(lines[i]) && !isUl(lines[i]) && !isOl(lines[i]) && !isHr(lines[i])) {
+        !/^(#{1,6})\s+/.test(lines[i]) && !isQ(lines[i]) && !isUl(lines[i]) && !isOl(lines[i]) &&
+        !isHr(lines[i]) && !isMdTableStart(lines, i)) {
         p.push(lines[i]); i++;
       }
       out.push('<p>' + inlineMd(p.join('<br>')) + '</p>');
@@ -319,6 +424,196 @@
   function nearBottom() { var s = $('chat-scroll'); return s.scrollHeight - s.scrollTop - s.clientHeight < 80; }
   function scrollMaybe(force) { var s = $('chat-scroll'); if (force || state.stickBottom) s.scrollTop = s.scrollHeight; }
 
+  /* ---------- 5b) 指标栏（输出速度 / 缓存命中率 / 上下文用量） ----------
+     数据来源是 SSE 的 `metrics` 块（iteration_end / done 都带），配合 usage 里的
+     prompt/completion/cached tokens。provider 没返回 usage 时后端会给出本地估算并
+     在 metrics.estimated 里标记，UI 用「≈」和 tooltip 说明，不把估算当事实展示。 */
+  var METRICS_KEY = 'tea_agent_ui_metrics_v1';
+  function emptyStats() {
+    return {
+      output: 0, context: 0, max: 0, prompt: 0, cached: 0, total: 0, cachePct: null,
+      speed: null, ttft: null, genMs: 0, elapsed: 0, estimated: false, at: 0,
+      steps: 0, turns: 0
+    };
+  }
+  function num(v) { return typeof v === 'number' && isFinite(v) ? v : 0; }
+  // providers 端点会在 model_info 里给出窗口；metrics 没带 max_context_tokens 时用它兜底。
+  function modelMaxContext() {
+    if (!state.model) return 0;
+    var found = 0;
+    state.models.forEach(function (m) {
+      if (m.provider === state.model.provider && m.model === state.model.model) found = num(m.max);
+    });
+    return found;
+  }
+  // 轮次 = 会话里的用户消息条数（与「模型迭代次数」区分开，后者在 metrics 里）。
+  function countUserTurns() {
+    var n = 0;
+    for (var i = 0; i < state.messages.length; i++) {
+      if (state.messages[i] && state.messages[i].role === 'user') n++;
+    }
+    return n;
+  }
+  // 与后端 Agent::estimate_tokens 同量级：CJK 约 1 token/字，ASCII 约 4 字符 1 token。
+  function estTokens(text) {
+    if (!text) return 0;
+    var ascii = 0, wide = 0, other = 0;
+    for (var i = 0; i < text.length; i++) {
+      var c = text.charCodeAt(i);
+      if (c < 0x80) { if (c !== 32 && c !== 10 && c !== 9 && c !== 13) ascii++; }
+      else if (c >= 0x2e80) wide++;
+      else other++;
+    }
+    return Math.round(ascii / 4) + wide + Math.round(other / 2);
+  }
+  function fmtTokens(n) {
+    n = num(n);
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+    return String(Math.round(n));
+  }
+  function fmtSec(ms) { return ms == null ? '—' : (num(ms) / 1000).toFixed(num(ms) < 10000 ? 1 : 0) + 's'; }
+  function loadStatsMap() {
+    try { return JSON.parse(localStorage.getItem(METRICS_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function statsFor(sid) {
+    var s = emptyStats();
+    var saved = sid ? loadStatsMap()[sid] : null;
+    if (!saved) return s;
+    Object.keys(s).forEach(function (k) { if (k in saved) s[k] = saved[k]; });
+    return s;
+  }
+  function saveStats() {
+    var sid = state.session ? state.session.id : null;
+    if (!sid) return;
+    var map = loadStatsMap();
+    map[sid] = state.stats;
+    var ids = Object.keys(map);
+    if (ids.length > 30) {                 // 只留最近 30 个会话，别把 localStorage 撑爆
+      ids.sort(function (a, b) { return num(map[b] && map[b].at) - num(map[a] && map[a].at); });
+      ids.slice(30).forEach(function (id) { delete map[id]; });
+    }
+    try { localStorage.setItem(METRICS_KEY, JSON.stringify(map)); } catch (e) { /* 配额满则忽略 */ }
+  }
+  function setMetric(id, text, title, cls) {
+    var v = $(id + '-v');
+    if (v) v.textContent = text;
+    var bar = $(id + '-bar');
+    if (bar && cls && cls.width != null) bar.style.width = cls.width;
+    var box = $(id);
+    if (!box) return;
+    box.classList.toggle('warn', !!(cls && cls.warn));
+    box.classList.toggle('bad', !!(cls && cls.bad));
+    box.classList.toggle('est', !!(cls && cls.est));
+    if (title) box.title = title;
+  }
+  function renderMetrics() {
+    var s = state.stats || emptyStats();
+    var live = state.streaming && state.liveTokens > 0 && state.liveStartAt > 0;
+    var liveSec = live ? Math.max(0.2, (Date.now() - state.liveStartAt) / 1000) : 0;
+    var speed = live ? state.liveTokens / liveSec : s.speed;
+    var est = !live && s.estimated;
+    if (!s.max) s.max = modelMaxContext();       // metrics 没带窗口时用 providers 兜底
+
+    // 耗时：流式期间按本地时钟跳动，结束后用 done 的 elapsed_ms。
+    var liveElapsed = state.streaming && state.turnStartAt ? Date.now() - state.turnStartAt : null;
+    var elapsed = liveElapsed != null ? liveElapsed : num(s.elapsed);
+    setMetric('metric-elapsed', elapsed > 0 ? (liveElapsed != null ? '≈' : '') + fmtSec(elapsed) : '—',
+      liveElapsed != null
+        ? '本轮已运行 ' + fmtSec(liveElapsed)
+        : (s.elapsed > 0 ? '整轮耗时 ' + fmtSec(s.elapsed) +
+          (s.output > 0 ? '\n按整轮耗时吞吐 ≈ ' + (s.output / (s.elapsed / 1000)).toFixed(1) + ' t/s' : '')
+          : '还没有本轮数据'),
+      { est: liveElapsed != null });
+
+    // 轮次：会话内的用户消息数；步数：本轮 tool_start 次数。
+    var turns = countUserTurns();
+    setMetric('metric-turns', turns > 0 ? String(turns) : '—',
+      '会话轮次：该会话里已发送的用户消息数');
+    var steps = state.turnSteps > 0 ? state.turnSteps : num(s.steps);
+    setMetric('metric-steps', (steps > 0 || state.streaming) ? String(steps) : '—',
+      '步数：本轮执行的工具调用次数（tool_start 事件）');
+
+    setMetric('metric-speed',
+      speed == null ? (state.streaming ? '生成中…' : '—')
+                    : (live || est ? '≈' : '') + speed.toFixed(speed >= 100 ? 0 : 1) + ' t/s',
+      live
+        ? '正在生成：本轮已输出约 ' + fmtTokens(state.liveTokens) + ' tokens / ' + liveSec.toFixed(1) + 's'
+        : (speed == null ? (state.streaming ? '等待第一个增量…' : '还没有生成数据') :
+          (est ? '本地估算（provider 未返回 usage）\n' : '') +
+          '输出 ' + fmtTokens(s.output) + ' tokens / 生成 ' + fmtSec(s.genMs) + '（不含首字与工具执行）' +
+          (s.elapsed > 0 ? '\n整轮吞吐 ≈ ' + (s.output / (s.elapsed / 1000)).toFixed(1) + ' t/s（含 TTFT 与工具执行，' + fmtSec(s.elapsed) + '）' : '') +
+          '\n首字延迟 ' + fmtSec(s.ttft)),
+      { est: est || live });
+
+    var cachePct = s.cachePct;
+    setMetric('metric-cache', cachePct == null ? '—' : cachePct + '%',
+      cachePct == null
+        ? 'provider 未返回缓存字段（DeepSeek: prompt_cache_hit_tokens；OpenAI: prompt_tokens_details.cached_tokens）'
+        : '前缀缓存命中 ' + fmtTokens(s.cached) + ' / ' + fmtTokens(s.prompt) + ' prompt tokens',
+      { width: (cachePct == null ? 0 : Math.min(100, cachePct)) + '%' });
+
+    var ctxPct = s.max > 0 ? Math.round(s.context * 100 / s.max) : null;
+    setMetric('metric-context',
+      s.context ? (est ? '≈' : '') + fmtTokens(s.context) + (s.max > 0 ? ' / ' + fmtTokens(s.max) : '') +
+        (ctxPct == null ? '' : ' · ' + ctxPct + '%') : '—',
+      (s.max > 0 ? '上下文窗口 ' + s.context + ' / ' + s.max + ' tokens（' + ctxPct + '%）'
+                 : '本次请求 prompt tokens：' + s.context + '（模型未配置 max_context_tokens）') +
+        (est ? '\n本地估算：provider 未返回 usage' : ''),
+      { width: (ctxPct == null ? 0 : Math.min(100, ctxPct)) + '%', warn: ctxPct != null && ctxPct >= 70, bad: ctxPct != null && ctxPct >= 90 });
+
+    var parts = [];
+    if (s.output) parts.push('输出 ' + fmtTokens(s.output) + ' tok');
+    if (s.total) parts.push('合计 ' + fmtTokens(s.total) + ' tok');
+    if (s.ttft != null && s.ttft > 0) parts.push('首字 ' + fmtSec(s.ttft));
+    setMetric('metric-tokens', parts.length ? parts.join(' · ') : '—',
+      parts.length ? '本轮统计' + (est ? '（本地估算）' : '') + '\n' +
+        '输出 ' + s.output + ' tokens，prompt ' + s.prompt + ' tokens，合计 ' + s.total +
+        '\n生成窗口 ' + s.genMs + 'ms，整轮 ' + s.elapsed + 'ms' : '还没有本轮数据',
+      { est: est });
+  }
+  function applyMetrics(m, usage) {
+    if (!m) return;
+    var s = state.stats;
+    s.output = num(m.output_tokens);
+    s.context = num(m.context_tokens);
+    s.max = num(m.max_context_tokens);
+    s.ttft = num(m.ttft_ms);
+    s.genMs = num(m.generation_ms);
+    s.elapsed = num(m.elapsed_ms);
+    s.estimated = !!m.estimated;
+    s.speed = s.genMs > 0 ? s.output / (s.genMs / 1000) : null;
+    if (usage) {
+      s.prompt = num(usage.prompt_tokens);
+      s.cached = num(usage.cached_tokens);
+      s.total = num(usage.total_tokens);
+      s.cachePct = s.prompt > 0 ? Math.round(s.cached * 100 / s.prompt) : null;
+    }
+    s.at = Date.now();
+    s.steps = state.turnSteps;
+    s.turns = countUserTurns();
+    saveStats();
+    renderMetrics();
+  }
+  function startMetricsTicker() {
+    if (state.metricsTimer) return;
+    state.metricsTimer = setInterval(function () {
+      if (!state.streaming) return;
+      renderMetrics();
+    }, 500);
+  }
+  function stopMetricsTicker() {
+    if (!state.metricsTimer) return;
+    clearInterval(state.metricsTimer);
+    state.metricsTimer = null;
+  }
+  // 流式期间按字符估算已输出的 token，配合计时器给出「正在生成」的实时速度。
+  function noteLiveTokens(text) {
+    if (!text) return;
+    if (!state.liveStartAt) state.liveStartAt = Date.now();
+    state.liveTokens += estTokens(text);
+  }
+
   /* ---------- 5) 流式对话（fetch + ReadableStream 解析 SSE） ---------- */
   function liveBlockForTool(id) {
     var found = null;
@@ -333,16 +628,26 @@
         state.session = { id: ev.session_id, title: '新会话' };
         saveLS();
       }
+      state.stats = emptyStats();                 // 新一轮：指标栏先清空，等 metrics 到达再填
+      state.liveTokens = 0; state.liveStartAt = 0;
+      state.turnSteps = 0; state.turnStartAt = Date.now();
+      renderMetrics();
       return;
     }
-    if (ev.type === 'reasoning_delta') { state.live.reasoning += ev.text || ''; renderLive(); scrollMaybe(); return; }
+    if (ev.type === 'reasoning_delta') {
+      state.live.reasoning += ev.text || '';
+      noteLiveTokens(ev.text);
+      renderLive(); scrollMaybe(); return;
+    }
     if (ev.type === 'content_delta') {
       var last = state.live.blocks[state.live.blocks.length - 1];
       if (!last || last.type !== 'md') { last = { type: 'md', text: '' }; state.live.blocks.push(last); }
       last.text += ev.text || '';
+      noteLiveTokens(ev.text);
       renderLive(); scrollMaybe(); return;
     }
     if (ev.type === 'tool_call' || ev.type === 'tool_start') {
+      if (ev.type === 'tool_start') { state.turnSteps++; renderMetrics(); }
       var block = liveBlockForTool(ev.id);
       if (block) block.tc.status = 'running';
       else state.live.blocks.push({ type: 'tool', tc: { id: ev.id, name: ev.name, arguments: ev.arguments, status: 'running' } });
@@ -354,13 +659,25 @@
       if (b2) b2.tc.status = ev.ok === false ? 'fail' : 'ok';
       renderLive(); scrollMaybe(); return;
     }
-    if (ev.type === 'iteration_end') return;                     // 仅统计，不渲染
+    if (ev.type === 'tool_args_delta') { noteLiveTokens(ev.text); return; }   // 工具调用参数也是输出 token
+    if (ev.type === 'iteration_end') {
+      // 先清掉本轮的实时估算窗口再套用服务端数字：窗口按轮重置，工具执行的时间
+      // 不会被算进生成时间，实时值与 done 的口径才一致。
+      state.liveTokens = 0; state.liveStartAt = 0;
+      applyMetrics(ev.metrics, ev.usage);
+      return;
+    }
     if (ev.type === 'error') {
       state.ended = true;
       state.streamError = '出错了：' + (ev.message || '未知错误') + (ev.detail ? '\n' + ev.detail : '');
       renderLive(); scrollMaybe(); return;
     }
-    if (ev.type === 'done' || ev.type === 'stopped') state.ended = true;
+    if (ev.type === 'done' || ev.type === 'stopped') {
+      state.ended = true;
+      state.liveTokens = 0;                    // 服务端数字到了，丢弃本地估算
+      if (ev.type === 'done') applyMetrics(ev.metrics, ev.usage);
+      renderMetrics();
+    }
   }
   function parseSseChunk(raw) {
     raw.split('\n').forEach(function (line) {
@@ -377,6 +694,13 @@
   function setStreaming(on) {
     state.streaming = on;
     updateComposer();
+    if (on) {
+      startMetricsTicker();
+    } else {
+      stopMetricsTicker();
+      state.liveTokens = 0; state.liveStartAt = 0;
+      renderMetrics();
+    }
     $('ws-chip').disabled = on;
     $('new-session').disabled = on;
     Array.prototype.forEach.call(document.querySelectorAll('.sess-row'), function (b) { b.disabled = on; });
@@ -387,7 +711,7 @@
     if (state.stopTimer) { clearTimeout(state.stopTimer); state.stopTimer = null; }
     state.abort = null;
     setStreaming(false);
-    var finish = function () { renderChat(); scrollMaybe(); };
+    var finish = function () { renderChat(); renderMetrics(); scrollMaybe(); };
     if (!sid) { finish(); return; }
     // 结束后重新拉取，保证渲染状态与服务器一致
     api('api/sessions/' + encodeURIComponent(sid)).then(function (d) {
@@ -413,6 +737,9 @@
       state.messages.push({ role: 'user', content: text, created_at: new Date().toISOString() });
       state.live = { role: 'assistant', reasoning: '', blocks: [], outputs: {} };
       state.ended = false; state.streamError = null; state.stickBottom = true;
+      state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
+      state.turnSteps = 0; state.turnStartAt = Date.now();
+      renderMetrics();
       renderChat(); scrollMaybe(true); setStreaming(true);
       var ctrl = new AbortController();
       state.abort = ctrl;
@@ -499,7 +826,10 @@
   function buildModels() {
     state.models = [];
     ((state.providers && state.providers.providers) || []).forEach(function (p) {
-      (p.models || []).forEach(function (m) { state.models.push({ provider: p.name, model: m }); });
+      var info = p.model_info || {};
+      (p.models || []).forEach(function (m) {
+        state.models.push({ provider: p.name, model: m, max: num((info[m] || {}).max_context_tokens) });
+      });
     });
     if (!state.model && state.providers && state.providers.active) {
       state.model = { provider: state.providers.active.provider, model: state.providers.active.model };
@@ -546,18 +876,103 @@
     dd.appendChild(el('div', 'dd-sep'));
     dd.appendChild(btn('dd-item', '＋ 添加工作区…', function () { closeDropdowns(); openAddWorkspace(false); }));
   }
+  /* 会话索引：标题 + 相对时间 + 消息条数，当前会话高亮，行内改名/删除。
+     排序在 loadSessions 里做（最新的在前），这里只负责渲染。 */
   function renderSessions() {
     var box = $('session-list');
     clear(box);
     if (!state.workspace) { box.appendChild(el('div', 'empty-note', '请先选择工作区')); return; }
-    if (!state.sessions.length) { box.appendChild(el('div', 'empty-note', '暂无会话，点击 ＋ 新建')); return; }
+    if (!state.sessions.length) { box.appendChild(el('div', 'empty-note', '暂无会话，点击上方 ＋ 新建')); return; }
     state.sessions.forEach(function (s) {
-      var b = btn('sess-row' + (state.session && state.session.id === s.id ? ' active' : ''), s.title || s.id,
-        function () { if (!state.streaming) openSession(s.id); });
-      b.title = (s.title || '') + ' · ' + (s.message_count || 0) + ' 条消息 · ' + fmtTime(s.updated_at || s.created_at);
-      b.disabled = state.streaming;
-      box.appendChild(b);
+      var active = state.session && state.session.id === s.id;
+      var item = el('div', 'sess-item' + (active ? ' active' : ''));
+      item.dataset.id = s.id;
+
+      var row = el('button', 'sess-row' + (active ? ' active' : ''));
+      row.type = 'button';
+      row.disabled = state.streaming;
+      row.appendChild(el('span', 'sess-title', s.title || s.id));
+      var meta = el('span', 'sess-meta');
+      meta.appendChild(el('span', null, fmtRelTime(s.updated_at || s.created_at) || '—'));
+      if (s.message_count != null) {
+        meta.appendChild(el('span', null, '·'));
+        meta.appendChild(el('span', null, s.message_count + ' 条'));
+      }
+      row.appendChild(meta);
+      row.title = (s.title || s.id) + '\n' + fmtTime(s.updated_at || s.created_at) +
+        ' · ' + (s.message_count || 0) + ' 条消息\n点击切换会话';
+      row.onclick = function () { if (!state.streaming) openSession(s.id); };
+      item.appendChild(row);
+
+      var tools = el('div', 'sess-tools');
+      var ren = btn('sess-tool', '改名', function (e) {
+        e.stopPropagation();
+        if (!state.streaming) renameSessionDialog(s);
+      });
+      ren.title = '重命名会话';
+      ren.disabled = state.streaming;
+      var del = btn('sess-tool danger', '删除', function (e) {
+        e.stopPropagation();
+        if (!state.streaming) deleteSessionDialog(s);
+      });
+      del.title = '删除会话';
+      del.disabled = state.streaming;
+      tools.appendChild(ren);
+      tools.appendChild(del);
+      item.appendChild(tools);
+      box.appendChild(item);
     });
+  }
+  // 删除/改名后统一走 loadSessions()：它重排列表并保持当前会话高亮。
+  function deleteSessionDialog(s) {
+    var body = el('div', 'desc', '删除会话「' + (s.title || s.id) + '」及其全部消息？此操作不可撤销。');
+    openDialog('删除会话', body, [
+      { label: '取消', onClick: closeDialog },
+      {
+        label: '删除', primary: true, onClick: function () {
+          closeDialog();
+          api('api/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' }).then(function () {
+            toast('已删除会话');
+            if (state.session && state.session.id === s.id) {
+              state.session = null;
+              state.messages = [];
+              state.live = null;
+              state.stats = emptyStats();
+              renderChat();
+              renderMetrics();
+            }
+            return loadSessions().then(function () {
+              if (!state.session && state.sessions.length) return openSession(state.sessions[0].id);
+              renderChat();
+            });
+          }, function (e) { toast('删除失败：' + e.message); });
+        }
+      }
+    ]);
+  }
+  function renameSessionDialog(s) {
+    var body = el('div');
+    var input = el('input', 'ta');
+    input.type = 'text';
+    input.value = s.title || '';
+    var f = el('div', 'field');
+    f.appendChild(el('label', null, '会话标题'));
+    f.appendChild(input);
+    body.appendChild(f);
+    openDialog('重命名会话', body, [
+      { label: '取消', onClick: closeDialog },
+      {
+        label: '保存', primary: true, onClick: function () {
+          var t = input.value.trim();
+          if (!t) { toast('标题不能为空'); return; }
+          closeDialog();
+          api('api/sessions/' + encodeURIComponent(s.id), { method: 'PATCH', body: { title: t } })
+            .then(function () { toast('已重命名'); return loadSessions(); },
+              function (e) { toast('重命名失败：' + e.message); });
+        }
+      }
+    ]);
+    setTimeout(function () { input.focus(); input.select(); }, 0);
   }
 
   /* ---------- 7) 数据加载 ---------- */
@@ -600,9 +1015,11 @@
     state.workspace = w;
     if (changed) {
       state.session = null; state.messages = []; state.live = null; state.streamError = null;
-      state.files = { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false };
+      state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
+      state.turnSteps = 0; state.turnStartAt = 0;
+      state.files = { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 };
     }
-    renderWorkspaceChip(); renderChat(); saveLS();
+    renderWorkspaceChip(); renderChat(); renderMetrics(); saveLS();
     return loadSessions().then(function () {
       if (state.view === 'files') loadTree(state.files.dir);
       if (state.view === 'memory') loadMemory();
@@ -631,12 +1048,18 @@
       state.session = d.session || { id: sid };
       state.messages = d.messages || [];
       state.live = null; state.streamError = null;
-      saveLS(); renderSessions(); renderChat(); scrollMaybe(true);
+      state.stats = statsFor(sid);                 // 恢复该会话上一轮的指标
+      state.turnSteps = num(state.stats.steps);
+      state.turnStartAt = 0;
+      state.liveTokens = 0; state.liveStartAt = 0;
+      saveLS(); renderSessions(); renderChat(); renderMetrics(); scrollMaybe(true);
     }, function (e) { toast('加载会话失败：' + e.message); });
   }
   function newSessionDraft() {
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
-    saveLS(); renderSessions(); renderChat(); showView('chat'); $('input').focus();
+    state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
+    state.turnSteps = 0; state.turnStartAt = 0;
+    saveLS(); renderSessions(); renderChat(); renderMetrics(); showView('chat'); $('input').focus();
   }
   function openAddWorkspace(isEmpty) {
     var body = el('div');
@@ -740,21 +1163,79 @@
     });
     var dirty = f.content !== f.original;
     $('files-note').textContent = f.path ? (f.truncated ? '内容已截断，只读显示' : (dirty ? '有未保存修改' : '未修改')) : '';
-    $('files-save').disabled = !f.path || f.readOnly || !dirty;
-    $('files-revert').disabled = !f.path || !dirty;
+    $('files-save').disabled = !f.path || f.readOnly || !dirty || isImagePath(f.path);
+    $('files-revert').disabled = !f.path || !dirty || isImagePath(f.path);
+    renderFilePane();
+  }
+  function fileExt(p) { var m = /\.([A-Za-z0-9]+)\s*$/.exec(String(p || '')); return m ? m[1].toLowerCase() : ''; }
+  var IMAGE_EXT = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, svg: 1, bmp: 1, ico: 1 };
+  function isImagePath(p) { return !!IMAGE_EXT[fileExt(p)]; }
+  function isMarkdownPath(p) { var e = fileExt(p); return e === 'md' || e === 'markdown'; }
+  function fileRawUrl(p) {
+    return apiUrl('api/workspaces/' + encodeURIComponent(state.workspace.id) +
+      '/raw?path=' + encodeURIComponent(p));
+  }
+  function fileEntry(p) {
+    var found = null;
+    state.files.entries.forEach(function (en) { if (en.path === p) found = en; });
+    return found;
+  }
+  // 图片直接走 raw 路由显示；markdown 可以在「编辑 / 预览」之间切换。
+  function renderFilePane() {
+    var f = state.files;
+    var image = !!f.path && isImagePath(f.path);
+    var md = !!f.path && isMarkdownPath(f.path);
+    var showMd = md && !!f.preview;
+    var showPre = !image && !showMd && f.readOnly;
+    var showEditor = !image && !showMd && !f.readOnly;
+    $('files-media').classList.toggle('hidden', !image);
+    $('files-md').classList.toggle('hidden', !showMd);
+    $('files-pre').classList.toggle('hidden', !showPre);
+    $('files-editor').classList.toggle('hidden', !showEditor);
+    var toggle = $('files-preview-toggle');
+    toggle.classList.toggle('hidden', !md);
+    toggle.textContent = f.preview ? '编辑' : '预览';
+    var media = $('files-media');
+    if (image) {
+      clear(media);
+      var img = document.createElement('img');
+      img.src = fileRawUrl(f.path);
+      img.alt = f.path;
+      media.appendChild(img);
+      media.appendChild(el('span', 'hint', f.path + ' · ' + fmtBytes(f.size)));
+    } else if (media.firstChild) {
+      clear(media);
+    }
+    if (showMd) {
+      // 预览里的相对图片路径以该文件所在目录为基准。
+      state.mdBase = f.path.split('/').slice(0, -1).join('/');
+      $('files-md').innerHTML = renderMarkdown($('files-editor').value);
+      state.mdBase = '';
+    }
   }
   function openFile(p) {
     if (!state.workspace) return;
+    var f = state.files;
+    if (isImagePath(p)) {
+      // 图片是二进制，走 raw 路由；`/file` 的 JSON 文本视图对它没有意义。
+      f.path = p; f.content = ''; f.original = ''; f.truncated = false; f.readOnly = true; f.preview = false;
+      var entry = fileEntry(p);
+      f.size = entry ? num(entry.size) : 0;
+      $('files-preview-head').textContent = p + (f.size ? '  ·  ' + fmtBytes(f.size) : '');
+      $('files-editor').value = '';
+      $('files-pre').textContent = '';
+      renderFiles();
+      return;
+    }
     api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/file?path=' + encodeURIComponent(p)).then(function (d) {
-      var f = state.files;
       f.path = d.path || p;
       f.content = d.content == null ? '' : d.content;
       f.original = f.content;
       f.truncated = !!d.truncated;
       f.readOnly = f.truncated;
+      f.preview = false;
+      f.size = num(d.size);
       $('files-preview-head').textContent = f.path + '  ·  ' + fmtBytes(d.size);
-      $('files-editor').classList.toggle('hidden', f.readOnly);
-      $('files-pre').classList.toggle('hidden', !f.readOnly);
       $('files-editor').value = f.content;
       $('files-pre').textContent = f.content;
       renderFiles();
@@ -924,6 +1405,10 @@
       state.files.content = $('files-editor').value;
       renderFiles();
     });
+    $('files-preview-toggle').onclick = function () {
+      state.files.preview = !state.files.preview;
+      renderFiles();
+    };
     $('memory-add').onclick = addMemory;
     $('memory-refresh').onclick = loadMemory;
     $('logs-refresh').onclick = loadLogs;
@@ -949,8 +1434,10 @@
     state.model = ls.model || null;
     state.logsAutoScroll = ls.logs_autoscroll !== false;
     $('logs-autoscroll').checked = state.logsAutoScroll;
+    state.stats = emptyStats();
     bind();
     updateComposer();
+    renderMetrics();
     renderWorkspaceChip(); renderModelChip(); renderSessions(); renderChat();
     showView(state.view);
     var boot = function () { return Promise.all([loadProviders(), loadTools(), loadWorkspaces()]); };

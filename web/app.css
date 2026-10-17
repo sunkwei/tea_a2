@@ -259,6 +259,28 @@ button{font-family:inherit}
 .send.stop:hover{background:var(--dsw-static-red-400)}
 .send:disabled{opacity:.4;cursor:not-allowed}
 
+/* ---------- composer 指标栏（输出速度 / 缓存命中率 / 上下文用量） ---------- */
+.metrics{
+  display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;padding:7px 6px 0;
+  font:11px/16px var(--ds-font-family-code);color:var(--dsw-alias-label-caption);
+}
+.metric{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.metric .m-k{color:var(--dsw-alias-label-caption)}
+.metric .m-v{color:var(--dsw-alias-label-secondary)}
+.metric.est .m-v{opacity:.7}
+.metric .m-bar{
+  display:inline-block;width:44px;height:4px;border-radius:2px;overflow:hidden;
+  background:var(--dsw-alias-bg-layer-2);
+}
+.metric .m-bar i{
+  display:block;width:0;height:100%;background:var(--dsw-alias-state-business-primary);
+  transition:width .25s ease;
+}
+.metric.warn .m-bar i{background:var(--dsw-alias-state-warn-primary)}
+.metric.warn .m-v{color:var(--dsw-alias-state-warn-label)}
+.metric.bad .m-bar i{background:var(--dsw-alias-state-error-primary)}
+.metric.bad .m-v{color:var(--dsw-alias-state-error-primary)}
+
 /* ---------- files ---------- */
 .files-grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;align-items:start}
 .file-list{
@@ -366,6 +388,59 @@ button{font-family:inherit}
   background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l2);
   border-radius:var(--dsw-radius-md);padding:8px 14px;font-size:13px;box-shadow:0 8px 28px #0008;
 }
+
+/* ---------- 会话索引（标题 / 时间 / 条数 / 行内操作） ---------- */
+.sess-item{position:relative;border-radius:8px}
+.sess-item .sess-row{
+  flex-direction:column;align-items:flex-start;justify-content:center;gap:1px;
+  height:auto;min-height:40px;padding:5px 8px;line-height:16px;
+}
+.sess-item .sess-title{
+  display:block;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;
+}
+.sess-item .sess-meta{
+  display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dsw-alias-label-caption);
+  overflow:hidden;white-space:nowrap;
+}
+.sess-item .sess-tools{
+  position:absolute;top:4px;right:4px;display:none;align-items:center;gap:2px;
+  padding-left:12px;border-radius:6px;
+  background:linear-gradient(90deg,transparent,var(--dsw-specific-sidebar-nav-item-active) 30%);
+}
+.sess-item:hover .sess-tools,.sess-item:focus-within .sess-tools{display:flex}
+.sess-tool{
+  border:0;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;
+  font-size:11px;line-height:16px;padding:1px 5px;border-radius:4px;
+}
+.sess-tool:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.sess-tool.danger:hover{color:var(--dsw-alias-state-error-primary)}
+.sess-tool:disabled{opacity:.4;cursor:not-allowed}
+
+/* ---------- markdown：图片 / 表格 ---------- */
+.md .md-figure{display:block;margin:0 0 12px;max-width:100%}
+.md .md-figure img{
+  display:block;max-width:100%;height:auto;border-radius:var(--dsw-radius-md);
+  border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);
+}
+.md .md-cap{display:block;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-caption)}
+.md-table-wrap{overflow:auto;margin:0 0 12px}
+.md table.md-table{border-collapse:collapse;font-size:13px}
+.md .md-table th,.md .md-table td{
+  border:.5px solid var(--dsw-alias-border-l2);padding:5px 10px;text-align:left;vertical-align:top;
+}
+.md .md-table th{
+  background:var(--dsw-alias-markdown-code-block-banner);font-weight:600;color:var(--dsw-alias-label-primary);
+}
+.md .md-table tbody tr:nth-child(even) td{background:var(--dsw-alias-bg-layer-1)}
+
+/* ---------- 文件预览：图片 / markdown ---------- */
+.file-media{padding:12px;max-height:calc(100vh - 240px);overflow:auto;text-align:center}
+.file-media img{
+  max-width:100%;height:auto;border-radius:var(--dsw-radius-md);
+  border:.5px solid var(--dsw-alias-border-l1);
+}
+.file-media .hint{display:block;margin-top:8px}
+.file-md{padding:14px;max-height:calc(100vh - 240px);overflow:auto}
 
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}

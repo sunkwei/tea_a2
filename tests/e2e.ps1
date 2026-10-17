@@ -51,6 +51,30 @@ function Check([string]$name, [bool]$ok, [string]$detail = "") {
     }
 }
 
+# Runs one /api/chat turn and returns the parsed SSE events. Used by the checks
+# that need a specific provider or a specific session.
+function Invoke-ChatTurn([string]$provider, [string]$sessionId, [string]$message) {
+    $bodyFile = Join-Path $scratch ("chat-" + [guid]::NewGuid().ToString('N') + ".json")
+    (@{
+            workspace_id = $wsId
+            session_id   = $sessionId
+            provider     = $provider
+            message      = $message
+        } | ConvertTo-Json -Compress) | Set-Content -Path $bodyFile -Encoding UTF8
+    $raw = & curl.exe -N -s --max-time 180 -X POST -H "Content-Type: application/json" `
+        --data-binary "@$bodyFile" "$base/api/chat" 2>&1 | Out-String
+    $out = @()
+    foreach ($line in ($raw -split "`n")) {
+        $t = $line.Trim()
+        if (-not $t.StartsWith('data:')) { continue }
+        $payload = $t.Substring(5).Trim()
+        if ($payload -and $payload -ne '[DONE]') {
+            try { $out += ($payload | ConvertFrom-Json) } catch { }
+        }
+    }
+    return $out
+}
+
 function Wait-Port([int]$port, [int]$timeoutSec = 20) {
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     while ((Get-Date) -lt $deadline) {
@@ -158,6 +182,9 @@ try {
     Check "GET /tokens.css served" ($tokens.StatusCode -eq 200)
     $allUi = $indexRes.Content + $appJs.Content + $appCss.Content + $tokens.Content
     Check "UI has no external CDN dependency" (-not ($allUi -match 'cdn\.|unpkg|jsdelivr|fonts\.googleapis'))
+    Check "UI ships the composer metrics bar" ($indexRes.Content -match 'id="metric-cache"')
+    Check "app.js renders the metrics block" ($appJs.Content -match 'applyMetrics')
+    Check "app.css styles the metrics bar" ($appCss.Content -match '\.metric \.m-bar')
 
     Write-Host "`n== streaming chat (multi-turn tool calling) ==" -ForegroundColor Cyan
     $bodyFile = Join-Path $scratch 'chat.json'
@@ -187,6 +214,10 @@ try {
     Check "stream has tool_result" ($types -contains 'tool_result')
     Check "stream has iteration_end" ($types -contains 'iteration_end')
     Check "stream has done" ($types -contains 'done')
+    # Streamed tool-call arguments: they are output tokens, so the UI counts them
+    # for the live t/s figure instead of showing a speed that decays while the
+    # model is writing a tool call.
+    Check "stream has tool_args_delta" ($types -contains 'tool_args_delta')
     # Regression: thinking-mode gateways reject the follow-up request when the
     # replayed assistant turn lost its reasoning_content. The mock enforces that
     # contract and answers 400, which surfaces here as an error event.
@@ -204,6 +235,28 @@ try {
 
     $iterations = ($events | Where-Object { $_.type -eq 'iteration_end' }).Count
     Check "multiple LLM round trips" ($iterations -ge 4) "iterations=$iterations"
+
+    # --- composer metrics: output speed / cache hit rate / context usage ------
+    # Every iteration_end and the final done carry a `metrics` block; the UI
+    # renders t/s, cache hit rate and max_context_tokens usage from it. This mock
+    # reports no usage unless the client asks for it, so the numbers here must be
+    # local estimates and must be flagged as such.
+    $doneEvent = $events | Where-Object { $_.type -eq 'done' } | Select-Object -First 1
+    Check "done carries a metrics block" ($null -ne $doneEvent.metrics)
+    Check "done reports the model context window" `
+        ($doneEvent.metrics.max_context_tokens -eq 128000) "got $($doneEvent.metrics.max_context_tokens)"
+    Check "done reports context usage" ($doneEvent.metrics.context_tokens -gt 0) `
+        "got $($doneEvent.metrics.context_tokens)"
+    Check "done reports generated output tokens" ($doneEvent.metrics.output_tokens -gt 0) `
+        "got $($doneEvent.metrics.output_tokens)"
+    Check "done reports elapsed and generation timing" `
+        (($doneEvent.metrics.elapsed_ms -gt 0) -and ($doneEvent.metrics.generation_ms -ge 0))
+    Check "metrics are flagged as estimates without provider usage" `
+        ($doneEvent.metrics.estimated -eq $true)
+    Check "no provider usage means no cache figure" ($doneEvent.usage.prompt_tokens -eq 0)
+    $iterMetrics = @($events | Where-Object { $_.type -eq 'iteration_end' -and $null -ne $_.metrics })
+    Check "every iteration_end carries a metrics block" ($iterMetrics.Count -eq $iterations) `
+        "metrics=$($iterMetrics.Count) iterations=$iterations"
 
     # curl tolerates a chunked body that is not properly terminated; browsers and
     # Node reject it ("Error in input stream" / "TypeError: terminated"). Assert
@@ -257,8 +310,39 @@ try {
         "settings:",
         "  keep_turns: 1",
         "  compaction_keep_recent: 2",
-        "  tool_output_max_lines: 50"
+        "  tool_output_max_lines: 50",
+        "  stream_include_usage: true"
     )
+
+    # --- provider-reported usage: the metrics must stop being estimates -------
+    $usageSession = (Invoke-RestMethod -Method Post -Uri "$base/api/workspaces/$wsId/sessions" `
+            -ContentType 'application/json' -Body '{"title":"usage"}' -TimeoutSec 10).id
+    $usageEvents = Invoke-ChatTurn 'mock' $usageSession 'report usage please'
+    $usageDone = $usageEvents | Where-Object { $_.type -eq 'done' } | Select-Object -First 1
+    Check "usage-enabled turn reports real metrics" ($usageDone.metrics.estimated -eq $false)
+    # `context_tokens` is the largest single request of the turn, not the sum of
+    # all requests: the UI shows how full the window got, so summing would lie.
+    $usageLastIter = $usageEvents | Where-Object { $_.type -eq 'iteration_end' } | Select-Object -Last 1
+    Check "context usage equals the last request's prompt tokens" `
+        ($usageDone.metrics.context_tokens -eq $usageLastIter.usage.prompt_tokens) `
+        "metrics=$($usageDone.metrics.context_tokens) last=$($usageLastIter.usage.prompt_tokens)"
+    Check "output tokens equal the reported completion tokens" `
+        ($usageDone.metrics.output_tokens -eq $usageDone.usage.completion_tokens) `
+        "metrics=$($usageDone.metrics.output_tokens) usage=$($usageDone.usage.completion_tokens)"
+    Check "cache hit rate becomes measurable" `
+        (($usageDone.usage.prompt_tokens -gt 0) -and ($usageDone.usage.cached_tokens -eq 0)) `
+        "prompt=$($usageDone.usage.prompt_tokens) cached=$($usageDone.usage.cached_tokens)"
+
+    # A gateway that ignores stream_options.include_usage must degrade to
+    # estimates, not to zeros or a broken UI.
+    $noUsageEvents = Invoke-ChatTurn 'mock_nousage' $usageSession 'report usage again'
+    $noUsageDone = $noUsageEvents | Where-Object { $_.type -eq 'done' } | Select-Object -First 1
+    Check "gateway ignoring include_usage falls back to estimates" `
+        ($noUsageDone.metrics.estimated -eq $true)
+    Check "estimated context usage is still populated" `
+        (($noUsageDone.metrics.context_tokens -gt 0) -and ($noUsageDone.metrics.max_context_tokens -eq 64000)) `
+        "context=$($noUsageDone.metrics.context_tokens) max=$($noUsageDone.metrics.max_context_tokens)"
+
     $csess = (Invoke-RestMethod -Method Post -Uri "$base/api/workspaces/$wsId/sessions" `
             -ContentType 'application/json' -Body '{"title":"compaction"}' -TimeoutSec 10).id
     $compactions = 0

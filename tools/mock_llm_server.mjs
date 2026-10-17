@@ -8,6 +8,10 @@
 //   turn 2 -> toolkit_file  (read  mock_note.txt)
 //   turn 3 -> final assistant message (markdown + fenced code block)
 //
+// Streamed replies only carry a `usage` chunk when the request sets
+// stream_options.include_usage - like a real gateway. Model `mock-no-usage`
+// never reports usage, so the client's estimated-metrics fallback stays covered.
+//
 // usage: node tools/mock_llm_server.mjs [--port 8790] [--host 127.0.0.1]
 
 import http from 'node:http';
@@ -88,10 +92,9 @@ function checkReasoningEchoed(messages) {
   return true;
 }
 
-function sseChunks(res, turn) {
+function sseChunks(res, turn, model, reportUsage) {
   const plan = planTurn(turn);
   const id = `chatcmpl-mock-${Date.now()}`;
-  const model = 'mock-model';
   const send = (delta, finish = null) => {
     const payload = {
       id,
@@ -140,16 +143,21 @@ function sseChunks(res, turn) {
       return;
     }
     send({}, plan.tool ? 'tool_calls' : 'stop');
-    res.write(
-      `data: ${JSON.stringify({
-        id,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model,
-        choices: [],
-        usage: { prompt_tokens: 128, completion_tokens: 64, total_tokens: 192 },
-      })}\n\n`,
-    );
+    // Usage only when the client asked for it (stream_options.include_usage),
+    // exactly like a real gateway: the model `mock-no-usage` never reports it, so
+    // the estimated-metrics path stays covered by the end-to-end test.
+    if (reportUsage) {
+      res.write(
+        `data: ${JSON.stringify({
+          id,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [],
+          usage: { prompt_tokens: 128, completion_tokens: 64, total_tokens: 192 },
+        })}\n\n`,
+      );
+    }
     res.write('data: [DONE]\n\n');
     res.end();
   };
@@ -259,7 +267,8 @@ const server = http.createServer((req, res) => {
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
       });
-      sseChunks(res, turn);
+      const wantsUsage = !!(parsed.stream_options && parsed.stream_options.include_usage);
+      sseChunks(res, turn, parsed.model || 'mock-model', wantsUsage && parsed.model !== 'mock-no-usage');
       return;
     }
 

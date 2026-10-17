@@ -25,6 +25,29 @@ namespace {
 
 constexpr size_t kFileReadLimit = 2u * 1024u * 1024u;
 
+/// Images and PDFs are fetched verbatim by the browser, so the raw route needs a
+/// much higher ceiling than the JSON `/file` view. 16 MB is generous for a
+/// screenshot yet small enough that one request cannot exhaust the device.
+constexpr uint64_t kRawReadLimit = 16u * 1024u * 1024u;
+
+/// Content type for the raw route. A fixed allow-list instead of sniffing: an
+/// unknown extension is served as opaque bytes, never as HTML, so a crafted file
+/// cannot execute script in the UI's origin.
+const char* raw_mime_for(const std::string& file_path) {
+  const std::string ext = path_extension(file_path);  // lower-case, includes the dot
+  if (ext == ".png") return "image/png";
+  if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+  if (ext == ".gif") return "image/gif";
+  if (ext == ".webp") return "image/webp";
+  if (ext == ".svg") return "image/svg+xml";
+  if (ext == ".bmp") return "image/bmp";
+  if (ext == ".ico") return "image/x-icon";
+  if (ext == ".pdf") return "application/pdf";
+  if (ext == ".txt") return "text/plain; charset=utf-8";
+  if (ext == ".md" || ext == ".markdown") return "text/markdown; charset=utf-8";
+  return "application/octet-stream";
+}
+
 void send_json(httplib::Response& res, const nlohmann::json& body, int status = 200) {
   res.status = status;
   res.set_header("Access-Control-Allow-Origin", "*");
@@ -290,7 +313,7 @@ void ApiServer::Impl::install_routes() {
   svr.Options(R"(/.*)", [](const httplib::Request&, httplib::Response& res) {
     res.status = 204;
     res.set_header("Access-Control-Allow-Origin", "*");
-    res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   });
 
@@ -315,6 +338,10 @@ void ApiServer::Impl::install_routes() {
     nlohmann::json active = nlohmann::json::object();
     active["provider"] = config->active_provider;
     active["model"] = config->active_model;
+    // The UI divides prompt_tokens by the window to show "上下文 12%", so the
+    // window has to be reachable without the client guessing it.
+    const ModelInfo* active_info = config->active_model_info();
+    active["max_context_tokens"] = active_info ? active_info->max_context_tokens : 0;
     j["active"] = active;
 
     nlohmann::json list = nlohmann::json::array();
@@ -326,6 +353,22 @@ void ApiServer::Impl::install_routes() {
       pj["api_url"] = p->api_url;
       pj["default_model"] = p->default_model;
       pj["models"] = p->models;
+      // `models` stays a plain array of names (existing clients read it that
+      // way); per-model capabilities live in a parallel map keyed by model name.
+      nlohmann::json model_info = nlohmann::json::object();
+      for (std::size_t m = 0; m < p->models.size(); ++m) {
+        const ModelInfo* info = p->find_model(p->models[m]);
+        nlohmann::json mi = nlohmann::json::object();
+        mi["max_context_tokens"] = info ? info->max_context_tokens : 0;
+        if (info) {
+          mi["max_output_tokens"] = info->max_output_tokens;
+          mi["supports_tools"] = info->supports_tools;
+          mi["supports_reasoning"] = info->supports_reasoning;
+          mi["supports_vision"] = info->supports_vision;
+        }
+        model_info[p->models[m]] = mi;
+      }
+      pj["model_info"] = model_info;
       pj["has_key"] = p->has_key();  // never expose the key itself
       if (!p->description.empty()) pj["description"] = p->description;
       list.push_back(pj);
@@ -494,6 +537,50 @@ void ApiServer::Impl::install_routes() {
             send_json(res, j);
           });
 
+  // ---- raw file bytes ----------------------------------------------------
+  // Images/PDFs referenced from assistant markdown are loaded by the browser
+  // directly, so they need a binary route; `/file` stays JSON-only.
+  svr.Get(R"(/api/workspaces/([^/]+)/raw)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string rel = req.has_param("path") ? req.get_param_value("path") : "";
+            if (rel.empty()) {
+              send_error(res, 400, "bad_request", "'path' is required");
+              return;
+            }
+            const std::string target = ws.resolve_path(rel, &err);
+            if (target.empty()) {
+              // resolve_path enforces the workspace boundary: ../.. is refused
+              // here and never reaches the read below.
+              send_error(res, 403, "forbidden", err);
+              return;
+            }
+            if (!path_is_file(target)) {
+              send_error(res, 404, "not_found",
+                         path_exists(target) ? "not a regular file" : "file not found");
+              return;
+            }
+            const uint64_t size = file_size(target);
+            if (size > kRawReadLimit) {
+              send_error(res, 413, "too_large",
+                         "file is larger than 16 MB; use /file for a truncated view");
+              return;
+            }
+            std::string bytes;
+            if (!read_file(target, &bytes)) {
+              send_error(res, 400, "read_failed", "cannot read " + rel);
+              return;
+            }
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_content(bytes, raw_mime_for(target));
+          });
+
   svr.Put(R"(/api/workspaces/([^/]+)/file)",
           [this](const httplib::Request& req, httplib::Response& res) {
             nlohmann::json body;
@@ -623,6 +710,29 @@ void ApiServer::Impl::install_routes() {
                }
                send_ok(res);
              });
+
+  // Renaming is what the sidebar's session index calls; the title is display-only.
+  svr.Patch(R"(/api/sessions/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+              nlohmann::json body;
+              if (!parse_json_body(req, &body, res)) return;
+              Workspace ws;
+              std::string err;
+              if (!find_session_workspace(req.matches[1].str(), &ws, &err)) {
+                send_error(res, 404, "not_found", err);
+                return;
+              }
+              const std::string title = json_string(body, "title");
+              if (trim(title).empty()) {
+                send_error(res, 400, "bad_request", "'title' is required");
+                return;
+              }
+              if (!ws.rename_session(req.matches[1].str(), title, &err)) {
+                send_error(res, 400, "session_error", err);
+                return;
+              }
+              send_ok(res);
+            });
 
   // ---- memory ------------------------------------------------------------
   svr.Get(R"(/api/workspaces/([^/]+)/memory)",

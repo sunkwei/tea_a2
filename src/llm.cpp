@@ -89,6 +89,18 @@ struct DeltaAccumulator {
   const DeltaCallback* on_delta;
   std::map<int, ToolCall> calls;
   std::string finish_reason;
+  /// Request start (ms) and whether this is a streamed response. Used to record
+  /// time-to-first-token and the generation window, which is what tokens/second
+  /// should be measured over.
+  const int64_t* started = nullptr;
+  bool streaming = false;
+
+  void mark_delta() {
+    if (!streaming || !started) return;
+    const int64_t now = now_ms();
+    if (result->ttft_ms == 0) result->ttft_ms = now - *started;
+    result->generation_ms = now - (*started + result->ttft_ms);
+  }
 
   void apply(const nlohmann::json& delta) {
     if (!delta.is_object()) return;
@@ -98,6 +110,7 @@ struct DeltaAccumulator {
       const std::string text = content->get<std::string>();
       if (!text.empty()) {
         result->content += text;
+        mark_delta();
         if (*on_delta) (*on_delta)(DeltaKind::Content, text);
       }
     }
@@ -109,6 +122,7 @@ struct DeltaAccumulator {
       const std::string text = r->get<std::string>();
       if (!text.empty()) {
         result->reasoning += text;
+        mark_delta();
         if (*on_delta) (*on_delta)(DeltaKind::Reasoning, text);
       }
     }
@@ -141,7 +155,15 @@ struct DeltaAccumulator {
         }
         auto args = fn->find("arguments");
         if (args != fn->end() && args->is_string()) {
-          call.raw_arguments += args->get<std::string>();
+          const std::string piece = args->get<std::string>();
+          call.raw_arguments += piece;
+          // Streamed tool-call arguments are output tokens too. Forwarding them
+          // lets a client count them (the Web UI uses this for the live t/s
+          // figure); they are never rendered as message content.
+          if (!piece.empty()) {
+            mark_delta();
+            if (*on_delta) (*on_delta)(DeltaKind::ToolArgs, piece);
+          }
         }
       }
     }
@@ -172,6 +194,8 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
   DeltaAccumulator acc;
   acc.result = &result;
   acc.on_delta = &on_delta;
+  acc.started = &started;
+  acc.streaming = req.stream;
 
   std::string sse_buf;
   bool saw_stream_error = false;

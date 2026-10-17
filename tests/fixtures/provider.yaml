@@ -9,6 +9,9 @@
 #   turn 2 -> toolkit_file   (read  mock_note.txt)
 #   turn 3 -> final assistant message
 #
+# `mock_nousage` serves the same mock but never reports token usage, which is how
+# a gateway that ignores stream_options.include_usage behaves.
+#
 # Copy this file to $HOME/.tea_agent/provider.yaml (or pass --config) to try the
 # agent without a real API key.
 version: 1
@@ -42,8 +45,20 @@ providers:
         supports_tools: true
         supports_reasoning: true
     api_keys:
-      - mock-key-not-used    api_keys:
       - mock-key-not-used
+  # Same mock, but it never reports usage - real gateways do this when they ignore
+  # stream_options.include_usage. Exercises the estimated-metrics fallback.
+  mock_nousage:
+    api_url: http://127.0.0.1:8790/v1
+    api_key: mock-key-not-used
+    default_model: mock-no-usage
+    description: mock that never reports token usage
+    models:
+      mock-no-usage:
+        max_context_tokens: 64000
+        max_output_tokens: 4096
+        supports_tools: true
+        supports_reasoning: true
 roles:
   main:
     provider: mock
