@@ -23,3 +23,8 @@ desktop.ini
 # Runtime logs
 *.log
 vcvars*.log
+
+# Scratch space created by tests/e2e.ps1 and manual probing
+tests/.scratch/
+tests/.verify/
+tests/.real/

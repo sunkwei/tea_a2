@@ -29,6 +29,8 @@
 #include <unistd.h>
 #endif
 
+#include "net_compat.h"
+
 namespace tea {
 namespace {
 
@@ -154,6 +156,7 @@ tea_socket_t tcp_connect(const std::string& host, int port, int timeout_ms, std:
     }
 
     set_nonblocking(s, false);
+    tea_disable_sigpipe(static_cast<std::intptr_t>(s));
     int one = 1;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof(one));
 #ifdef _WIN32
@@ -179,12 +182,7 @@ bool send_all_fd(tea_socket_t fd, const std::string& data, int timeout_ms, std::
   size_t sent = 0;
   while (sent < data.size()) {
     const int n = ::send(fd, data.data() + sent, static_cast<int>(data.size() - sent),
-#ifdef _WIN32
-                         0
-#else
-                         MSG_NOSIGNAL
-#endif
-    );
+                         TEA_SEND_FLAGS);
     if (n > 0) {
       sent += static_cast<size_t>(n);
       continue;

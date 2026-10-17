@@ -22,9 +22,74 @@ Web UI、支持多轮工具调用、多工作区，以及每个工作区独立�
 
 ---
 
-## 2. 快速开始
+## 2. 构建矩阵、依赖与快速开始
 
-### 2.1 准备配置
+### 2.1 需要哪些工具（只有这些）
+
+| 角色 | 要求 | 说明 |
+| --- | --- | --- |
+| 构建系统 | CMake ≥ 3.20（3.x / 4.x 都行） | CMake 4.x 下靠 `CMAKE_POLICY_VERSION_MINIMUM` 兼容 yaml-cpp / mbedTLS 的旧 `cmake_minimum_required` |
+| C++ 编译器 | 支持 C++17；已验证 GCC 6.5 / MinGW GCC 16.2 / MSVC 19.51 | 代码不含 C++17 专属语言特性，可用 `-DTEA_AGENT_CXX_STANDARD=14` 复核 |
+| C 编译器 | C99（只用于编译 mbedTLS） | 与 C++ 编译器同一套工具链即可 |
+| 生成器 | Ninja / Unix Makefiles / NMake / Xcode | 任选；Windows 上若 Ninja 卡死改用 NMake（见第 11 节第 6 条） |
+| 线程库 | 系统自带 | POSIX：`pthread`；Windows：不需要额外库 |
+
+**不需要** OpenSSL、zlib、vcpkg/conan、Perl、Python。具体依据：
+
+- **OpenSSL**：不启用 `CPPHTTPLIB_OPENSSL_SUPPORT`，TLS 由 mbedTLS（`3rd/`）或 WinHTTP 承担。
+- **zlib**：mbedTLS 的 `ENABLE_ZLIB_SUPPORT` 默认 `OFF`（`3rd/mbedtls/CMakeLists.txt:48`）。
+- **Python 3**：mbedTLS 的 CMake 会探测它，但注释写明 *"Python 3 is only needed here to check for configuration warnings"*（`3rd/mbedtls/CMakeLists.txt:89`）；探测不到就跳过告警检查，不影响构建。
+- **Perl**：只在 `apidoc` / `generated_files` 这类维护者目标里用到，不属于默认构建目标。
+
+### 2.2 各平台流程与状态
+
+| 平台 | 命令 | 产物 | 本次是否实测 |
+| --- | --- | --- | --- |
+| Windows + MinGW-w64 | `scripts\build-mingw.bat` | `build-mingw\bin\tea_agent.exe` | ✅ 实测（0 warning，E2E 42/42） |
+| Windows + MSVC | `scripts\build.bat`（可用 `scripts\build.bat out ninja`） | `build-msvc\bin\tea_agent.exe` | ✅ 实测（0 error，E2E 42/42） |
+| Linux（GCC / Clang） | `scripts/build.sh` 或 `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)` | `build/bin/tea_agent` | ⚠️ **未实测** |
+| macOS（AppleClang） | `scripts/build.sh` | `build/bin/tea_agent` | ⚠️ **未实测** |
+
+三个平台的流程完全一致，都是「CMake 配置 → 编译 → 链接 → 复制运行时资源」：
+
+1. **配置**：探测编译器；把 `3rd/yaml-cpp`、`3rd/mbedtls` 作为 CMake 子项目纳入（各自独立编译成静态库）；
+2. **构建期代码生成**：先编译 `tools/embed_assets.cpp`，用它把 `web/{index.html,tokens.css,app.css,app.js}` 生成 `generated/web_assets.cpp`，实现单文件自带 UI；
+3. **编译 + 链接** `src/*.cpp`；
+4. **后置步骤**：把 `web/` 与 `3rd/ca-bundle/cacert.pem` 复制到 `<build>/bin/`（方便 `--web-dir` 与 CA 查找）。
+
+MinGW 下额外加了 `-static-libgcc -static-libstdc++ -static`，所以产物不依赖 `libstdc++-6.dll` 等运行库，可直接拷贝分发。
+
+> Linux / macOS 这两个平台我在此次会话中**没有实际编译过**（本机只有 Windows 工具链）。代码中已按平台分支处理（见 2.4），但仍需你首次编译时确认。
+
+### 2.3 除了 `3rd/` 还需要什么
+
+| 平台 | 额外链接的系统库 | 是否需要安装 |
+| --- | --- | --- |
+| Windows | `winhttp`、`ws2_32`、`advapi32` | 否，Windows SDK 自带 |
+| Linux | `pthread`（`Threads::Threads`） | 否，glibc 自带 |
+| macOS | `pthread`（系统 stub） | 否 |
+
+运行时还要一份 **CA 证书**，只在使用内置 mbedTLS 后端时需要；Windows 默认走 WinHTTP，用的是系统证书库，可以不需要。构建时会把 `3rd/ca-bundle/cacert.pem` 复制到 `bin/ca-bundle/`，程序按序查找：
+
+1. `--ca-bundle <pem>` 显式指定
+2. `<可执行文件目录>/ca-bundle/cacert.pem`
+3. `<可执行文件目录>/cacert.pem`
+4. `<可执行文件目录>/../3rd/ca-bundle/cacert.pem`
+5. `./3rd/ca-bundle/cacert.pem`（按当前工作目录）
+6. `$TEA_AGENT_HOME/ca-bundle/cacert.pem`
+
+### 2.4 平台相关代码在哪
+
+| 关注点 | 位置 | 处理方式 |
+| --- | --- | --- |
+| 路径与文件 I/O | `src/platform_fs.cpp` | Win32 宽字符 API / POSIX `stat`+`dirent`，全流程 UTF-8，不用 `std::filesystem` |
+| 可执行文件路径 | `src/util.cpp: executable_path()` | Windows `GetModuleFileNameW`；macOS `_NSGetExecutablePath`；Linux `/proc/self/exe` |
+| SIGPIPE | `src/net_compat.h` | Linux `MSG_NOSIGNAL`；macOS/BSD `SO_NOSIGPIPE`；Windows 无 |
+| 命令执行 | `src/command.cpp` | Windows：临时 `.cmd/.ps1` + Job Object；POSIX：`fork`+`setsid`+进程组 `kill` |
+| HTTPS | `src/http_winhttp.cpp` / `src/tls.cpp` | Windows 默认 WinHTTP，失败自动回退 mbedTLS；其它平台直接用 mbedTLS |
+| 控制台编码 | `src/log.cpp` | Windows `WriteConsoleW`；POSIX 直写 UTF-8 |
+
+### 2.5 准备配置
 
 ```bash
 mkdir -p ~/.tea_agent
@@ -32,7 +97,7 @@ cp provider.example.yaml ~/.tea_agent/provider.yaml
 # 编辑 provider.yaml，填入 api_key
 ```
 
-### 2.2 构建
+### 2.6 构建
 
 **Windows + MinGW-w64（推荐）**
 
@@ -66,7 +131,7 @@ cmake --build build -j"$(nproc)"
 **验证 GCC 6.5 兼容性**：`-DTEA_AGENT_CXX_STANDARD=14` 会用 C++14 语言模式编译全部代码
 （GCC 6.5 上 CMake 会把 17 映射为 `-std=c++1z`，但代码本身不依赖 C++17 语言特性）。
 
-### 2.3 运行
+### 2.7 运行
 
 ```bash
 # 把当前目录注册为工作区并启动，默认 http://127.0.0.1:8282
@@ -78,7 +143,7 @@ build/bin/tea_agent --workspace-root D:\projects --port 9000
 
 启动后会打印工作区索引、当前 provider/model、可用工具，浏览器打开 Web UI 即可对话。
 
-### 2.4 命令一览
+### 2.8 命令一览
 
 ```
 --host <addr>              监听地址（默认 127.0.0.1）
@@ -338,6 +403,7 @@ provider.example.yaml       配置示例
 scripts/
   build-mingw.bat           MinGW/GCC 构建
   build.bat                 MSVC（NMake，可用 ninja）
+  build.sh                  Linux / macOS 构建
   vcenv.bat                 不依赖 VsDevCmd 的 MSVC 环境装配
 src/
   main.cpp                  CLI、信号、启动横幅
@@ -353,6 +419,7 @@ src/
   http_socket.cpp           HTTP/1.1 over TCP，可选 TLS
   http_winhttp.cpp          Windows WinHTTP 后端
   tls.{h,cpp}               mbedTLS 客户端封装
+  net_compat.h              SIGPIPE / send 标志的平台差异
   platform_fs.cpp           路径与文件 I/O（Win32 宽字符 / POSIX）
   util.{h,cpp} log.{h,cpp}  字符串、时间、编码、日志
 web/                        index.html / tokens.css / app.css / app.js

@@ -17,6 +17,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+
 namespace tea {
 namespace {
 
@@ -328,7 +332,21 @@ std::string executable_path() {
     buffer.resize(buffer.size() * 2);
     if (buffer.size() > (1u << 20)) return std::string();
   }
+#elif defined(__APPLE__)
+  // macOS has no /proc; ask dyld instead.
+  uint32_t needed = 0;
+  _NSGetExecutablePath(nullptr, &needed);
+  if (needed == 0) return std::string();
+  std::vector<char> buffer(static_cast<size_t>(needed) + 1, '\0');
+  uint32_t actual = static_cast<uint32_t>(buffer.size());
+  if (_NSGetExecutablePath(&buffer[0], &actual) != 0) return std::string();
+  buffer[buffer.size() - 1] = '\0';
+  const std::string path(&buffer[0]);
+  if (path.empty()) return path;
+  // _NSGetExecutablePath may contain ".." or a symlink; normalise it.
+  return path_canonical(path);
 #else
+  // Linux: /proc/self/exe already resolves to the real path.
   std::vector<char> buffer(1024);
   for (;;) {
     const ssize_t n = ::readlink("/proc/self/exe", &buffer[0], buffer.size() - 1);

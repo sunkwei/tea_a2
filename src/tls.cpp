@@ -26,6 +26,8 @@
 #include <sys/types.h>
 #endif
 
+#include "net_compat.h"
+
 namespace tea {
 
 #if defined(TEA_HAVE_MBEDTLS)
@@ -211,12 +213,7 @@ class MbedTlsStream : public TlsStream {
     MbedTlsStream* self = static_cast<MbedTlsStream*>(ctx);
     const int want = length > 0x7fffffff ? 0x7fffffff : static_cast<int>(length);
     const int n = ::send(self->fd_, reinterpret_cast<const char*>(buffer), want,
-#ifdef _WIN32
-                         0
-#else
-                         MSG_NOSIGNAL
-#endif
-    );
+                         TEA_SEND_FLAGS);
     if (n >= 0) return n;
     const int e = socket_last_error();
     if (socket_would_block(e)) return MBEDTLS_ERR_SSL_WANT_WRITE;
