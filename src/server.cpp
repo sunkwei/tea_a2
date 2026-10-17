@@ -138,7 +138,15 @@ struct ChatTurn {
         lock.lock();
       }
     }
-    if (queue.empty()) return false;  // closed and drained
+    if (queue.empty()) {
+      // The turn is finished and everything has been flushed. A chunked body is
+      // only terminated by done(): returning false here is treated as a
+      // cancellation and aborts the transfer *without* the terminating
+      // "0\r\n\r\n" chunk, which browsers report as "Error in input stream"
+      // (curl silently tolerates it).
+      sink.done();
+      return true;
+    }
     const std::string chunk = queue.front();
     queue.pop_front();
     lock.unlock();

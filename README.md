@@ -398,13 +398,17 @@ pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
 ```
 
 `tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
-再以独立 `--tea-home` 启动 agent，覆盖 **43 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
+再以独立 `--tea-home` 启动 agent，覆盖 **44 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
 SSE 事件序列、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、目录树与文件读写、
 记忆与日志接口、内置 UI 交付且无 CDN 依赖。全程本地 `http://`，不需要 api_key。
 
-其中一条是**思考回传的回归测试**：mock 会像真实 thinking 网关那样，一旦发现被重放的 assistant
-消息丢了 `reasoning_content` 就回 400。用修复前的二进制跑这套测试会挂 7 项，可以据此确认测试
-确实覆盖了这个 bug。
+其中两条是**回归测试**：
+
+1. **思考回传**：mock 像真实 thinking 网关那样，一旦发现被重放的 assistant 消息丢了
+   `reasoning_content` 就回 400。用 0.1.0 的二进制跑会挂 7 项。
+2. **流正确收尾**：`tests/sse_probe.mjs` 用 Node 的 fetch 当严格客户端读 SSE。curl 容忍
+   未终止的 chunked 响应，浏览器/Node 不容忍（`error: Error in input stream` /
+   `TypeError: terminated`），所以必须显式断言。用 0.1.1 的二进制跑，44 项里恰好挂这 1 项。
 
 脚本开跑前会检查端口占用，发现残留监听就直接报错退出——否则会静默连到上一次遗留的实例上，
 表现为「卡住」而不是失败。

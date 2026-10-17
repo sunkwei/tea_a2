@@ -187,6 +187,14 @@ try {
     $iterations = ($events | Where-Object { $_.type -eq 'iteration_end' }).Count
     Check "multiple LLM round trips" ($iterations -ge 4) "iterations=$iterations"
 
+    # curl tolerates a chunked body that is not properly terminated; browsers and
+    # Node reject it ("Error in input stream" / "TypeError: terminated"). Assert
+    # the closing chunk explicitly with a strict client.
+    $probeOut = & node (Join-Path $PSScriptRoot 'sse_probe.mjs') $base $wsId 1 2>&1
+    $probeCode = $LASTEXITCODE
+    Check "stream terminates cleanly for a strict client" ($probeCode -eq 0) `
+        (($probeOut -join ' ').Trim())
+
     Write-Host "`n== side effects on disk ==" -ForegroundColor Cyan
     $runDir = Join-Path $wsDir '.tea_agent_run'
     Check ".tea_agent_run created" (Test-Path $runDir)
