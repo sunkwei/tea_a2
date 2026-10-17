@@ -53,6 +53,11 @@ struct SessionInfo {
 struct Session {
   SessionInfo info;
   std::vector<Message> messages;
+  /// Rolling summary of the oldest `summary_upto` messages. Compaction never
+  /// deletes the originals (the UI and the audit trail still see them); it only
+  /// keeps them out of the model's context.
+  std::string summary;
+  std::size_t summary_upto = 0;
 };
 
 }  // namespace tea

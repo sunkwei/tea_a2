@@ -93,6 +93,17 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (yhas(node, "utf8_console")) s.utf8_console = ybool(node, "utf8_console", s.utf8_console);
   if (yhas(node, "shell")) s.shell = ystr(node, "shell", s.shell);
   if (yhas(node, "system_prompt")) s.system_prompt = ystr(node, "system_prompt", s.system_prompt);
+  if (yhas(node, "tool_output_max_lines"))
+    s.tool_output_max_lines = static_cast<int>(yint(node, "tool_output_max_lines", s.tool_output_max_lines));
+  if (yhas(node, "enable_compaction"))
+    s.enable_compaction = ybool(node, "enable_compaction", s.enable_compaction);
+  if (yhas(node, "compaction_summary_max_tokens"))
+    s.compaction_summary_max_tokens =
+        yint(node, "compaction_summary_max_tokens", s.compaction_summary_max_tokens);
+  if (yhas(node, "compaction_keep_recent"))
+    s.compaction_keep_recent =
+        static_cast<int>(yint(node, "compaction_keep_recent", s.compaction_keep_recent));
+  if (s.keep_turns < 0) s.keep_turns = 0;
   if (s.max_iterations < 1) s.max_iterations = 1;
   if (s.command_timeout_ms < 1000) s.command_timeout_ms = 1000;
 }

@@ -27,7 +27,22 @@ providers:
         supports_tools: true
         reasoning_effort: auto
         note: ''
+  # Same mock, but with a tiny context window so the history-compaction path can
+  # be exercised without a long conversation. Select it per request with
+  # {"provider":"mock_small"}.
+  mock_small:
+    api_url: http://127.0.0.1:8790/v1
+    api_key: mock-key-not-used
+    default_model: mock-model
+    description: tiny context window, used to exercise history compaction
+    models:
+      mock-model:
+        max_context_tokens: 1500
+        max_output_tokens: 100
+        supports_tools: true
+        supports_reasoning: true
     api_keys:
+      - mock-key-not-used    api_keys:
       - mock-key-not-used
 roles:
   main:

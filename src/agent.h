@@ -25,6 +25,15 @@ struct TurnOptions {
   bool stream = true;
 };
 
+/// How much of the stored history actually made it into the model context.
+struct ContextStats {
+  std::size_t kept = 0;
+  std::size_t total = 0;
+  long long budget = 0;
+  long long used = 0;
+  bool trimmed = false;
+};
+
 struct TurnResult {
   bool ok = false;
   bool cancelled = false;
@@ -51,12 +60,22 @@ class Agent {
   static long long estimate_tokens(const std::string& text);
   static long long estimate_tokens(const std::vector<Message>& messages);
 
+  /// Fold the oldest part of the history into a rolling summary when the context
+  /// is about to overflow. Never deletes messages: only advances
+  /// session->summary_upto so they stop being sent.
+  bool maybe_compact(Workspace& workspace, Session* session, const std::string& provider,
+                     const std::string& model, const ModelInfo* model_info,
+                     std::atomic<bool>* cancel, const EventEmitter& emit);
+
   /// Exposed so the HTTP layer can show exactly what the model receives.
   std::string build_system_prompt(const Workspace& workspace, const Session& session) const;
 
  private:
   void build_context(const Workspace& workspace, const Session& session, const ModelInfo* model,
-                     std::vector<Message>* out) const;
+                     std::vector<Message>* out, ContextStats* stats = nullptr) const;
+  bool compact_history(Workspace& workspace, Session* session, const std::string& provider,
+                       const std::string& model, const ModelInfo* model_info,
+                       std::atomic<bool>* cancel);
 
   AppConfig* config_;
   ToolRegistry* tools_;

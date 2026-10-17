@@ -186,6 +186,54 @@ const server = http.createServer((req, res) => {
     }
 
     const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+
+    // Compaction: the agent asks the model to fold old turns into a summary.
+    // Detect it explicitly so the mock answers with text instead of a tool call.
+    const summaryRequest = messages.some(
+      (m) =>
+        m.role === 'system' &&
+        typeof m.content === 'string' &&
+        m.content.includes('compress conversation history'),
+    );
+    if (summaryRequest) {
+      const body = 'COMPACTED SUMMARY: earlier turns covered tool calls and file writes.';
+      console.log('[mock-llm] summarisation request -> answering with text');
+      if (parsed.stream) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        const sid = `chatcmpl-summary-${Date.now()}`;
+        const emit = (delta, finish = null) => {
+          res.write(
+            `data: ${JSON.stringify({
+              id: sid,
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: parsed.model,
+              choices: [{ index: 0, delta, finish_reason: finish }],
+            })}\n\n`,
+          );
+        };
+        emit({ content: body });
+        emit({}, 'stop');
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            id: 'chatcmpl-summary',
+            object: 'chat.completion',
+            model: parsed.model,
+            choices: [{ index: 0, message: { role: 'assistant', content: body }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 12, completion_tokens: 9, total_tokens: 21 },
+          }),
+        );
+      }
+      return;
+    }
     const turn = toolTurns(messages);
     const tools = Array.isArray(parsed.tools) ? parsed.tools.map((t) => t.function?.name) : [];
     console.log(

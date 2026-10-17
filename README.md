@@ -187,11 +187,77 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 
 ## 多轮工具调用与上下文
 
-- 单条用户消息内循环「模型 → 工具 → 模型」，直到不再请求工具或达到 `max_iterations`。
-- 每轮都按 `max_context_tokens` 的 55% 预算从最新消息向前回溯，并对齐到 user 轮次边界，
-  避免从半个工具调用中间截断。
-- 工具参数 JSON 解析失败时，把解析错误作为工具结果回灌给模型（而不是静默当成 `{}`），
-  模型有机会自我修正。
+单条用户消息内循环「模型 → 工具 → 模型」，直到不再请求工具或达到 `max_iterations`。
+工具参数 JSON 解析失败时，把解析错误作为工具结果回灌给模型（而不是静默当成 `{}`），
+模型有机会自我修正。
+
+这一块的四个机制值得单独说，因为它们直接决定长会话能不能用：
+
+### 1. 工具输出按内容属性削减，而不是按字节硬切
+
+对 4 万行的构建日志，按字节截断留下来的是进度噪声、丢掉的往往是错误行。`toolkit_exec`
+会先给命令分类（build / test / diff / 通用）再削减：
+
+- **build / test**：保留每一条诊断行（`error`、`failed`、`undefined reference`、`错误`、`失败`
+  …）及其后 2 行上下文，丢掉进度噪声（`[ 42%] Building ...`、cmake 的 `-- ...`、
+  `Note: including file`），并始终保留头部与尾部；
+- **其它**：保留头部 + 尾部；
+- 每一段被省略的内容都替换成显式标记：
+  `... [tea_agent omitted 321 lines of output: progress noise; diagnostics kept] ...`，
+  模型因此知道自己看到的是删减版，不会基于残缺日志瞎猜。
+
+过滤是确定性的（同样的输入必然产出同样的输出），因为工具结果会落盘并在后续轮次重放。
+可以随时自测：`tea_agent --selftest`。
+
+### 2. 预算按实际额度算，而不是拍一个百分比
+
+```
+budget = 上下文窗口 − 输出预留 − (system prompt + 工具 schema + 框架开销)
+```
+
+输出预留取 `max_tokens` 或模型的 `max_output_tokens`，并限制在窗口的 1/3 以内（避免饿死历史）；
+预算有 `窗口 / 5` 的下限。`keep_turns` 是「至少保留最近 N 轮」的**硬下限**，单条消息本身超预算时
+按头尾裁剪而不是直接溢出。日志里每次都能看到实际数字：
+
+```
+context: max=1000000 reserve_output=333333 fixed=847 budget=665820 kept=4/4 used=960 summarised=23
+```
+
+### 3. 超预算时做滚动摘要，而不是静默丢弃
+
+历史超过预算时，把最旧的一段交给模型压缩成摘要，写入会话的 `summary`，并记录
+`summary_upto`（已被摘要覆盖的消息条数）。**原始消息不会删除**——UI 和审计仍能看到全文，
+只是不再发给模型。摘要会写进 system prompt 的「Compact history」小节，并在 SSE 里发一个
+`compaction` 事件。摘要失败（网络/模型报错）时自动退回丢弃最旧消息，不会卡死会话。
+
+### 4. 前缀缓存命中率是**可测量**的
+
+DeepSeek / opencode 网关都按「最长公共前缀」缓存提示词。系统提示词里任何每轮都变的内容
+（比如时间戳）都会让缓存整体失效，所以：
+
+- Environment 块全部来自**启动时探测一次**的真实设备信息（见下），不随时间变化；
+- 墙钟被移出提示词，改为提示模型需要时自己执行 `date` / `echo %DATE% %TIME%`；
+- 每次补全都记录命中情况：`cache=1280/1444 (88%)`。
+
+实测同一个真实端点连续两轮：**88% 和 87%** 的前缀命中。
+
+### 环境探测（system prompt 的 Environment 块）
+
+不是写死的 `Windows`/`Linux` 字符串，而是启动时真实探测设备（`src/env.cpp`）：
+
+```text
+Environment (probed from this device at startup)
+- OS: Windows 10.0.19045 (x86_64)      # RtlGetVersion 拿真实 build，不用会撒谎的 GetVersionEx
+- Host: SUNKW-X1
+- Time zone: UTC+08:00
+- CPUs: 8, memory: 15.9 GiB
+- Free space on the workspace volume: 329.5 GiB
+- toolkit_exec shell: cmd (also installed: powershell, pwsh)
+```
+
+Linux 下走 `/etc/os-release`（嵌入式发行版能读成 `Buildroot` 之类）+ `uname` + `statvfs`，
+macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell（真的在 PATH 里能找）都是实测值。
+`GET /api/workspaces/:id/prompt` 可以随时看到当前 workspace 实际拼出的完整 system prompt。
 
 ---
 
@@ -256,6 +322,32 @@ settings:
 
 解析顺序：`--provider`/`--model` → `roles.main` → 第一个 provider 的 `default_model`。
 api_key 只在日志里以掩码出现，HTTP 接口从不下发。
+
+### 按工作区覆盖设置
+
+同一份二进制部署到不同设备/项目时，shell、超时、上下文策略往往不同，所以设置是分层的
+（后者覆盖前者）：
+
+```
+内置默认 → $TEA_AGENT_HOME/tea_agent.yaml → <workspace>/.tea_agent_run/settings.yaml → CLI
+```
+
+```yaml
+# <workspace>/.tea_agent_run/settings.yaml
+settings:
+  shell: bash                  # 这台设备上该用哪个 shell
+  command_timeout_ms: 600000
+  keep_turns: 6
+  enable_compaction: true
+  compaction_keep_recent: 4
+  tool_output_max_lines: 400
+  system_prompt: |             # 也可以整体替换默认规则
+    ...
+```
+
+另外有一个工作区指令文件 `<workspace>/.tea_agent_run/instructions.md`，内容会原样拼进
+system prompt 的「Workspace instructions」小节——用来放「这个项目怎么构建、怎么测、有哪些约定」，
+与机器级配置彻底分开。两者都在 workspace 打开时读取一次，保证提示词前缀稳定。
 
 ### 回传 `reasoning_content`（多轮工具调用的坑）
 
@@ -346,7 +438,7 @@ src/
   config.{h,cpp}            provider.yaml / roles / headers 解析
   message.{h,cpp}           消息模型（wire 格式 + 存储格式）
   llm.{h,cpp}               OpenAI 兼容客户端：SSE、tool_calls 聚合、重试
-  agent.{h,cpp}             多轮工具调用主循环、上下文裁剪、system prompt
+  agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
   tools.{h,cpp}             工具注册表与三个内置工具
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆、索引
@@ -357,10 +449,12 @@ src/
   tls.{h,cpp}               mbedTLS 客户端封装
   net_compat.h              SIGPIPE / send 标志的平台差异
   platform_fs.cpp           路径与文件 I/O（Win32 宽字符 / POSIX，全 UTF-8）
+  env.{h,cpp}               设备环境探测（OS/架构/时区/CPU/内存/磁盘/shell）
+  output_filter.{h,cpp}     工具输出按内容属性削减（build/test/通用）
   util.{h,cpp} log.{h,cpp}  字符串、时间、编码、日志
 web/                        index.html / tokens.css / app.css / app.js（构建期嵌入）
 tools/                      embed_assets.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
-tests/e2e.ps1               端到端测试
+tests/e2e.ps1              端到端测试（52 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat
 3rd/                        第三方依赖
 ```
@@ -398,7 +492,7 @@ pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
 ```
 
 `tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
-再以独立 `--tea-home` 启动 agent，覆盖 **44 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
+再以独立 `--tea-home` 启动 agent，覆盖 **52 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
 SSE 事件序列、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、目录树与文件读写、
 记忆与日志接口、内置 UI 交付且无 CDN 依赖。全程本地 `http://`，不需要 api_key。
 
@@ -406,7 +500,11 @@ SSE 事件序列、两个工具的落盘副作用、`.tea_agent_run/` 全部子�
 
 1. **思考回传**：mock 像真实 thinking 网关那样，一旦发现被重放的 assistant 消息丢了
    `reasoning_content` 就回 400。用 0.1.0 的二进制跑会挂 7 项。
-2. **流正确收尾**：`tests/sse_probe.mjs` 用 Node 的 fetch 当严格客户端读 SSE。curl 容忍
+2. **上下文压缩**：fixture 里有一个 `max_context_tokens: 1500` 的 `mock_small` provider，
+   `e2e.ps1` 用它 + 复用同一会话 + 工作区级 `settings.yaml` 强制触发压缩，断言 SSE 出现
+   `compaction` 事件、会话落盘了 `summary` / `summary_upto`、且原始消息没有被删除
+   （压缩是「不再发送」而不是「删除」）。
+3. **流正确收尾**：`tests/sse_probe.mjs` 用 Node 的 fetch 当严格客户端读 SSE。curl 容忍
    未终止的 chunked 响应，浏览器/Node 不容忍（`error: Error in input stream` /
    `TypeError: terminated`），所以必须显式断言。用 0.1.1 的二进制跑，44 项里恰好挂这 1 项。
 

@@ -26,5 +26,6 @@ vcvars*.log
 
 # Scratch space created by tests/e2e.ps1 and manual probing
 tests/.scratch/
+tests/.pc/
 tests/.verify/
 tests/.real/

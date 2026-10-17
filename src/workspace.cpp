@@ -296,7 +296,7 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
     if (!apply_settings_yaml(&settings_, settings_file(), &load_err)) {
       LOG_WARN("workspace ", entry_.id, ": ignoring ", settings_file(), ": ", load_err);
     } else {
-      LOG_INFO("workspace ", entry_.id, ": applied ", settings_file());
+      LOG_DEBUG("workspace ", entry_.id, ": applied ", settings_file());
     }
   }
 
@@ -424,6 +424,8 @@ bool Workspace::load_session(const std::string& id, Session* out, std::string* e
   }
   out->info = SessionInfo();
   out->messages.clear();
+  out->summary.clear();
+  out->summary_upto = 0;
   out->info.id = id;
   auto title_it = j.find("title");
   if (title_it != j.end() && title_it->is_string()) out->info.title = title_it->get<std::string>();
@@ -433,6 +435,15 @@ bool Workspace::load_session(const std::string& id, Session* out, std::string* e
   auto updated_it = j.find("updated_at");
   if (updated_it != j.end() && updated_it->is_string())
     out->info.updated_at = updated_it->get<std::string>();
+  auto summary_it = j.find("summary");
+  if (summary_it != j.end() && summary_it->is_string()) {
+    out->summary = summary_it->get<std::string>();
+  }
+  auto upto_it = j.find("summary_upto");
+  if (upto_it != j.end() && upto_it->is_number_integer()) {
+    out->summary_upto = upto_it->get<std::size_t>();
+  }
+  if (out->summary_upto > 0 && out->summary.empty()) out->summary_upto = 0;
   auto msgs = j.find("messages");
   if (msgs != j.end() && msgs->is_array()) {
     for (auto it = msgs->begin(); it != msgs->end(); ++it) {
@@ -454,6 +465,8 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
     msgs.push_back(session.messages[i].to_store());
   }
   j["messages"] = msgs;
+  if (!session.summary.empty()) j["summary"] = session.summary;
+  if (session.summary_upto > 0) j["summary_upto"] = session.summary_upto;
   const std::string dir = sessions_dir();
   if (!write_file(session_file_for(dir, session.info.id), j.dump(2) + "\n", false, err)) {
     return false;

@@ -249,7 +249,41 @@ try {
 
     $logs = Invoke-RestMethod "$base/api/workspaces/$wsId/logs?tail=50"
     Check "GET logs returns lines" ($logs.lines.Count -ge 1)
-}
+    # --- history compaction: tiny window + reused session + workspace settings --
+    # Per-workspace settings are also covered here: keep_turns and
+    # compaction_keep_recent come from <run_dir>/settings.yaml, not the global config.
+    $settingsPath = Join-Path $wsDir ".tea_agent_run\settings.yaml"
+    Set-Content -Path $settingsPath -Encoding ASCII -Value @(
+        "settings:",
+        "  keep_turns: 1",
+        "  compaction_keep_recent: 2",
+        "  tool_output_max_lines: 50"
+    )
+    $csess = (Invoke-RestMethod -Method Post -Uri "$base/api/workspaces/$wsId/sessions" `
+            -ContentType 'application/json' -Body '{"title":"compaction"}' -TimeoutSec 10).id
+    $compactions = 0
+    for ($round = 0; $round -lt 3; $round++) {
+        $pad = 'x' * 400
+        $cbody = (@{
+                workspace_id = $wsId
+                session_id   = $csess
+                provider     = 'mock_small'
+                model        = 'mock-model'
+                message      = "probe $round $pad"
+            } | ConvertTo-Json -Compress)
+        $cfile = Join-Path $scratch "compaction-$round.json"
+        Set-Content -Path $cfile -Encoding UTF8 -Value $cbody
+        $craw = & curl.exe -N -s --max-time 120 -X POST -H "Content-Type: application/json" `
+            --data-binary "@$cfile" "$base/api/chat" 2>&1 | Out-String
+        $compactions += ([regex]::Matches($craw, '"type":\s*"compaction"')).Count
+    }
+    Check "compaction event emitted" ($compactions -ge 1) "count=$compactions"
+    $cSessFile = Join-Path $wsDir ".tea_agent_run\sessions\$csess.json"
+    $cSess = Get-Content -Path $cSessFile -Raw | ConvertFrom-Json
+    Check "session stores a rolling summary" `
+        (($cSess.summary_upto -gt 0) -and (-not [string]::IsNullOrEmpty($cSess.summary))) `
+        "upto=$($cSess.summary_upto) bytes=$($cSess.summary.Length)"
+    Check "compaction keeps the original messages" ($cSess.messages.Count -gt $cSess.summary_upto)}
 catch {
     Write-Host "`nUNEXPECTED ERROR: $_" -ForegroundColor Red
     $failures += "exception"
@@ -268,3 +302,4 @@ if ($failures.Count -eq 0) {
 Write-Host "$($failures.Count) of $checks CHECKS FAILED:" -ForegroundColor Red
 $failures | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
 exit 1
+

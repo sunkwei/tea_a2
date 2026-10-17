@@ -174,6 +174,12 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
     out << instructions << "\n";
   }
 
+  if (!session.summary.empty()) {
+    out << "\nCompact history (older turns were summarised to save context; treat "
+           "these as established facts)\n";
+    out << session.summary << "\n";
+  }
+
   std::vector<nlohmann::json> notes = workspace.load_memory(nullptr);
   if (!notes.empty()) {
     out << "\nWorkspace memory (durable notes previously stored for this workspace)\n";
@@ -212,7 +218,8 @@ std::string truncate_middle(const std::string& text, std::size_t keep_bytes) {
 }  // namespace
 
 void Agent::build_context(const Workspace& workspace, const Session& session,
-                          const ModelInfo* model, std::vector<Message>* out) const {
+                          const ModelInfo* model, std::vector<Message>* out,
+                          ContextStats* stats) const {
   const Settings& st = workspace.settings();
   out->clear();
   Message system;
@@ -248,7 +255,9 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
   long long used = fixed;
   int user_turns = 0;
   const long long ceiling = max_context - max_output;
-  for (std::size_t i = session.messages.size(); i-- > 0;) {
+  const std::size_t first =
+      session.summary_upto <= session.messages.size() ? session.summary_upto : session.messages.size();
+  for (std::size_t i = session.messages.size(); i-- > first;) {
     const Message& m = session.messages[i];
     const long long cost = message_cost(m);
     const bool below_keep_turns = user_turns < st.keep_turns;
@@ -274,8 +283,147 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
 
   LOG_DEBUG("context: max=", max_context, " reserve_output=", max_output, " fixed=", fixed,
             " budget=", budget, " kept=", tail.size(), "/", session.messages.size(),
-            " used=", used, " keep_turns=", st.keep_turns);
+            " used=", used, " keep_turns=", st.keep_turns,
+            session.summary_upto ? " summarised=" : "", session.summary_upto);
+  if (stats) {
+    stats->kept = tail.size();
+    stats->total = session.messages.size();
+    stats->budget = budget;
+    stats->used = used;
+    stats->trimmed = tail.size() < (session.messages.size() - first);
+  }
   for (std::size_t i = 0; i < tail.size(); ++i) out->push_back(tail[i]);
+}
+bool Agent::compact_history(Workspace& workspace, Session* session, const std::string& provider,
+                            const std::string& model, const ModelInfo* model_info,
+                            std::atomic<bool>* cancel) {
+  if (!session) return false;
+  const Settings& st = workspace.settings();
+  const std::size_t total = session->messages.size();
+  const std::size_t keep =
+      st.compaction_keep_recent > 0 ? static_cast<std::size_t>(st.compaction_keep_recent) : 4;
+  if (total <= keep + 2) return false;
+
+  // Fold everything except the most recent messages into the summary.
+  std::size_t split = total - keep;
+  // Prefer to cut right before a user message, so the kept window starts a turn.
+  while (split > session->summary_upto && session->messages[split - 1].role != "user") --split;
+  if (split <= session->summary_upto) split = total - keep;
+  if (split <= session->summary_upto) return false;
+
+  // Bound the request: the segment can itself be large the first time compaction
+  // runs on a long session. Keep the newest part and say so in the transcript.
+  const std::size_t kTranscriptLimit = 60000;
+  std::ostringstream transcript;
+  for (std::size_t i = session->summary_upto; i < split; ++i) {
+    const Message& m = session->messages[i];
+    std::string content = m.content;
+    if (content.size() > 4000) content = content.substr(0, 4000) + " ... [truncated]";
+    transcript << "[" << m.role;
+    if (!m.name.empty()) transcript << " " << m.name;
+    if (!m.tool_calls.empty()) {
+      transcript << " called ";
+      for (std::size_t k = 0; k < m.tool_calls.size(); ++k) {
+        transcript << (k ? ", " : "") << m.tool_calls[k].name;
+      }
+    }
+    transcript << "] " << content << "\n";
+  }
+  std::string segment = transcript.str();
+  if (segment.size() > kTranscriptLimit) {
+    segment = std::string(
+                  "Note: the oldest part of this segment was dropped before summarisation.\n") +
+              segment.substr(segment.size() - kTranscriptLimit);
+  }
+
+  const ProviderInfo* provider_info = config_->provider(provider);
+  if (!provider_info) return false;
+
+  ChatRequest request;
+  request.provider = provider;
+  request.model = model;
+  request.api_url = provider_info->api_url;
+  request.api_key = provider_info->api_key;
+  request.stream = false;
+  request.headers = provider_info->headers;
+  for (std::size_t i = 0; i < request.headers.size(); ++i) {
+    request.headers[i].second =
+        replace_all(request.headers[i].second, "${session_id}", session->info.id);
+  }
+  {
+    bool has_session_header = false;
+    for (std::size_t i = 0; i < request.headers.size(); ++i) {
+      if (to_lower(request.headers[i].first) == "x-opencode-session") has_session_header = true;
+    }
+    const ParsedUrl parsed = parse_url(provider_info->api_url);
+    if (!has_session_header && parsed.valid && ends_with(to_lower(parsed.host), "opencode.ai")) {
+      request.headers.push_back(
+          std::make_pair(std::string("x-opencode-session"), session->info.id));
+    }
+  }
+  request.connect_timeout_ms = st.http_connect_timeout_ms;
+  request.read_timeout_ms = st.http_read_timeout_ms;
+  request.max_tokens = st.compaction_summary_max_tokens > 0 ? st.compaction_summary_max_tokens : 800;
+  request.has_temperature = true;
+  request.temperature = 0.0;
+  request.send_reasoning_effort = false;
+
+  Message system = Message::make("system",
+                                 "You compress conversation history for a software-engineering "
+                                 "agent. Reply with the updated summary only: terse, factual, "
+                                 "bullet points, no preamble.");
+  Message user = Message::make(
+      "user", std::string("Existing summary (may be empty):\n") +
+                  (session->summary.empty() ? "(none)" : session->summary) +
+                  "\n\nConversation segment to fold in:\n" + segment +
+                  "\n\nWrite the updated summary that replaces both.");
+  request.messages.push_back(system.to_wire(false));
+  request.messages.push_back(user.to_wire(false));
+
+  const ChatResult chat = llm_chat(request, DeltaCallback(), cancel);
+  if (chat.cancelled) return false;
+  if (!chat.ok || trim(chat.content).empty()) {
+    LOG_WARN("compaction: summarisation failed (", chat.http_status, "): ",
+             chat.error.empty() ? chat.detail : chat.error);
+    return false;
+  }
+
+  session->summary = trim(chat.content);
+  session->summary_upto = split;
+  session->info.updated_at = now_iso8601();
+  LOG_INFO("compaction: summary now covers ", split, "/", total, " messages (", session->summary.size(),
+           " bytes), folded ", segment.size(), " bytes of transcript");
+  workspace.log("INFO", "compaction: summary now covers " + std::to_string(split) + " messages");
+  return true;
+}
+
+bool Agent::maybe_compact(Workspace& workspace, Session* session, const std::string& provider,
+                          const std::string& model, const ModelInfo* model_info,
+                          std::atomic<bool>* cancel, const EventEmitter& emit) {
+  if (!session) return false;
+  const Settings& st = workspace.settings();
+  if (!st.enable_compaction) return false;
+  if (cancel && cancel->load()) return false;
+
+  std::vector<Message> probe;
+  ContextStats stats;
+  build_context(workspace, *session, model_info, &probe, &stats);
+  if (!stats.trimmed) return false;
+
+  if (!compact_history(workspace, session, provider, model, model_info, cancel)) return false;
+  std::string save_err;
+  if (!workspace.save_session(*session, &save_err)) {
+    LOG_WARN("compaction: cannot persist the session: ", save_err);
+  }
+  if (emit) {
+    nlohmann::json event = nlohmann::json::object();
+    event["type"] = "compaction";
+    event["covered_messages"] = session->summary_upto;
+    event["total_messages"] = session->messages.size();
+    event["summary_bytes"] = session->summary.size();
+    emit(event);
+  }
+  return true;
 }
 TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::string& user_text,
                            const TurnOptions& options, const EventEmitter& emit,
@@ -320,6 +468,13 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   }
   session->info.updated_at = now_iso8601();
   workspace.save_session(*session, nullptr);
+
+  // Fold the oldest turns into a summary before the context overflows, so the
+  // model keeps the thread of the conversation instead of silently losing it.
+  // Runs before the start event so a compaction event lands first in the stream.
+  if (st.enable_compaction) {
+    maybe_compact(workspace, session, provider, model, model_info, cancel, emit);
+  }
 
   // --- announce the turn ---------------------------------------------------
   nlohmann::json start_event = nlohmann::json::object();
@@ -568,6 +723,13 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   out.elapsed_ms = now_ms() - started;
   session->info.updated_at = now_iso8601();
   workspace.save_session(*session, nullptr);
+
+  // Fold the oldest turns into a summary before the context overflows, so the
+  // model keeps the thread of the conversation instead of silently losing it.
+  // Runs before the start event so a compaction event lands first in the stream.
+  if (st.enable_compaction) {
+    maybe_compact(workspace, session, provider, model, model_info, cancel, emit);
+  }
 
   if (out.cancelled) {
     nlohmann::json event = nlohmann::json::object();
