@@ -125,8 +125,16 @@ endif()
 # Web asset embedder: turns web/* into a C++ translation unit so that the
 # produced binary is fully self-contained.
 # ---------------------------------------------------------------------------
-add_executable(tea_embed_assets tools/embed_assets.cpp)
-set_target_properties(tea_embed_assets PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# The asset embedder is a *build-time* helper: it must run on the build host,
+# not on the target. When cross-compiling (ARM embedded boards and the like),
+# building it with the target toolchain would produce a binary the host cannot
+# execute, so it is built as a nested project with the host toolchain instead.
+#
+# TEA_AGENT_USE_HOST_ASSET_TOOL defaults to CMAKE_CROSSCOMPILING; set it to ON
+# for a native build as well if you want to exercise that path.
+if(NOT DEFINED TEA_AGENT_USE_HOST_ASSET_TOOL)
+  set(TEA_AGENT_USE_HOST_ASSET_TOOL ${CMAKE_CROSSCOMPILING})
+endif()
 
 set(TEA_WEB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/web)
 set(TEA_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
@@ -138,11 +146,36 @@ foreach(_rel ${TEA_WEB_RELPATHS})
   list(APPEND TEA_WEB_FILES ${TEA_WEB_DIR}/${_rel})
 endforeach()
 
+if(TEA_AGENT_USE_HOST_ASSET_TOOL)
+  message(STATUS "tea_agent: building the asset embedder with the host toolchain")
+  set(TEA_HOST_TOOLS_DIR ${CMAKE_BINARY_DIR}/host-tools)
+  set(TEA_EMBED_EXE
+      ${TEA_HOST_TOOLS_DIR}/bin/tea_embed_assets${CMAKE_EXECUTABLE_SUFFIX})
+  add_custom_command(
+    OUTPUT ${TEA_EMBED_EXE}
+    COMMAND ${CMAKE_COMMAND}
+            -S ${CMAKE_CURRENT_SOURCE_DIR}/tools/host_embed
+            -B ${TEA_HOST_TOOLS_DIR}
+            -DCMAKE_BUILD_TYPE=Release
+    COMMAND ${CMAKE_COMMAND} --build ${TEA_HOST_TOOLS_DIR} --config Release
+    COMMENT "Building host asset embedder"
+    VERBATIM
+  )
+  add_custom_target(tea_embed_assets_host DEPENDS ${TEA_EMBED_EXE})
+  set(TEA_EMBED_DEP tea_embed_assets_host)
+else()
+  add_executable(tea_embed_assets tools/embed_assets.cpp)
+  set_target_properties(tea_embed_assets PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  set(TEA_EMBED_EXE $<TARGET_FILE:tea_embed_assets>)
+  set(TEA_EMBED_DEP tea_embed_assets)
+endif()
+
 set(TEA_WEB_ASSETS_CPP ${TEA_GEN_DIR}/web_assets.cpp)
 add_custom_command(
   OUTPUT ${TEA_WEB_ASSETS_CPP} ${TEA_GEN_DIR}/web_assets.h
-  COMMAND tea_embed_assets ${TEA_GEN_DIR} ${TEA_WEB_DIR} ${TEA_WEB_RELPATHS}
-  DEPENDS tea_embed_assets ${TEA_WEB_FILES}
+  COMMAND ${TEA_EMBED_EXE} ${TEA_GEN_DIR} ${TEA_WEB_DIR} ${TEA_WEB_RELPATHS}
+  DEPENDS ${TEA_EMBED_DEP} ${TEA_WEB_FILES}
   COMMENT "Embedding web assets into web_assets.cpp"
   VERBATIM
 )
