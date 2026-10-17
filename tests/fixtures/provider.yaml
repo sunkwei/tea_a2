@@ -1,0 +1,40 @@
+# Test provider configuration used by tests/e2e.ps1.
+#
+# It points at tools/mock_llm_server.mjs, which speaks the OpenAI
+# chat-completions protocol over plain http and drives a four-step
+# tool-calling conversation:
+#
+#   turn 0 -> toolkit_exec   (echo mock-tool-exec-ok)
+#   turn 1 -> toolkit_file   (write mock_note.txt)
+#   turn 2 -> toolkit_file   (read  mock_note.txt)
+#   turn 3 -> final assistant message
+#
+# Copy this file to $HOME/.tea_agent/provider.yaml (or pass --config) to try the
+# agent without a real API key.
+version: 1
+providers:
+  mock:
+    api_url: http://127.0.0.1:8790/v1
+    api_key: mock-key-not-used
+    default_model: mock-model
+    description: local mock used by the end-to-end test
+    models:
+      mock-model:
+        max_context_tokens: 128000
+        max_output_tokens: 8192
+        supports_vision: false
+        supports_reasoning: true
+        supports_tools: true
+        reasoning_effort: auto
+        note: ''
+    api_keys:
+      - mock-key-not-used
+roles:
+  main:
+    provider: mock
+    model: mock-model
+settings:
+  max_iterations: 8
+  max_tool_output: 65536
+  command_timeout_ms: 30000
+  stream: true

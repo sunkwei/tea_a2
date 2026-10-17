@@ -1,0 +1,102 @@
+// workspace.h -- multi-workspace support.
+//
+// * Every workspace owns a `.tea_agent_run/` directory that holds its buffer,
+//   logs, sessions and memory.
+// * `$HOME/.tea_agent/workspaces.json` indexes every known workspace so that a
+//   freshly started agent can list them all.
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "message.h"
+
+namespace tea {
+
+struct WorkspaceEntry {
+  std::string id;
+  std::string name;
+  std::string path;
+  std::string created_at;
+  std::string last_used_at;
+  std::string last_session_id;
+  bool exists = false;
+  int sessions = 0;
+  std::string run_dir;
+
+  nlohmann::json to_json() const;
+  static WorkspaceEntry from_json(const nlohmann::json& j);
+};
+
+class WorkspaceRegistry {
+ public:
+  bool load(const std::string& tea_home, std::string* err);
+  bool save(std::string* err) const;
+
+  const std::vector<WorkspaceEntry>& entries() const { return entries_; }
+  std::vector<WorkspaceEntry>& mutable_entries() { return entries_; }
+
+  WorkspaceEntry* find(const std::string& id);
+  const WorkspaceEntry* find(const std::string& id) const;
+  WorkspaceEntry* find_by_path(const std::string& path);
+
+  /// Register `path` (creating `.tea_agent_run/`). Returns the entry.
+  WorkspaceEntry* add(const std::string& path, const std::string& name, std::string* err);
+  bool remove(const std::string& id, std::string* err);
+
+  std::string index_path() const { return index_path_; }
+  void refresh_flags();
+
+ private:
+  std::string index_path_;
+  std::vector<WorkspaceEntry> entries_;
+};
+
+class Workspace {
+ public:
+  bool open(const WorkspaceEntry& entry, bool allow_outside_workspace, std::string* err);
+
+  const WorkspaceEntry& entry() const { return entry_; }
+  const std::string& id() const { return entry_.id; }
+  const std::string& root() const { return root_; }
+  const std::string& run_dir() const { return run_dir_; }
+  std::string sessions_dir() const;
+  std::string memory_file() const;
+  std::string log_file() const;
+  std::string tmp_dir() const;
+  std::string meta_file() const;
+  std::string artifacts_dir() const;
+
+  /// Map a user/model supplied path to an absolute one, enforcing the
+  /// workspace boundary unless allow_outside_workspace is set.
+  std::string resolve_path(const std::string& path, std::string* err) const;
+  /// Make a path relative to the workspace root when possible (for display).
+  std::string display_path(const std::string& absolute) const;
+
+  std::vector<SessionInfo> list_sessions() const;
+  bool load_session(const std::string& id, Session* out, std::string* err) const;
+  bool save_session(const Session& session, std::string* err) const;
+  bool create_session(const std::string& title, Session* out, std::string* err) const;
+  bool delete_session(const std::string& id, std::string* err) const;
+  bool rename_session(const std::string& id, const std::string& title, std::string* err) const;
+
+  std::vector<nlohmann::json> load_memory(std::string* err) const;
+  nlohmann::json add_memory_note(const std::string& text, std::string* err) const;
+  bool delete_memory_note(const std::string& note_id, std::string* err) const;
+
+  std::vector<std::string> tail_log(std::size_t max_lines) const;
+
+  void log(const std::string& level, const std::string& message) const;
+
+  static std::string derive_title(const std::string& text);
+
+ private:
+  WorkspaceEntry entry_;
+  std::string root_;
+  std::string run_dir_;
+  bool allow_outside_ = false;
+};
+
+}  // namespace tea

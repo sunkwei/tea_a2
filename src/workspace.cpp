@@ -1,0 +1,587 @@
+#include "workspace.h"
+
+#include <algorithm>
+#include <fstream>
+#include <iterator>
+
+#include "log.h"
+#include "util.h"
+
+namespace tea {
+namespace {
+
+const char* const kRunDirName = ".tea_agent_run";
+const char* const kMemoryFileName = "memory.json";
+
+nlohmann::json read_json_file(const std::string& path, bool* ok) {
+  *ok = false;
+  std::string text;
+  if (!path_exists(path)) return nlohmann::json();
+  if (!read_file(path, &text)) return nlohmann::json();
+  try {
+    nlohmann::json j = nlohmann::json::parse(text);
+    *ok = true;
+    return j;
+  } catch (const std::exception&) {
+    return nlohmann::json();
+  }
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// WorkspaceEntry
+// ---------------------------------------------------------------------------
+nlohmann::json WorkspaceEntry::to_json() const {
+  nlohmann::json j = nlohmann::json::object();
+  j["id"] = id;
+  j["name"] = name;
+  j["path"] = path;
+  j["run_dir"] = run_dir.empty() ? path_join(path, kRunDirName) : run_dir;
+  j["created_at"] = created_at;
+  j["last_used_at"] = last_used_at;
+  if (!last_session_id.empty()) j["last_session_id"] = last_session_id;
+  j["exists"] = exists;
+  j["sessions"] = sessions;
+  return j;
+}
+
+WorkspaceEntry WorkspaceEntry::from_json(const nlohmann::json& j) {
+  WorkspaceEntry e;
+  if (!j.is_object()) return e;
+  auto str_of = [&](const char* key) -> std::string {
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_string()) return std::string();
+    return it->get<std::string>();
+  };
+  e.id = str_of("id");
+  e.name = str_of("name");
+  e.path = str_of("path");
+  e.run_dir = str_of("run_dir");
+  e.created_at = str_of("created_at");
+  e.last_used_at = str_of("last_used_at");
+  e.last_session_id = str_of("last_session_id");
+  e.exists = path_is_dir(e.path);
+  if (e.run_dir.empty() && !e.path.empty()) e.run_dir = path_join(e.path, kRunDirName);
+  return e;
+}
+
+// ---------------------------------------------------------------------------
+// WorkspaceRegistry
+// ---------------------------------------------------------------------------
+bool WorkspaceRegistry::load(const std::string& tea_home, std::string* err) {
+  index_path_ = path_join(tea_home, "workspaces.json");
+  entries_.clear();
+  if (!path_exists(index_path_)) return true;
+
+  std::string text;
+  if (!read_file(index_path_, &text)) {
+    if (err) *err = "cannot read workspace index: " + index_path_;
+    return false;
+  }
+  try {
+    nlohmann::json j = nlohmann::json::parse(text);
+    const nlohmann::json* list = nullptr;
+    if (j.is_object()) {
+      auto it = j.find("workspaces");
+      if (it != j.end() && it->is_array()) list = &(*it);
+    } else if (j.is_array()) {
+      list = &j;
+    }
+    if (list) {
+      for (auto it = list->begin(); it != list->end(); ++it) {
+        WorkspaceEntry e = WorkspaceEntry::from_json(*it);
+        if (e.id.empty() && !e.path.empty()) e.id = make_id("ws_");
+        if (!e.path.empty()) entries_.push_back(e);
+      }
+    }
+  } catch (const std::exception& e) {
+    if (err) *err = std::string("cannot parse workspace index ") + index_path_ + ": " + e.what();
+    return false;
+  }
+  refresh_flags();
+  LOG_INFO("workspaces: loaded ", entries_.size(), " entr(ies) from ", index_path_);
+  return true;
+}
+
+bool WorkspaceRegistry::save(std::string* err) const {
+  nlohmann::json root = nlohmann::json::object();
+  root["version"] = 1;
+  root["updated_at"] = now_iso8601();
+  nlohmann::json list = nlohmann::json::array();
+  for (std::size_t i = 0; i < entries_.size(); ++i) list.push_back(entries_[i].to_json());
+  root["workspaces"] = list;
+  const std::string parent = path_parent(index_path_);
+  if (!parent.empty()) make_dirs(parent);
+  return write_file(index_path_, root.dump(2) + "\n", false, err);
+}
+
+void WorkspaceRegistry::refresh_flags() {
+  for (std::size_t i = 0; i < entries_.size(); ++i) {
+    WorkspaceEntry& e = entries_[i];
+    e.exists = path_is_dir(e.path);
+    if (e.run_dir.empty()) e.run_dir = path_join(e.path, kRunDirName);
+    e.sessions = 0;
+    const std::string sessions_dir = path_join(e.run_dir, "sessions");
+    if (path_is_dir(sessions_dir)) {
+      std::vector<DirEntryInfo> files;
+      std::string err;
+      if (list_directory(sessions_dir, &files, &err)) {
+        for (std::size_t k = 0; k < files.size(); ++k) {
+          if (files[k].is_dir) continue;
+          if (files[k].name == "index.json") continue;
+          if (path_extension(files[k].name) != ".json") continue;
+          ++e.sessions;
+        }
+      }
+    }
+  }
+}
+
+WorkspaceEntry* WorkspaceRegistry::find(const std::string& id) {
+  for (std::size_t i = 0; i < entries_.size(); ++i) {
+    if (entries_[i].id == id) return &entries_[i];
+  }
+  return nullptr;
+}
+
+const WorkspaceEntry* WorkspaceRegistry::find(const std::string& id) const {
+  for (std::size_t i = 0; i < entries_.size(); ++i) {
+    if (entries_[i].id == id) return &entries_[i];
+  }
+  return nullptr;
+}
+
+WorkspaceEntry* WorkspaceRegistry::find_by_path(const std::string& path) {
+  const std::string want = path_canonical(path);
+#ifdef _WIN32
+  const std::string want_l = to_lower(want);
+#else
+  const std::string& want_l = want;
+#endif
+  for (std::size_t i = 0; i < entries_.size(); ++i) {
+    const std::string have = path_canonical(entries_[i].path);
+#ifdef _WIN32
+    if (to_lower(have) == want_l) return &entries_[i];
+#else
+    if (have == want_l) return &entries_[i];
+#endif
+  }
+  return nullptr;
+}
+
+WorkspaceEntry* WorkspaceRegistry::add(const std::string& path_in, const std::string& name,
+                                       std::string* err) {
+  std::string path = expand_user(trim(path_in));
+  if (path.empty()) {
+    if (err) *err = "workspace path is empty";
+    return nullptr;
+  }
+  path = path_absolute(path);
+  if (!path_exists(path)) {
+    if (err) *err = "workspace path does not exist: " + path;
+    return nullptr;
+  }
+  if (!path_is_dir(path)) {
+    if (err) *err = "workspace path is not a directory: " + path;
+    return nullptr;
+  }
+  path = path_canonical(path);
+
+  if (WorkspaceEntry* existing = find_by_path(path)) {
+    if (!name.empty()) existing->name = name;
+    if (existing->id.empty()) existing->id = make_id("ws_");
+    if (existing->created_at.empty()) existing->created_at = now_iso8601();
+    existing->last_used_at = now_iso8601();
+    refresh_flags();
+    std::string save_err;
+    if (!save(&save_err)) LOG_WARN("workspaces: cannot update the index: ", save_err);
+    return existing;
+  }
+
+  WorkspaceEntry e;
+  e.id = make_id("ws_");
+  e.name = name.empty() ? path_filename(path) : name;
+  if (e.name.empty()) e.name = path;
+  e.path = path;
+  e.run_dir = path_join(path, kRunDirName);
+  e.created_at = now_iso8601();
+  e.last_used_at = e.created_at;
+  e.exists = true;
+  entries_.push_back(e);
+  refresh_flags();
+  std::string save_err;
+  if (!save(&save_err)) LOG_WARN("workspaces: cannot update the index: ", save_err);
+  return &entries_.back();
+}
+
+bool WorkspaceRegistry::remove(const std::string& id, std::string* err) {
+  for (std::size_t i = 0; i < entries_.size(); ++i) {
+    if (entries_[i].id != id) continue;
+    entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(i));
+    return save(err);
+  }
+  if (err) *err = "workspace not found: " + id;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace
+// ---------------------------------------------------------------------------
+std::string Workspace::sessions_dir() const { return path_join(run_dir_, "sessions"); }
+std::string Workspace::memory_file() const {
+  return path_join(path_join(run_dir_, "memory"), kMemoryFileName);
+}
+std::string Workspace::log_file() const {
+  return path_join(path_join(run_dir_, "logs"), "agent.log");
+}
+std::string Workspace::tmp_dir() const { return path_join(run_dir_, "tmp"); }
+std::string Workspace::meta_file() const { return path_join(run_dir_, "meta.json"); }
+std::string Workspace::artifacts_dir() const { return path_join(run_dir_, "artifacts"); }
+
+namespace {
+std::string session_file_for(const std::string& dir, const std::string& id) {
+  return path_join(dir, id + ".json");
+}
+}  // namespace
+
+bool Workspace::open(const WorkspaceEntry& entry, bool allow_outside_workspace, std::string* err) {
+  entry_ = entry;
+  allow_outside_ = allow_outside_workspace;
+  root_ = path_canonical(entry.path);
+  if (root_.empty() || !path_is_dir(root_)) {
+    if (err) *err = "workspace directory does not exist: " + entry.path;
+    return false;
+  }
+  entry_.path = root_;
+  run_dir_ = path_join(root_, kRunDirName);
+
+  // NOTE: keep these as owned strings - taking c_str() from temporaries here
+  // used to leave the array full of dangling pointers.
+  std::vector<std::string> dirs;
+  dirs.push_back(run_dir_);
+  dirs.push_back(sessions_dir());
+  dirs.push_back(tmp_dir());
+  dirs.push_back(artifacts_dir());
+  dirs.push_back(path_parent(log_file()));
+  dirs.push_back(path_parent(memory_file()));
+  for (std::size_t i = 0; i < dirs.size(); ++i) {
+    if (dirs[i].empty()) continue;
+    if (!make_dirs(dirs[i])) {
+      if (err) *err = "cannot create " + dirs[i];
+      return false;
+    }
+  }
+
+  if (!path_exists(meta_file())) {
+    nlohmann::json meta = nlohmann::json::object();
+    meta["schema"] = 1;
+    meta["id"] = entry_.id;
+    meta["name"] = entry_.name;
+    meta["path"] = root_;
+    meta["created_at"] = entry_.created_at.empty() ? now_iso8601() : entry_.created_at;
+    write_file(meta_file(), meta.dump(2) + "\n", false, nullptr);
+  }
+  if (!path_exists(memory_file())) {
+    nlohmann::json mem = nlohmann::json::object();
+    mem["notes"] = nlohmann::json::array();
+    write_file(memory_file(), mem.dump(2) + "\n", false, nullptr);
+  }
+  Logger::instance().add_sink(entry_.id, log_file());
+  return true;
+}
+
+std::string Workspace::resolve_path(const std::string& path_in, std::string* err) const {
+  std::string p = trim(path_in);
+  if (p.size() >= 2 && ((p.front() == '"' && p.back() == '"') || (p.front() == '\'' && p.back() == '\''))) {
+    p = p.substr(1, p.size() - 2);
+  }
+  p = expand_user(p);
+  if (p.empty()) {
+    if (err) *err = "path is empty";
+    return std::string();
+  }
+  const std::string full =
+      path_is_absolute(p) ? path_absolute(p) : path_absolute(path_join(root_, p));
+  if (!allow_outside_ && !path_is_within(full, root_)) {
+    if (err) {
+      *err = "path escapes the workspace: '" + p + "' (workspace root: " + root_ + ")";
+    }
+    return std::string();
+  }
+  return full;
+}
+
+std::string Workspace::display_path(const std::string& absolute) const {
+  if (path_is_within(absolute, root_)) {
+    std::string rel = absolute.substr(root_.size());
+    while (!rel.empty() && (rel.front() == '/' || rel.front() == '\\')) rel.erase(0, 1);
+    if (rel.empty()) return ".";
+    std::string out;
+    for (std::size_t i = 0; i < rel.size(); ++i) out += (rel[i] == '\\') ? '/' : rel[i];
+    return out;
+  }
+  return absolute;
+}
+
+std::vector<SessionInfo> Workspace::list_sessions() const {
+  std::vector<SessionInfo> out;
+  const std::string dir = sessions_dir();
+  const std::string index = path_join(dir, "index.json");
+  bool from_index = false;
+  if (path_exists(index)) {
+    bool ok = false;
+    nlohmann::json j = read_json_file(index, &ok);
+    if (ok && j.is_array()) {
+      for (auto it = j.begin(); it != j.end(); ++it) {
+        SessionInfo s = SessionInfo::from_json(*it);
+        if (s.id.empty()) continue;
+        if (!path_exists(session_file_for(dir, s.id))) continue;
+        out.push_back(s);
+      }
+      from_index = true;
+    }
+  }
+  if (!from_index) {
+    out.clear();
+    std::vector<DirEntryInfo> files;
+    std::string err;
+    if (list_directory(dir, &files, &err)) {
+      for (std::size_t i = 0; i < files.size(); ++i) {
+        if (files[i].is_dir) continue;
+        if (files[i].name == "index.json") continue;
+        if (path_extension(files[i].name) != ".json") continue;
+        bool ok = false;
+        nlohmann::json j = read_json_file(files[i].path, &ok);
+        if (!ok || !j.is_object()) continue;
+        SessionInfo s;
+        s.id = path_stem(files[i].name);
+        auto title_it = j.find("title");
+        if (title_it != j.end() && title_it->is_string()) s.title = title_it->get<std::string>();
+        auto created_it = j.find("created_at");
+        if (created_it != j.end() && created_it->is_string())
+          s.created_at = created_it->get<std::string>();
+        auto updated_it = j.find("updated_at");
+        if (updated_it != j.end() && updated_it->is_string())
+          s.updated_at = updated_it->get<std::string>();
+        auto msgs = j.find("messages");
+        if (msgs != j.end() && msgs->is_array()) s.message_count = static_cast<int>(msgs->size());
+        if (s.title.empty()) s.title = "会话 " + s.id;
+        if (s.updated_at.empty()) s.updated_at = files[i].mtime;
+        if (s.created_at.empty()) s.created_at = s.updated_at;
+        out.push_back(s);
+      }
+    }
+  }
+  std::sort(out.begin(), out.end(), [](const SessionInfo& a, const SessionInfo& b) {
+    return a.updated_at > b.updated_at;
+  });
+  return out;
+}
+
+bool Workspace::load_session(const std::string& id, Session* out, std::string* err) const {
+  const std::string path = session_file_for(sessions_dir(), id);
+  bool ok = false;
+  nlohmann::json j = read_json_file(path, &ok);
+  if (!ok) {
+    if (err) *err = "session not found: " + id;
+    return false;
+  }
+  out->info = SessionInfo();
+  out->messages.clear();
+  out->info.id = id;
+  auto title_it = j.find("title");
+  if (title_it != j.end() && title_it->is_string()) out->info.title = title_it->get<std::string>();
+  auto created_it = j.find("created_at");
+  if (created_it != j.end() && created_it->is_string())
+    out->info.created_at = created_it->get<std::string>();
+  auto updated_it = j.find("updated_at");
+  if (updated_it != j.end() && updated_it->is_string())
+    out->info.updated_at = updated_it->get<std::string>();
+  auto msgs = j.find("messages");
+  if (msgs != j.end() && msgs->is_array()) {
+    for (auto it = msgs->begin(); it != msgs->end(); ++it) {
+      out->messages.push_back(Message::from_store(*it));
+    }
+  }
+  out->info.message_count = static_cast<int>(out->messages.size());
+  return true;
+}
+
+bool Workspace::save_session(const Session& session, std::string* err) const {
+  nlohmann::json j = nlohmann::json::object();
+  j["id"] = session.info.id;
+  j["title"] = session.info.title;
+  j["created_at"] = session.info.created_at;
+  j["updated_at"] = session.info.updated_at;
+  nlohmann::json msgs = nlohmann::json::array();
+  for (std::size_t i = 0; i < session.messages.size(); ++i) {
+    msgs.push_back(session.messages[i].to_store());
+  }
+  j["messages"] = msgs;
+  const std::string dir = sessions_dir();
+  if (!write_file(session_file_for(dir, session.info.id), j.dump(2) + "\n", false, err)) {
+    return false;
+  }
+
+  // Keep the lightweight index in sync.
+  SessionInfo info = session.info;
+  info.message_count = static_cast<int>(session.messages.size());
+  const std::string index_path = path_join(dir, "index.json");
+  bool ok = false;
+  nlohmann::json index = read_json_file(index_path, &ok);
+  nlohmann::json list = nlohmann::json::array();
+  if (ok && index.is_array()) list = index;
+  bool replaced = false;
+  for (auto it = list.begin(); it != list.end(); ++it) {
+    if (it->is_object()) {
+      auto id_it = it->find("id");
+      if (id_it != it->end() && id_it->is_string() && id_it->get<std::string>() == info.id) {
+        *it = info.to_json();
+        replaced = true;
+        break;
+      }
+    }
+  }
+  if (!replaced) list.push_back(info.to_json());
+  return write_file(index_path, list.dump(2) + "\n", false, err);
+}
+
+bool Workspace::create_session(const std::string& title, Session* out, std::string* err) const {
+  Session s;
+  s.info.id = make_id("s_");
+  s.info.title = title.empty() ? "新会话" : title;
+  s.info.created_at = now_iso8601();
+  s.info.updated_at = s.info.created_at;
+  s.info.message_count = 0;
+  if (!save_session(s, err)) return false;
+  *out = s;
+  return true;
+}
+
+bool Workspace::delete_session(const std::string& id, std::string* err) const {
+  const std::string dir = sessions_dir();
+  const std::string path = session_file_for(dir, id);
+  if (!path_exists(path)) {
+    if (err) *err = "session not found: " + id;
+    return false;
+  }
+  remove_path(path, false, nullptr);
+  const std::string index_path = path_join(dir, "index.json");
+  bool ok = false;
+  nlohmann::json index = read_json_file(index_path, &ok);
+  if (ok && index.is_array()) {
+    nlohmann::json list = nlohmann::json::array();
+    for (auto it = index.begin(); it != index.end(); ++it) {
+      if (!it->is_object()) continue;
+      auto id_it = it->find("id");
+      if (id_it != it->end() && id_it->is_string() && id_it->get<std::string>() == id) continue;
+      list.push_back(*it);
+    }
+    write_file(index_path, list.dump(2) + "\n", false, nullptr);
+  }
+  return true;
+}
+
+bool Workspace::rename_session(const std::string& id, const std::string& title,
+                               std::string* err) const {
+  Session s;
+  if (!load_session(id, &s, err)) return false;
+  s.info.title = title;
+  s.info.updated_at = now_iso8601();
+  return save_session(s, err);
+}
+
+std::vector<nlohmann::json> Workspace::load_memory(std::string* err) const {
+  std::vector<nlohmann::json> notes;
+  bool ok = false;
+  nlohmann::json j = read_json_file(memory_file(), &ok);
+  if (!ok) {
+    if (path_exists(memory_file()) && err) *err = "cannot read memory file";
+    return notes;
+  }
+  auto it = j.find("notes");
+  if (it != j.end() && it->is_array()) {
+    for (auto n = it->begin(); n != it->end(); ++n) notes.push_back(*n);
+  }
+  return notes;
+}
+
+nlohmann::json Workspace::add_memory_note(const std::string& text, std::string* err) const {
+  const std::string trimmed = trim(text);
+  if (trimmed.empty()) {
+    if (err) *err = "memory text is empty";
+    return nlohmann::json();
+  }
+  std::vector<nlohmann::json> notes = load_memory(nullptr);
+  nlohmann::json note = nlohmann::json::object();
+  note["id"] = make_id("n_");
+  note["text"] = trimmed;
+  note["created_at"] = now_iso8601();
+  notes.push_back(note);
+
+  nlohmann::json mem = nlohmann::json::object();
+  nlohmann::json arr = nlohmann::json::array();
+  for (std::size_t i = 0; i < notes.size(); ++i) arr.push_back(notes[i]);
+  mem["notes"] = arr;
+  mem["updated_at"] = now_iso8601();
+  if (!write_file(memory_file(), mem.dump(2) + "\n", false, err)) return nlohmann::json();
+  return note;
+}
+
+bool Workspace::delete_memory_note(const std::string& note_id, std::string* err) const {
+  std::vector<nlohmann::json> notes = load_memory(nullptr);
+  nlohmann::json arr = nlohmann::json::array();
+  bool removed = false;
+  for (std::size_t i = 0; i < notes.size(); ++i) {
+    auto id_it = notes[i].find("id");
+    if (id_it != notes[i].end() && id_it->is_string() && id_it->get<std::string>() == note_id) {
+      removed = true;
+      continue;
+    }
+    arr.push_back(notes[i]);
+  }
+  if (!removed) {
+    if (err) *err = "memory note not found: " + note_id;
+    return false;
+  }
+  nlohmann::json mem = nlohmann::json::object();
+  mem["notes"] = arr;
+  mem["updated_at"] = now_iso8601();
+  return write_file(memory_file(), mem.dump(2) + "\n", false, err);
+}
+
+std::vector<std::string> Workspace::tail_log(std::size_t max_lines) const {
+  std::vector<std::string> lines;
+  const std::string path = log_file();
+  if (!path_exists(path)) return lines;
+  std::string data;
+  if (!read_file_tail(path, 512u * 1024u, &data)) return lines;
+  lines = split_lines(data);
+  // The first line is probably cut in half when we started mid-file.
+  if (data.size() >= 512u * 1024u && !lines.empty()) lines.erase(lines.begin());
+  if (max_lines > 0 && lines.size() > max_lines) {
+    lines.erase(lines.begin(),
+                lines.begin() + static_cast<std::ptrdiff_t>(lines.size() - max_lines));
+  }
+  return lines;
+}
+
+void Workspace::log(const std::string& level, const std::string& message) const {
+  const std::string tag = entry_.id.empty() ? entry_.name : entry_.id;
+  Logger::instance().write(log_level_from_string(level), tag, message);
+}
+
+std::string Workspace::derive_title(const std::string& text) {
+  std::string t = trim(text);
+  const std::size_t nl = t.find_first_of("\r\n");
+  if (nl != std::string::npos) t = t.substr(0, nl);
+  t = trim(t);
+  bool truncated = false;
+  std::string out = truncate_utf8(t, 80, &truncated);
+  if (truncated) out += "...";
+  if (out.empty()) out = "新会话";
+  return out;
+}
+
+}  // namespace tea

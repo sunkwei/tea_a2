@@ -1,0 +1,25 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+
+# Local toolchains downloaded for building/testing (see scripts/build-mingw.bat)
+.toolchain/
+
+# Scratch build temp (some sandboxes deny writes to the real %TEMP%)
+.tmp/
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# Local agent scratch space created inside a workspace
+.tea_agent_run/
+
+# Runtime logs
+*.log
+vcvars*.log

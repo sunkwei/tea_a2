@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TEA AGENT</title>
+<link rel="stylesheet" href="./tokens.css">
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<div id="app">
+  <!-- ================= 侧边栏 ================= -->
+  <aside id="sidebar">
+    <div class="wordmark">TEA AGENT</div>
+
+    <div class="side-block">
+      <div class="side-label"><span>工作区</span></div>
+      <div class="dd-wrap">
+        <button id="ws-chip" class="chip chip-block" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="chip-text" id="ws-chip-text">未选择</span><span class="chev-sm">›</span>
+        </button>
+        <div id="ws-dropdown" class="dropdown hidden"></div>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav-row" type="button" data-view="chat">
+        <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.6 3.6h10.8v7.2H7.4L4.6 13.2v-2.4H2.6z"/></svg>
+        <span>对话</span>
+      </button>
+      <button class="nav-row" type="button" data-view="files">
+        <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.4h4.2l1.3 1.6H14v5.6H2z"/></svg>
+        <span>文件</span>
+      </button>
+      <button class="nav-row" type="button" data-view="memory">
+        <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.4l1.5 3.6 3.6 1.5-3.6 1.5L8 12.6 6.5 9 2.9 7.5 6.5 6z"/></svg>
+        <span>记忆</span>
+      </button>
+      <button class="nav-row" type="button" data-view="logs">
+        <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.2h10M3 8h10M3 11.8h6"/></svg>
+        <span>日志</span>
+      </button>
+      <button class="nav-row" type="button" data-view="settings">
+        <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 2.2v1.8M8 12v1.8M2.2 8h1.8M12 8h1.8M4.1 4.1l1.3 1.3M10.6 10.6l1.3 1.3M11.9 4.1l-1.3 1.3M5.4 10.6l-1.3 1.3"/></svg>
+        <span>设置</span>
+      </button>
+    </nav>
+
+    <div class="side-block sess-block">
+      <div class="side-label">
+        <span>会话</span>
+        <button id="new-session" class="mini-btn" type="button" title="新建会话">＋</button>
+      </div>
+      <div id="session-list" class="sess-list"></div>
+    </div>
+  </aside>
+
+  <!-- ================= 主区 ================= -->
+  <main id="main">
+    <header id="topbar">
+      <div class="crumbs" id="crumbs"></div>
+      <div class="topbar-right">
+        <div class="dd-wrap">
+          <button id="model-chip" class="chip" type="button" aria-haspopup="true" aria-expanded="false">
+            <span class="chip-text" id="model-chip-text">模型</span><span class="chev-sm">›</span>
+          </button>
+          <div id="model-dropdown" class="dropdown hidden"></div>
+        </div>
+        <div class="status" id="status" title="服务状态">
+          <span class="status-dot" id="status-dot"></span><span id="status-text">连接中…</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="banner hidden" id="banner">
+      <span id="banner-text">无法连接到本地服务。</span>
+      <button class="btn" id="banner-retry" type="button">重试</button>
+    </div>
+
+    <!-- 对话 -->
+    <section class="view" id="view-chat">
+      <div class="chat-scroll" id="chat-scroll">
+        <div class="chat-col" id="messages"></div>
+      </div>
+      <div class="composer-wrap">
+        <div class="chat-col">
+          <div class="composer">
+            <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+            <button class="send" id="send" type="button" title="发送"></button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 文件 -->
+    <section class="view hidden" id="view-files">
+      <div class="view-scroll">
+        <div class="page">
+          <div class="page-head">
+            <div class="crumbs" id="files-crumbs"></div>
+            <div class="page-actions">
+              <span class="hint" id="files-note"></span>
+              <button class="btn" id="files-revert" type="button">还原</button>
+              <button class="btn primary" id="files-save" type="button">保存</button>
+            </div>
+          </div>
+          <div class="files-grid">
+            <div class="file-list" id="files-list"></div>
+            <div class="file-pane">
+              <div class="preview-head" id="files-preview-head">未选择文件</div>
+              <pre class="file-pre hidden" id="files-pre"></pre>
+              <textarea class="ta file-editor hidden" id="files-editor" spellcheck="false"></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 记忆 -->
+    <section class="view hidden" id="view-memory">
+      <div class="view-scroll">
+        <div class="page">
+          <div class="page-head"><h2 class="page-title">记忆</h2>
+            <div class="page-actions"><button class="btn" id="memory-refresh" type="button">刷新</button></div>
+          </div>
+          <div class="note-add">
+            <textarea class="ta" id="memory-input" rows="3" placeholder="记录一条长期记忆…"></textarea>
+            <button class="btn primary" id="memory-add" type="button">添加</button>
+          </div>
+          <div class="note-list" id="memory-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 日志 -->
+    <section class="view hidden" id="view-logs">
+      <div class="view-scroll">
+        <div class="page">
+          <div class="page-head"><h2 class="page-title">日志</h2>
+            <div class="page-actions">
+              <label class="switch"><input type="checkbox" id="logs-autoscroll" checked><span>自动滚动到底部</span></label>
+              <button class="btn" id="logs-refresh" type="button">刷新</button>
+            </div>
+          </div>
+          <pre class="logs" id="logs-pre"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section class="view hidden" id="view-settings">
+      <div class="view-scroll">
+        <div class="page">
+          <div class="page-head"><h2 class="page-title">设置</h2>
+            <div class="page-actions"><button class="btn" id="settings-refresh" type="button">刷新</button></div>
+          </div>
+          <div id="settings-paths" class="card"></div>
+          <h3 class="sec-title">模型提供方</h3>
+          <div id="settings-providers"></div>
+          <h3 class="sec-title">可用工具</h3>
+          <div id="settings-tools"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="overlay hidden" id="overlay"><div class="dialog" id="dialog"></div></div>
+<div class="toast hidden" id="toast"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>

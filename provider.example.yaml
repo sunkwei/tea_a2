@@ -1,0 +1,72 @@
+# Example provider configuration for tea_agent.
+#
+#   copy provider.example.yaml  %USERPROFILE%\.tea_agent\provider.yaml
+#
+# tea_agent reads $HOME/.tea_agent/provider.yaml (override with --config) and
+# speaks the OpenAI chat-completions protocol, so any compatible endpoint works.
+
+version: 1
+
+providers:
+  DeepSeek:
+    # Bare hosts are fine: tea_agent appends /v1/chat/completions when the URL
+    # has no path, and /chat/completions when it ends with /v1.
+    api_url: https://api.deepseek.com
+    api_key: sk-REPLACE-ME
+    default_model: deepseek-chat
+    models:
+      deepseek-chat:
+        max_context_tokens: 128000
+        max_output_tokens: 8192
+        supports_tools: true
+        supports_reasoning: false
+        note: ''
+      deepseek-reasoner:
+        max_context_tokens: 128000
+        max_output_tokens: 65536
+        supports_tools: true
+        supports_reasoning: true
+        reasoning_effort: auto
+    api_keys:
+      - sk-REPLACE-ME
+
+  # A local OpenAI-compatible server (llama.cpp, vLLM, Ollama, LM Studio, ...).
+  local:
+    api_url: http://127.0.0.1:11434/v1
+    api_key: not-needed
+    default_model: qwen2.5-coder:7b
+    models:
+      qwen2.5-coder:7b:
+        max_context_tokens: 32768
+        max_output_tokens: 4096
+        supports_tools: true
+
+  # Gateways that need extra routing headers declare them here. ${session_id}
+  # is replaced with the current conversation id on every request.
+  opencode:
+    api_url: https://opencode.ai/zen/go/v1
+    api_key: sk-REPLACE-ME
+    default_model: deepseek-v4.1-flash
+    headers:
+      x-opencode-session: '${session_id}'
+    models:
+      deepseek-v4.1-flash:
+        max_context_tokens: 1000000
+        max_output_tokens: 384000
+        supports_tools: true
+        supports_reasoning: true
+
+# roles.main selects the provider/model used when --provider/--model are absent.
+roles:
+  main:
+    provider: DeepSeek
+    model: deepseek-chat
+
+settings:
+  max_iterations: 50           # tool-calling round trips per user message
+  max_tool_output: 131072      # bytes of tool output fed back to the model
+  keep_turns: 10
+  enable_thinking: false
+  reasoning_effort: auto
+  command_timeout_ms: 180000   # default toolkit_exec timeout
+  stream: true
