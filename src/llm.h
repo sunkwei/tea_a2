@@ -19,6 +19,9 @@ struct ChatUsage {
   long long prompt_tokens = 0;
   long long completion_tokens = 0;
   long long total_tokens = 0;
+  /// Prompt tokens served from the provider's prefix cache. Lets us actually
+  /// measure whether the system prompt and message history stay cacheable.
+  long long cached_tokens = 0;
   nlohmann::json raw = nlohmann::json::object();
   nlohmann::json to_json() const;
 };

@@ -99,6 +99,30 @@ void apply_settings(Settings& s, const YAML::Node& node) {
 
 }  // namespace
 
+bool apply_settings_yaml(Settings* settings, const std::string& yaml_path, std::string* err) {
+  if (!settings) return false;
+  if (!path_exists(yaml_path)) {
+    if (err) *err = "not found: " + yaml_path;
+    return false;
+  }
+  YAML::Node root;
+  try {
+    root = YAML::LoadFile(yaml_path);
+  } catch (const std::exception& e) {
+    if (err) *err = std::string("cannot parse ") + yaml_path + ": " + e.what();
+    return false;
+  }
+  if (!root || !root.IsMap()) {
+    if (err) *err = "not a YAML mapping: " + yaml_path;
+    return false;
+  }
+  // Accept both a nested `settings:` block (same shape as tea_agent.yaml) and a
+  // flat file whose keys are the settings themselves.
+  const YAML::Node block = root["settings"] ? root["settings"] : root;
+  apply_settings(*settings, block);
+  return true;
+}
+
 const ModelInfo* ProviderInfo::find_model(const std::string& n) const {
   auto it = model_map.find(n);
   return it == model_map.end() ? nullptr : &it->second;

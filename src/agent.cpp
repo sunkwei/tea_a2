@@ -2,6 +2,8 @@
 
 #include <sstream>
 
+#include "command.h"
+#include "env.h"
 #include "http.h"
 #include "log.h"
 #include "util.h"
@@ -50,13 +52,7 @@ bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provide
   return true;
 }
 
-std::string platform_description() {
-#ifdef _WIN32
-  return "Windows";
-#else
-  return "Linux/macOS";
-#endif
-}
+
 
 }  // namespace
 
@@ -89,20 +85,56 @@ long long Agent::estimate_tokens(const std::vector<Message>& messages) {
   return total;
 }
 
-std::string Agent::build_system_prompt(const Workspace& workspace) const {
+std::string Agent::build_system_prompt(const Workspace& workspace, const Session& session) const {
+  const EnvironmentInfo& env = machine_environment();
+  const Settings& st = workspace.settings();
   std::ostringstream out;
   out << config_->default_system_prompt() << "\n\n";
-  out << "Environment\n";
-  out << "- Host platform: " << platform_description() << "\n";
+
+  // Everything below is probed from the real device and kept byte-stable for the
+  // process/session lifetime: a varying block at the head of the conversation
+  // would invalidate the provider's prompt cache on every single turn.
+  out << "Environment (probed from this device at startup)\n";
+  out << "- OS: " << env.os_name;
+  if (!env.os_version.empty()) out << " " << env.os_version;
+  out << " (" << env.arch << ")\n";
+  if (!env.hostname.empty()) out << "- Host: " << env.hostname << "\n";
+  if (!env.timezone.empty()) out << "- Time zone: " << env.timezone << "\n";
+  out << "- CPUs: " << env.cpu_count;
+  if (env.memory_total_bytes > 0) out << ", memory: " << binary_size(env.memory_total_bytes);
+  out << "\n";
+  if (workspace.free_bytes() > 0) {
+    out << "- Free space on the workspace volume: " << binary_size(workspace.free_bytes()) << "\n";
+  }
+
+  const std::string active_shell = st.shell.empty() ? default_shell() : st.shell;
+  out << "- toolkit_exec shell: " << active_shell;
+  if (!env.shells.empty()) {
+    std::string others;
+    for (std::size_t i = 0; i < env.shells.size(); ++i) {
+      if (env.shells[i].name == active_shell) continue;
+      if (!others.empty()) others += ", ";
+      others += env.shells[i].name;
+    }
+    out << " (also installed: " << (others.empty() ? "none" : others) << ")";
+  }
+  out << "\n";
   out << "- Workspace root: " << workspace.root() << "\n";
   out << "- Agent run directory: " << workspace.run_dir() << "\n";
-  out << "- Shell: " << (config_->settings.shell.empty() ? "platform default"
-                                                        : config_->settings.shell)
-      << "\n";
-  out << "- Current time (UTC): " << now_iso8601() << "\n";
-  out << "- Default command timeout: " << config_->settings.command_timeout_ms << " ms\n";
-  if (!config_->settings.allow_outside_workspace) {
+  out << "- Default command timeout: " << st.command_timeout_ms << " ms\n";
+  if (!st.allow_outside_workspace) {
     out << "- File tools are restricted to the workspace root.\n";
+  }
+  if (!session.info.created_at.empty()) {
+    out << "- Session started (UTC): " << session.info.created_at << "\n";
+  }
+  out << "- The wall clock is intentionally not injected here; run `date` or "
+         "`echo %DATE% %TIME%` when the current time matters.\n";
+
+  const std::string& instructions = workspace.instructions();
+  if (!instructions.empty()) {
+    out << "\nWorkspace instructions (from .tea_agent_run/instructions.md)\n";
+    out << instructions << "\n";
   }
 
   std::vector<nlohmann::json> notes = workspace.load_memory(nullptr);
@@ -115,13 +147,12 @@ std::string Agent::build_system_prompt(const Workspace& workspace) const {
   }
   return out.str();
 }
-
 void Agent::build_context(const Workspace& workspace, const Session& session,
                           const ModelInfo* model, std::vector<Message>* out) const {
   out->clear();
   Message system;
   system.role = "system";
-  system.content = build_system_prompt(workspace);
+  system.content = build_system_prompt(workspace, session);
   system.created_at = now_iso8601();
   out->push_back(system);
 
@@ -180,6 +211,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     return out;
   }
 
+  const Settings& st = workspace.settings();
   bool echo_reasoning = resolve_reasoning_echo(*config_, *provider_info);
   LOG_DEBUG("agent: turn start provider=", provider, " model=", model,
             " reasoning_echo=", echo_reasoning ? 1 : 0, " history=", session->messages.size());
@@ -207,7 +239,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   nlohmann::json tools_json = tools_->openai_tools();
   if (model_info && !model_info->supports_tools) tools_json = nlohmann::json::array();
 
-  const int max_iterations = config_->settings.max_iterations;
+  const int max_iterations = st.max_iterations;
   bool finished = false;
 
   for (int iteration = 0; iteration < max_iterations; ++iteration) {
@@ -250,29 +282,29 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
             std::make_pair(std::string("x-opencode-session"), session->info.id));
       }
     }
-    request.include_usage = config_->settings.stream_include_usage;
+    request.include_usage = st.stream_include_usage;
     request.send_reasoning_effort = false;
     request.reasoning_effort =
-        model_info ? model_info->reasoning_effort : config_->settings.reasoning_effort;
-    request.connect_timeout_ms = config_->settings.http_connect_timeout_ms;
-    request.read_timeout_ms = config_->settings.http_read_timeout_ms;
+        model_info ? model_info->reasoning_effort : st.reasoning_effort;
+    request.connect_timeout_ms = st.http_connect_timeout_ms;
+    request.read_timeout_ms = st.http_read_timeout_ms;
 
-    if (config_->settings.max_tokens > 0) {
-      request.max_tokens = config_->settings.max_tokens;
+    if (st.max_tokens > 0) {
+      request.max_tokens = st.max_tokens;
     } else if (model_info && model_info->max_output_tokens > 0) {
       request.max_tokens = model_info->max_output_tokens;
     }
 
-    if (config_->settings.temperature >= 0) {
+    if (st.temperature >= 0) {
       request.has_temperature = true;
-      request.temperature = config_->settings.temperature;
+      request.temperature = st.temperature;
     } else if (model_info && model_info->has_temperature) {
       request.has_temperature = true;
       request.temperature = model_info->temperature;
     }
-    if (config_->settings.top_p >= 0) {
+    if (st.top_p >= 0) {
       request.has_top_p = true;
-      request.top_p = config_->settings.top_p;
+      request.top_p = st.top_p;
     } else if (model_info && model_info->has_top_p) {
       request.has_top_p = true;
       request.top_p = model_info->top_p;

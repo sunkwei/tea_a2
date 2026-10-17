@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iterator>
 
+#include "env.h"
 #include "log.h"
 #include "util.h"
 
@@ -245,9 +246,9 @@ std::string session_file_for(const std::string& dir, const std::string& id) {
 }
 }  // namespace
 
-bool Workspace::open(const WorkspaceEntry& entry, bool allow_outside_workspace, std::string* err) {
+bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings, std::string* err) {
   entry_ = entry;
-  allow_outside_ = allow_outside_workspace;
+  settings_ = base_settings;
   root_ = path_canonical(entry.path);
   if (root_.empty() || !path_is_dir(root_)) {
     if (err) *err = "workspace directory does not exist: " + entry.path;
@@ -287,8 +288,42 @@ bool Workspace::open(const WorkspaceEntry& entry, bool allow_outside_workspace, 
     mem["notes"] = nlohmann::json::array();
     write_file(memory_file(), mem.dump(2) + "\n", false, nullptr);
   }
+  // Per-workspace overrides land on top of the machine-level settings, so a
+  // project can pin its own shell/timeouts/system prompt. Loaded once here and
+  // kept for the process lifetime to keep the prompt prefix stable.
+  if (path_exists(settings_file())) {
+    std::string load_err;
+    if (!apply_settings_yaml(&settings_, settings_file(), &load_err)) {
+      LOG_WARN("workspace ", entry_.id, ": ignoring ", settings_file(), ": ", load_err);
+    } else {
+      LOG_INFO("workspace ", entry_.id, ": applied ", settings_file());
+    }
+  }
+
+  instructions_.clear();
+  if (path_exists(instructions_file())) {
+    std::string text;
+    if (read_file(instructions_file(), &text, 64u * 1024u)) {
+      instructions_ = trim(text);
+      if (!instructions_.empty()) {
+        LOG_INFO("workspace ", entry_.id, ": loaded ", instructions_file(), " (",
+                 instructions_.size(), " bytes)");
+      }
+    }
+  }
+
+  free_bytes_ = free_space_bytes(root_);
+
   Logger::instance().add_sink(entry_.id, log_file());
   return true;
+}
+
+std::string Workspace::settings_file() const {
+  return path_join(run_dir_, "settings.yaml");
+}
+
+std::string Workspace::instructions_file() const {
+  return path_join(run_dir_, "instructions.md");
 }
 
 std::string Workspace::resolve_path(const std::string& path_in, std::string* err) const {
@@ -303,7 +338,7 @@ std::string Workspace::resolve_path(const std::string& path_in, std::string* err
   }
   const std::string full =
       path_is_absolute(p) ? path_absolute(p) : path_absolute(path_join(root_, p));
-  if (!allow_outside_ && !path_is_within(full, root_)) {
+  if (!settings_.allow_outside_workspace && !path_is_within(full, root_)) {
     if (err) {
       *err = "path escapes the workspace: '" + p + "' (workspace root: " + root_ + ")";
     }

@@ -51,8 +51,10 @@ class Agent {
   static long long estimate_tokens(const std::string& text);
   static long long estimate_tokens(const std::vector<Message>& messages);
 
+  /// Exposed so the HTTP layer can show exactly what the model receives.
+  std::string build_system_prompt(const Workspace& workspace, const Session& session) const;
+
  private:
-  std::string build_system_prompt(const Workspace& workspace) const;
   void build_context(const Workspace& workspace, const Session& session, const ModelInfo* model,
                      std::vector<Message>* out) const;
 

@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "config.h"
 #include "message.h"
 
 namespace tea {
@@ -56,12 +57,23 @@ class WorkspaceRegistry {
 
 class Workspace {
  public:
-  bool open(const WorkspaceEntry& entry, bool allow_outside_workspace, std::string* err);
+  /// Layering: `base_settings` (builtin defaults + tea_agent.yaml + CLI) is
+  /// overridden by `<run_dir>/settings.yaml`, so a project can pin its own
+  /// shell, timeouts and system prompt without touching the global config.
+  bool open(const WorkspaceEntry& entry, const Settings& base_settings, std::string* err);
 
   const WorkspaceEntry& entry() const { return entry_; }
   const std::string& id() const { return entry_.id; }
   const std::string& root() const { return root_; }
   const std::string& run_dir() const { return run_dir_; }
+  const Settings& settings() const { return settings_; }
+  /// Contents of `<run_dir>/instructions.md` (empty when absent). Stable for the
+  /// process lifetime, so it does not destabilise the prompt prefix.
+  const std::string& instructions() const { return instructions_; }
+  /// Free bytes on the workspace volume, sampled when the workspace was opened.
+  uint64_t free_bytes() const { return free_bytes_; }
+  std::string settings_file() const;
+  std::string instructions_file() const;
   std::string sessions_dir() const;
   std::string memory_file() const;
   std::string log_file() const;
@@ -96,7 +108,9 @@ class Workspace {
   WorkspaceEntry entry_;
   std::string root_;
   std::string run_dir_;
-  bool allow_outside_ = false;
+  Settings settings_;
+  std::string instructions_;
+  uint64_t free_bytes_ = 0;
 };
 
 }  // namespace tea

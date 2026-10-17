@@ -73,11 +73,11 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
   CommandOptions options;
   options.command = command;
   options.tmp_dir = ctx.workspace->tmp_dir();
-  options.shell = arg_str(args, "shell", ctx.config->settings.shell);
-  options.timeout_ms = static_cast<int>(arg_int(args, "timeout_ms", ctx.config->settings.command_timeout_ms));
+  options.shell = arg_str(args, "shell", ctx.workspace->settings().shell);
+  options.timeout_ms = static_cast<int>(arg_int(args, "timeout_ms", ctx.workspace->settings().command_timeout_ms));
   if (options.timeout_ms < 1000) options.timeout_ms = 1000;
-  options.max_output_bytes = static_cast<std::size_t>(ctx.config->settings.max_tool_output);
-  options.utf8_console = ctx.config->settings.utf8_console;
+  options.max_output_bytes = static_cast<std::size_t>(ctx.workspace->settings().max_tool_output);
+  options.utf8_console = ctx.workspace->settings().utf8_console;
 
   const std::string cwd_arg = arg_str(args, "cwd");
   if (!cwd_arg.empty()) {
@@ -112,7 +112,7 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
 
   result.ok = (run.exit_code == 0) && !run.timed_out;
   result.truncated = run.output_truncated;
-  std::size_t limit = static_cast<std::size_t>(ctx.config->settings.max_tool_output);
+  std::size_t limit = static_cast<std::size_t>(ctx.workspace->settings().max_tool_output);
   bool truncated_again = false;
   std::string text = out.str();
   text = limit_output(text, limit, &truncated_again);
@@ -140,7 +140,7 @@ ToolResult tool_read(const std::string& path, const ToolContext& ctx, const nloh
   }
   const long long requested = arg_int(args, "max_bytes", 0);
   std::size_t limit = requested > 0 ? static_cast<std::size_t>(requested)
-                                    : static_cast<std::size_t>(ctx.config->settings.max_tool_output);
+                                    : static_cast<std::size_t>(ctx.workspace->settings().max_tool_output);
   std::string content;
   bool truncated = false;
   if (!read_file(path, &content, limit, &truncated)) {
@@ -219,7 +219,7 @@ ToolResult tool_list(const std::string& path, const ToolContext& ctx) {
     out << line << "\n";
   }
   std::size_t limit =
-      ctx.config ? static_cast<std::size_t>(ctx.config->settings.max_tool_output) : 131072u;
+      ctx.workspace ? static_cast<std::size_t>(ctx.workspace->settings().max_tool_output) : 131072u;
   bool truncated = false;
   result.output = limit_output(out.str(), limit, &truncated);
   result.truncated = truncated;

@@ -198,7 +198,7 @@ struct ApiServer::Impl {
       }
       copy = *entry;
     }
-    return out->open(copy, config->settings.allow_outside_workspace, err);
+    return out->open(copy, config->settings, err);
   }
 
   bool find_session_workspace(const std::string& session_id, Workspace* out, std::string* err) {
@@ -221,7 +221,7 @@ struct ApiServer::Impl {
       *err = "session not found: " + session_id;
       return false;
     }
-    return out->open(copy, config->settings.allow_outside_workspace, err);
+    return out->open(copy, config->settings, err);
   }
 
   void prune_turns_locked() {
@@ -395,7 +395,7 @@ void ApiServer::Impl::install_routes() {
       // Materialise .tea_agent_run/ right away, like the CLI does.
       Workspace ws;
       std::string open_err;
-      if (!ws.open(*entry, config->settings.allow_outside_workspace, &open_err)) {
+      if (!ws.open(*entry, config->settings, &open_err)) {
         LOG_WARN("workspace: ", open_err);
       }
       send_json(res, entry->to_json());
@@ -526,6 +526,30 @@ void ApiServer::Impl::install_routes() {
             send_json(res, j);
           });
 
+  // ---- prompt preview ----------------------------------------------------
+  // Shows exactly the system prompt this workspace produces, which is what
+  // operators need in order to reason about device probing and cache stability.
+  svr.Get(R"(/api/workspaces/([^/]+)/prompt)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            Agent agent(config, tools);
+            Session session;
+            session.info.created_at = now_iso8601();
+            const std::string prompt = agent.build_system_prompt(ws, session);
+            nlohmann::json j = nlohmann::json::object();
+            j["system_prompt"] = prompt;
+            j["bytes"] = static_cast<long long>(prompt.size());
+            j["estimated_tokens"] = Agent::estimate_tokens(prompt);
+            j["settings_file"] = ws.settings_file();
+            j["instructions_file"] = ws.instructions_file();
+            j["has_instructions"] = !ws.instructions().empty();
+            send_json(res, j);
+          });
   // ---- sessions ----------------------------------------------------------
   svr.Get(R"(/api/workspaces/([^/]+)/sessions)",
           [this](const httplib::Request& req, httplib::Response& res) {

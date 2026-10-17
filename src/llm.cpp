@@ -68,6 +68,19 @@ void parse_usage_into(ChatUsage* usage, const nlohmann::json& u) {
   usage->completion_tokens = get("completion_tokens");
   usage->total_tokens = get("total_tokens");
   if (usage->total_tokens == 0) usage->total_tokens = usage->prompt_tokens + usage->completion_tokens;
+
+  // Prefix-cache accounting. DeepSeek reports prompt_cache_hit_tokens; the
+  // OpenAI shape nests it under prompt_tokens_details.cached_tokens.
+  usage->cached_tokens = get("prompt_cache_hit_tokens");
+  if (usage->cached_tokens == 0) {
+    auto details = u.find("prompt_tokens_details");
+    if (details != u.end() && details->is_object()) {
+      auto cached = details->find("cached_tokens");
+      if (cached != details->end() && cached->is_number()) {
+        usage->cached_tokens = cached->get<long long>();
+      }
+    }
+  }
 }
 
 /// Accumulates one streamed delta (or a whole non-streamed message object).
@@ -326,6 +339,7 @@ nlohmann::json ChatUsage::to_json() const {
   j["prompt_tokens"] = prompt_tokens;
   j["completion_tokens"] = completion_tokens;
   j["total_tokens"] = total_tokens;
+  j["cached_tokens"] = cached_tokens;
   return j;
 }
 
@@ -393,10 +407,19 @@ ChatResult llm_chat(const ChatRequest& req, const DeltaCallback& on_delta,
 
   result.elapsed_ms = now_ms() - started;
   if (result.ok) {
+    std::string cache_note;
+    if (result.usage.present && result.usage.prompt_tokens > 0) {
+      const long long cached = result.usage.cached_tokens;
+      const long long prompt = result.usage.prompt_tokens;
+      const int pct = static_cast<int>((cached * 100) / (prompt > 0 ? prompt : 1));
+      cache_note = " cache=" + std::to_string(cached) + "/" + std::to_string(prompt) + " (" +
+                   std::to_string(pct) + "%)";
+    }
     LOG_INFO("llm: ", req.provider, "/", req.model, " ok in ", result.elapsed_ms, "ms content=",
              result.content.size(), "b reasoning=", result.reasoning.size(), "b tool_calls=",
              result.tool_calls.size(),
-             result.usage.present ? (" tokens=" + std::to_string(result.usage.total_tokens)) : "");
+             result.usage.present ? (" tokens=" + std::to_string(result.usage.total_tokens)) : "",
+             cache_note);
   } else if (!result.cancelled) {
     LOG_WARN("llm: ", req.provider, "/", req.model, " failed in ", result.elapsed_ms,
              "ms: ", result.error);

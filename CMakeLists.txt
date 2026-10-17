@@ -187,6 +187,7 @@ set(TEA_SOURCES
   src/main.cpp
   src/util.cpp
   src/platform_fs.cpp
+  src/env.cpp
   src/log.cpp
   src/config.cpp
   src/message.cpp

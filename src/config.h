@@ -74,10 +74,28 @@ struct Settings {
   bool utf8_console = true;
   std::string shell;  // "cmd" | "powershell" | "bash" | "" => auto
   std::string system_prompt;
+
+  // ---- tool output ------------------------------------------------------
+  /// Hard cap on retained lines per tool result, applied on top of
+  /// max_tool_output. Content-aware filtering runs before this.
+  int tool_output_max_lines = 400;
+
+  // ---- context management ----------------------------------------------
+  /// Summarise the oldest part of the history instead of dropping it silently.
+  bool enable_compaction = true;
+  /// Token budget for the generated summary.
+  int64_t compaction_summary_max_tokens = 800;
+  /// Keep at least this many recent messages no matter what.
+  int compaction_keep_recent = 4;
 };
 
-struct AppConfig {
-  std::string path;      // provider.yaml that was loaded
+/// Overlay a `settings:` mapping from a YAML file on top of `settings`.
+/// Used for the optional `$TEA_AGENT_HOME/tea_agent.yaml` and for the
+/// per-workspace `<run_dir>/settings.yaml`. Returns false with `err` set when
+/// the file cannot be read or parsed; `settings` is then left untouched.
+bool apply_settings_yaml(Settings* settings, const std::string& yaml_path, std::string* err);
+
+struct AppConfig {  std::string path;      // provider.yaml that was loaded
   std::string extra_path;  // tea_agent.yaml, if present
   std::string tea_home;  // $HOME/.tea_agent
   std::vector<std::string> provider_order;

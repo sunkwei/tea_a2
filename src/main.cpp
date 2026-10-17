@@ -275,7 +275,7 @@ int main(int argc, char** argv) {
       // buffer/log/memory storage on disk even before the first request.
       Workspace ws;
       std::string open_err;
-      if (!ws.open(*entry, config.settings.allow_outside_workspace, &open_err)) {
+      if (!ws.open(*entry, config.settings, &open_err)) {
         LOG_WARN("workspace: ", open_err);
       }
       LOG_INFO("workspace registered: ", entry->id, " -> ", entry->path);
