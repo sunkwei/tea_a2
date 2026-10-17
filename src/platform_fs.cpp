@@ -658,6 +658,65 @@ bool write_file(const std::string& path, const std::string& data, bool append, s
 #endif
 }
 
+bool write_file_at(const std::string& path, uint64_t offset, const std::string& data) {
+  if (path.empty()) return false;
+  const std::string parent = path_parent(path);
+  if (!parent.empty() && !make_dirs(parent)) return false;
+
+#ifdef _WIN32
+  HANDLE h = CreateFileW(win_path(path).c_str(), GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  LARGE_INTEGER pos;
+  pos.QuadPart = static_cast<LONGLONG>(offset);
+  if (!SetFilePointerEx(h, pos, nullptr, FILE_BEGIN)) {
+    CloseHandle(h);
+    return false;
+  }
+  size_t written = 0;
+  bool ok = true;
+  while (written < data.size()) {
+    DWORD chunk = 0;
+    const DWORD request = static_cast<DWORD>(std::min<size_t>(data.size() - written, 1u << 20));
+    if (!WriteFile(h, data.data() + written, request, &chunk, nullptr) || chunk == 0) {
+      ok = false;
+      break;
+    }
+    written += chunk;
+  }
+  if (ok) {
+    LARGE_INTEGER end;
+    end.QuadPart = static_cast<LONGLONG>(offset + written);
+    if (!SetFilePointerEx(h, end, nullptr, FILE_BEGIN) || !SetEndOfFile(h)) ok = false;
+  }
+  CloseHandle(h);
+  return ok;
+#else
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT, 0666);
+  if (fd < 0) return false;
+  if (::lseek(fd, static_cast<off_t>(offset), SEEK_SET) < 0) {
+    ::close(fd);
+    return false;
+  }
+  size_t written = 0;
+  bool ok = true;
+  while (written < data.size()) {
+    const ssize_t n = ::write(fd, data.data() + written, data.size() - written);
+    if (n > 0) {
+      written += static_cast<size_t>(n);
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    ok = false;
+    break;
+  }
+  if (ok && ::ftruncate(fd, static_cast<off_t>(offset + written)) != 0) ok = false;
+  ::close(fd);
+  return ok;
+#endif
+}
+
 bool remove_path(const std::string& path, bool recursive, std::string* err) {
   if (!path_exists(path)) {
     if (err) *err = "path does not exist: " + path;

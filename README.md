@@ -143,6 +143,8 @@ build/bin/tea_agent --workspace . --open
 | `GET` / `POST` | `/api/workspaces/{id}/sessions` | 会话列表 / 新建 |
 | `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果） |
 | `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
+| `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |
+| `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
@@ -173,7 +175,7 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 | `tool_start` | 即将执行 |
 | `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated` |
 | `iteration_end` | 单轮结束，带 `usage` 与 `metrics` |
-| `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` |
+| `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` / `trajectory_id` |
 | `stopped` | 被 `/api/chat/stop` 中断 |
 | `error` | `message` / `detail` |
 | `ping` | 空闲心跳（15s），用于判断链路存活 |
@@ -214,6 +216,69 @@ token 估算器补上 `context_tokens` / `output_tokens` 并置 `estimated: true
 
 ```
 turn finished ok=true iterations=4 elapsed_ms=3120 output_tokens=512 ttft_ms=640 gen_ms=2140 context=128/128000
+```
+
+### 轨迹：每一轮「实际做了什么」的审计记录
+
+会话记录（`/api/sessions/{sid}`）回答「说了什么」，轨迹回答「做了什么」：每一次模型
+迭代、每一次工具调用的原始参数与真实输出、上下文压缩、以及工具**自己回报**的文件改动。
+被上层 agent 远程操控时，这是唯一不用反推聊天记录的证据链。
+
+- 位置：`<workspace>/.tea_agent_run/trajectories/<session_id>.jsonl`，**一轮一行**。
+- 一行 = 一个 turn 对象：`turn_id` / `session_id` / `workspace_id` / `provider` / `model` /
+  `started_at` / `finished_at` / `ok` / `iterations` / `usage{prompt,completion,total,cached}`
+  / `steps[]` / `files_changed[]`。
+- 步骤 `kind`：
+  - `model`：`reasoning_chars` / `content_chars` / 请求的 `tool_calls` 名字 /
+    `tokens{prompt,completion,cached}` / `ttft_ms`（provider 没回 usage 时标 `usage_estimated`）；
+  - `tool`：`name` / `arguments`（模型发出的原始 JSON 字符串）/ `ok` / `exit_code` /
+    `truncated` / `output_filter` + `dropped_lines` / `output`（按上限截断并留标记）；
+  - `compaction`：`covered_messages` / `summary_bytes`。
+- `files_changed` 只写工具真实回报的结果：`toolkit_file` 的 write/append/delete/move 带
+  `path`（写入还带 `bytes` 与 `size`），`toolkit_exec` 只带 `command`——不猜路径。
+- 增量落盘：turn 一开始就写头行，之后每一步**原地刷新同一行**（同偏移重写 + 截断），
+  因此进程被 kill 或断电时文件里仍是最后一份完整快照。读入时按 `turn_id` 取最后一条，
+  尾部被写坏的半行会被跳过；`?full=1` 里未完成的轮次带 `"partial": true`。
+- 文件里不含任何 api_key，API 响应也不含。
+
+```bash
+# SSE 的 done 事件直接给出 id，不需要轮询
+curl -N -X POST http://device:8282/api/chat -d '{"workspace_id":"ws_x","message":"..."}'
+# data: {"type":"done",...,"trajectory_id":"t_1a2b3c4d5e6f"}
+
+curl -s http://device:8282/api/sessions/s_9f8e7d/trajectory            # 摘要，最新在前
+curl -s 'http://device:8282/api/sessions/s_9f8e7d/trajectory?full=1'   # 带 steps / files_changed
+curl -s http://device:8282/api/turns/t_1a2b3c4d5e6f/trajectory         # 单轮完整轨迹
+curl -s 'http://device:8282/api/sessions/s_9f8e7d/trajectory?format=jsonl'  # 原始 JSONL
+```
+
+默认视图（摘要）：
+
+```json
+[{"turn_id":"t_1a2b3c4d5e6f","started_at":"2026-01-01T00:00:00.000Z","elapsed_ms":4213,
+  "ok":true,"iterations":4,"steps":7,
+  "usage":{"prompt_tokens":1843,"completion_tokens":512,"total_tokens":2355,"cached_tokens":1024},
+  "files_changed":1,"partial":false}]
+```
+
+内置 UI 在每条助手回复上方显示一行折叠的「轨迹」（例如 `4 步 · 1.2 s · 284 tok`），
+展开后是步骤时间线（模型 / 工具 / 压缩）、工具参数与实际输出、以及本轮改动过的文件与
+字节数。
+
+留存与上限，按工作区覆盖（`<workspace>/.tea_agent_run/settings.yaml`）：
+
+```yaml
+settings:
+  enable_trajectory: true           # false => 完全不写轨迹
+  trajectory_step_max_bytes: 8192   # 单条工具输出保留多少字节（超出留截断标记）
+  trajectory_max_turns: 200         # 每个会话文件最多留几轮
+  trajectory_max_bytes: 8388608     # 每个会话文件最多多少字节（默认 8 MB）
+```
+
+超出上限时**从最旧的轮次删起**，并在工作区日志里写清删了什么：
+
+```
+trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; limits 1 turns / 8388608 bytes)
 ```
 
 
@@ -322,6 +387,7 @@ macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell�
 │   ├── index.json            # 会话索引（标题/时间/条数）
 │   └── <session_id>.json     # 完整会话（reasoning、工具调用与结果）
 ├── memory/memory.json        # 长期记忆
+├── trajectories/<sid>.jsonl  # 每轮轨迹，一轮一行（见上文「轨迹」）
 ├── tmp/                      # toolkit_exec 的临时脚本
 └── artifacts/                # 预留产物目录
 ```

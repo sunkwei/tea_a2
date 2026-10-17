@@ -15,6 +15,7 @@
 #include "agent.h"
 #include "http.h"
 #include "log.h"
+#include "trajectory.h"
 #include "util.h"
 #include "version.h"
 #include "web_assets.h"
@@ -29,6 +30,11 @@ constexpr size_t kFileReadLimit = 2u * 1024u * 1024u;
 /// much higher ceiling than the JSON `/file` view. 16 MB is generous for a
 /// screenshot yet small enough that one request cannot exhaust the device.
 constexpr uint64_t kRawReadLimit = 16u * 1024u * 1024u;
+
+/// A session trajectory file is already bounded by `trajectory_max_bytes`
+/// (8 MB by default); this is only a guard against an operator raising that cap
+/// on a device that cannot serve it.
+constexpr size_t kTrajectoryReadLimit = 32u * 1024u * 1024u;
 
 /// Content type for the raw route. A fixed allow-list instead of sniffing: an
 /// unknown extension is served as opaque bytes, never as HTML, so a crafted file
@@ -733,6 +739,100 @@ void ApiServer::Impl::install_routes() {
               }
               send_ok(res);
             });
+
+  // ---- trajectories (the per-turn audit trail) ---------------------------
+  // One JSONL file per session (`<run_dir>/trajectories/<session_id>.jsonl`,
+  // one line per turn). The default view is the newest turn summaries first;
+  // `?full=1` adds steps and file changes, `?format=jsonl` hands the raw bytes
+  // to a controlling agent, and `/api/turns/<id>/trajectory` addresses exactly
+  // the turn the SSE `done` event announced as `trajectory_id`.
+  svr.Get(R"(/api/sessions/([^/]+)/trajectory)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            const std::string session_id = req.matches[1].str();
+            // The id becomes a file name further down; refuse anything that is
+            // not a plain id so a crafted path cannot escape the run directory.
+            if (!trajectory_id_is_safe(session_id)) {
+              send_error(res, 400, "bad_request", "invalid session id");
+              return;
+            }
+            Workspace ws;
+            std::string err;
+            if (!find_session_workspace(session_id, &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string path = trajectory_file_path(ws.run_dir(), session_id);
+            if (!path_is_file(path)) {
+              send_error(res, 404, "not_found",
+                         "no trajectory recorded for session " + session_id);
+              return;
+            }
+            if (req.has_param("format") &&
+                to_lower(req.get_param_value("format")) == "jsonl") {
+              std::string bytes;
+              if (!read_file(path, &bytes, kTrajectoryReadLimit)) {
+                send_error(res, 400, "read_failed", "cannot read " + path);
+                return;
+              }
+              res.status = 200;
+              res.set_header("Access-Control-Allow-Origin", "*");
+              res.set_header("Cache-Control", "no-store");
+              res.set_content(bytes, "application/x-ndjson; charset=utf-8");
+              return;
+            }
+            std::vector<nlohmann::json> turns;
+            if (!load_trajectories(path, &turns, &err)) {
+              send_error(res, 400, "trajectory_error", err);
+              return;
+            }
+            const bool full = req.has_param("full") && req.get_param_value("full") != "0";
+            nlohmann::json list = nlohmann::json::array();
+            for (std::size_t i = 0; i < turns.size(); ++i) {
+              list.push_back(full ? turns[i] : trajectory_summary(turns[i]));
+            }
+            send_json(res, list);
+          });
+
+  svr.Get(R"(/api/turns/([^/]+)/trajectory)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            const std::string turn_id = req.matches[1].str();
+            if (!trajectory_id_is_safe(turn_id)) {
+              send_error(res, 400, "bad_request", "invalid turn id");
+              return;
+            }
+            // Turn ids are not indexed, so scan the registered workspaces'
+            // session files and stop at the first hit (which is what a caller
+            // polling right after `done` gets).
+            std::vector<WorkspaceEntry> entries;
+            {
+              std::lock_guard<std::mutex> lock(mu);
+              for (std::size_t i = 0; i < registry->entries().size(); ++i) {
+                entries.push_back(registry->entries()[i]);
+              }
+            }
+            for (std::size_t i = 0; i < entries.size(); ++i) {
+              if (entries[i].path.empty() || !path_is_dir(entries[i].path)) continue;
+              Workspace ws;
+              std::string err;
+              if (!ws.open(entries[i], config->settings, &err)) continue;
+              const std::string dir = path_join(ws.run_dir(), "trajectories");
+              if (!path_is_dir(dir)) continue;
+              std::vector<DirEntryInfo> files;
+              if (!list_directory(dir, &files, &err)) continue;
+              for (std::size_t k = 0; k < files.size(); ++k) {
+                if (files[k].is_dir) continue;
+                if (path_extension(files[k].name) != ".jsonl") continue;
+                std::vector<nlohmann::json> turns;
+                if (!load_trajectories(files[k].path, &turns, &err)) continue;
+                for (std::size_t t = 0; t < turns.size(); ++t) {
+                  if (turns[t].value("turn_id", std::string()) != turn_id) continue;
+                  send_json(res, turns[t]);
+                  return;
+                }
+              }
+            }
+            send_error(res, 404, "not_found", "no trajectory recorded for turn " + turn_id);
+          });
 
   // ---- memory ------------------------------------------------------------
   svr.Get(R"(/api/workspaces/([^/]+)/memory)",

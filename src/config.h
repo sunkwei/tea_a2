@@ -96,6 +96,17 @@ struct Settings {
   int64_t compaction_summary_max_tokens = 800;
   /// Keep at least this many recent messages no matter what.
   int compaction_keep_recent = 4;
+
+  // ---- turn trajectories (the per-turn audit trail) ---------------------
+  /// Record one structured trajectory per turn in
+  /// `<run_dir>/trajectories/<session_id>.jsonl`. Off writes nothing at all.
+  bool enable_trajectory = true;
+  /// Cap on one tool output body inside a trajectory step, in bytes.
+  int64_t trajectory_step_max_bytes = 8192;
+  /// Retention: at most this many turns and this many bytes per session file.
+  /// The oldest turns are dropped first.
+  int trajectory_max_turns = 200;
+  int64_t trajectory_max_bytes = 8 * 1024 * 1024;
 };
 
 /// Overlay a `settings:` mapping from a YAML file on top of `settings`.

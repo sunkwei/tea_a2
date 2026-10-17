@@ -100,6 +100,10 @@ bool read_file(const std::string& path, std::string* out, size_t max_bytes = 0,
 bool read_file_tail(const std::string& path, size_t max_bytes, std::string* out);
 bool write_file(const std::string& path, const std::string& data, bool append = false,
                 std::string* err = nullptr);
+/// Overwrite the file from `offset` with `data` and truncate whatever followed.
+/// Lets an append-only log refresh its newest line in place (the trajectory
+/// writer does exactly that) instead of rewriting the whole file every step.
+bool write_file_at(const std::string& path, uint64_t offset, const std::string& data);
 bool remove_path(const std::string& path, bool recursive, std::string* err = nullptr);
 bool move_path(const std::string& from, const std::string& to, std::string* err = nullptr);
 

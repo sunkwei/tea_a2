@@ -108,7 +108,21 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (yhas(node, "compaction_keep_recent"))
     s.compaction_keep_recent =
         static_cast<int>(yint(node, "compaction_keep_recent", s.compaction_keep_recent));
+  if (yhas(node, "enable_trajectory"))
+    s.enable_trajectory = ybool(node, "enable_trajectory", s.enable_trajectory);
+  if (yhas(node, "trajectory_step_max_bytes"))
+    s.trajectory_step_max_bytes =
+        yint(node, "trajectory_step_max_bytes", s.trajectory_step_max_bytes);
+  if (yhas(node, "trajectory_max_turns"))
+    s.trajectory_max_turns =
+        static_cast<int>(yint(node, "trajectory_max_turns", s.trajectory_max_turns));
+  if (yhas(node, "trajectory_max_bytes"))
+    s.trajectory_max_bytes = yint(node, "trajectory_max_bytes", s.trajectory_max_bytes);
   if (s.keep_turns < 0) s.keep_turns = 0;
+  if (s.trajectory_step_max_bytes < 0) s.trajectory_step_max_bytes = 0;
+  if (s.trajectory_step_max_bytes > 1024 * 1024) s.trajectory_step_max_bytes = 1024 * 1024;
+  if (s.trajectory_max_turns < 1) s.trajectory_max_turns = 1;
+  if (s.trajectory_max_bytes < 1024) s.trajectory_max_bytes = 1024;
   if (s.compaction_trigger_ratio < 0.3) s.compaction_trigger_ratio = 0.3;
   if (s.compaction_trigger_ratio > 0.95) s.compaction_trigger_ratio = 0.95;
   if (s.compaction_retain_ratio < 0.02) s.compaction_retain_ratio = 0.02;

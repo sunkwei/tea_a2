@@ -14,6 +14,7 @@
     model: null, models: [], modelMenu: false,
     live: null, liveNode: null, streaming: false, abort: null, stopTimer: null,
     ended: false, streamError: null, expanded: {}, stickBottom: true,
+    trajectory: [], trajFull: {}, lastTrajectoryId: null,
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
     turnStartAt: 0, turnSteps: 0, mdBase: '',
     files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 },
@@ -289,7 +290,8 @@
     gear: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 2.4v2M8 11.6v2M2.4 8h2M11.6 8h2"/></svg>',
     spark: '<svg viewBox="0 0 16 16"><path d="M8 2.6l1.3 3.2 3.2 1.2-3.2 1.3L8 11.5 6.7 8.3 3.5 7l3.2-1.2z"/></svg>',
     check: '<svg viewBox="0 0 16 16"><path d="M3.4 8.4l3 3 6.2-6.6"/></svg>',
-    cross: '<svg viewBox="0 0 16 16"><path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/></svg>'
+    cross: '<svg viewBox="0 0 16 16"><path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/></svg>',
+    traj: '<svg viewBox="0 0 16 16"><path d="M3.2 4h3.2v3.2H3.2zM9.6 8.8h3.2V12H9.6z"/><path d="M6.4 5.6h3.2v4.8"/></svg>'
   };
   function toolSummary(args) {
     args = args || {};
@@ -354,9 +356,179 @@
     row.appendChild(el('div', 'reason-panel', text));
     return row;
   }
+
+  /* ---------- 4b) 轨迹：每一轮的结构化审计记录 ----------
+     后端在 <workspace>/.tea_agent_run/trajectories/<session>.jsonl 里一轮一行，
+     记录模型迭代、工具调用（参数+实际输出）、压缩动作与工具真实回报的文件变更。
+     折叠时只显示摘要（步数 / 耗时 / tokens）；展开才按 turn_id 拉完整记录，
+     所以一个会话有多少轮都不会把页面拖慢。数据全部来自后端，UI 不做推测。 */
+  function fmtSecSpaced(ms) {
+    return ms == null ? '' : (num(ms) / 1000).toFixed(num(ms) < 10000 ? 1 : 0) + ' s';
+  }
+  function trajKindLabel(kind) {
+    if (kind === 'model') return '模型';
+    if (kind === 'tool') return '工具';
+    if (kind === 'compaction') return '压缩';
+    return String(kind || '步骤');
+  }
+  function fmtTrajSummary(t) {
+    var parts = [];
+    if (t.steps != null) parts.push(num(t.steps) + ' 步');
+    if (t.elapsed_ms != null) parts.push(fmtSecSpaced(t.elapsed_ms));
+    var u = t.usage || {}, tok = num(u.total_tokens);
+    if (!tok) tok = num(u.prompt_tokens) + num(u.completion_tokens);
+    if (tok) parts.push((u.estimated ? '≈' : '') + fmtTokens(tok) + ' tok');
+    if (num(t.files_changed)) parts.push(num(t.files_changed) + ' 文件');
+    return parts.join(' · ');
+  }
+  function trajStepView(step) {
+    var li = el('div', 'traj-step ' + (step.kind || 'other'));
+    var head = el('div', 'traj-step-head');
+    head.appendChild(el('span', 'traj-idx', '#' + (num(step.index) + 1)));
+    head.appendChild(el('span', 'traj-kind', trajKindLabel(step.kind)));
+    if (step.name) head.appendChild(el('span', 'traj-name', step.name));
+    head.appendChild(el('span', 'traj-ms', fmtMs(num(step.elapsed_ms))));
+    if (step.kind === 'model') {
+      head.appendChild(el('span', 'traj-info',
+        '推理 ' + num(step.reasoning_chars) + ' 字 · 正文 ' + num(step.content_chars) + ' 字'));
+      var tk = step.tokens || {};
+      var tok = (step.usage_estimated ? '≈' : '') + fmtTokens(num(tk.prompt)) + ' → ' +
+        fmtTokens(num(tk.completion)) + ' tok';
+      if (num(tk.cached)) tok += ' · 缓存 ' + fmtTokens(num(tk.cached));
+      head.appendChild(el('span', 'traj-tok', tok));
+      if (num(step.ttft_ms)) head.appendChild(el('span', 'traj-tok', '首字 ' + fmtMs(num(step.ttft_ms))));
+    } else if (step.kind === 'compaction') {
+      head.appendChild(el('span', 'traj-info',
+        '覆盖 ' + num(step.covered_messages) + ' 条消息 · 摘要 ' + fmtBytes(num(step.summary_bytes))));
+    } else {
+      var flags = [];
+      if (step.exit_code != null) flags.push('exit ' + step.exit_code);
+      if (step.truncated) flags.push('输出已截断');
+      if (step.output_filter && step.output_filter !== 'none') {
+        flags.push('过滤 ' + step.output_filter +
+          (num(step.dropped_lines) ? ' -' + num(step.dropped_lines) + ' 行' : ''));
+      }
+      if (flags.length) head.appendChild(el('span', 'traj-flags', flags.join(' · ')));
+    }
+    li.appendChild(head);
+    if (step.kind === 'tool') {
+      if (step.arguments) li.appendChild(el('div', 'traj-args', step.arguments));
+      if (step.output) li.appendChild(el('pre', 'traj-out', step.output));
+      if (step.output_truncated) li.appendChild(el('div', 'traj-note', '输出已按轨迹上限截断'));
+    }
+    return li;
+  }
+  function trajFilesView(files) {
+    var box = el('div', 'traj-files');
+    box.appendChild(el('div', 'traj-files-title', '本轮改动'));
+    files = files || [];
+    if (!files.length) {
+      box.appendChild(el('div', 'traj-note', '没有工具报告文件改动'));
+      return box;
+    }
+    files.forEach(function (f) {
+      var row = el('div', 'traj-file');
+      row.appendChild(el('span', 'traj-op ' + (f.op || ''), f.op || '?'));
+      if (f.path) row.appendChild(el('span', 'traj-path', f.path + (f.dest ? ' → ' + f.dest : '')));
+      else if (f.command) row.appendChild(el('code', 'traj-cmd', f.command));
+      var meta = [];
+      if (f.op !== 'exec' && f.op !== 'delete') {
+        if (f.bytes != null) meta.push(fmtBytes(num(f.bytes)));
+        if (f.size != null) meta.push('共 ' + fmtBytes(num(f.size)));
+      }
+      if (f.exit_code != null) meta.push('exit ' + f.exit_code);
+      if (f.ok === false) meta.push('失败');
+      if (meta.length) row.appendChild(el('span', 'traj-file-meta', meta.join(' · ')));
+      box.appendChild(row);
+    });
+    return box;
+  }
+  function renderTrajPanel(panel, turn) {
+    clear(panel);
+    var head = el('div', 'traj-head');
+    var bits = [];
+    if (turn.provider) bits.push(turn.provider);
+    if (turn.model) bits.push(turn.model);
+    bits.push(num(turn.iterations) + ' 轮迭代');
+    if (turn.started_at) bits.push(fmtTime(turn.started_at));
+    head.appendChild(el('span', 'traj-sum', bits.join(' · ')));
+    head.appendChild(el('span', 'traj-id', turn.turn_id || ''));
+    panel.appendChild(head);
+    if (turn.error) {
+      panel.appendChild(el('div', 'traj-error', turn.error + (turn.detail ? '\n' + turn.detail : '')));
+    }
+    var steps = turn.steps || [];
+    if (!steps.length) panel.appendChild(el('div', 'traj-note', '没有步骤记录（可能仍在进行中）'));
+    steps.forEach(function (s) { panel.appendChild(trajStepView(s)); });
+    panel.appendChild(trajFilesView(turn.files_changed));
+  }
+  function trajectoryRow(turn, key) {
+    var row = el('div', 'tool-row traj-row');
+    row.dataset.key = key;
+    row.dataset.turnId = turn.turn_id || '';
+    if (key in state.expanded && state.expanded[key]) row.classList.add('open');
+    var line = el('div', 'tool-line');
+    var ic = el('span', 'tool-icon');
+    ic.innerHTML = ICONS.traj;
+    line.appendChild(ic);
+    line.appendChild(el('span', 'tool-title', '轨迹'));
+    line.appendChild(el('span', 'dot'));
+    line.appendChild(el('span', 'tool-summary', fmtTrajSummary(turn)));
+    if (turn.ok === false) line.appendChild(el('span', 'traj-badge', turn.partial ? '进行中' : '失败'));
+    line.appendChild(el('span', 'chev', '›'));
+    row.appendChild(line);
+    row.appendChild(el('div', 'tool-panel traj-panel'));
+    // 重新渲染时如果这一行本来就是展开的，面板要立即有内容（命中缓存时不发请求）。
+    if (row.classList.contains('open')) loadTrajectoryPanel(row);
+    return row;
+  }
+  function loadTrajectoryPanel(row) {
+    var id = row.dataset.turnId;
+    if (!id) return;
+    var panel = row.querySelector('.traj-panel');
+    if (!panel || panel.dataset.loaded === '1') return;
+    var cached = state.trajFull[id];
+    if (cached) { renderTrajPanel(panel, cached); panel.dataset.loaded = '1'; return; }
+    panel.textContent = '载入中…';
+    api('api/turns/' + encodeURIComponent(id) + '/trajectory').then(function (turn) {
+      state.trajFull[id] = turn;
+      renderTrajPanel(panel, turn);
+      panel.dataset.loaded = '1';
+    }, function (e) {
+      panel.textContent = '轨迹加载失败：' + e.message;
+    });
+  }
+  function loadTrajectories() {
+    if (!state.workspace || !state.session) { state.trajectory = []; return Promise.resolve(); }
+    var sid = state.session.id;
+    return api('api/sessions/' + encodeURIComponent(sid) + '/trajectory').then(function (turns) {
+      if (state.session && state.session.id === sid) state.trajectory = turns || [];
+    }, function () { state.trajectory = []; });
+  }
+  // 把「第 N 轮」挂到该轮最后一条 assistant 消息上。从最新的一端对齐，
+  // 这样即使早期轮次没有轨迹（比如功能上线前），最近几轮仍然能正确对应。
+  function attachTrajectories() {
+    var turns = state.trajectory || [];
+    if (!turns.length || !state.messages.length) return;
+    var userIdx = [];
+    state.messages.forEach(function (m, i) { if (m.role === 'user') userIdx.push(i); });
+    if (!userIdx.length) return;
+    var newestUsers = userIdx.slice().reverse();
+    for (var j = 0; j < turns.length && j < newestUsers.length; j++) {
+      var start = newestUsers[j];
+      var end = j === 0 ? state.messages.length : newestUsers[j - 1];
+      for (var i = end - 1; i >= start; i--) {
+        if (state.messages[i].role === 'assistant') { state.messages[i].trajectory = turns[j]; break; }
+      }
+    }
+  }
   function assistantNode(msg, outputs, keyPrefix, isLive) {
     var wrap = el('div', 'msg assistant' + (isLive ? ' streaming' : ''));
     if (isLive) wrap.dataset.live = '1';
+    // 轨迹行默认折叠，放在最前面：先看到「这一轮做了什么」再看正文。
+    if (msg.trajectory && !isLive) {
+      wrap.appendChild(trajectoryRow(msg.trajectory, keyPrefix + ':traj'));
+    }
     if (msg.reasoning) wrap.appendChild(reasoningRow(msg.reasoning, keyPrefix + ':reason', isLive && !msg.content));
     var blocks = msg.blocks;
     if (!blocks) {
@@ -675,6 +847,7 @@
     if (ev.type === 'done' || ev.type === 'stopped') {
       state.ended = true;
       state.liveTokens = 0;                    // 服务端数字到了，丢弃本地估算
+      if (ev.trajectory_id) state.lastTrajectoryId = ev.trajectory_id;
       if (ev.type === 'done') applyMetrics(ev.metrics, ev.usage);
       renderMetrics();
     }
@@ -713,12 +886,17 @@
     setStreaming(false);
     var finish = function () { renderChat(); renderMetrics(); scrollMaybe(); };
     if (!sid) { finish(); return; }
-    // 结束后重新拉取，保证渲染状态与服务器一致
+    // 结束后重新拉取，保证渲染状态与服务器一致；轨迹是这一轮结束后才落盘的，
+    // 所以必须和会话一起重新取回来才能挂到对应的 assistant 消息上。
     api('api/sessions/' + encodeURIComponent(sid)).then(function (d) {
-      state.session = d.session || state.session;
-      state.messages = d.messages || [];
-      finish(); loadSessions();
-    }, finish);
+      if (state.session && state.session.id === sid) {
+        state.session = d.session || state.session;
+        state.messages = d.messages || [];
+      }
+    }, function () { }).then(loadTrajectories).then(function () {
+      attachTrajectories();
+    }).then(finish, finish);
+    loadSessions();
   }
   function sendMessage() {
     if (state.streaming) return;
@@ -999,6 +1177,7 @@
       renderWorkspaceMenu();
       if (!state.workspaces.length) {
         state.workspace = null; state.sessions = []; state.session = null; state.messages = [];
+        state.trajectory = []; state.lastTrajectoryId = null;
         renderWorkspaceChip(); renderSessions(); renderChat(); renderSettings();
         openAddWorkspace(true);
         return;
@@ -1017,6 +1196,7 @@
       state.session = null; state.messages = []; state.live = null; state.streamError = null;
       state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
       state.turnSteps = 0; state.turnStartAt = 0;
+      state.trajectory = []; state.lastTrajectoryId = null;
       state.files = { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 };
     }
     renderWorkspaceChip(); renderChat(); renderMetrics(); saveLS();
@@ -1052,13 +1232,19 @@
       state.turnSteps = num(state.stats.steps);
       state.turnStartAt = 0;
       state.liveTokens = 0; state.liveStartAt = 0;
-      saveLS(); renderSessions(); renderChat(); renderMetrics(); scrollMaybe(true);
+      state.lastTrajectoryId = null;
+      // 轨迹按需单独取：摘要用于折叠行，展开时再按 turn_id 拉完整记录。
+      return loadTrajectories().then(function () {
+        attachTrajectories();
+        saveLS(); renderSessions(); renderChat(); renderMetrics(); scrollMaybe(true);
+      });
     }, function (e) { toast('加载会话失败：' + e.message); });
   }
   function newSessionDraft() {
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
     state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
     state.turnSteps = 0; state.turnStartAt = 0;
+    state.trajectory = []; state.lastTrajectoryId = null;
     saveLS(); renderSessions(); renderChat(); renderMetrics(); showView('chat'); $('input').focus();
   }
   function openAddWorkspace(isEmpty) {
@@ -1392,7 +1578,14 @@
         return;
       }
       var line = e.target.closest && e.target.closest('.tool-line');
-      if (line) state.expanded[line.parentNode.dataset.key] = line.parentNode.classList.toggle('open');
+      if (line) {
+        var row = line.parentNode;
+        state.expanded[row.dataset.key] = row.classList.toggle('open');
+        // 轨迹面板内容按需加载：折叠时只有一行摘要，展开才请求完整记录。
+        if (row.classList.contains('traj-row') && row.classList.contains('open')) {
+          loadTrajectoryPanel(row);
+        }
+      }
     });
     $('overlay').onclick = function (e) { if (e.target === $('overlay')) closeDialog(); };
     $('files-save').onclick = saveFile;

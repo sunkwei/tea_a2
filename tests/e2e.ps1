@@ -185,6 +185,9 @@ try {
     Check "UI ships the composer metrics bar" ($indexRes.Content -match 'id="metric-cache"')
     Check "app.js renders the metrics block" ($appJs.Content -match 'applyMetrics')
     Check "app.css styles the metrics bar" ($appCss.Content -match '\.metric \.m-bar')
+    Check "UI ships the trajectory renderer" ($appJs.Content -match 'function trajectoryRow')
+    Check "UI fetches a turn trajectory on expand" ($appJs.Content -match 'api/turns/')
+    Check "app.css styles the trajectory timeline" ($appCss.Content -match '\.traj-step')
 
     Write-Host "`n== streaming chat (multi-turn tool calling) ==" -ForegroundColor Cyan
     $bodyFile = Join-Path $scratch 'chat.json'
@@ -265,6 +268,89 @@ try {
     $probeCode = $LASTEXITCODE
     Check "stream terminates cleanly for a strict client" ($probeCode -eq 0) `
         (($probeOut -join ' ').Trim())
+
+    Write-Host "`n== trajectory (per-turn audit record) ==" -ForegroundColor Cyan
+    $startEvent = $events | Where-Object { $_.type -eq 'start' } | Select-Object -First 1
+    $mainSession = $startEvent.session_id
+    Check "done event carries a trajectory_id" `
+        ((-not [string]::IsNullOrEmpty($doneEvent.trajectory_id)) -and ($doneEvent.trajectory_id -match '^t_[0-9a-f]+$')) `
+        "got '$($doneEvent.trajectory_id)'"
+
+    $trajPath = Join-Path $wsDir ".tea_agent_run\trajectories\$mainSession.jsonl"
+    Check "trajectory JSONL file exists" (Test-Path $trajPath) "missing $trajPath"
+    $trajLines = @(Get-Content $trajPath -ErrorAction SilentlyContinue)
+    $trajParsed = @()
+    $trajValid = ($trajLines.Count -ge 1)
+    foreach ($tl in $trajLines) {
+        if ([string]::IsNullOrWhiteSpace($tl)) { $trajValid = $false; continue }
+        try { $trajParsed += ($tl | ConvertFrom-Json) } catch { $trajValid = $false }
+    }
+    Check "every trajectory JSONL line is valid JSON" $trajValid
+    Check "trajectory file holds one line per turn" ($trajLines.Count -eq 1) "lines=$($trajLines.Count)"
+    $trajTurn = $trajParsed | Select-Object -First 1
+    Check "trajectory header has the turn id from done" ($trajTurn.turn_id -eq $doneEvent.trajectory_id) `
+        "file=$($trajTurn.turn_id) done=$($doneEvent.trajectory_id)"
+    Check "trajectory header has provider/model/usage" `
+        (($trajTurn.provider -eq 'mock') -and ($trajTurn.model -eq 'mock-model') -and ($null -ne $trajTurn.usage) -and ($null -ne $trajTurn.started_at))
+    # 4 model iterations + 3 tool executions in the mock sequence.
+    Check "trajectory records 4 model + 3 tool steps" `
+        (($trajTurn.steps.Count -eq 7) -and ((@($trajTurn.steps | Where-Object { $_.kind -eq 'model' })).Count -eq 4) -and ((@($trajTurn.steps | Where-Object { $_.kind -eq 'tool' })).Count -eq 3)) `
+        "steps=$($trajTurn.steps.Count)"
+
+    $trajSummaries = @(Invoke-RestMethod "$base/api/sessions/$mainSession/trajectory")
+    Check "GET session trajectory returns one turn" ($trajSummaries.Count -eq 1) "count=$($trajSummaries.Count)"
+    Check "turn summary reports the step count" ($trajSummaries[0].steps -eq 7) "steps=$($trajSummaries[0].steps)"
+    Check "turn summary reports elapsed/iterations/usage" `
+        (($trajSummaries[0].elapsed_ms -gt 0) -and ($trajSummaries[0].iterations -eq 4) -and ($null -ne $trajSummaries[0].usage))
+    Check "turn summary counts real file changes only" ($trajSummaries[0].files_changed -eq 1) `
+        "files_changed=$($trajSummaries[0].files_changed)"
+
+    $trajFull = @(Invoke-RestMethod "$base/api/sessions/$mainSession/trajectory?full=1")
+    $trajToolSteps = @($trajFull[0].steps | Where-Object { $_.kind -eq 'tool' })
+    Check "?full=1 includes the tool steps" ($trajToolSteps.Count -eq 3) "count=$($trajToolSteps.Count)"
+    $execStep = $trajToolSteps | Where-Object { $_.name -eq 'toolkit_exec' } | Select-Object -First 1
+    Check "tool step keeps the mock command" ($execStep.arguments -match 'echo mock-tool-exec-ok') `
+        "arguments=$($execStep.arguments)"
+    Check "tool step keeps the mock output" ($execStep.output -match 'mock-tool-exec-ok') `
+        "output=$($execStep.output)"
+    $writeStep = $trajToolSteps | Where-Object { $_.arguments -match '"op":"write"' } | Select-Object -First 1
+    Check "write step records the path and byte count" `
+        (($writeStep.output -match 'mock_note.txt') -and ($writeStep.ok -eq $true))
+    $noteChange = @($trajFull[0].files_changed | Where-Object { $_.path -eq 'mock_note.txt' })
+    Check "mock_note.txt appears in files_changed with a size" `
+        (($noteChange.Count -eq 1) -and ($noteChange[0].op -eq 'write') -and ($noteChange[0].bytes -eq 20)) `
+        "bytes=$($noteChange[0].bytes)"
+    $execChange = @($trajFull[0].files_changed | Where-Object { $_.op -eq 'exec' })
+    Check "exec is recorded as its command, not a guessed path" `
+        (($execChange.Count -eq 1) -and ($execChange[0].command -eq 'echo mock-tool-exec-ok') -and (-not ($execChange[0].PSObject.Properties.Name -contains 'path')))
+    Check "model steps carry token and timing fields" `
+        (($trajFull[0].steps[0].kind -eq 'model') -and ($null -ne $trajFull[0].steps[0].tokens) -and ($trajFull[0].steps[0].ttft_ms -ge 0))
+
+    $jsonlRes = Invoke-WebRequest "$base/api/sessions/$mainSession/trajectory?format=jsonl" -UseBasicParsing
+    Check "?format=jsonl is served as application/x-ndjson" `
+        (($jsonlRes.StatusCode -eq 200) -and ($jsonlRes.Headers['Content-Type'] -match 'application/x-ndjson')) `
+        "type=$($jsonlRes.Headers['Content-Type'])"
+    # Write the body to disk: PowerShell decodes some content types as bytes, and
+    # what matters here is that the bytes on the wire are the JSONL file itself.
+    $jsonlCopy = Join-Path $scratch 'trajectory-download.jsonl'
+    Invoke-WebRequest "$base/api/sessions/$mainSession/trajectory?format=jsonl" -UseBasicParsing -OutFile $jsonlCopy
+    $jsonlText = Get-Content $jsonlCopy -Raw
+    Check "?format=jsonl returns the raw file bytes" `
+        (($jsonlText -match [regex]::Escape($doneEvent.trajectory_id)) -and ((Get-Item $jsonlCopy).Length -eq (Get-Item $trajPath).Length)) `
+        "downloaded=$((Get-Item $jsonlCopy).Length) file=$((Get-Item $trajPath).Length)"
+
+    $oneTurn = Invoke-RestMethod "$base/api/turns/$($doneEvent.trajectory_id)/trajectory"
+    Check "GET /api/turns/:id/trajectory returns the same turn" `
+        (($oneTurn.turn_id -eq $doneEvent.trajectory_id) -and ($oneTurn.steps.Count -eq 7))
+
+    $trajRaw = Get-Content $trajPath -Raw
+    Check "no api key in the trajectory file" (-not ($trajRaw -match 'mock-key-not-used'))
+    $fullRaw = [string]::Join("`n", (Invoke-WebRequest "$base/api/sessions/$mainSession/trajectory?full=1" -UseBasicParsing).Content)
+    Check "no api key in the trajectory API response" (-not ($fullRaw -match 'mock-key-not-used'))
+    $missingStatus = 0
+    try { Invoke-RestMethod "$base/api/sessions/s_doesnotexist/trajectory" -ErrorAction Stop | Out-Null }
+    catch { $missingStatus = [int]$_.Exception.Response.StatusCode }
+    Check "trajectory for an unknown session is 404" ($missingStatus -eq 404) "status=$missingStatus"
 
     Write-Host "`n== side effects on disk ==" -ForegroundColor Cyan
     $runDir = Join-Path $wsDir '.tea_agent_run'
@@ -367,7 +453,82 @@ try {
     Check "session stores a rolling summary" `
         (($cSess.summary_upto -gt 0) -and (-not [string]::IsNullOrEmpty($cSess.summary))) `
         "upto=$($cSess.summary_upto) bytes=$($cSess.summary.Length)"
-    Check "compaction keeps the original messages" ($cSess.messages.Count -gt $cSess.summary_upto)}
+    Check "compaction keeps the original messages" ($cSess.messages.Count -gt $cSess.summary_upto)
+
+    # --- trajectory bounds and retention (per-workspace settings) -----------
+    # trajectory_step_max_bytes caps one tool output body; trajectory_max_turns
+    # caps the turns kept per session file (oldest first). Both live in
+    # <run_dir>/settings.yaml, which every request re-reads, so they apply at once.
+    Set-Content -Path $settingsPath -Encoding ASCII -Value @(
+        "settings:",
+        "  keep_turns: 1",
+        "  compaction_keep_recent: 2",
+        "  tool_output_max_lines: 50",
+        "  stream_include_usage: true",
+        "  trajectory_step_max_bytes: 12",
+        "  trajectory_max_turns: 1"
+    )
+
+    $capSession = (Invoke-RestMethod -Method Post -Uri "$base/api/workspaces/$wsId/sessions" `
+            -ContentType 'application/json' -Body '{"title":"trajectory-cap"}' -TimeoutSec 10).id
+    $null = Invoke-ChatTurn 'mock' $capSession 'trajectory step cap'
+    $capPath = Join-Path $wsDir ".tea_agent_run\trajectories\$capSession.jsonl"
+    Check "trajectory file created for the capped session" (Test-Path $capPath)
+    $capTurn = (Get-Content $capPath -Raw | ConvertFrom-Json)
+    $capExec = $capTurn.steps | Where-Object { $_.name -eq 'toolkit_exec' } | Select-Object -First 1
+    Check "step output honours trajectory_step_max_bytes" `
+        (($capExec.output_truncated -eq $true) -and ($capExec.output -match 'bytes of tool output dropped') -and ($capExec.output_bytes -gt 12)) `
+        "output='$($capExec.output)'"
+
+    $retSession = (Invoke-RestMethod -Method Post -Uri "$base/api/workspaces/$wsId/sessions" `
+            -ContentType 'application/json' -Body '{"title":"trajectory-retention"}' -TimeoutSec 10).id
+    $null = Invoke-ChatTurn 'mock' $retSession 'retention turn one'
+    $ret2Events = Invoke-ChatTurn 'mock' $retSession 'retention turn two'
+    $retDone = $ret2Events | Where-Object { $_.type -eq 'done' } | Select-Object -First 1
+    $retPath = Join-Path $wsDir ".tea_agent_run\trajectories\$retSession.jsonl"
+    $retLines = @(Get-Content $retPath -ErrorAction SilentlyContinue)
+    Check "retention keeps at most trajectory_max_turns lines" ($retLines.Count -eq 1) `
+        "lines=$($retLines.Count)"
+    $retTurn = $retLines[0] | ConvertFrom-Json
+    Check "retention keeps the newest turn" ($retTurn.turn_id -eq $retDone.trajectory_id) `
+        "kept=$($retTurn.turn_id) newest=$($retDone.trajectory_id)"
+    $logsAfter = Invoke-RestMethod "$base/api/workspaces/$wsId/logs?tail=200"
+    Check "retention logs what it pruned" `
+        (((@($logsAfter.lines) -join "`n")) -match 'trajectory: pruned 1 turn\(s\)') `
+        "no prune line in the workspace log"
+
+    # --- byte cap: trajectory_max_bytes alone also prunes oldest-first -------
+    Set-Content -Path $settingsPath -Encoding ASCII -Value @(
+        "settings:",
+        "  stream_include_usage: true",
+        "  trajectory_max_bytes: 1024"
+    )
+    $byteSession = (Invoke-RestMethod -Method Post -Uri "$base/api/workspaces/$wsId/sessions" `
+            -ContentType 'application/json' -Body '{"title":"trajectory-bytes"}' -TimeoutSec 10).id
+    $null = Invoke-ChatTurn 'mock' $byteSession 'byte cap turn one'
+    $null = Invoke-ChatTurn 'mock' $byteSession 'byte cap turn two'
+    $bytePath = Join-Path $wsDir ".tea_agent_run\trajectories\$byteSession.jsonl"
+    $byteLines = @(Get-Content $bytePath -ErrorAction SilentlyContinue)
+    $byteSize = if (Test-Path $bytePath) { (Get-Item $bytePath).Length } else { -1 }
+    Check "retention honours trajectory_max_bytes (oldest dropped)" `
+        (($byteLines.Count -eq 1) -and ($byteSize -le 1024)) `
+        "lines=$($byteLines.Count) bytes=$byteSize"
+
+    # --- enable_trajectory: false must write nothing at all ------------------
+    Set-Content -Path $settingsPath -Encoding ASCII -Value @(
+        "settings:",
+        "  stream_include_usage: true",
+        "  enable_trajectory: false"
+    )
+    $offSession = (Invoke-RestMethod -Method Post -Uri "$base/api/workspaces/$wsId/sessions" `
+            -ContentType 'application/json' -Body '{"title":"trajectory-off"}' -TimeoutSec 10).id
+    $offEvents = Invoke-ChatTurn 'mock' $offSession 'trajectory disabled'
+    $offDone = $offEvents | Where-Object { $_.type -eq 'done' } | Select-Object -First 1
+    Check "enable_trajectory=false writes no trajectory file" `
+        (-not (Test-Path (Join-Path $wsDir ".tea_agent_run\trajectories\$offSession.jsonl")))
+    Check "enable_trajectory=false omits trajectory_id from done" `
+        ([string]::IsNullOrEmpty($offDone.trajectory_id)) "got '$($offDone.trajectory_id)'"
+}
 catch {
     Write-Host "`nUNEXPECTED ERROR: $_" -ForegroundColor Red
     $failures += "exception"

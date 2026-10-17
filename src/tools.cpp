@@ -74,6 +74,10 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
 
   CommandOptions options;
   options.command = command;
+  // The trajectory records the command (never a guessed path list) as what this
+  // tool touched; `command` is also the only thing an exec result can honestly
+  // report.
+  result.meta["command"] = command;
   options.tmp_dir = ctx.workspace->tmp_dir();
   options.shell = arg_str(args, "shell", ctx.workspace->settings().shell);
   options.timeout_ms = static_cast<int>(arg_int(args, "timeout_ms", ctx.workspace->settings().command_timeout_ms));
@@ -202,6 +206,10 @@ ToolResult tool_write(const std::string& path, const ToolContext& ctx, const nlo
                   " bytes total)";
   result.meta["bytes"] = static_cast<long long>(content.size());
   result.meta["size"] = file_size(path);
+  // Structured attribution for the turn trajectory: the exact path the tool
+  // wrote and the byte count it reported, not something inferred later.
+  result.meta["file_op"] = append ? "append" : "write";
+  result.meta["path"] = rel_or_abs(*ctx.workspace, path);
   return result;
 }
 
@@ -327,6 +335,8 @@ ToolResult tool_file(const nlohmann::json& args, const ToolContext& ctx) {
     }
     result.ok = true;
     result.output = "deleted " + rel_or_abs(*ctx.workspace, path);
+    result.meta["file_op"] = "delete";
+    result.meta["path"] = rel_or_abs(*ctx.workspace, path);
     return result;
   }
 
@@ -352,6 +362,9 @@ ToolResult tool_file(const nlohmann::json& args, const ToolContext& ctx) {
     result.ok = true;
     result.output = "moved " + rel_or_abs(*ctx.workspace, path) + " -> " +
                     rel_or_abs(*ctx.workspace, dest);
+    result.meta["file_op"] = "move";
+    result.meta["path"] = rel_or_abs(*ctx.workspace, path);
+    result.meta["dest"] = rel_or_abs(*ctx.workspace, dest);
     return result;
   }
 

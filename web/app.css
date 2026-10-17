@@ -237,6 +237,63 @@ button{font-family:inherit}
 .pulse{animation:pulse 1.4s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.45}}
 
+/* ---------- 轨迹：每轮的结构化审计记录（默认折叠） ---------- */
+.traj-row>.tool-line .tool-summary{font-family:var(--ds-font-family-code);font-size:12px}
+.traj-badge{flex:0 0 auto;margin-left:8px;font-size:11px;color:var(--dsw-alias-state-error-primary)}
+.traj-panel{max-height:440px}
+.traj-head{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;
+  padding-bottom:6px;border-bottom:.5px solid var(--dsw-alias-border-l1);
+}
+.traj-head .traj-sum{color:var(--dsw-alias-label-tertiary);font-size:12px}
+.traj-head .traj-id{color:var(--dsw-alias-label-caption);font-size:11px;font-family:var(--ds-font-family-code)}
+.traj-error{margin-bottom:8px;color:var(--dsw-alias-state-error-primary);font-size:12px;white-space:pre-wrap;word-break:break-word}
+.traj-step{margin-bottom:8px;padding-left:8px;border-left:2px solid var(--dsw-alias-border-l2)}
+.traj-step.model{border-left-color:var(--dsw-alias-state-business-primary)}
+.traj-step.tool{border-left-color:var(--dsw-alias-state-success-primary)}
+.traj-step.compaction{border-left-color:var(--dsw-alias-state-warn-primary)}
+.traj-step-head{
+  display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;
+  font-size:12px;color:var(--dsw-alias-label-tertiary);
+}
+.traj-idx{color:var(--dsw-alias-label-caption)}
+.traj-kind{color:var(--dsw-alias-label-secondary)}
+.traj-name{font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-secondary)}
+.traj-ms{color:var(--dsw-alias-label-caption)}
+.traj-info,.traj-flags{color:var(--dsw-alias-label-caption)}
+.traj-tok{color:var(--dsw-alias-label-caption);font-family:var(--ds-font-family-code)}
+.traj-args{
+  margin:4px 0 0;padding:3px 8px;border-radius:4px;
+  background:var(--dsw-alias-markdown-code-block-banner);color:var(--dsw-alias-label-secondary);
+  font:11px/16px var(--ds-font-family-code);white-space:pre-wrap;word-break:break-word;
+}
+.traj-out{
+  margin:4px 0 0;padding:8px 10px;max-height:200px;overflow:auto;border-radius:6px;
+  background:var(--dsw-alias-markdown-code-block);border:.5px solid var(--dsw-alias-border-l1);
+  color:var(--dsw-alias-label-secondary);font:11px/16px var(--ds-font-family-code);
+  white-space:pre-wrap;word-break:break-word;
+}
+.traj-note{font-size:11px;color:var(--dsw-alias-label-caption)}
+.traj-files{margin-top:10px;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l1)}
+.traj-files-title{
+  font-size:11px;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--dsw-alias-label-caption);margin-bottom:5px;
+}
+.traj-file{display:flex;align-items:baseline;gap:8px;font-size:12px;line-height:18px}
+.traj-op{
+  flex:0 0 auto;min-width:44px;font-family:var(--ds-font-family-code);font-size:11px;
+  color:var(--dsw-alias-label-caption);
+}
+.traj-op.write,.traj-op.append{color:var(--dsw-alias-state-success-primary)}
+.traj-op.delete,.traj-op.exec{color:var(--dsw-alias-state-warn-primary)}
+.traj-op.move{color:var(--dsw-alias-state-business-primary)}
+.traj-path{color:var(--dsw-alias-label-secondary);word-break:break-all}
+.traj-cmd{color:var(--dsw-alias-label-secondary);font:11px/16px var(--ds-font-family-code);word-break:break-all}
+.traj-file-meta{
+  margin-left:auto;flex:0 0 auto;color:var(--dsw-alias-label-caption);
+  font-size:11px;font-family:var(--ds-font-family-code);
+}
+
 /* ---------- composer ---------- */
 .composer{
   display:flex;align-items:flex-end;gap:8px;padding:10px 10px 10px 14px;

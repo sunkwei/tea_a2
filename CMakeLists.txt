@@ -199,6 +199,7 @@ set(TEA_SOURCES
   src/tools.cpp
   src/workspace.cpp
   src/llm.cpp
+  src/trajectory.cpp
   src/agent.cpp
   src/server.cpp
   ${TEA_WEB_ASSETS_CPP}

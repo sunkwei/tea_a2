@@ -6,6 +6,7 @@
 #include "env.h"
 #include "http.h"
 #include "log.h"
+#include "trajectory.h"
 #include "util.h"
 #include "version.h"
 
@@ -592,11 +593,30 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   session->info.updated_at = now_iso8601();
   workspace.save_session(*session, nullptr);
 
+  // --- trajectory ----------------------------------------------------------
+  // One machine-readable record per turn, written under
+  // <run_dir>/trajectories/<session_id>.jsonl. The header line lands on disk
+  // before the first model request and is refreshed after every step, so a
+  // killed process still leaves a usable partial trajectory.
+  TrajectoryRecorder trajectory;
+  trajectory.begin(workspace, session->info.id, workspace.id(), provider, model);
+  const EventEmitter emit_user = emit;
+  // Compaction is the one step that does not pass through this function's own
+  // bookkeeping (it runs inside maybe_compact, both before the loop and during
+  // overflow recovery), so it is recorded where both paths meet: the event.
+  EventEmitter emit_all = [&trajectory, emit_user](const nlohmann::json& event) {
+    if (event.is_object() && event.value("type", std::string()) == "compaction") {
+      trajectory.record_compaction(event.value("covered_messages", static_cast<long long>(0)),
+                                   event.value("summary_bytes", static_cast<long long>(0)));
+    }
+    emit_user(event);
+  };
+
   // Fold the oldest turns into a summary before the context overflows, so the
   // model keeps the thread of the conversation instead of silently losing it.
   // Runs before the start event so a compaction event lands first in the stream.
   if (st.enable_compaction) {
-    maybe_compact(workspace, session, provider, model, model_info, cancel, emit);
+    maybe_compact(workspace, session, provider, model, model_info, cancel, emit_all);
   }
 
   // --- announce the turn ---------------------------------------------------
@@ -621,6 +641,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       break;
     }
     out.iterations = iteration + 1;
+    // Wall-clock start of this iteration; the trajectory reports the whole
+    // iteration (including a retry after a provider disagreement) rather than
+    // just the last HTTP round trip.
+    const int64_t iteration_started = now_ms();
 
     std::vector<Message> context;
     ContextStats ctx_stats;
@@ -724,7 +748,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
           looks_like_context_overflow(failure)) {
         overflow_recovered = true;
         LOG_WARN("llm: provider reported a context overflow; compacting and retrying");
-        if (maybe_compact(workspace, session, provider, model, model_info, cancel, emit, true)) {
+        if (maybe_compact(workspace, session, provider, model, model_info, cancel, emit_all, true)) {
           build_context(workspace, *session, model_info, &context, &ctx_stats);
           continue;
         }
@@ -774,6 +798,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     out.output_tokens += iter_output;
     out.generation_ms += iter_gen_ms;
     if (out.ttft_ms == 0) out.ttft_ms = chat.ttft_ms;
+
+    // Trajectory: what this iteration produced and what it cost. `has_usage`
+    // decides whether the token counts are provider facts or local estimates.
+    trajectory.record_model(iteration_started, chat.reasoning, chat.content, chat.tool_calls,
+                            chat.usage, !has_usage, chat.ttft_ms);
 
     Message assistant;
     assistant.role = "assistant";
@@ -872,6 +901,13 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       result_event["truncated"] = tool_result.truncated;
       emit(result_event);
 
+      // Trajectory: the raw arguments the model emitted plus what the tool
+      // actually reported (paths, byte counts, exit code, filter decisions).
+      trajectory.record_tool(call.name,
+                             call.raw_arguments.empty() ? call.arguments.dump()
+                                                        : call.raw_arguments,
+                             tool_result, tool_message.elapsed_ms);
+
       if (out.cancelled) break;
     }
 
@@ -889,6 +925,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   session->info.updated_at = now_iso8601();
   workspace.save_session(*session, nullptr);
 
+  // Close the trajectory (stamps finished_at/ok/usage, appends the final line
+  // and applies retention) before the done event announces its id.
+  trajectory.finish(out.ok, out.error, out.detail, out.iterations, out.usage,
+                    out.usage_estimated);
+
 
   if (out.cancelled) {
     nlohmann::json event = nlohmann::json::object();
@@ -904,6 +945,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
                                     out.ttft_ms, out.generation_ms, out.usage_estimated,
                                     out.elapsed_ms);
     event["content"] = out.content;
+    // The caller learns the audit-trail id without polling; the full record is
+    // at GET /api/turns/<trajectory_id>/trajectory.
+    if (trajectory.active()) event["trajectory_id"] = trajectory.turn_id();
     emit(event);
   }
   (void)finished;
