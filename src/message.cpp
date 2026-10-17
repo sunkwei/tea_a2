@@ -6,7 +6,7 @@
 
 namespace tea {
 
-nlohmann::json Message::to_wire() const {
+nlohmann::json Message::to_wire(bool include_reasoning) const {
   nlohmann::json j = nlohmann::json::object();
   j["role"] = role;
 
@@ -17,10 +17,17 @@ nlohmann::json Message::to_wire() const {
     return j;
   }
 
-  if (role == "assistant" && !tool_calls.empty()) {
+  if (role == "assistant") {
     // Some providers reject a missing "content" key even when tool calls are
     // present, so keep it (possibly empty).
     j["content"] = content;
+    // "Thinking mode" gateways insist on receiving the previous assistant
+    // reasoning back verbatim; api.deepseek.com rejects it instead. The callers
+    // decide via include_reasoning (see resolve_reasoning_echo in agent.cpp).
+    if (include_reasoning && !reasoning.empty()) {
+      j["reasoning_content"] = reasoning;
+    }
+    if (tool_calls.empty()) return j;
     nlohmann::json arr = nlohmann::json::array();
     for (std::size_t i = 0; i < tool_calls.size(); ++i) {
       const ToolCall& tc = tool_calls[i];

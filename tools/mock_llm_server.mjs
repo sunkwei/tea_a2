@@ -27,21 +27,34 @@ function toolTurns(messages) {
 function planTurn(turn) {
   switch (turn) {
     case 0:
+      // Thinking mode: emit reasoning *before* the tool call. Real gateways
+      // (opencode.ai and friends) then demand that this reasoning be echoed
+      // back on the follow-up request, so the client must send
+      // reasoning_content on the assistant message it replays.
       return {
+        reasoning:
+          'The user wants the directory listing. I will run a shell command and then a file ' +
+          'tool, so the answer is backed by two independent sources.',
         tool: {
           name: 'toolkit_exec',
           arguments: { command: 'echo mock-tool-exec-ok' },
         },
       };
     case 1:
+      // Every turn that returns tool calls also emits reasoning, so the
+      // reasoning echo requirement is exercised on every follow-up.
       return {
+        reasoning: 'The command output is in; next I will leave a note on disk.',
         tool: {
           name: 'toolkit_file',
           arguments: { op: 'write', path: 'mock_note.txt', content: 'written by mock llm\n' },
         },
       };
     case 2:
-      return { tool: { name: 'toolkit_file', arguments: { op: 'read', path: 'mock_note.txt' } } };
+      return {
+        reasoning: 'Now read the note back to confirm the write landed.',
+        tool: { name: 'toolkit_file', arguments: { op: 'read', path: 'mock_note.txt' } },
+      };
     default:
       return {
         content:
@@ -55,6 +68,24 @@ function planTurn(turn) {
           'operations before summarising.',
       };
   }
+}
+
+// Same wording the real gateway uses, so a regression here is self-explanatory.
+const REASONING_MISSING_MESSAGE =
+  'Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking ' +
+  'mode must be passed back to the API.';
+
+/// Mirror of the upstream contract: once an assistant turn carried tool calls in
+/// thinking mode, the replayed assistant message must keep its reasoning.
+function checkReasoningEchoed(messages) {
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue;
+    if (!Array.isArray(m.tool_calls) || m.tool_calls.length === 0) continue;
+    if (typeof m.reasoning_content !== 'string' || m.reasoning_content.length === 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function sseChunks(res, turn) {
@@ -161,6 +192,18 @@ const server = http.createServer((req, res) => {
       `[mock-llm] ${req.method} ${url.pathname} model=${parsed.model} turn=${turn} ` +
         `stream=${!!parsed.stream} messages=${messages.length} tools=[${tools.join(',')}]`,
     );
+
+    // Enforce the upstream thinking-mode contract on every follow-up request.
+    if (turn >= 1 && !checkReasoningEchoed(messages)) {
+      console.log('[mock-llm] REJECTED: reasoning_content missing on a replayed assistant turn');
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { message: REASONING_MISSING_MESSAGE, type: 'invalid_request_error' },
+        }),
+      );
+      return;
+    }
 
     if (parsed.stream) {
       res.writeHead(200, {

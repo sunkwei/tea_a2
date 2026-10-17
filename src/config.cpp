@@ -216,6 +216,22 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
         }
       }
 
+      // Whether the assistant's reasoning_content must be echoed back to this
+      // endpoint on the follow-up request.
+      if (yhas(pn, "reasoning_content")) {
+        const std::string echo = to_lower(trim(ystr(pn, "reasoning_content")));
+        if (echo == "keep" || echo == "true" || echo == "always") {
+          info.reasoning_echo = ReasoningEcho::Keep;
+        } else if (echo == "strip" || echo == "false" || echo == "never") {
+          info.reasoning_echo = ReasoningEcho::Strip;
+        } else if (echo == "auto" || echo.empty()) {
+          info.reasoning_echo = ReasoningEcho::Auto;
+        } else {
+          warnings.push_back("provider '" + name + "': unknown reasoning_content '" + echo +
+                             "' (use auto|keep|strip); falling back to auto");
+        }
+      }
+
       if (info.api_url.empty()) {
         warnings.push_back("provider '" + name + "' has no api_url; skipped");
         continue;
@@ -320,6 +336,19 @@ bool AppConfig::set_active(const std::string& provider_name, const std::string& 
   active_provider = pname;
   active_model = mname;
   return true;
+}
+
+bool AppConfig::lookup_reasoning_echo(const std::string& provider_name, bool* out) const {
+  std::lock_guard<std::mutex> lock(reasoning_mu_);
+  std::map<std::string, bool>::const_iterator it = reasoning_echo_learned_.find(provider_name);
+  if (it == reasoning_echo_learned_.end()) return false;
+  if (out) *out = it->second;
+  return true;
+}
+
+void AppConfig::remember_reasoning_echo(const std::string& provider_name, bool keep) {
+  std::lock_guard<std::mutex> lock(reasoning_mu_);
+  reasoning_echo_learned_[provider_name] = keep;
 }
 
 std::string AppConfig::default_system_prompt() const {

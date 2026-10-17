@@ -236,6 +236,7 @@ providers:
     default_model: deepseek-chat
     headers:                               # 可选：网关自定义头
       x-opencode-session: '${session_id}'  # ${session_id} 会替换为当前会话 id
+    reasoning_content: auto                # keep | strip | auto（默认 auto，见下）
     models:
       deepseek-chat:
         max_context_tokens: 128000
@@ -255,6 +256,34 @@ settings:
 
 解析顺序：`--provider`/`--model` → `roles.main` → 第一个 provider 的 `default_model`。
 api_key 只在日志里以掩码出现，HTTP 接口从不下发。
+
+### 回传 `reasoning_content`（多轮工具调用的坑）
+
+第二轮请求要不要把上一轮 assistant 的 `reasoning_content` 原样带回，各家要求正好相反：
+
+- **thinking 模式网关必须带回**（opencode.ai 等），否则第二次请求直接 400：
+  *The `reasoning_content` in the thinking mode must be passed back to the API.*
+- **DeepSeek 只把它当响应字段**——[官方 Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion)
+  里 `reasoning_content` 出现在 assistant 响应中，请求体没有这个字段，所以默认不回传。
+
+`auto`（默认）按端点判断：`*.deepseek.com` 不回传，其余回传。猜错也不会卡住——收到 400 且错误里
+提到 `reasoning_content` 时，程序会翻转策略、记住结论（进程内）并重试同一次请求，同时打一条
+`provider disagreed about reasoning_content; retrying with echo=...`。要固定行为就显式写：
+
+```yaml
+providers:
+  opencode:
+    reasoning_content: keep    # keep：总是回传；strip：从不回传
+```
+
+### 自定义请求头
+
+`headers:` 里的值支持 `${session_id}` 占位符，按会话替换。`opencode.ai` 端点若没配
+`x-opencode-session`，程序会自动补一个——[其文档](https://opencode.ai/docs/go/)要求客户端
+「为每个会话发送稳定的 session id」。同一份文档还要求客户端用自己的 UA 标识，所以两个传输后端
+（socket+TLS 与 WinHTTP）都会带 `User-Agent: tea_agent/<version>`，不会伪装成通用 HTTP 库。
+
+因此**不必修改 Python 版已有的 `provider.yaml`** 就能直接接入。
 
 `tea_agent.yaml`（可选）用来放 C++ 版专属设置，避免污染 `provider.yaml`：
 
@@ -369,9 +398,16 @@ pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
 ```
 
 `tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
-再以独立 `--tea-home` 启动 agent，覆盖 **42 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
+再以独立 `--tea-home` 启动 agent，覆盖 **43 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
 SSE 事件序列、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、目录树与文件读写、
 记忆与日志接口、内置 UI 交付且无 CDN 依赖。全程本地 `http://`，不需要 api_key。
+
+其中一条是**思考回传的回归测试**：mock 会像真实 thinking 网关那样，一旦发现被重放的 assistant
+消息丢了 `reasoning_content` 就回 400。用修复前的二进制跑这套测试会挂 7 项，可以据此确认测试
+确实覆盖了这个 bug。
+
+脚本开跑前会检查端口占用，发现残留监听就直接报错退出——否则会静默连到上一次遗留的实例上，
+表现为「卡住」而不是失败。
 
 ---
 

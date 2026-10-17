@@ -206,6 +206,18 @@ if(WIN32)
   list(APPEND TEA_SOURCES src/http_winhttp.cpp)
 endif()
 
+# Localized Visual Studio emits a non-ASCII `/showIncludes` prefix (for a
+# Chinese VS: "注意: 包含文件:"). CMake stores that prefix in the generated
+# makefile, where it does not survive the encoding, so the filter matches
+# nothing, the .obj.d files stay empty and editing a header silently does not
+# trigger a rebuild. Declare the dependency explicitly instead: with ~10 TUs it
+# costs a full recompile of our sources only when a header actually changes.
+if(MSVC)
+  file(GLOB_RECURSE TEA_PROJECT_HEADERS CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
+  set_property(SOURCE ${TEA_SOURCES} APPEND PROPERTY OBJECT_DEPENDS ${TEA_PROJECT_HEADERS})
+endif()
+
 add_executable(tea_agent ${TEA_SOURCES})
 # NOTE: src/ is deliberately NOT on the include path. It would make the
 # compiler resolve system headers such as <process.h> (pulled in by <thread>)

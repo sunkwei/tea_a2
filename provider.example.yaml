@@ -49,6 +49,10 @@ providers:
     default_model: deepseek-v4.1-flash
     headers:
       x-opencode-session: '${session_id}'
+    # Thinking-mode gateways demand the previous assistant reasoning be echoed
+    # back on the follow-up request; DeepSeek rejects/ignores it. `auto` (the
+    # default) decides per endpoint and self-corrects on a 400.
+    reasoning_content: auto
     models:
       deepseek-v4.1-flash:
         max_context_tokens: 1000000

@@ -122,11 +122,21 @@ HttpResponse http_perform_winhttp(const HttpRequest& req, const HttpChunkCallbac
 
   std::wstring headers;
   bool has_content_type = false;
+  bool has_user_agent = false;
   for (std::size_t i = 0; i < req.headers.size(); ++i) {
     const std::string lname = to_lower(req.headers[i].name);
     if (lname == "content-length" || lname == "host" || lname == "connection") continue;
     if (lname == "content-type") has_content_type = true;
+    if (lname == "user-agent") has_user_agent = true;
     headers += utf8_to_wide(req.headers[i].name + ": " + req.headers[i].value + "\r\n");
+  }
+  if (!has_user_agent) {
+    // Gateways such as opencode.ai ask clients to identify themselves rather
+    // than look like a generic HTTP library, so never fall back to the WinHTTP
+    // default.
+    headers = utf8_to_wide(std::string("User-Agent: tea_agent/") + TEA_AGENT_VERSION_STRING +
+                           "\r\n") +
+              headers;
   }
   if (!req.body.empty() && !has_content_type) {
     headers += utf8_to_wide("Content-Type: " + req.content_type + "\r\n");

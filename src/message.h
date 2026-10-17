@@ -29,7 +29,10 @@ struct Message {
   std::string created_at;
 
   /// OpenAI wire format (what we POST to the provider).
-  nlohmann::json to_wire() const;
+  /// `include_reasoning` echoes `reasoning_content` back on assistant turns.
+  /// "Thinking mode" gateways (vLLM/SGLang/GLM/Kimi/opencode...) require it on
+  /// the follow-up request; api.deepseek.com rejects it outright.
+  nlohmann::json to_wire(bool include_reasoning = false) const;
   /// Storage format: a superset that also keeps reasoning/timing metadata.
   nlohmann::json to_store() const;
   static Message from_store(const nlohmann::json& j);

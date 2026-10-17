@@ -30,6 +30,26 @@ nlohmann::json usage_json(const ChatUsage& usage) {
   return usage.to_json();
 }
 
+bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provider) {
+  bool learned = false;
+  if (config.lookup_reasoning_echo(provider.name, &learned)) return learned;
+
+  if (provider.reasoning_echo == ReasoningEcho::Keep) return true;
+  if (provider.reasoning_echo == ReasoningEcho::Strip) return false;
+
+  // Auto: the two behaviours are both real. DeepSeek's API reference documents
+  // reasoning_content only as an *output* field of the assistant message, so we
+  // do not send it there. opencode.ai and other thinking-mode gateways reject a
+  // follow-up request that omits it ("The `reasoning_content` in the thinking
+  // mode must be passed back to the API"), so we keep it everywhere else. If a
+  // provider still disagrees, run_turn flips this and retries once.
+  const ParsedUrl url = parse_url(provider.api_url);
+  if (!url.valid) return false;
+  const std::string host = to_lower(url.host);
+  if (host == "deepseek.com" || ends_with(host, ".deepseek.com")) return false;
+  return true;
+}
+
 std::string platform_description() {
 #ifdef _WIN32
   return "Windows";
@@ -160,6 +180,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     return out;
   }
 
+  bool echo_reasoning = resolve_reasoning_echo(*config_, *provider_info);
+  LOG_DEBUG("agent: turn start provider=", provider, " model=", model,
+            " reasoning_echo=", echo_reasoning ? 1 : 0, " history=", session->messages.size());
+
   // --- persist the user message -------------------------------------------
   Message user_message = Message::make("user", user_text);
   session->messages.push_back(user_message);
@@ -254,10 +278,6 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       request.top_p = model_info->top_p;
     }
 
-    nlohmann::json wire_messages = nlohmann::json::array();
-    for (std::size_t i = 0; i < context.size(); ++i) wire_messages.push_back(context[i].to_wire());
-    request.messages = wire_messages;
-
     DeltaCallback on_delta = [&emit](DeltaKind kind, const std::string& text) {
       nlohmann::json event = nlohmann::json::object();
       event["type"] = (kind == DeltaKind::Reasoning) ? "reasoning_delta" : "content_delta";
@@ -265,8 +285,33 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       emit(event);
     };
 
-    const ChatResult chat =
-        llm_chat(request, options.stream ? on_delta : DeltaCallback(), cancel);
+    // Thinking-mode gateways require the previous assistant reasoning_content on
+    // the follow-up request; api.deepseek.com rejects it. The provider config
+    // sets the initial policy, and if the provider disagrees we flip once,
+    // remember the answer for the rest of the process, and retry.
+    ChatResult chat;
+    for (int attempt = 0;; ++attempt) {
+      nlohmann::json wire_messages = nlohmann::json::array();
+      for (std::size_t i = 0; i < context.size(); ++i) {
+        wire_messages.push_back(context[i].to_wire(echo_reasoning));
+      }
+      request.messages = wire_messages;
+
+      chat = llm_chat(request, options.stream ? on_delta : DeltaCallback(), cancel);
+      LOG_DEBUG("agent: iteration ", iteration + 1, " chat done ok=", chat.ok ? 1 : 0,
+                " status=", chat.http_status);
+
+      const bool produced_output =
+          !chat.content.empty() || !chat.reasoning.empty() || !chat.tool_calls.empty();
+      if (chat.ok || chat.cancelled || attempt >= 1) break;
+      if (chat.http_status != 400 || produced_output) break;
+      if (!contains(to_lower(chat.error + " " + chat.detail), "reasoning_content")) break;
+
+      echo_reasoning = !echo_reasoning;
+      config_->remember_reasoning_echo(provider_info->name, echo_reasoning);
+      LOG_WARN("llm: provider disagreed about reasoning_content; retrying with echo=",
+               echo_reasoning ? "on" : "off");
+    }
 
     if (chat.cancelled) {
       out.cancelled = true;

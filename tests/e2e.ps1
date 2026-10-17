@@ -66,9 +66,22 @@ function Wait-Port([int]$port, [int]$timeoutSec = 20) {
     return $false
 }
 
+# A leftover listener on one of our ports used to make this script silently talk
+# to a stale instance (and hang). Refuse to run instead.
+function Assert-PortFree([int]$port, [string]$what) {
+    $busy = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    if ($busy) {
+        $owners = ($busy | ForEach-Object { $_.OwningProcess } | Sort-Object -Unique) -join ', '
+        throw "$what port $port is already in use (pid $owners). Stop it or pass another port."
+    }
+}
+
 $mock = $null
 $agent = $null
 try {
+    Assert-PortFree $MockPort 'mock LLM'
+    Assert-PortFree $AgentPort 'agent'
+
     Write-Host "`n== starting mock LLM on $MockPort ==" -ForegroundColor Cyan
     $mock = Start-Process -FilePath 'node' `
         -ArgumentList (Join-Path $root 'tools\mock_llm_server.mjs'), '--port', "$MockPort" `
@@ -133,7 +146,8 @@ try {
     @{ workspace_id = $wsId; message = 'please run the mock tool sequence' } |
         ConvertTo-Json -Compress | Set-Content -Path $bodyFile -Encoding UTF8
 
-    $raw = & curl.exe -N -s -X POST -H "Content-Type: application/json" `
+    # --max-time so a stalled stream fails the check instead of hanging forever.
+    $raw = & curl.exe -N -s --max-time 300 -X POST -H "Content-Type: application/json" `
         --data-binary "@$bodyFile" "$base/api/chat" 2>&1 | Out-String
 
     $events = @()
@@ -155,6 +169,10 @@ try {
     Check "stream has tool_result" ($types -contains 'tool_result')
     Check "stream has iteration_end" ($types -contains 'iteration_end')
     Check "stream has done" ($types -contains 'done')
+    # Regression: thinking-mode gateways reject the follow-up request when the
+    # replayed assistant turn lost its reasoning_content. The mock enforces that
+    # contract and answers 400, which surfaces here as an error event.
+    Check "no error event (reasoning_content echoed back)" ($types -notcontains 'error')
 
     $execResults = $events | Where-Object { $_.type -eq 'tool_result' -and $_.name -eq 'toolkit_exec' }
     Check "toolkit_exec ran" ($execResults.Count -ge 1)

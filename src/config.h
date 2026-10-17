@@ -5,10 +5,21 @@
 
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
 namespace tea {
+
+/// Whether assistant `reasoning_content` is echoed back on the follow-up
+/// request. Providers disagree, and both behaviours are fatal if guessed wrong:
+/// thinking-mode gateways (vLLM/SGLang/GLM/Kimi/opencode) *require* it, while
+/// api.deepseek.com answers 400 if it is present.
+enum class ReasoningEcho {
+  Auto,   // decide from the endpoint, then learn from the provider's reply
+  Keep,   // always echo reasoning_content
+  Strip   // never echo it
+};
 
 struct ModelInfo {
   std::string name;
@@ -37,6 +48,8 @@ struct ProviderInfo {
   /// Extra request headers sent with every completion call. Values may contain
   /// the placeholder ${session_id}, which is replaced per conversation.
   std::vector<std::pair<std::string, std::string> > headers;
+  /// How to treat assistant reasoning_content on the wire.
+  ReasoningEcho reasoning_echo = ReasoningEcho::Auto;
 
   bool has_key() const { return !api_key.empty(); }
   const ModelInfo* find_model(const std::string& name) const;
@@ -86,6 +99,16 @@ struct AppConfig {
   bool set_active(const std::string& provider, const std::string& model, std::string* err);
 
   std::string default_system_prompt() const;
+
+  // ---- learned runtime behaviour -----------------------------------------
+  // A provider's opinion on reasoning_content can only be discovered by asking
+  // it, so the first wrong guess is remembered here for the whole process.
+  bool lookup_reasoning_echo(const std::string& provider_name, bool* out) const;
+  void remember_reasoning_echo(const std::string& provider_name, bool keep);
+
+ private:
+  mutable std::mutex reasoning_mu_;
+  std::map<std::string, bool> reasoning_echo_learned_;
 };
 
 }  // namespace tea
