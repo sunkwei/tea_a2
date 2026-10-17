@@ -54,6 +54,17 @@ set "GEN=MinGW Makefiles"
 if defined TEA_AGENT_GENERATOR set "GEN=%TEA_AGENT_GENERATOR%"
 echo [mingw] generator %GEN%, temp %TEMP%
 
+rem A build directory made with a different generator cannot be reused ("Does not
+rem match the generator used previously"), so start over instead of making the
+rem user delete CMakeCache.txt by hand. Everything in there is generated.
+if exist "%BUILD_DIR%\CMakeCache.txt" (
+  findstr /B /C:"CMAKE_GENERATOR:INTERNAL=%GEN%" "%BUILD_DIR%\CMakeCache.txt" >nul 2>nul
+  if errorlevel 1 (
+    echo [mingw] generator changed - recreating "%BUILD_DIR%"
+    rmdir /s /q "%BUILD_DIR%"
+  )
+)
+
 cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "%GEN%" -DCMAKE_BUILD_TYPE=Release ^
       -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
 if errorlevel 1 (
