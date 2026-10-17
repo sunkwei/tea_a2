@@ -60,7 +60,6 @@ struct Settings {
   int64_t max_tool_output = 131072;
   int64_t max_assistant_content = 131072;
   int keep_turns = 10;
-  bool enable_thinking = false;
   std::string reasoning_effort = "auto";
   double temperature = -1.0;  // < 0 => not set
   double top_p = -1.0;        // < 0 => not set

@@ -281,6 +281,18 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
     tail.push_back(m);
   }
 
+  // Cap absurdly long assistant replies in the wire copy only: the transcript on
+  // disk keeps them in full, the model does not need a pasted file replayed in
+  // every subsequent turn.
+  if (st.max_assistant_content > 0) {
+    const std::size_t cap = static_cast<std::size_t>(st.max_assistant_content);
+    for (std::size_t i = 0; i < tail.size(); ++i) {
+      if (tail[i].role != "assistant") continue;
+      if (tail[i].content.size() <= cap) continue;
+      tail[i].content = truncate_middle(tail[i].content, cap);
+    }
+  }
+
   LOG_DEBUG("context: max=", max_context, " reserve_output=", max_output, " fixed=", fixed,
             " budget=", budget, " kept=", tail.size(), "/", session.messages.size(),
             " used=", used, " keep_turns=", st.keep_turns,
