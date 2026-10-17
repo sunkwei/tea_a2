@@ -13,6 +13,7 @@
 #include "config.h"
 #include "http.h"
 #include "log.h"
+#include "output_filter.h"
 #include "server.h"
 #include "tls.h"
 #include "tools.h"
@@ -67,7 +68,7 @@ struct Args {
   }
 };
 
-const char* kBooleanFlags[] = {"help",  "version", "open", "no-console", "quiet",
+const char* kBooleanFlags[] = {"help", "version", "selftest", "open", "no-console", "quiet",
                                "allow-outside-workspace", "no-color", "insecure"};
 
 bool is_boolean_flag(const std::string& name) {
@@ -110,6 +111,7 @@ void print_usage() {
                   "  --no-console               do not echo log lines to the console\n"
                   "  --help                     show this help\n"
                   "  --version                  show the version\n"
+                  "  --selftest                 run built-in checks and exit\n"
                   "\n"
                   "Environment\n"
                   "  TEA_AGENT_HOME             overrides the agent home directory\n"
@@ -180,6 +182,13 @@ int main(int argc, char** argv) {
     print_usage();
     return 0;
   }
+  if (args.has("selftest")) {
+    std::string report;
+    const bool ok = output_filter_selftest(&report);
+    console_write_line(report);
+    return ok ? 0 : 1;
+  }
+
   if (args.has("version")) {
     console_write_line(TEA_AGENT_NAME " " TEA_AGENT_VERSION_STRING);
     return 0;

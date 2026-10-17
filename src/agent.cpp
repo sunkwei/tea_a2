@@ -57,19 +57,56 @@ bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provide
 }  // namespace
 
 long long Agent::estimate_tokens(const std::string& text) {
+  // Per-script heuristic: ASCII runs about 4 characters per token, CJK about one
+  // token per character, and other scripts (Cyrillic, Arabic, emoji...) sit in
+  // between. Markdown/JSON punctuation is counted with the ASCII run, which makes
+  // the estimate slightly conservative - the direction we want.
   long long ascii = 0;
-  long long wide = 0;
-  for (std::size_t i = 0; i < text.size(); ++i) {
+  long long cjk = 0;
+  long long other = 0;
+  for (std::size_t i = 0; i < text.size();) {
     const unsigned char c = static_cast<unsigned char>(text[i]);
     if (c < 0x80) {
-      ++ascii;
-    } else if ((c & 0xC0) != 0x80) {
-      ++wide;  // one non-ASCII code point
+      if (c != ' ' && c != '\n' && c != '\t' && c != '\r') ++ascii;
+      ++i;
+      continue;
+    }
+    unsigned int cp = 0;
+    std::size_t len = 1;
+    if ((c & 0xE0) == 0xC0) {
+      cp = c & 0x1Fu;
+      len = 2;
+    } else if ((c & 0xF0) == 0xE0) {
+      cp = c & 0x0Fu;
+      len = 3;
+    } else if ((c & 0xF8) == 0xF0) {
+      cp = c & 0x07u;
+      len = 4;
+    } else {
+      ++other;
+      ++i;
+      continue;
+    }
+    for (std::size_t k = 1; k < len && i + k < text.size(); ++k) {
+      cp = (cp << 6) | (static_cast<unsigned char>(text[i + k]) & 0x3Fu);
+    }
+    i += len;
+    const bool wide =
+        (cp >= 0x3040 && cp <= 0x30FF) ||   // kana
+        (cp >= 0x3400 && cp <= 0x4DBF) ||   // CJK extension A
+        (cp >= 0x4E00 && cp <= 0x9FFF) ||   // CJK unified
+        (cp >= 0xAC00 && cp <= 0xD7AF) ||   // hangul
+        (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK compatibility
+        (cp >= 0xFF00 && cp <= 0xFF60);     // fullwidth forms
+    if (wide) {
+      ++cjk;
+    } else {
+      ++other;
     }
   }
-  return ascii / 4 + wide + 4;
+  const long long total = ascii / 4 + cjk + other / 2;
+  return total > 0 ? total + 4 : 4;
 }
-
 long long Agent::estimate_tokens(const std::vector<Message>& messages) {
   long long total = 0;
   for (std::size_t i = 0; i < messages.size(); ++i) {
@@ -147,8 +184,36 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
   }
   return out.str();
 }
+namespace {
+
+/// Bytes and tokens for one message, including its tool-call payload.
+long long message_cost(const Message& m) {
+  long long cost = Agent::estimate_tokens(m.content) + Agent::estimate_tokens(m.reasoning) / 2 + 8;
+  for (std::size_t k = 0; k < m.tool_calls.size(); ++k) {
+    cost += Agent::estimate_tokens(m.tool_calls[k].name);
+    cost += Agent::estimate_tokens(m.tool_calls[k].raw_arguments);
+  }
+  return cost;
+}
+
+/// Keep the head and the tail of an over-long single message. Used only when one
+/// message alone would not fit, which happens with a huge pasted file.
+std::string truncate_middle(const std::string& text, std::size_t keep_bytes) {
+  if (text.size() <= keep_bytes || keep_bytes < 64) return text;
+  const std::size_t head = keep_bytes * 2 / 3;
+  const std::size_t tail = keep_bytes - head;
+  std::ostringstream out;
+  out << text.substr(0, head) << "\n... [tea_agent truncated " << (text.size() - head - tail)
+      << " bytes of a single oversized message] ...\n"
+      << text.substr(text.size() - tail);
+  return out.str();
+}
+
+}  // namespace
+
 void Agent::build_context(const Workspace& workspace, const Session& session,
                           const ModelInfo* model, std::vector<Message>* out) const {
+  const Settings& st = workspace.settings();
   out->clear();
   Message system;
   system.role = "system";
@@ -156,32 +221,62 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
   system.created_at = now_iso8601();
   out->push_back(system);
 
-  long long max_context = (model && model->max_context_tokens > 0) ? model->max_context_tokens
-                                                                   : 128000;
-  // Leave room for the completion and keep a safety margin.
-  const long long budget = static_cast<long long>(max_context * 0.55);
-  const long long system_cost = estimate_tokens(system.content);
+  const long long max_context =
+      (model && model->max_context_tokens > 0) ? model->max_context_tokens : 128000;
 
-  // Walk backwards collecting messages until the budget is exhausted, then
-  // rewind to a turn boundary (a user message) so we never start mid-turn.
+  // Budget = context window - what the completion may consume - the parts of the
+  // prompt that are not history (system block, tool schemas, framing). The old
+  // code just took 55% of the window, which both under-used big windows and could
+  // overflow when max_tokens was configured large.
+  long long max_output = st.max_tokens > 0 ? st.max_tokens
+                                           : (model && model->max_output_tokens > 0
+                                                  ? model->max_output_tokens
+                                                  : 8192);
+  const long long output_cap = max_context / 3;
+  if (max_output > output_cap) max_output = output_cap;
+
+  const long long tool_schema_cost = 480;  // 3 tool schemas, measured on the wire
+  const long long fixed = estimate_tokens(system.content) + tool_schema_cost + 64;
+  long long budget = max_context - max_output - fixed;
+  const long long floor_budget = max_context / 5;
+  if (budget < floor_budget) budget = floor_budget;
+
+  // Walk backwards until the budget is exhausted. `keep_turns` is a floor, not a
+  // suggestion: we keep pulling whole turns while fewer than that many user
+  // messages are in the window, as long as we stay under the hard ceiling.
   std::vector<Message> tail;
-  long long used = system_cost;
+  long long used = fixed;
+  int user_turns = 0;
+  const long long ceiling = max_context - max_output;
   for (std::size_t i = session.messages.size(); i-- > 0;) {
     const Message& m = session.messages[i];
-    const long long cost = estimate_tokens(m.content) + estimate_tokens(m.reasoning) / 2 + 8;
-    if (used + cost > budget && !tail.empty()) break;
+    const long long cost = message_cost(m);
+    const bool below_keep_turns = user_turns < st.keep_turns;
+    if (!tail.empty() && used + cost > budget && !below_keep_turns) break;
+    if (!tail.empty() && used + cost > ceiling) break;
     tail.push_back(m);
     used += cost;
+    if (m.role == "user") ++user_turns;
   }
   std::reverse(tail.begin(), tail.end());
   while (!tail.empty() && tail.front().role != "user") tail.erase(tail.begin());
+
   if (tail.empty() && !session.messages.empty()) {
-    // Always keep at least the newest message.
-    tail.push_back(session.messages.back());
+    // One message alone exceeds the budget; keep it but trim it to fit.
+    Message m = session.messages.back();
+    if (message_cost(m) > budget) {
+      const std::size_t keep_bytes = static_cast<std::size_t>(budget > 4096 ? budget * 4 : 16384);
+      m.content = truncate_middle(m.content, keep_bytes);
+      if (!m.reasoning.empty()) m.reasoning = truncate_middle(m.reasoning, keep_bytes / 4);
+    }
+    tail.push_back(m);
   }
+
+  LOG_DEBUG("context: max=", max_context, " reserve_output=", max_output, " fixed=", fixed,
+            " budget=", budget, " kept=", tail.size(), "/", session.messages.size(),
+            " used=", used, " keep_turns=", st.keep_turns);
   for (std::size_t i = 0; i < tail.size(); ++i) out->push_back(tail[i]);
 }
-
 TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::string& user_text,
                            const TurnOptions& options, const EventEmitter& emit,
                            std::atomic<bool>* cancel) {

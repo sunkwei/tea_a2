@@ -128,6 +128,24 @@ try {
     $sessions = Invoke-RestMethod "$base/api/workspaces/$wsId/sessions"
     Check "session list endpoint works" ($null -ne $sessions.sessions)
 
+    # --- system prompt: probed environment, stable prefix, no volatile clock ---
+    $prompt = Invoke-RestMethod "$base/api/workspaces/$wsId/prompt"
+    Check "prompt endpoint returns a system prompt" `
+        ($prompt.system_prompt -match 'Environment \(probed from this device at startup\)')
+    Check "prompt reports a real OS and architecture" `
+        ($prompt.system_prompt -match '(?m)^- OS: .+ \((x86_64|aarch64|arm|x86|armv7l|unknown)\)$')
+    # A per-turn timestamp at the head of the conversation destroys the provider's
+    # prefix cache, so the prompt must not carry a wall clock.
+    Check "prompt has no volatile wall clock" `
+        (-not ($prompt.system_prompt -match 'Current time \(UTC\)'))
+    Check "prompt is byte-stable across calls" `
+        ($prompt.system_prompt -ceq (Invoke-RestMethod "$base/api/workspaces/$wsId/prompt").system_prompt)
+
+    # --- built-in output filter self test ------------------------------------
+    $selfOut = & $Exe --selftest 2>&1 | Out-String
+    $selfCode = $LASTEXITCODE
+    Check "built-in --selftest passes" ($selfCode -eq 0 -and $selfOut -match 'PASS') $selfOut.Trim()
+
     Write-Host "`n== web UI assets (embedded) ==" -ForegroundColor Cyan
     $indexRes = Invoke-WebRequest "$base/" -UseBasicParsing
     Check "GET / serves the web UI" ($indexRes.StatusCode -eq 200 -and $indexRes.Content -match 'app\.js')

@@ -1,5 +1,7 @@
 #include "tools.h"
 
+#include "output_filter.h"
+
 #include <sstream>
 
 #include "command.h"
@@ -112,12 +114,24 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
 
   result.ok = (run.exit_code == 0) && !run.timed_out;
   result.truncated = run.output_truncated;
-  std::size_t limit = static_cast<std::size_t>(ctx.workspace->settings().max_tool_output);
-  bool truncated_again = false;
-  std::string text = out.str();
-  text = limit_output(text, limit, &truncated_again);
-  result.truncated = result.truncated || truncated_again;
-  result.output = text;
+
+  // Reduce the output according to what it is: a build log keeps its diagnostics
+  // and loses the progress noise, everything else keeps head and tail.
+  const Settings& st = ctx.workspace->settings();
+  OutputFilterOptions fopts;
+  fopts.max_bytes = static_cast<std::size_t>(st.max_tool_output);
+  if (st.tool_output_max_lines > 0) {
+    fopts.max_lines = static_cast<std::size_t>(st.tool_output_max_lines);
+  }
+  const FilteredOutput filtered = filter_tool_output(command, out.str(), fopts);
+  result.output = filtered.text;
+  result.truncated = result.truncated || filtered.changed;
+  if (filtered.changed) {
+    result.meta["output_filter"] = filtered.strategy;
+    result.meta["dropped_lines"] = static_cast<long long>(filtered.dropped_lines);
+    LOG_DEBUG("toolkit_exec: output reduced (", filtered.strategy, "), dropped ",
+              filtered.dropped_lines, " lines");
+  }
   result.meta["exit_code"] = run.exit_code;
   result.meta["timed_out"] = run.timed_out;
   result.meta["elapsed_ms"] = run.elapsed_ms;
