@@ -736,12 +736,6 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   session->info.updated_at = now_iso8601();
   workspace.save_session(*session, nullptr);
 
-  // Fold the oldest turns into a summary before the context overflows, so the
-  // model keeps the thread of the conversation instead of silently losing it.
-  // Runs before the start event so a compaction event lands first in the stream.
-  if (st.enable_compaction) {
-    maybe_compact(workspace, session, provider, model, model_info, cancel, emit);
-  }
 
   if (out.cancelled) {
     nlohmann::json event = nlohmann::json::object();
