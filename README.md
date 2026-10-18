@@ -113,10 +113,12 @@ build/bin/tea_agent --workspace . --open
 那种情况下静默启动只会把问题藏起来。
 
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
-对话页的输入框下方常驻一行指标：输出速度（t/s）、前缀缓存命中率、`max_context_tokens`
-用量（带进度条，超 70% / 90% 变黄变红）以及本轮 token 与首字延迟。此外还有本轮
-**耗时**（流式期间按本地时钟跳动，结束后取 `done` 的 `elapsed_ms`）、**轮次**（该会话
-已发送的用户消息数）与**步数**（本轮 `tool_start` 次数）。
+对话页的输入框下方常驻**一行**指标：耗时、轮次、步数、速度（t/s）、前缀缓存命中率、
+`max_context_tokens` 用量（后两者带进度条，超 70% / 90% 变黄变红）以及本轮输出与首字延迟。
+这一行永远是单行：`flex-wrap:nowrap` 保证不会折成两行（折行会让输入区高度跳动），
+窗口变窄时按「轮次/步数 → 缓存 → 耗时」的顺序收起，最宽的一项最多出省略号，完整内容
+仍在 `title` 里。耗时在流式期间按本地时钟跳动，结束后取 `done` 的 `elapsed_ms`；
+轮次是该会话已发送的用户消息数，步数是本轮 `tool_start` 次数。
 侧边栏的**会话索引**按更新时间倒序列出当前工作区的会话（标题、相对时间、消息条数），
 点击即切换，当前会话高亮，行内可**改名**、**删除**，右上角 ＋ 新建；一轮对话结束后自动刷新。
 助手输出里的 `![alt](路径)` 会渲染成图片（alt 作为说明文字），工作区相对路径经
@@ -693,6 +695,7 @@ python3 tests/smoke_web_tools.py                          # 网页工具（本�
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
+node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -706,6 +709,10 @@ node tests/ui_paste_image.mjs                             # 粘贴图片的浏�
 
 `tests/ui_paste_image.mjs` 用真实粘贴事件（`ClipboardEvent` + `DataTransfer`）验证缩略图出现、
 × 能移除、发送后缩略图条清空、用户气泡经 `/raw` 渲染且图片真的加载成功（`naturalWidth > 0`）。
+
+`tests/ui_metrics_layout.mjs` 在 9 个窗口宽度（1440→600）下把每个指标填成最宽的真实数值，
+断言指标栏**只有一行**、且最长的那项没有被截断。这类「不许换行」的布局约束加一个指标或
+改一个标签就会破，所以单独钉住。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器

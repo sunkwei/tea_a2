@@ -92,8 +92,9 @@
             </div>
             <button class="send" id="send" type="button" title="发送"></button>
           </div>
-          <!-- 指标栏：耗时 / 轮次 / 步数 / 输出速度 / 缓存命中率 / 上下文用量
-               数据来自 SSE 的 metrics 块 + usage（run 结束时由 done 事件给出） -->
+          <!-- 指标栏：耗时 / 轮次 / 步数 / 速度 / 缓存命中率 / 上下文用量 / 本轮输出
+               数据来自 SSE 的 metrics 块 + usage（run 结束时由 done 事件给出）。
+               这一行永远单行（见 app.css 的 .metrics），窄窗口按优先级收起次要项。 -->
           <div class="metrics" id="metrics">
             <span class="metric" id="metric-elapsed">
               <span class="m-k">耗时</span><span class="m-v" id="metric-elapsed-v">—</span>
@@ -105,7 +106,7 @@
               <span class="m-k">步数</span><span class="m-v" id="metric-steps-v">—</span>
             </span>
             <span class="metric" id="metric-speed">
-              <span class="m-k">输出速度</span><span class="m-v" id="metric-speed-v">—</span>
+              <span class="m-k">速度</span><span class="m-v" id="metric-speed-v">—</span>
             </span>
             <span class="metric" id="metric-cache">
               <span class="m-k">缓存</span><span class="m-v" id="metric-cache-v">—</span>
@@ -115,8 +116,8 @@
               <span class="m-k">上下文</span><span class="m-v" id="metric-context-v">—</span>
               <span class="m-bar"><i id="metric-context-bar"></i></span>
             </span>
-            <span class="metric" id="metric-tokens">
-              <span class="m-k">本轮</span><span class="m-v" id="metric-tokens-v">—</span>
+            <span class="metric wide" id="metric-tokens">
+              <span class="m-v" id="metric-tokens-v">—</span>
             </span>
           </div>
         </div>

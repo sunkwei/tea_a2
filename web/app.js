@@ -753,18 +753,19 @@
 
     var ctxPct = s.max > 0 ? Math.round(s.context * 100 / s.max) : null;
     setMetric('metric-context',
-      s.context ? (est ? '≈' : '') + fmtTokens(s.context) + (s.max > 0 ? ' / ' + fmtTokens(s.max) : '') +
-        (ctxPct == null ? '' : ' · ' + ctxPct + '%') : '—',
+      s.context ? (est ? '≈' : '') + fmtTokens(s.context) + (s.max > 0 ? '/' + fmtTokens(s.max) : '') +
+        (ctxPct == null ? '' : ' ' + ctxPct + '%') : '—',
       (s.max > 0 ? '上下文窗口 ' + s.context + ' / ' + s.max + ' tokens（' + ctxPct + '%）'
                  : '本次请求 prompt tokens：' + s.context + '（模型未配置 max_context_tokens）') +
         (est ? '\n本地估算：provider 未返回 usage' : ''),
       { width: (ctxPct == null ? 0 : Math.min(100, ctxPct)) + '%', warn: ctxPct != null && ctxPct >= 70, bad: ctxPct != null && ctxPct >= 90 });
 
+    // 单行预算很紧：单位不进正文，tooltip 里已经写清楚是 tokens。
     var parts = [];
-    if (s.output) parts.push('输出 ' + fmtTokens(s.output) + ' tok');
-    if (s.total) parts.push('合计 ' + fmtTokens(s.total) + ' tok');
+    if (s.output) parts.push('输出 ' + fmtTokens(s.output));
+    if (s.total) parts.push('合计 ' + fmtTokens(s.total));
     if (s.ttft != null && s.ttft > 0) parts.push('首字 ' + fmtSec(s.ttft));
-    setMetric('metric-tokens', parts.length ? parts.join(' · ') : '—',
+    setMetric('metric-tokens', parts.length ? parts.join('·') : '—',
       parts.length ? '本轮统计' + (est ? '（本地估算）' : '') + '\n' +
         '输出 ' + s.output + ' tokens，prompt ' + s.prompt + ' tokens，合计 ' + s.total +
         '\n生成窗口 ' + s.genMs + 'ms，整轮 ' + s.elapsed + 'ms' : '还没有本轮数据',

@@ -331,16 +331,21 @@ button{font-family:inherit}
 
 /* ---------- composer 指标栏（输出速度 / 缓存命中率 / 上下文用量） ---------- */
 .metrics{
-  display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;padding:7px 6px 0;
+  display:flex;flex-wrap:nowrap;align-items:center;gap:0 8px;padding:7px 6px 0;
   font:11px/16px var(--ds-font-family-code);color:var(--dsw-alias-label-caption);
+  overflow:hidden;                     /* 永远单行：宁可省略号，也不要折成两行 */
+  min-width:0;                         /* flex 子项默认 min-width:auto 会被内容撑宽 */
 }
-.metric{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.metric{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;flex:0 0 auto}
+/* 最长的一项允许被压缩，末尾出省略号（完整内容在 title 里） */
+.metric.wide{flex:0 1 auto;min-width:0;overflow:hidden}
+.metric.wide .m-v{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .metric .m-k{color:var(--dsw-alias-label-caption)}
 .metric .m-v{color:var(--dsw-alias-label-secondary)}
 .metric.est .m-v{opacity:.7}
 .metric .m-bar{
-  display:inline-block;width:44px;height:4px;border-radius:2px;overflow:hidden;
-  background:var(--dsw-alias-bg-layer-2);
+  display:inline-block;width:24px;height:4px;border-radius:2px;overflow:hidden;
+  background:var(--dsw-alias-bg-layer-2);flex:0 0 24px;
 }
 .metric .m-bar i{
   display:block;width:0;height:100%;background:var(--dsw-alias-state-business-primary);
@@ -350,6 +355,11 @@ button{font-family:inherit}
 .metric.warn .m-v{color:var(--dsw-alias-state-warn-label)}
 .metric.bad .m-bar i{background:var(--dsw-alias-state-error-primary)}
 .metric.bad .m-v{color:var(--dsw-alias-state-error-primary)}
+/* 窄窗口按「先次要、后次要」的顺序收起，永远保住单行：
+   轮次/步数 → 缓存 → 耗时。剩下的最宽一项最多出省略号，完整内容仍在 title 里。 */
+@media (max-width:980px){ #metric-turns,#metric-steps{display:none} }
+@media (max-width:860px){ #metric-cache{display:none} }
+@media (max-width:720px){ #metric-elapsed{display:none} }
 
 /* ---------- files ---------- */
 .files-grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;align-items:start}
