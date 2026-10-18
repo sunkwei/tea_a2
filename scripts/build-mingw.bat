@@ -74,6 +74,18 @@ if errorlevel 1 (
 
 cmake --build "%BUILD_DIR%" --parallel
 if errorlevel 1 (
+  echo.
+  rem The link step fails with "cannot open output file ... Permission denied" when
+  rem an instance of the agent is running, and users should not have to decode an
+  rem ld error to learn that. Windows cannot replace a running executable.
+  tasklist /fi "imagename eq tea_agent.exe" 2>nul | findstr /i "tea_agent.exe" >nul
+  if not errorlevel 1 (
+    echo [mingw] tea_agent.exe is running and holds the output file open.
+    echo [mingw] stop it ^(Ctrl+C in its window, or: taskkill /im tea_agent.exe /f^),
+    echo [mingw] then run this script again.
+  ) else (
+    echo [mingw] build failed - see the messages above.
+  )
   popd
   exit /b 1
 )
