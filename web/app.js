@@ -891,6 +891,16 @@
       if (ev && typeof ev === 'object') handleEvent(ev);
     });
   }
+  /// A running turn owns the conversation: switching workspace or starting a new
+  /// session mid-stream would pull state out from under the SSE reader. The
+  /// controls stay enabled so the click can say *why* it is refused; a disabled
+  /// button gives no feedback at all, which reads as "the UI is broken".
+  function blockedWhileStreaming(what) {
+    if (!state.streaming) return false;
+    toast('正在生成回答：先点停止，或等这一轮结束再' + what);
+    return true;
+  }
+
   function setStreaming(on) {
     state.streaming = on;
     updateComposer();
@@ -901,8 +911,11 @@
       state.liveTokens = 0; state.liveStartAt = 0;
       renderMetrics();
     }
-    $('ws-chip').disabled = on;
-    $('new-session').disabled = on;
+    // The chip stays clickable: the menu is still useful (it shows what exists)
+    // and the refusal is explained on selection. The tooltip states the reason
+    // up front.
+    $('ws-chip').title = on ? '正在生成回答：结束后才能切换工作区'
+                            : '切换工作区，或添加一个新的项目目录';
     Array.prototype.forEach.call(document.querySelectorAll('.sess-row'), function (b) { b.disabled = on; });
   }
   function finalizeStream() {
@@ -1170,13 +1183,18 @@
     state.workspaces.forEach(function (w) {
       var it = btn('dd-item' + (state.workspace && state.workspace.id === w.id ? ' active' : ''), w.name, function () {
         closeDropdowns();
+        if (blockedWhileStreaming('切换工作区')) return;
         if (!state.workspace || state.workspace.id !== w.id) selectWorkspace(w.id);
       });
       it.appendChild(el('span', 'sub', w.exists === false ? '路径不存在' : (w.sessions || 0) + ' 会话'));
       dd.appendChild(it);
     });
     dd.appendChild(el('div', 'dd-sep'));
-    dd.appendChild(btn('dd-item', '＋ 添加工作区…', function () { closeDropdowns(); openAddWorkspace(false); }));
+    dd.appendChild(btn('dd-item', '＋ 添加工作区…', function () {
+      closeDropdowns();
+      if (blockedWhileStreaming('添加工作区')) return;
+      openAddWorkspace(false);
+    }));
   }
   /* 会话索引：标题 + 相对时间 + 消息条数，当前会话高亮，行内改名/删除。
      排序在 loadSessions 里做（最新的在前），这里只负责渲染。 */
@@ -1854,7 +1872,10 @@
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
     });
     $('send').onclick = function () { if (state.streaming) stopStream(); else sendMessage(); };
-    $('new-session').onclick = function () { if (!state.streaming) newSessionDraft(); };
+    $('new-session').onclick = function () {
+      if (blockedWhileStreaming('新建会话')) return;
+      newSessionDraft();
+    };
     $('banner-retry').onclick = function () {
       $('status-dot').className = 'status-dot wait';
       $('status-text').textContent = '连接中…';

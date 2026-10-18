@@ -55,6 +55,9 @@ button{font-family:inherit}
 }
 .sess-row:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-secondary)}
 .sess-row.active{background:var(--dsw-specific-sidebar-nav-item-active);color:var(--dsw-alias-label-primary)}
+/* 生成期间会话行不可点：要看得出来，否则点了没反应像是坏了 */
+.sess-row:disabled{opacity:.5;cursor:not-allowed}
+.sess-row:disabled:hover{background:transparent}
 .empty-note{padding:6px 10px;font-size:12px;color:var(--dsw-alias-label-caption)}
 
 /* ---------- main ---------- */

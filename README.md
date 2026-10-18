@@ -704,6 +704,7 @@ node tests/ui_setup_flow.mjs                              # 首次运行上传�
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
 node tests/ui_workspace_add.mjs                           # 新增工作区（含目录不存在时创建）
+node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -725,6 +726,10 @@ node tests/ui_workspace_add.mjs                           # 新增工作区（�
 `tests/ui_workspace_add.mjs` 覆盖新增工作区的四条路径：菜单可达、目录不存在时给出创建提示
 并在确认后真的建目录、添加后**自动切换**、取消不产生副作用（并验证服务端对「路径是个文件」
 仍然拒绝，即使带了 `create: true`）。
+
+`tests/ui_stream_guard.mjs` 起一轮慢速流式回答，在生成过程中点侧边栏：工作区按钮仍可点开菜单
+（不能变成死按钮），切换工作区 / 添加工作区 / 新建会话都被拒绝并给出原因，会话行显示为禁用；
+一轮结束后切换恢复正常。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器
