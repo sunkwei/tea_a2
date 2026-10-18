@@ -63,10 +63,24 @@ static std::string mime_for(const std::string& name) {
 
 // Emit a C++ string literal. Uses a raw string literal when safe, otherwise
 // falls back to a fully escaped ordinary literal.
-static std::string to_literal(const std::string& data) {
+//
+// A raw literal is only safe when the compiler will hand back exactly the bytes
+// we put in: translation phase 1 rewrites CRLF to LF *inside* literals, so a
+// raw literal holding CRLF text compiles to fewer bytes than the file. That
+// silently broke the Web UI once -- kAssetData_N ended early, the table still
+// claimed the on-disk size, and the server read past the terminator into the
+// next asset, appending CSS to app.js (a syntax error that killed the page).
+// CR-bearing data therefore takes the escaped path, which spells out \r.
+static bool raw_literal_is_safe(const std::string& data) {
   static const char* kDelim = "TEA_ASSET_8f3c1d";
   const std::string terminator = std::string(")") + kDelim + "\"";
-  if (data.find(terminator) == std::string::npos) {
+  if (data.find(terminator) != std::string::npos) return false;
+  return data.find('\r') == std::string::npos;
+}
+
+static std::string to_literal(const std::string& data) {
+  static const char* kDelim = "TEA_ASSET_8f3c1d";
+  if (raw_literal_is_safe(data)) {
     return std::string("R\"") + kDelim + "(" + data + ")" + kDelim + "\"";
   }
   std::string out = "\"";
@@ -154,6 +168,11 @@ int main(int argc, char** argv) {
          "namespace tea {\n\n";
     for (size_t i = 0; i < assets.size(); ++i) {
       c << "static const char kAssetData_" << i << "[] =\n" << to_literal(assets[i].data) << ";\n";
+      // The table below advertises the on-disk size, and the server sends that
+      // many bytes. If the compiled array ever ends up shorter (see the CRLF
+      // note in to_literal), this fails the build instead of serving garbage.
+      c << "static_assert(sizeof(kAssetData_" << i << ") - 1 == " << assets[i].data.size()
+        << ", \"embedded asset size mismatch: " << assets[i].path << "\");\n";
     }
     c << "\nconst WebAsset kWebAssets[] = {\n";
     for (size_t i = 0; i < assets.size(); ++i) {

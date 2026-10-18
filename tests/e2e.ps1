@@ -189,6 +189,34 @@ try {
     Check "UI fetches a turn trajectory on expand" ($appJs.Content -match 'api/turns/')
     Check "app.css styles the trajectory timeline" ($appCss.Content -match '\.traj-step')
 
+    # Embedded assets are generated at build time from web/. The generator used
+    # to record the on-disk byte count as the size while a raw string literal
+    # holding CRLF text compiles short (the compiler normalises CRLF to LF), so
+    # the server read past the end of app.js into the next asset and served
+    # JavaScript with CSS appended. That is a syntax error: nothing in the page
+    # ran and the UI sat on its 连接中 placeholder forever, while all the
+    # substring checks above kept passing. Compare the bytes instead.
+    foreach ($asset in @(@('/app.js', 'web\app.js'), @('/app.css', 'web\app.css'),
+            @('/tokens.css', 'web\tokens.css'), @('/', 'web\index.html'))) {
+        $servedFile = Join-Path $scratch ('served-' + [guid]::NewGuid().ToString('N') + '.bin')
+        & curl.exe -s -o $servedFile "$base$($asset[0])"
+        $servedHash = (Get-FileHash -Path $servedFile -Algorithm SHA256).Hash
+        $sourceHash = (Get-FileHash -Path (Join-Path $root $asset[1]) -Algorithm SHA256).Hash
+        Check "served $($asset[0]) is byte-identical to $($asset[1])" ($servedHash -eq $sourceHash) `
+            "served=$((Get-Item $servedFile).Length)B source=$((Get-Item (Join-Path $root $asset[1])).Length)B"
+    }
+
+    # Actually execute the page. The checks above only prove that certain
+    # strings are present; they say nothing about whether init() runs. This
+    # probe loads the *served* app.js into a DOM stub built from the real
+    # index.html and fires the DOMContentLoaded path.
+    $bootOut = & node (Join-Path $PSScriptRoot 'ui_boot_probe.mjs') --base $base --all 2>&1
+    $bootCode = $LASTEXITCODE
+    $bootText = ($bootOut | Out-String)
+    Check "web page boots headlessly into the connected state" `
+        ($bootCode -eq 0 -and ($bootText -match 'UI_BOOT_OK state=normal status=connected')) `
+        ((($bootOut | Select-Object -Last 4) -join ' ').Trim())
+
     Write-Host "`n== streaming chat (multi-turn tool calling) ==" -ForegroundColor Cyan
     $bodyFile = Join-Path $scratch 'chat.json'
     @{ workspace_id = $wsId; message = 'please run the mock tool sequence' } |

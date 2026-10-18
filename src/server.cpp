@@ -350,7 +350,13 @@ struct ApiServer::Impl {
     // 2. assets embedded at build time
     const WebAsset* asset = find_embedded_asset(relative);
     if (!asset) return false;
-    res.set_content(std::string(asset->data, asset->size), asset->mime);
+    // kAssetData_N is NUL-terminated, so never trust a size that runs past the
+    // terminator: a build where they disagree used to append the next asset to
+    // app.js, which is a JS syntax error and left the UI stuck on 连接中.
+    std::size_t n = asset->size;
+    const std::size_t term = std::strlen(asset->data);
+    if (n > term) n = term;
+    res.set_content(std::string(asset->data, n), asset->mime);
     res.set_header("Cache-Control", "no-store");
     return true;
   }
