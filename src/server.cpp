@@ -13,6 +13,7 @@
 #include "httplib.h"
 
 #include "agent.h"
+#include "file_dialog.h"
 #include "http.h"
 #include "log.h"
 #include "trajectory.h"
@@ -400,6 +401,9 @@ void ApiServer::Impl::install_routes() {
     j["provider"] = config->active_provider;
     j["model"] = config->active_model;
     j["http_engine"] = http_engine();
+    // The UI hides the "browse" button when the server has no desktop to draw
+    // a dialog on (headless box, no zenity/kdialog, no override).
+    j["dir_picker"] = directory_picker_available();
     // The UI blocks on this: without a config there is nothing to chat with.
     j["config_loaded"] = config->loaded;
     if (!config->loaded) j["config_error"] = config->error;
@@ -594,6 +598,50 @@ void ApiServer::Impl::install_routes() {
     j["tea_home"] = config->tea_home;
     j["workspaces"] = list;
     send_json(res, j);
+  });
+
+  // ---- native directory picker -------------------------------------------
+  // The browser cannot return an absolute path (showDirectoryPicker gives a
+  // handle; <input webkitdirectory> gives relative names), so the dialog is
+  // opened on the server's desktop and the path comes back over HTTP. The
+  // request blocks until the dialog closes; httplib's pool has enough workers
+  // that one open dialog does not stall the rest of the API.
+  svr.Post("/api/dialog/directory", [this](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    std::string initial = json_string(body, "initial");
+    if (!initial.empty()) {
+      // Never hand the picker a path that escaped the workspace sandbox by
+      // accident: an unreadable start directory just makes the dialog open at
+      // the default location.
+      if (!path_is_dir(initial)) initial.clear();
+    }
+    const int timeout_ms = 300000;  // 5 minutes: people read their filesystem
+    const DirectoryPickResult pick = pick_directory(initial, "Select a project directory", timeout_ms);
+    nlohmann::json j = nlohmann::json::object();
+    j["tool"] = pick.tool;
+    if (pick.ok) {
+      LOG_INFO("dialog: directory selected via ", pick.tool, ": ", pick.path);
+      j["ok"] = true;
+      j["path"] = pick.path;
+      send_json(res, j);
+      return;
+    }
+    if (pick.cancelled) {
+      j["ok"] = false;
+      j["cancelled"] = true;
+      send_json(res, j);
+      return;
+    }
+    LOG_WARN("dialog: ", pick.tool, " failed: ", pick.error);
+    j["ok"] = false;
+    j["error"] = pick.error;
+    if (pick.unavailable) {
+      j["unavailable"] = true;
+      send_json(res, j, 501);
+      return;
+    }
+    send_json(res, j, 500);
   });
 
   svr.Post("/api/workspaces", [this](const httplib::Request& req, httplib::Response& res) {

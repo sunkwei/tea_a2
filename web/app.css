@@ -465,6 +465,10 @@ button{font-family:inherit}
 .dialog .desc{font-size:13px;color:var(--dsw-alias-label-tertiary);line-height:20px;margin-bottom:12px}
 .dialog .field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 .dialog .field label{font-size:12px;color:var(--dsw-alias-label-caption)}
+/* 路径输入 + 右侧「浏览…」按钮 */
+.dialog .field-row{display:flex;gap:8px;align-items:center}
+.dialog .field-row .ta{flex:1 1 auto;min-width:0}
+.dialog .field-row .btn{flex:0 0 auto;white-space:nowrap}
 .dialog .actions{display:flex;justify-content:flex-end;gap:8px}
 /* 首次运行：上传 provider.yaml */
 .dialog:has(.setup){width:min(560px,92vw)}

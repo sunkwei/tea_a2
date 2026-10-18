@@ -122,8 +122,18 @@ build/bin/tea_agent --workspace . --open
 
 **切换/新增工作区**（每个工作区就是一个项目目录，各自独立的会话、记忆、文件树和
 `.tea_agent_run/`）：点左上角的**工作区名称**（形如 `tea_a2 ›`）打开下拉，列出所有已注册
-工作区，最后一项是「＋ 添加工作区…」。填入本地目录路径即可；目录还不存在时会问一次
-「创建并添加」，确认后 `mkdir -p` 再注册。添加成功后界面会**自动切到**新工作区。
+工作区，最后一项是「＋ 添加工作区…」。点它会**直接弹出系统的目录选择对话框**，选中后立刻
+注册并切换过去。
+
+为什么是服务端弹框：浏览器给不出绝对路径（`showDirectoryPicker()` 返回的是句柄，
+`<input webkitdirectory>` 只有相对名），所以对话框由运行 tea_agent 的那台机器弹出
+（Linux 用 kdialog/zenity，macOS 用 `osascript`，Windows 用 PowerShell 的
+FolderBrowserDialog）。**注意**：如果你从另一台电脑打开这个 UI，对话框会出现在服务器上；
+那种情况下请用手动输入。
+
+服务端没有可用对话框时（无桌面、没装 zenity/kdialog），UI 自动退回手动输入表单，并且会
+问一次「目录不存在，是否创建」——确认后 `mkdir -p` 再注册。`TEA_AGENT_DIR_PICKER` 可以把
+选择器换成任意命令（stdout 即所选路径），用于无桌面环境或 SSH 下的自建选择器。
 命令行侧对应 `--workspace <path>`（可重复）和 `--workspace-root <dir>`（注册其下所有一级子目录）。
 
 侧边栏的**会话索引**按更新时间倒序列出当前工作区的会话（标题、相对时间、消息条数），
@@ -703,7 +713,8 @@ python3 tests/smoke_vision.py                             # 粘贴图片：校�
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
-node tests/ui_workspace_add.mjs                           # 新增工作区（含目录不存在时创建）
+python3 tests/smoke_dir_dialog.py                         # 原生目录选择器（后端选择/取消/不可用）
+node tests/ui_workspace_add.mjs                           # 新增工作区（原生对话框 + 手动回退）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 ```
 
@@ -723,9 +734,15 @@ node tests/ui_stream_guard.mjs                            # 生成期间切换/�
 断言指标栏**只有一行**、且最长的那项没有被截断。这类「不许换行」的布局约束加一个指标或
 改一个标签就会破，所以单独钉住。
 
-`tests/ui_workspace_add.mjs` 覆盖新增工作区的四条路径：菜单可达、目录不存在时给出创建提示
-并在确认后真的建目录、添加后**自动切换**、取消不产生副作用（并验证服务端对「路径是个文件」
-仍然拒绝，即使带了 `create: true`）。
+`tests/smoke_dir_dialog.py` 覆盖目录选择器的后端：`TEA_AGENT_DIR_PICKER` 覆盖、带空格的路径
+原样返回、KDE 走 kdialog / GNOME 走 zenity（用假的可执行文件记录 argv，不弹窗）、取消返回
+200+cancelled、失败返回 500、完全没有选择器时返回 501 且 `/api/health` 的 `dir_picker` 为
+false。选出的路径能直接喂给 `/api/workspaces`。
+
+`tests/ui_workspace_add.mjs` 覆盖两条入口：有选择器时「添加工作区」**不出现表单**、直接采用
+对话框结果并切换；没有选择器时退回手动表单、隐藏「浏览…」按钮、目录不存在时给出创建提示
+并在确认后真的建目录、取消不产生副作用（并验证服务端对「路径是个文件」仍然拒绝，即使带了
+`create: true`）。
 
 `tests/ui_stream_guard.mjs` 起一轮慢速流式回答，在生成过程中点侧边栏：工作区按钮仍可点开菜单
 （不能变成死按钮），切换工作区 / 添加工作区 / 新建会话都被拒绝并给出原因，会话行显示为禁用；
