@@ -119,6 +119,13 @@ build/bin/tea_agent --workspace . --open
 窗口变窄时按「轮次/步数 → 缓存 → 耗时」的顺序收起，最宽的一项最多出省略号，完整内容
 仍在 `title` 里。耗时在流式期间按本地时钟跳动，结束后取 `done` 的 `elapsed_ms`；
 轮次是该会话已发送的用户消息数，步数是本轮 `tool_start` 次数。
+
+**切换/新增工作区**（每个工作区就是一个项目目录，各自独立的会话、记忆、文件树和
+`.tea_agent_run/`）：点左上角的**工作区名称**（形如 `tea_a2 ›`）打开下拉，列出所有已注册
+工作区，最后一项是「＋ 添加工作区…」。填入本地目录路径即可；目录还不存在时会问一次
+「创建并添加」，确认后 `mkdir -p` 再注册。添加成功后界面会**自动切到**新工作区。
+命令行侧对应 `--workspace <path>`（可重复）和 `--workspace-root <dir>`（注册其下所有一级子目录）。
+
 侧边栏的**会话索引**按更新时间倒序列出当前工作区的会话（标题、相对时间、消息条数），
 点击即切换，当前会话高亮，行内可**改名**、**删除**，右上角 ＋ 新建；一轮对话结束后自动刷新。
 助手输出里的 `![alt](路径)` 会渲染成图片（alt 作为说明文字），工作区相对路径经
@@ -696,6 +703,7 @@ python3 tests/smoke_vision.py                             # 粘贴图片：校�
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
+node tests/ui_workspace_add.mjs                           # 新增工作区（含目录不存在时创建）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -713,6 +721,10 @@ node tests/ui_metrics_layout.mjs                          # 指标栏始终单�
 `tests/ui_metrics_layout.mjs` 在 9 个窗口宽度（1440→600）下把每个指标填成最宽的真实数值，
 断言指标栏**只有一行**、且最长的那项没有被截断。这类「不许换行」的布局约束加一个指标或
 改一个标签就会破，所以单独钉住。
+
+`tests/ui_workspace_add.mjs` 覆盖新增工作区的四条路径：菜单可达、目录不存在时给出创建提示
+并在确认后真的建目录、添加后**自动切换**、取消不产生副作用（并验证服务端对「路径是个文件」
+仍然拒绝，即使带了 `create: true`）。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器

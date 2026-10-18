@@ -1496,12 +1496,25 @@
     state.trajectory = []; state.lastTrajectoryId = null;
     saveLS(); renderSessions(); renderChat(); renderMetrics(); showView('chat'); $('input').focus();
   }
+  /// Register a workspace and, on success, switch to it: adding a project and
+  /// then staying on the old one looks like nothing happened.
+  function addWorkspace(path, name, create, onError) {
+    return api('api/workspaces', { method: 'POST', body: { path: path, name: name, create: !!create } })
+      .then(function (entry) {
+        toast('已添加工作区：' + (entry && entry.name ? entry.name : name));
+        return loadWorkspaces().then(function () {
+          if (entry && entry.id) return selectWorkspace(entry.id);
+        });
+      }, function (e) { onError(e); });
+  }
+
   function openAddWorkspace(isEmpty) {
     var body = el('div');
-    body.appendChild(el('div', 'desc', isEmpty ? '还没有任何工作区。请输入一个本地目录路径来创建（例如 C:\\work\\my_project）。'
-      : '输入本地目录路径以添加到工作区索引。'));
+    body.appendChild(el('div', 'desc', isEmpty
+      ? '还没有任何工作区。输入一个本地项目目录（例如 /home/me/project）；目录不存在时会问你是否创建。'
+      : '输入本地项目目录以添加到工作区索引；目录不存在时会问你是否创建。'));
     var pathInput = el('input', 'ta'), nameInput = el('input', 'ta');
-    pathInput.type = 'text'; pathInput.placeholder = 'C:\\Users\\me\\project';
+    pathInput.type = 'text'; pathInput.placeholder = '/home/me/project';
     nameInput.type = 'text'; nameInput.placeholder = 'project';
     [['路径', pathInput], ['名称（可选）', nameInput]].forEach(function (pair) {
       var f = el('div', 'field');
@@ -1516,15 +1529,38 @@
           var p = pathInput.value.trim();
           if (!p) { toast('请输入路径'); return; }
           var nm = nameInput.value.trim() || p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'workspace';
-          closeDialog();
-          api('api/workspaces', { method: 'POST', body: { path: p, name: nm } }).then(function () {
-            toast('已添加工作区：' + nm);
-            return loadWorkspaces();
-          }, function (e) { toast('添加失败：' + e.message); });
+          addWorkspace(p, nm, false, function (e) {
+            // A brand-new project directory is a normal case, not an error to
+            // dead-end on: offer to create it rather than making the user do
+            // it in a shell and come back.
+            if (e && e.message && e.message.indexOf('does not exist') >= 0) {
+              openCreateWorkspaceDialog(p, nm);
+              return;
+            }
+            toast('添加失败：' + e.message);
+          });
         }
       }
     ]);
     setTimeout(function () { pathInput.focus(); }, 0);
+  }
+
+  function openCreateWorkspaceDialog(path, name) {
+    var body = el('div');
+    body.appendChild(el('div', 'desc', '这个目录还不存在，是否创建后作为工作区？'));
+    var row = el('div', 'field');
+    row.appendChild(el('label', null, '将创建'));
+    row.appendChild(el('span', 'mono', path));
+    body.appendChild(row);
+    openDialog('目录不存在', body, [
+      { label: '取消', onClick: closeDialog },
+      {
+        label: '创建并添加', primary: true, onClick: function () {
+          closeDialog();
+          addWorkspace(path, name, true, function (e) { toast('创建失败：' + e.message); });
+        }
+      }
+    ]);
   }
   function openDialog(title, bodyNode, actions) {
     var d = $('dialog');

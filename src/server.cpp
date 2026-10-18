@@ -604,6 +604,19 @@ void ApiServer::Impl::install_routes() {
       send_error(res, 400, "bad_request", "'path' is required");
       return;
     }
+    // `create: true` lets the UI offer "the directory does not exist, create
+    // it?" instead of dead-ending on a typo-free new project path.
+    nlohmann::json::const_iterator create_it = body.find("create");
+    if (create_it != body.end() && create_it->is_boolean() && create_it->get<bool>()) {
+      const std::string expanded = path_absolute(expand_user(trim(path)));
+      if (!path_exists(expanded)) {
+        if (!make_dirs(expanded)) {
+          send_error(res, 400, "workspace_error", "cannot create directory " + expanded);
+          return;
+        }
+        LOG_INFO("workspace: created directory ", expanded);
+      }
+    }
     std::string err;
     WorkspaceEntry* entry = nullptr;
     {
