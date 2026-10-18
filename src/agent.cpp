@@ -629,8 +629,32 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   emit(start_event);
 
   // --- build the tool schema ----------------------------------------------
-  nlohmann::json tools_json = tools_->openai_tools();
+  // Billed web-tool calls are counted per turn, not per iteration: a model that
+  // keeps retrying a failing search would otherwise run to max_iterations.
+  int web_tool_calls = 0;
+  // toolkit_search/toolkit_fetch only appear when this turn's provider
+  // declares them; the underlying protocol is provider-specific.
+  nlohmann::json tools_json = tools_->openai_tools(provider_info);
   if (model_info && !model_info->supports_tools) tools_json = nlohmann::json::array();
+
+  // Once the billed web-tool budget for this turn is spent, stop advertising
+  // them: an error result alone invites the model to retry until
+  // max_iterations, which is slow and (per call billing) expensive.
+  nlohmann::json tools_json_no_web;
+  auto tools_for_request = [&]() -> const nlohmann::json& {
+    const int budget = st.web_tool_max_calls_per_turn;
+    if (budget <= 0 || web_tool_calls < budget) return tools_json;
+    if (tools_json_no_web.is_null()) {
+      tools_json_no_web = nlohmann::json::array();
+      for (std::size_t i = 0; i < tools_json.size(); ++i) {
+        const nlohmann::json& t = tools_json[i];
+        const std::string name = t["function"]["name"].get<std::string>();
+        if (name == "toolkit_search" || name == "toolkit_fetch") continue;
+        tools_json_no_web.push_back(t);
+      }
+    }
+    return tools_json_no_web;
+  };
 
   const int max_iterations = st.max_iterations;
   bool finished = false;
@@ -655,7 +679,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     request.model = model;
     request.api_url = provider_info->api_url;
     request.api_key = provider_info->api_key;
-    request.tools = tools_json;
+    request.tools = tools_for_request();
     request.stream = options.stream;
 
     // Per-provider headers, with ${session_id} substituted.
@@ -880,8 +904,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       } else if (arguments_valid) {
         ToolContext tool_ctx;
         tool_ctx.config = config_;
+        tool_ctx.provider = provider_info;
         tool_ctx.workspace = &workspace;
         tool_ctx.cancel = cancel;
+        tool_ctx.web_tool_calls = &web_tool_calls;
         tool_result = tools_->execute(call.name, parsed_arguments, tool_ctx);
       }
 

@@ -327,10 +327,17 @@ int main(int argc, char** argv) {
     banner += "  Provider    : " + config.active_provider + " / " + config.active_model + "\n";
     banner += "  HTTP engine : " + http_engine() + " (available: " + http_available_engines() +
               ")\n";
+    // List what the active provider actually advertises: web tools are
+    // provider-scoped, and showing the unfiltered set here misleads debugging.
     banner += "  Tools       : ";
-    for (std::size_t i = 0; i < tools.defs().size(); ++i) {
+    const nlohmann::json advertised = tools.openai_tools(config.active_provider_info());
+    for (std::size_t i = 0; i < advertised.size(); ++i) {
       if (i) banner += ", ";
-      banner += tools.defs()[i].name;
+      banner += advertised[i]["function"]["name"].get<std::string>();
+    }
+    if (advertised.size() < tools.defs().size()) {
+      banner += "  (" + std::to_string(tools.defs().size() - advertised.size()) +
+                " provider-scoped tool(s) hidden for this provider)";
     }
     banner += "\n";
     banner += "  Workspaces  : " + std::to_string(registry.entries().size()) + " registered (index: " +

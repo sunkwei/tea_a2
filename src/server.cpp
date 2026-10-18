@@ -213,6 +213,11 @@ struct ApiServer::Impl {
 
   std::mutex mu;  // guards registry access and `turns`
   std::map<std::string, std::shared_ptr<ChatTurn>> turns;
+  /// Turns displaced by a newer turn on the same session. ~ChatTurn joins its
+  /// worker, so these are kept alive here and only destroyed outside `mu`:
+  /// joining under the lock would freeze every other request for as long as
+  /// the old worker is still stuck (e.g. in a long tool call).
+  std::vector<std::shared_ptr<ChatTurn>> retired;
   // ---- helpers -----------------------------------------------------------
   void install_routes();
 
@@ -253,10 +258,21 @@ struct ApiServer::Impl {
     return out->open(copy, config->settings, err);
   }
 
-  void prune_turns_locked() {
+  /// With `mu` held: move finished turns into `graveyard`. The caller destroys
+  /// them after unlocking, because the destructor joins the worker thread.
+  void prune_turns_locked(std::vector<std::shared_ptr<ChatTurn>>* graveyard) {
     for (auto it = turns.begin(); it != turns.end();) {
-      if (it->second && it->second->finished() && it->second->worker.joinable()) {
+      if (it->second && it->second->finished()) {
+        graveyard->push_back(it->second);
         it = turns.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    for (auto it = retired.begin(); it != retired.end();) {
+      if (!*it || (*it)->finished()) {
+        if (*it) graveyard->push_back(*it);
+        it = retired.erase(it);
       } else {
         ++it;
       }
@@ -376,6 +392,8 @@ void ApiServer::Impl::install_routes() {
       }
       pj["model_info"] = model_info;
       pj["has_key"] = p->has_key();  // never expose the key itself
+      pj["supports_search"] = p->supports_search;
+      pj["supports_fetch"] = p->supports_fetch;
       if (!p->description.empty()) pj["description"] = p->description;
       list.push_back(pj);
     }
@@ -953,13 +971,20 @@ void ApiServer::Impl::install_routes() {
     const std::string provider = json_string(body, "provider");
     const std::string model = json_string(body, "model");
 
+    std::vector<std::shared_ptr<ChatTurn>> graveyard;
     {
       std::lock_guard<std::mutex> lock(mu);
-      prune_turns_locked();
+      prune_turns_locked(&graveyard);
       auto it = turns.find(turn->session_id);
-      if (it != turns.end() && it->second) it->second->cancel.store(true);
+      if (it != turns.end() && it->second) {
+        it->second->cancel.store(true);
+        retired.push_back(it->second);  // destroyed after the lock is released
+        turns.erase(it);
+      }
       turns[turn->session_id] = turn;
     }
+    // Joining a finished worker is immediate; doing it here keeps `mu` free.
+    graveyard.clear();
 
     AppConfig* cfg = config;
     ToolRegistry* reg = tools;

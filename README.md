@@ -418,6 +418,10 @@ providers:
     headers:                               # 可选：网关自定义头
       x-opencode-session: '${session_id}'  # ${session_id} 会替换为当前会话 id
     reasoning_content: auto                # keep | strip | auto（默认 auto，见下）
+    supports_search: true                  # 网页搜索工具 toolkit_search（见下「网页搜索与抓取」）
+    supports_fetch: true                   # 网页抓取工具 toolkit_fetch
+    # search_path: /v1/tools/search        # 可选：端点覆盖（相对 api_url 的路径或完整 URL）
+    # fetch_path: /v1/tools/fetch
     models:
       deepseek-chat:
         max_context_tokens: 128000
@@ -437,6 +441,37 @@ settings:
 
 解析顺序：`--provider`/`--model` → `roles.main` → 第一个 provider 的 `default_model`。
 api_key 只在日志里以掩码出现，HTTP 接口从不下发。
+
+### 网页搜索与抓取（provider 级可选能力）
+
+DeepSeek 对所有 API 用户开放了两个原生端点（`POST /v1/tools/search`、`POST /v1/tools/fetch`，
+与 chat 相同的 Bearer 鉴权）。这不是 OpenAI 标准协议，探测不了，所以按 provider 声明：
+
+```yaml
+providers:
+  DeepSeek:
+    supports_search: true    # 向模型暴露 toolkit_search（结构化搜索结果）
+    supports_fetch: true     # 向模型暴露 toolkit_fetch（网页 → Markdown 正文）
+```
+
+开关是 provider 级而非模型级——端点挂在账号上，与具体模型无关。未声明的 provider 完全看不到
+这两个工具；即使模型硬调也会得到能力错误，不会发请求。默认全关：DeepSeek 按请求次数计费
+（各 5 元 / 1000 次成功请求，账号级各 5 QPS），开了才会计费。搜索支持 `site:`、`lang:`、
+`after:`/`before:` 等语法，工具描述里会教给模型。
+
+超时与计费预算单独配置（`settings:` 里，也可按工作区覆盖）：
+
+```yaml
+settings:
+  web_tool_connect_timeout_ms: 10000   # 连接超时
+  web_tool_timeout_ms: 60000           # 单次 search/fetch 的读超时
+  web_tool_max_calls_per_turn: 10      # 每轮对话最多几次计费调用
+```
+
+这三项是必须的，不能让 web 工具沿用 LLM 的超时：`http_read_timeout_ms` 默认 600 秒（流式
+响应要用），一次卡住的搜索会让整轮对话停十分钟，而且中途无法取消。现在 web 工具用独立的
+有界超时，用户点停止会立即中断传输（返回 `cancelled by user`）。预算用尽后这两个工具会从
+工具表里消失，模型不会继续空转重试——否则它会把 `max_iterations` 全部耗在重试上，既慢又费钱。
 
 ### 按工作区覆盖设置
 
@@ -633,13 +668,14 @@ scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat
 ```bash
 pwsh -File tests/e2e.ps1                                  # 默认构建产物
 pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
+
+python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
 ```
 
-`tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
-再以独立 `--tea-home` 启动 agent，覆盖 **69 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
-SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、
-目录树与文件读写、记忆与日志接口、内置 UI 交付（含指标栏）且无 CDN 依赖。全程本地 `http://`，
-不需要 api_key。
+`tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
+覆盖：工具按 provider 声明才出现在工具表、未声明时强制调用被拒且不外呼、端点卡住时按
+`web_tool_timeout_ms` 超时而不是拖住整轮、`/api/chat/stop` 能中断传输中的请求。
+
 
 其中几条是**回归测试**：
 

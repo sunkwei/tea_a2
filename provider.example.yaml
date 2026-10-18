@@ -14,6 +14,17 @@ providers:
     api_url: https://api.deepseek.com
     api_key: sk-REPLACE-ME
     default_model: deepseek-chat
+    # Provider-scoped web tools. The endpoints (POST /v1/tools/search and
+    # /v1/tools/fetch, same Bearer auth) are DeepSeek-specific, not
+    # OpenAI-standard, so they are declared instead of probed. When enabled,
+    # toolkit_search / toolkit_fetch join the advertised tool set. The provider
+    # bills every successful call per request (5 CNY / 1000 calls each), so the
+    # default is off.
+    supports_search: true
+    supports_fetch: true
+    # Optional endpoint overrides (path relative to api_url, or a full URL):
+    # search_path: /v1/tools/search
+    # fetch_path: /v1/tools/fetch
     models:
       deepseek-chat:
         max_context_tokens: 128000
@@ -79,4 +90,10 @@ settings:
   compaction_keep_recent: 4
   compaction_summary_max_tokens: 800
   tool_output_max_lines: 400
+  # Web tools (toolkit_search/toolkit_fetch) get their own bounded budget; they
+  # must not inherit http_read_timeout_ms (600s, meant for LLM streaming), or a
+  # single slow endpoint stalls a turn for minutes and cannot be cancelled.
+  web_tool_connect_timeout_ms: 10000
+  web_tool_timeout_ms: 60000
+  web_tool_max_calls_per_turn: 10   # billed calls per user turn
   max_assistant_content: 131072

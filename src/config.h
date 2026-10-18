@@ -51,6 +51,17 @@ struct ProviderInfo {
   /// How to treat assistant reasoning_content on the wire.
   ReasoningEcho reasoning_echo = ReasoningEcho::Auto;
 
+  /// Provider-scoped web tools (DeepSeek-style /v1/tools/{search,fetch}).
+  /// These endpoints are not OpenAI-standard, so their presence cannot be
+  /// probed safely; the config declares them. Account-level, hence not a
+  /// per-model flag. Both default to off: every call is billed per request.
+  bool supports_search = false;
+  bool supports_fetch = false;
+  /// Optional endpoint overrides (path relative to api_url, or a full URL).
+  /// Empty => "/v1/tools/search" and "/v1/tools/fetch".
+  std::string search_path;
+  std::string fetch_path;
+
   bool has_key() const { return !api_key.empty(); }
   const ModelInfo* find_model(const std::string& name) const;
 };
@@ -67,6 +78,16 @@ struct Settings {
   int command_timeout_ms = 180000;
   int http_connect_timeout_ms = 30000;
   int http_read_timeout_ms = 600000;
+  /// Web tools (toolkit_search / toolkit_fetch) get their own budget. The
+  /// 600s read timeout above exists for LLM streaming; reusing it meant one
+  /// slow search endpoint could stall a turn for ten minutes, and the request
+  /// was not cancellable either.
+  int web_tool_connect_timeout_ms = 10000;
+  int web_tool_timeout_ms = 60000;
+  /// Hard cap on billed web-tool calls per user turn. A model that keeps
+  /// retrying would otherwise burn the whole max_iterations budget, which is
+  /// both slow and (the provider bills per call) expensive.
+  int web_tool_max_calls_per_turn = 10;
   bool allow_outside_workspace = false;
   bool stream = true;
   bool stream_include_usage = false;

@@ -84,6 +84,15 @@ void apply_settings(Settings& s, const YAML::Node& node) {
     s.http_connect_timeout_ms = static_cast<int>(yint(node, "http_connect_timeout_ms", s.http_connect_timeout_ms));
   if (yhas(node, "http_read_timeout_ms"))
     s.http_read_timeout_ms = static_cast<int>(yint(node, "http_read_timeout_ms", s.http_read_timeout_ms));
+  if (yhas(node, "web_tool_connect_timeout_ms"))
+    s.web_tool_connect_timeout_ms =
+        static_cast<int>(yint(node, "web_tool_connect_timeout_ms", s.web_tool_connect_timeout_ms));
+  if (yhas(node, "web_tool_timeout_ms"))
+    s.web_tool_timeout_ms =
+        static_cast<int>(yint(node, "web_tool_timeout_ms", s.web_tool_timeout_ms));
+  if (yhas(node, "web_tool_max_calls_per_turn"))
+    s.web_tool_max_calls_per_turn =
+        static_cast<int>(yint(node, "web_tool_max_calls_per_turn", s.web_tool_max_calls_per_turn));
   if (yhas(node, "allow_outside_workspace"))
     s.allow_outside_workspace = ybool(node, "allow_outside_workspace", s.allow_outside_workspace);
   if (yhas(node, "stream")) s.stream = ybool(node, "stream", s.stream);
@@ -131,6 +140,10 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (s.compaction_retries < 0) s.compaction_retries = 0;
   if (s.max_iterations < 1) s.max_iterations = 1;
   if (s.command_timeout_ms < 1000) s.command_timeout_ms = 1000;
+  if (s.web_tool_connect_timeout_ms < 1000) s.web_tool_connect_timeout_ms = 1000;
+  if (s.web_tool_timeout_ms < 1000) s.web_tool_timeout_ms = 1000;
+  if (s.web_tool_timeout_ms > 600000) s.web_tool_timeout_ms = 600000;
+  if (s.web_tool_max_calls_per_turn < 1) s.web_tool_max_calls_per_turn = 1;
 }
 
 }  // namespace
@@ -291,6 +304,15 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
                              "' (use auto|keep|strip); falling back to auto");
         }
       }
+
+      // Provider-scoped web tools (DeepSeek opens /v1/tools/{search,fetch} to
+      // every API user; the protocol is not OpenAI-standard, so support is
+      // declared rather than probed). Off by default: every call is billed
+      // per request by the provider.
+      info.supports_search = ybool(pn, "supports_search", false);
+      info.supports_fetch = ybool(pn, "supports_fetch", false);
+      info.search_path = trim(ystr(pn, "search_path"));
+      info.fetch_path = trim(ystr(pn, "fetch_path"));
 
       if (info.api_url.empty()) {
         warnings.push_back("provider '" + name + "' has no api_url; skipped");
