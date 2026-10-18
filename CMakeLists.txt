@@ -171,6 +171,32 @@ else()
   set(TEA_EMBED_DEP tea_embed_assets)
 endif()
 
+# ---------------------------------------------------------------------------
+# CA bundle embedder: compiles 3rd/ca-bundle/cacert.pem into the binary so a
+# single-file deployment has working https:// without a sidecar PEM.
+# ---------------------------------------------------------------------------
+add_executable(tea_embed_ca_bundle tools/embed_ca_bundle.cpp)
+set_target_properties(tea_embed_ca_bundle PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+set(TEA_CA_BUNDLE_PEM ${TEA_3RD}/ca-bundle/cacert.pem)
+set(TEA_CA_BUNDLE_CPP ${TEA_GEN_DIR}/ca_bundle.cpp)
+# A missing PEM is not fatal: the generator emits an empty bundle and the
+# runtime falls back to a file. Keep the dependency list honest either way.
+if(EXISTS ${TEA_CA_BUNDLE_PEM})
+  set(TEA_CA_BUNDLE_DEPS ${TEA_CA_BUNDLE_PEM})
+else()
+  set(TEA_CA_BUNDLE_DEPS "")
+  message(STATUS "tea_agent: no ${TEA_CA_BUNDLE_PEM}; the binary will look for a PEM at runtime")
+endif()
+add_custom_command(
+  OUTPUT ${TEA_CA_BUNDLE_CPP}
+  COMMAND tea_embed_ca_bundle ${TEA_GEN_DIR} ${TEA_CA_BUNDLE_PEM}
+  DEPENDS tea_embed_ca_bundle ${TEA_CA_BUNDLE_DEPS}
+  COMMENT "Embedding the CA bundle into ca_bundle.cpp"
+  VERBATIM
+)
+
 set(TEA_WEB_ASSETS_CPP ${TEA_GEN_DIR}/web_assets.cpp)
 add_custom_command(
   OUTPUT ${TEA_WEB_ASSETS_CPP} ${TEA_GEN_DIR}/web_assets.h
@@ -204,6 +230,7 @@ set(TEA_SOURCES
   src/agent.cpp
   src/server.cpp
   ${TEA_WEB_ASSETS_CPP}
+  ${TEA_CA_BUNDLE_CPP}
 )
 
 if(WIN32)
@@ -227,7 +254,9 @@ add_executable(tea_agent ${TEA_SOURCES})
 # compiler resolve system headers such as <process.h> (pulled in by <thread>)
 # to our own src/process.h. All intra-project includes are quoted and resolve
 # relative to the including file, which is exactly what we want.
-target_include_directories(tea_agent PRIVATE ${TEA_GEN_DIR})
+# src/ is needed by the generated translation units (ca_bundle.cpp includes
+# ca_bundle.h); the hand-written sources find their headers next to themselves.
+target_include_directories(tea_agent PRIVATE ${TEA_GEN_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(tea_agent PRIVATE tea_3rd)
 
 if(WIN32)
@@ -254,17 +283,33 @@ target_link_libraries(tea_agent PRIVATE Threads::Threads)
 # targets built with GCC or Clang.
 option(TEA_AGENT_STATIC_RUNTIME
        "Link the C++ runtime statically so the binary is self-contained" ON)
-# Fully static (also libc). Needs a static libc to be installed — musl-based
-# toolchains handle this well; with glibc, static linking still resolves DNS
-# through nsswitch/dlopen and can surprise you, so it stays off by default.
-option(TEA_AGENT_FULLY_STATIC "Also link libc statically (see the glibc caveat)" OFF)
+# Fully static (also libc). On by default: the binary is meant to be copied to
+# devices that may run an older glibc than the build host, and a dynamically
+# linked binary then dies with "version `GLIBC_2.xx' not found" before it can
+# print anything useful.
+#
+# The cost is glibc's NSS: a static binary cannot dlopen libnss_*.so modules,
+# and on hosts whose /etc/nsswitch.conf lists systemd-resolved (`resolve`) or
+# mDNS, getaddrinfo segfaults. http_socket.cpp therefore pins the hosts
+# database to "files dns" (the two implementations compiled into libc) when
+# TEA_STATIC_LIBC is defined, so DNS keeps working and mDNS/systemd-resolved's
+# NSS front end is bypassed. musl has no NSS modules at all and needs none of
+# this. Set to OFF for a dynamic binary when the target matches the build host.
+option(TEA_AGENT_STATIC_LIBC "Link libc statically so the binary runs on older systems" ON)
 
 if(TEA_AGENT_STATIC_RUNTIME AND NOT WIN32 AND NOT APPLE AND
    CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_link_options(tea_agent PRIVATE -static-libstdc++ -static-libgcc)
-  if(TEA_AGENT_FULLY_STATIC)
-    target_link_options(tea_agent PRIVATE -static)
-    message(STATUS "tea_agent: fully static binary requested (-static)")
+  if(TEA_AGENT_STATIC_LIBC)
+    # -no-pie: a fully static executable cannot be a PIE on glibc; the default
+    # toolchain here produces PIE, and `-static` alone then fails to link.
+    target_link_options(tea_agent PRIVATE -static -no-pie)
+    target_compile_options(tea_agent PRIVATE -fno-pie)
+    # Tells http_socket.cpp to keep NSS to the built-in "files dns" lookups;
+    # without it a static binary crashes inside libnss_resolve.so on
+    # systemd-resolved hosts.
+    target_compile_definitions(tea_agent PRIVATE TEA_STATIC_LIBC=1)
+    message(STATUS "tea_agent: fully static binary (-static -no-pie)")
   endif()
 endif()
 

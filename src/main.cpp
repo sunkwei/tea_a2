@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "agent.h"
+#include "ca_bundle.h"
 #include "config.h"
 #include "http.h"
 #include "log.h"
@@ -97,7 +98,8 @@ void print_usage() {
                   "  --provider <name>          provider to use\n"
                   "  --model <name>             model to use\n"
                   "  --http-engine <name>       auto | socket | winhttp\n"
-                  "  --ca-bundle <path>         PEM file with trusted roots (default: bundled cacert.pem)\n"
+                  "  --ca-bundle <path>         PEM file with trusted roots (default: the bundle\n"
+                  "                             compiled into this binary)\n"
                   "  --insecure                 do not verify TLS certificates (testing only)\n"
                   "\n"
                   "Workspaces\n"
@@ -129,8 +131,9 @@ void open_browser(const std::string& url) {
 #endif
 }
 
-/// Look for a CA bundle next to the binary, in the repository, or in the agent
-/// home directory.
+/// Look for a CA bundle file next to the binary, in the repository, or in the
+/// agent home directory. Only consulted when the build embedded no bundle (or
+/// when an operator wants to override the embedded one with --ca-bundle).
 std::string find_ca_bundle(const std::string& tea_home) {
   std::vector<std::string> candidates;
   const std::string exe_dir = executable_dir();
@@ -218,18 +221,32 @@ int main(int argc, char** argv) {
   // ---- TLS ---------------------------------------------------------------
   TlsOptions tls;
   tls.verify_peer = !args.has("insecure");
+  // Root resolution, in order: --ca-bundle (explicit) > embedded bundle >
+  // a PEM found on disk. The embedded one is the default so that copying a
+  // single ELF to a device is enough for https:// to work; the file search
+  // remains for builds without a vendored bundle and for operators who want to
+  // refresh the roots without rebuilding.
   tls.ca_bundle = args.get("ca-bundle");
-  if (tls.ca_bundle.empty()) tls.ca_bundle = find_ca_bundle(tea_home);
+  if (tls.ca_bundle.empty()) {
+    const char* pem = embedded_ca_bundle_pem();
+    if (pem != nullptr && embedded_ca_bundle_size() > 0) {
+      tls.ca_pem.assign(pem, embedded_ca_bundle_size());
+    } else {
+      tls.ca_bundle = find_ca_bundle(tea_home);
+    }
+  }
   if (!tls.ca_bundle.empty()) tls.ca_bundle = path_absolute(tls.ca_bundle);
   http_set_tls_config(tls);
   if (!tls.verify_peer) {
     LOG_WARN("tls: certificate verification is DISABLED (--insecure)");
-  } else if (tls.ca_bundle.empty()) {
+  } else if (!tls.ca_bundle.empty()) {
+    LOG_INFO("tls: CA bundle ", tls.ca_bundle);
+  } else if (!tls.ca_pem.empty()) {
+    LOG_INFO("tls: CA bundle embedded in the binary (", tls.ca_pem.size(), " bytes)");
+  } else {
     LOG_WARN(
         "tls: no CA bundle found; https:// through the bundled TLS backend will fail "
         "(pass --ca-bundle <pem> or --insecure)");
-  } else {
-    LOG_INFO("tls: CA bundle ", tls.ca_bundle);
   }
 
   // ---- configuration -----------------------------------------------------

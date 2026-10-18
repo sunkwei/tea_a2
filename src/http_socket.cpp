@@ -103,8 +103,38 @@ void set_nonblocking(tea_socket_t s, bool nonblocking) {
 #endif
 }
 
+#if defined(TEA_STATIC_LIBC) && defined(__GLIBC__)
+extern "C" int __nss_configure_lookup(const char* db, const char* configuration);
+#endif
+
+/// A statically linked glibc cannot load NSS modules safely: getaddrinfo
+/// dlopen()s libnss_resolve.so.2 / libnss_mdns*.so.2 from /etc/nsswitch.conf,
+/// and mixing a shared module into a static binary segfaults (verified with a
+/// 20-line static repro on a systemd-resolved host). Pinning the "hosts"
+/// database to the two implementations glibc compiles in keeps DNS working.
+///
+/// The trade-off, which only applies to static builds: systemd-resolved's
+/// module and mDNS are bypassed. Plain DNS still works - on such hosts
+/// /etc/resolv.conf points at the 127.0.0.53 stub, so names still resolve
+/// through systemd-resolved, just without its NSS front end.
+void configure_nss_for_static_build() {
+#if defined(TEA_STATIC_LIBC) && defined(__GLIBC__)
+  static std::once_flag once;
+  std::call_once(once, [] {
+    const int rc = __nss_configure_lookup("hosts", "files dns");
+    if (rc != 0) {
+      LOG_WARN("nss: cannot restrict the hosts database to 'files dns' (rc=", rc,
+               "); name resolution may crash in this statically linked build");
+    } else {
+      LOG_DEBUG("nss: hosts lookups restricted to 'files dns' (static build)");
+    }
+  });
+#endif
+}
+
 tea_socket_t tcp_connect(const std::string& host, int port, int timeout_ms, std::string* err) {
   ensure_winsock();
+  configure_nss_for_static_build();
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;

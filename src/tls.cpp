@@ -87,6 +87,17 @@ class MbedTlsStream : public TlsStream {
         return false;
       }
       ca_loaded_ = true;
+    } else if (!options_.ca_pem.empty()) {
+      // The embedded bundle. mbedtls wants the terminating NUL counted, so a
+      // PEM with several certificates parses in one call.
+      const int rc = mbedtls_x509_crt_parse(
+          &ca_, reinterpret_cast<const unsigned char*>(options_.ca_pem.data()),
+          options_.ca_pem.size() + 1);
+      if (rc < 0) {
+        *err = std::string("cannot parse the embedded CA bundle: ") + mbedtls_error_text(rc);
+        return false;
+      }
+      ca_loaded_ = true;
     }
     if (options_.verify_peer && !ca_loaded_) {
       *err =

@@ -603,48 +603,69 @@ cmake --build build-arm64 -j"$(nproc)"
 | --- | --- | --- |
 | Windows x64 / MinGW-w64（已实测） | 6.1 MB | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
 | Windows x64 / MSVC（已实测） | 1.7 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
-| Linux / ARM（未实测） | 取决于是否静态链接 | 默认动态链接 libstdc++ |
+| Linux x64（已实测） | 5.7 MB | **完全静态**：不依赖目标机的 glibc 版本 |
+| Linux / ARM（未实测） | 取决于工具链 | 默认完全静态，需要目标架构的静态 libc |
 
 想进一步压：`-DCMAKE_BUILD_TYPE=MinSizeRel` + `strip`；不需要 HTTPS 可
 `-DTEA_AGENT_USE_MBEDTLS=OFF`（体积显著下降，但 Linux 上就没有 `https://` 了）；
 还可以用自定义 `MBEDTLS_CONFIG_FILE` 裁掉 mbedTLS 里用不到的算法。
 
-### 单文件部署（静态链接运行时）
+### 单文件部署（完全静态）
 
-目标设备上不该再装一遍编译器运行时，所以 **C++ 运行时是静态链接的**（`TEA_AGENT_STATIC_RUNTIME`，
-默认 `ON`）：
+一个 ELF 拷到目标机就能跑：**不依赖目标机的 glibc 版本**，也**不需要旁边的 PEM 文件**。
+这正是「部署到比构建机更老的系统」所需要的——动态链接的二进制在那种机器上会先报
+`version 'GLIBC_2.xx' not found` 再退出，连一句有用的错误都来不及打印。
 
 | 平台 | 链接方式 | 目标机需要什么 |
 | --- | --- | --- |
-| Windows / MinGW-w64 | `-static-libgcc -static-libstdc++ -static` | 只有 Windows 自带的 `KERNEL32/ADVAPI32/SHELL32/WINHTTP/WS2_32` + UCRT，无 `libstdc++-6.dll` / `libwinpthread-1.dll` |
-| Linux / 其它 ELF（GCC/Clang） | `-static-libstdc++ -static-libgcc` | 只剩系统 `libc/libm/libpthread`，无 `libstdc++.so.6` / `libgcc_s.so.1` |
-| macOS | 不适用 | 系统不提供静态 `libc++`，此选项自动跳过 |
-
-实测（MinGW）：6.4 MB，`objdump -p` 里的 DLL 依赖只有上面 6 个系统库，
-`libstdc++/libgcc/winpthread` 命中 **0** 个。
-
-Linux 上用一条命令确认（`libstdc++`/`libgcc_s` 不应出现）：
+| Windows / MinGW-w64 | `-static-libgcc -static-libstdc++ -static` | 只有 Windows 自带的 `KERNEL32/ADVAPI32/SHELL32/WINHTTP/WS2_32` + UCRT |
+| Linux / 其它 ELF（GCC/Clang） | `-static -no-pie`（默认开启） | **什么都不需要**，连 glibc 都不用 |
+| macOS | 不适用 | 系统不提供静态 `libc++`，自动跳过 |
 
 ```bash
-ldd build/bin/tea_agent        # 期待只有 libc、libm、libpthread
+file build/bin/tea_agent     # → statically linked
+ldd  build/bin/tea_agent     # → not a dynamic executable
 ```
 
-想要**连 libc 也静态**（真正的 fully static，适合 musl 工具链的嵌入式板子）：
+三个相关开关：
 
-```bash
-cmake -S . -B build -DTEA_AGENT_FULLY_STATIC=ON
+| 选项 | 默认 | 作用 |
+| --- | --- | --- |
+| `TEA_AGENT_STATIC_RUNTIME` | `ON` | 静态链接 `libstdc++`/`libgcc` |
+| `TEA_AGENT_STATIC_LIBC` | `ON` | 再静态链接 libc（`-static -no-pie`） |
+| `TEA_AGENT_USE_MBEDTLS` | `ON` | 关掉可显著减小体积，但 Linux 上就没有 `https://` 了 |
+
+#### glibc 的 NSS 陷阱（已处理）
+
+静态链接的 glibc **不能**安全地 `dlopen` NSS 模块：`getaddrinfo` 会按
+`/etc/nsswitch.conf` 加载 `libnss_resolve.so.2`（systemd-resolved）或
+`libnss_mdns*.so.2`，把共享模块混进静态二进制里会 **SIGSEGV**。这在 `resolve` 出现在
+nsswitch 里的现代发行版上是必现的（本项目实测崩溃过）。
+
+所以 `TEA_STATIC_LIBC` 打开时，`http_socket.cpp` 会把 hosts 数据库钉到 glibc 内建的两种实现：
+
+```c
+__nss_configure_lookup("hosts", "files dns");   // 仅静态构建
 ```
 
-注意 glibc 的坑：静态链接后 DNS 解析仍可能通过 `nsswitch`/`dlopen` 在运行期加载，
-所以 glibc 下不建议开这个选项；musl（或 `TEA_AGENT_USE_MBEDTLS` 场景下自带 TLS）更稳。
+代价（只影响静态构建）：绕过 systemd-resolved 的 NSS 前端与 mDNS。普通 DNS 仍然工作——
+这类机器的 `/etc/resolv.conf` 指向 `127.0.0.53` 这个 stub，域名照样由 systemd-resolved 解析，
+只是不经过它的 NSS 模块。musl 工具链没有 NSS 模块，无需这层处理。
+
+`tests/smoke_single_file.py` 把这条钉住了：它确认证书嵌在 ELF 里、`ldd` 无共享库依赖、
+把二进制单独拷到一个空目录也能启动并使用内嵌根证书，最后**用真实域名走一遍解析**——
+回归时的表现是进程被 SIGSEGV 杀掉，而不是一个难查的线上问题。
 
 ### TLS 与证书
 
 - Windows 默认走 WinHTTP，使用**系统证书库**，无需额外文件；拿不到状态行时自动回退内置 mbedTLS。
-- 其它平台走内置 mbedTLS，需要一份 CA 证书。构建时会把 `3rd/ca-bundle/cacert.pem` 复制到
-  `bin/ca-bundle/`，查找顺序：`--ca-bundle` → 可执行文件同级的 `ca-bundle/cacert.pem` →
-  同级 `cacert.pem` → 同级 `../3rd/ca-bundle/cacert.pem` → 工作目录 `3rd/ca-bundle/cacert.pem`
-  → `$TEA_AGENT_HOME/ca-bundle/cacert.pem`。
+- 其它平台走内置 mbedTLS，根证书**编译进二进制**（`3rd/ca-bundle/cacert.pem` 由
+  `tools/embed_ca_bundle.cpp` 生成 `ca_bundle.cpp`），所以单文件部署不需要随附 PEM。
+  启动日志会写 `tls: CA bundle embedded in the binary (N bytes)`。
+- 覆盖顺序：`--ca-bundle <pem>` 优先（便于不重新编译就更新根证书）→ 内嵌证书 → 磁盘查找
+  （同级 `ca-bundle/cacert.pem`、同级 `cacert.pem`、`../3rd/ca-bundle/cacert.pem`、
+  工作目录 `3rd/ca-bundle/cacert.pem`、`$TEA_AGENT_HOME/ca-bundle/cacert.pem`）。
+  最后这层只对「构建时没有 vendored 证书」的构建有意义。
 
 ---
 
@@ -713,6 +734,7 @@ python3 tests/smoke_vision.py                             # 粘贴图片：校�
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
+python3 tests/smoke_single_file.py                        # 内嵌证书 + 静态链接 + 静态下的 DNS
 python3 tests/smoke_dir_dialog.py                         # 原生目录选择器（后端选择/取消/不可用）
 node tests/ui_workspace_add.mjs                           # 新增工作区（原生对话框 + 手动回退）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝

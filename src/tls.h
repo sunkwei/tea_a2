@@ -26,6 +26,10 @@ struct TlsOptions {
   /// PEM file holding the trusted roots. Empty means "no roots loaded", which
   /// is only acceptable when verify_peer is false.
   std::string ca_bundle;
+  /// PEM text already in memory (the bundle embedded at build time). Used when
+  /// `ca_bundle` is empty; `ca_bundle` wins so an operator can still point at a
+  /// newer file without rebuilding.
+  std::string ca_pem;
   bool verify_peer = true;
 };
 
