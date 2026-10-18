@@ -348,6 +348,109 @@ void ApiServer::Impl::install_routes() {
     j["provider"] = config->active_provider;
     j["model"] = config->active_model;
     j["http_engine"] = http_engine();
+    // The UI blocks on this: without a config there is nothing to chat with.
+    j["config_loaded"] = config->loaded;
+    if (!config->loaded) j["config_error"] = config->error;
+    send_json(res, j);
+  });
+
+  // ---- first-run configuration -------------------------------------------
+  // A missing provider.yaml is not fatal any more: the server comes up in setup
+  // mode, the UI uploads the file, and the config is reloaded in place.
+  svr.Get("/api/config/status", [this](const httplib::Request&, httplib::Response& res) {
+    nlohmann::json j = nlohmann::json::object();
+    j["loaded"] = config->loaded;
+    j["path"] = config->path;
+    j["tea_home"] = config->tea_home;
+    if (!config->loaded) {
+      j["needs_setup"] = config->file_missing;
+      j["error"] = config->error;
+    }
+    j["providers"] = config->provider_order;
+    send_json(res, j);
+  });
+
+  svr.Post("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
+    // Body is the YAML text itself, or {"yaml": "..."} for JSON-only clients.
+    // Decide by content rather than Content-Type: a browser File upload and a
+    // curl --data-binary send the raw text, while the bundled UI wraps it.
+    std::string yaml_text = req.body;
+    if (!trim(req.body).empty() && trim(req.body)[0] == '{') {
+      nlohmann::json body = nlohmann::json::parse(req.body, nullptr, false);
+      if (body.is_object()) {
+        const std::string wrapped = json_string(body, "yaml");
+        if (!wrapped.empty()) yaml_text = wrapped;
+        else {
+          const std::string alt = json_string(body, "content");
+          if (!alt.empty()) yaml_text = alt;
+        }
+      }
+      // No wrapper key: the body is a YAML flow mapping, keep it verbatim.
+    }
+    if (trim(yaml_text).empty()) {
+      send_error(res, 400, "bad_request", "the request body is empty; send provider.yaml");
+      return;
+    }
+    if (yaml_text.size() > 4u * 1024u * 1024u) {
+      send_error(res, 413, "too_large", "provider.yaml must be smaller than 4 MB");
+      return;
+    }
+
+    // Reject the upload while a turn is running: reloading the config in place
+    // would pull the provider out from under the agent thread.
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (auto it = turns.begin(); it != turns.end(); ++it) {
+        if (it->second && !it->second->finished()) {
+          send_error(res, 409, "turn_running",
+                     "a chat turn is still running; stop it before replacing the config");
+          return;
+        }
+      }
+    }
+
+    const std::string dir = path_parent(config->path);
+    if (!dir.empty() && !make_dirs(dir)) {
+      send_error(res, 500, "io_error", "cannot create " + dir);
+      return;
+    }
+    // Validate into a scratch config first, so a bad upload never overwrites a
+    // working file (and never leaves the server without a config).
+    const std::string probe_path = config->path + ".upload.tmp";
+    std::string io_err;
+    if (!write_file(probe_path, yaml_text, false, &io_err)) {
+      send_error(res, 500, "io_error", "cannot write " + probe_path + ": " + io_err);
+      return;
+    }
+    AppConfig probe;
+    if (!probe.load(probe_path, config->tea_home)) {
+      remove_path(probe_path, false, nullptr);
+      send_error(res, 400, "invalid_config", probe.error);
+      return;
+    }
+    if (probe.providers.empty()) {
+      remove_path(probe_path, false, nullptr);
+      send_error(res, 400, "invalid_config",
+                 "the file parsed, but declares no usable provider (needs a `providers:` "
+                 "mapping with at least one api_url)");
+      return;
+    }
+    if (!move_path(probe_path, config->path, &io_err)) {
+      remove_path(probe_path, false, nullptr);
+      send_error(res, 500, "io_error", "cannot replace " + config->path + ": " + io_err);
+      return;
+    }
+    if (!config->load(config->path, config->tea_home)) {
+      send_error(res, 500, "reload_failed", config->error);
+      return;
+    }
+    LOG_INFO("config: provider.yaml replaced via the web UI (", config->providers.size(),
+             " provider(s), active=", config->active_provider, "/", config->active_model, ")");
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["path"] = config->path;
+    j["providers"] = config->provider_order;
+    j["active"] = { {"provider", config->active_provider}, {"model", config->active_model} };
     send_json(res, j);
   });
 
@@ -934,6 +1037,11 @@ void ApiServer::Impl::install_routes() {
     nlohmann::json body;
     if (!parse_json_body(req, &body, res)) return;
 
+    if (!config->loaded) {
+      send_error(res, 409, "config_missing",
+                 "no provider.yaml is configured yet; upload it in the web UI");
+      return;
+    }
     const std::string message = json_string(body, "message");
     if (trim(message).empty()) {
       send_error(res, 400, "bad_request", "'message' is required");

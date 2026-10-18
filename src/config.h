@@ -147,6 +147,10 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   std::vector<std::string> warnings;
   std::string error;
   bool loaded = false;
+  /// True when `load()` failed because the file does not exist (as opposed to
+  /// being unreadable or malformed). The server uses this to come up in setup
+  /// mode and let the UI upload the file instead of refusing to start.
+  bool file_missing = false;
 
   bool load(const std::string& config_path, const std::string& tea_home);
 

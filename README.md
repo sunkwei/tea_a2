@@ -94,7 +94,7 @@ scripts\build.bat
 ### 跑起来
 
 ```bash
-# 准备配置
+# 准备配置（也可以跳过这一步，见下面的「首次运行」）
 mkdir -p ~/.tea_agent
 cp provider.example.yaml ~/.tea_agent/provider.yaml
 $EDITOR ~/.tea_agent/provider.yaml          # 填 api_url / api_key / model
@@ -102,6 +102,15 @@ $EDITOR ~/.tea_agent/provider.yaml          # 填 api_url / api_key / model
 # 启动（默认 127.0.0.1:8282），把当前目录注册为工作区
 build/bin/tea_agent --workspace . --open
 ```
+
+**首次运行**：如果 `$HOME/.tea_agent/provider.yaml` 不存在，服务不会退出，而是以「配置模式」
+启动——浏览器打开页面后会被一个不可跳过的对话框挡住，点击（或拖入）`provider.yaml`、
+也可以直接粘贴内容，点「上传并应用」即可。配置会先校验再落盘（校验失败不会覆盖已有文件），
+成功后页面自动刷新，状态栏从「未配置」变成「已连接」，可以直接开始对话。
+命令行会打印 `starting in setup mode` 和提示地址，方便无 GUI 环境照常启动后再上传。
+
+注意只有**文件不存在**才进入配置模式；文件存在但 YAML 语法错误仍然会直接报错退出——
+那种情况下静默启动只会把问题藏起来。
 
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
 对话页的输入框下方常驻一行指标：输出速度（t/s）、前缀缓存命中率、`max_context_tokens`
@@ -670,12 +679,22 @@ pwsh -File tests/e2e.ps1                                  # 默认构建产物
 pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
 
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
+node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
 覆盖：工具按 provider 声明才出现在工具表、未声明时强制调用被拒且不外呼、端点卡住时按
 `web_tool_timeout_ms` 超时而不是拖住整轮、`/api/chat/stop` 能中断传输中的请求。
 
+`tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
+CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器
+能填入内容、上传成功后页面自动重载且状态栏变回「已连接」。
+
+`tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
+再以独立 `--tea-home` 启动 agent，覆盖 **69 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
+SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、
+目录树与文件读写、记忆与日志接口、内置 UI 交付（含指标栏）且无 CDN 依赖。全程本地 `http://`，
+不需要 api_key。
 
 其中几条是**回归测试**：
 

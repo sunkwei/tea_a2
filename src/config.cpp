@@ -184,9 +184,12 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
   error.clear();
   providers.clear();
   provider_order.clear();
+  loaded = false;
+  file_missing = false;
 
   if (!path_exists(path)) {
     error = "provider config not found: " + path;
+    file_missing = true;
     return false;
   }
 

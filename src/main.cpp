@@ -235,14 +235,26 @@ int main(int argc, char** argv) {
   // ---- configuration -----------------------------------------------------
   AppConfig config;
   const std::string config_path = args.get("config", path_join(tea_home, "provider.yaml"));
-  if (!config.load(config_path, tea_home)) {
-    LOG_ERROR("configuration error: ", config.error);
-    console_write_line("error: " + config.error);
-    console_write_line("hint: create " + config_path +
-                       " with a `providers:` mapping (see README.md)");
-    return 1;
+  const bool config_ok = config.load(config_path, tea_home);
+  if (!config_ok) {
+    if (!config.file_missing) {
+      // Malformed or unreadable config: fail loudly. Only a *missing* file is
+      // recoverable, because the web UI can then ask for it.
+      LOG_ERROR("configuration error: ", config.error);
+      console_write_line("error: " + config.error);
+      console_write_line("hint: create " + config_path +
+                         " with a `providers:` mapping (see README.md)");
+      return 1;
+    }
+    // Setup mode: serve the UI so it can upload provider.yaml, then reload.
+    LOG_WARN("configuration missing: ", config.error);
+    LOG_WARN("starting in setup mode: the web UI will ask for ", config_path);
+    console_write_line("warning: " + config.error);
+    console_write_line("         starting in setup mode; upload the file at " +
+                       std::string("http://") + args.get("host", "127.0.0.1") + ":" +
+                       args.get("port", "8282") + "/");
   }
-  {
+  if (config_ok) {
     std::string err;
     if (args.has("provider") || args.has("model")) {
       if (!config.set_active(args.get("provider"), args.get("model"), &err) && !err.empty()) {
@@ -323,8 +335,13 @@ int main(int argc, char** argv) {
     banner += "  " TEA_AGENT_NAME " " TEA_AGENT_VERSION_STRING "\n";
     banner += "  ------------------------------------------------------------\n";
     banner += "  Web UI      : " + server.url() + "\n";
-    banner += "  Config      : " + config.path + "\n";
-    banner += "  Provider    : " + config.active_provider + " / " + config.active_model + "\n";
+    banner += "  Config      : " + config.path +
+              (config.loaded ? std::string("\n")
+                             : std::string("  (missing - upload it in the web UI)\n"));
+    banner += "  Provider    : " +
+              (config.loaded ? config.active_provider + " / " + config.active_model
+                             : std::string("not configured yet")) +
+              "\n";
     banner += "  HTTP engine : " + http_engine() + " (available: " + http_available_engines() +
               ")\n";
     // List what the active provider actually advertises: web tools are

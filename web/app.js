@@ -985,9 +985,17 @@
     });
   }
   function markOnline() {
-    $('status-dot').className = 'status-dot ok';
-    $('status-text').textContent = '已连接' + (state.health && state.health.version ? ' v' + state.health.version : '');
-    $('banner').classList.add('hidden');
+    var needsSetup = state.health && state.health.config_loaded === false;
+    $('status-dot').className = 'status-dot ' + (needsSetup ? 'bad' : 'ok');
+    $('status-text').textContent = needsSetup
+      ? '未配置'
+      : '已连接' + (state.health && state.health.version ? ' v' + state.health.version : '');
+    if (needsSetup) {
+      $('banner-text').textContent = '尚未配置 provider.yaml，上传后才能开始对话。';
+      $('banner').classList.remove('hidden');
+    } else {
+      $('banner').classList.add('hidden');
+    }
   }
   function markOffline(err) {
     $('status-dot').className = 'status-dot bad';
@@ -1151,6 +1159,131 @@
       }
     ]);
     setTimeout(function () { input.focus(); input.select(); }, 0);
+  }
+
+  /* ---------- 6.5) 首次运行：上传 provider.yaml ---------- */
+  // 服务在找不到 provider.yaml 时会以「配置模式」启动。此时除了上传配置之外什么都做不了，
+  // 所以用一个不可关闭的对话框挡住界面，上传成功后直接刷新页面（配置在服务端已热加载）。
+  var setupGate = { open: false, busy: false };
+
+  function loadConfigStatus() {
+    return api('api/config/status').then(function (st) { return st; }, function () { return null; });
+  }
+
+  function openSetupGate(status) {
+    setupGate.open = true;
+    var body = el('div', 'setup');
+    body.appendChild(el('p', 'setup-lead',
+      '服务已启动，但没有找到 provider.yaml。上传后即可开始对话，配置会立即生效。'));
+    var pathRow = el('div', 'setup-path');
+    pathRow.appendChild(el('span', 'k', '保存到'));
+    pathRow.appendChild(el('span', 'mono', (status && status.path) || '~/.tea_agent/provider.yaml'));
+    body.appendChild(pathRow);
+
+    // 文件选择 + 拖放
+    var drop = el('label', 'setup-drop');
+    drop.setAttribute('for', 'setup-file');
+    drop.appendChild(el('span', 'setup-drop-main', '点击选择或拖入 provider.yaml'));
+    drop.appendChild(el('span', 'setup-drop-hint', 'YAML 文件，通常只有几十行'));
+    var input = document.createElement('input');
+    input.type = 'file'; input.id = 'setup-file';
+    input.accept = '.yaml,.yml,text/yaml,text/plain';
+    input.className = 'hidden';
+    drop.appendChild(input);
+    body.appendChild(drop);
+
+    // 也可以直接粘贴
+    var ta = document.createElement('textarea');
+    ta.className = 'ta mono setup-paste'; ta.id = 'setup-yaml'; ta.rows = 8;
+    ta.placeholder = '或者把 provider.yaml 的内容粘贴到这里…';
+    body.appendChild(ta);
+
+    var err = el('div', 'setup-error hidden'); err.id = 'setup-error';
+    body.appendChild(err);
+
+    function showError(msg) {
+      err.textContent = msg; err.classList.remove('hidden');
+    }
+    function setBusy(b) {
+      setupGate.busy = b;
+      applyBtn.disabled = b;
+      applyBtn.textContent = b ? '正在应用…' : '上传并应用';
+    }
+    function apply(text) {
+      if (setupGate.busy) return;
+      if (!text || !String(text).trim()) { showError('请先选择文件或粘贴配置内容。'); return; }
+      setBusy(true); err.classList.add('hidden');
+      fetch(apiUrl('api/config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/yaml' },
+        body: String(text)
+      }).then(function (r) {
+        return r.text().then(function (t) {
+          var data = null;
+          try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
+          if (!r.ok) {
+            var m = (data && data.error && (data.error.message || data.error.code)) || ('HTTP ' + r.status);
+            throw new Error(m);
+          }
+          return data;
+        });
+      }).then(function () {
+        // 配置已在服务端生效；刷新页面让界面按新配置重建。
+        $('setup-ok').classList.remove('hidden');
+        setTimeout(function () { location.reload(); }, 400);
+      }, function (e) {
+        setBusy(false);
+        showError('上传失败：' + (e && e.message ? e.message : '未知错误'));
+      });
+    }
+
+    input.onchange = function () {
+      var f = input.files && input.files[0];
+      if (!f) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        ta.value = String(reader.result || '');
+        drop.classList.add('filled');
+        drop.querySelector('.setup-drop-main').textContent = '已选择：' + f.name;
+      };
+      reader.readAsText(f);
+    };
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+    });
+    drop.addEventListener('drop', function (e) {
+      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!f) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        ta.value = String(reader.result || '');
+        drop.classList.add('filled');
+        drop.querySelector('.setup-drop-main').textContent = '已选择：' + f.name;
+      };
+      reader.readAsText(f);
+    });
+
+    var applyBtn = btn('btn primary', '上传并应用', function () { apply(ta.value); });
+    var ok = el('div', 'setup-ok hidden', '配置已应用，正在刷新…'); ok.id = 'setup-ok';
+    body.appendChild(ok);
+
+    openDialog('需要配置 provider.yaml', body, [
+      { label: '重新检测', onClick: function () { location.reload(); } },
+      { label: '上传并应用', primary: true, onClick: function () { apply(ta.value); } }
+    ]);
+    // openDialog 会重建按钮，所以把禁用状态挂在真正的那个按钮上。
+    var dialog = $('dialog');
+    var buttons = dialog.querySelectorAll('.actions .btn');
+    if (buttons.length >= 2) {
+      applyBtn = buttons[buttons.length - 1];
+      applyBtn.onclick = function () { apply(ta.value); };
+    }
+    // 挡住关闭：overlay 点击与 Esc 都不能关掉它。
+    $('overlay').classList.add('setup-locked');
+    setTimeout(function () { ta.focus(); }, 0);
   }
 
   /* ---------- 7) 数据加载 ---------- */
@@ -1587,7 +1720,10 @@
         }
       }
     });
-    $('overlay').onclick = function (e) { if (e.target === $('overlay')) closeDialog(); };
+    $('overlay').onclick = function (e) {
+      if (setupGate.open) return;                       // 首次配置必须完成，不能点掉
+      if (e.target === $('overlay')) closeDialog();
+    };
     $('files-save').onclick = saveFile;
     $('files-revert').onclick = function () {
       state.files.content = state.files.original;
@@ -1617,7 +1753,10 @@
         if (state.view !== 'chat') showView('chat');
         $('input').focus();
       }
-      if (e.key === 'Escape') { closeDropdowns(); closeDialog(); }          // Esc 关闭浮层
+      if (e.key === 'Escape') {                                          // Esc 关闭浮层
+        closeDropdowns();
+        if (!setupGate.open) closeDialog();
+      }
     });
   }
 
@@ -1634,7 +1773,15 @@
     renderWorkspaceChip(); renderModelChip(); renderSessions(); renderChat();
     showView(state.view);
     var boot = function () { return Promise.all([loadProviders(), loadTools(), loadWorkspaces()]); };
-    loadHealth().then(boot, boot).catch(function () {});
+    loadHealth().then(function (h) {
+      if (h && h.config_loaded === false) {
+        // Nothing else can work yet: ask for the file instead of booting.
+        loadConfigStatus().then(function (st) { openSetupGate(st || {}); },
+          function () { openSetupGate({}); });
+        return null;
+      }
+      return boot();
+    }, boot).catch(function () {});
     startLogsTimer();
     autoGrow();
   }
