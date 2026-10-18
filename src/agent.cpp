@@ -245,9 +245,16 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
 }
 namespace {
 
+/// Context cost of one image, in tokens. Vision tokenisation depends on the
+/// provider and the resolution, so this is a deliberately conservative flat
+/// estimate (~1024x1024 on a tiled encoder). It only feeds history trimming and
+/// the UI's context gauge; the provider's reported usage overrides it.
+constexpr long long kImageTokenCost = 1024;
+
 /// Bytes and tokens for one message, including its tool-call payload.
 long long message_cost(const Message& m) {
   long long cost = Agent::estimate_tokens(m.content) + Agent::estimate_tokens(m.reasoning) / 2 + 8;
+  cost += static_cast<long long>(m.images.size()) * kImageTokenCost;
   for (std::size_t k = 0; k < m.tool_calls.size(); ++k) {
     cost += Agent::estimate_tokens(m.tool_calls[k].name);
     cost += Agent::estimate_tokens(m.tool_calls[k].raw_arguments);
@@ -547,6 +554,7 @@ bool Agent::maybe_compact(Workspace& workspace, Session* session, const std::str
   return true;
 }
 TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::string& user_text,
+                           const std::vector<ImageAttachment>& images,
                            const TurnOptions& options, const EventEmitter& emit,
                            std::atomic<bool>* cancel) {
   TurnResult out;
@@ -585,10 +593,37 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
   // --- persist the user message -------------------------------------------
   Message user_message = Message::make("user", user_text);
+  // Vision input is stored as file references, and encoded to data: URLs once
+  // per turn: every iteration re-sends the whole context, and re-encoding a
+  // few megabytes each time would be pure waste.
+  std::map<std::string, std::string> image_urls;
+  if (!images.empty()) {
+    if (!model_info || !model_info->supports_vision) {
+      LOG_WARN("agent: ", images.size(), " image(s) dropped: model ", provider, "/", model,
+               " does not declare supports_vision");
+    } else {
+      for (std::size_t i = 0; i < images.size(); ++i) {
+        std::string bytes;
+        const std::string absolute = workspace.resolve_path(images[i].path, nullptr);
+        if (absolute.empty() || !read_file(absolute, &bytes)) {
+          LOG_WARN("agent: cannot read image attachment ", images[i].path, "; skipping");
+          continue;
+        }
+        user_message.images.push_back(images[i]);
+        image_urls[images[i].path] =
+            "data:" + images[i].mime + ";base64," + base64_encode(bytes);
+      }
+    }
+  }
   session->messages.push_back(user_message);
   if (session->info.id.empty()) session->info.id = make_id("s_");
   if (session->info.title.empty() || session->info.title == "新会话") {
     session->info.title = Workspace::derive_title(user_text);
+    // An image-only message would otherwise leave every such session titled
+    // "新会话".
+    if (session->info.title == "新会话" && !user_message.images.empty()) {
+      session->info.title = "图片";
+    }
   }
   session->info.updated_at = now_iso8601();
   workspace.save_session(*session, nullptr);
@@ -750,7 +785,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     for (int attempt = 0;; ++attempt) {
       nlohmann::json wire_messages = nlohmann::json::array();
       for (std::size_t i = 0; i < context.size(); ++i) {
-        wire_messages.push_back(context[i].to_wire(echo_reasoning));
+        wire_messages.push_back(context[i].to_wire(echo_reasoning, &image_urls));
       }
       request.messages = wire_messages;
 

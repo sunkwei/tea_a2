@@ -124,6 +124,17 @@ build/bin/tea_agent --workspace . --open
 行内代码、粗斜体与链接都会渲染，链接一律新标签页打开。文件视图里选中图片直接显示，
 选中 `.md` 可在「预览 / 编辑」之间切换。
 
+**粘贴图片**：在输入框里直接 Ctrl+V 粘贴截图（或把图片拖进输入框），缩略图会出现在
+输入框上方，点 × 可移除，一条消息最多 4 张、单张 8 MB。发送时图片随消息提交，服务端按
+**内容**而不是文件名嗅探真实类型（PNG / JPEG / GIF / WebP），落到工作区的
+`.tea_agent_run/artifacts/`，会话里只记路径不存字节，因此会话文件依旧很小、可直接阅读。
+历史消息里的图片由 `/api/workspaces/{id}/raw` 回放。
+
+图片只有在模型声明 `supports_vision: true` 时才会发送：否则 `/api/chat` 直接返回
+`400 vision_unsupported` 并说明原因，而不是让 provider 报一个难懂的错，或者更糟——静默
+忽略图片让用户以为模型看过了。视觉输入在上下文预算里按每张 1024 token 估算（真实用量以
+provider 回报的 `usage` 为准）。
+
 ```bash
 # 常用参数
 --host 0.0.0.0        # 监听所有网卡（暴露到网络前务必读「安全须知」）
@@ -679,12 +690,22 @@ pwsh -File tests/e2e.ps1                                  # 默认构建产物
 pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
 
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
+python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
+node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
 覆盖：工具按 provider 声明才出现在工具表、未声明时强制调用被拒且不外呼、端点卡住时按
 `web_tool_timeout_ms` 超时而不是拖住整轮、`/api/chat/stop` 能中断传输中的请求。
+
+`tests/smoke_vision.py` 覆盖图片通路：没有 `supports_vision` 的模型被拒且**不会**请求 provider、
+坏 base64 / 非图片字节 / 超过 4 张 / 空载荷分别报对应错误码、合法图片落盘且字节一致、
+请求体是 `[{type:text},{type:image_url}]` 且 base64 往返无损、会话只存路径、`/raw` 能取回原图、
+纯图片消息与纯文本消息都仍然可用。
+
+`tests/ui_paste_image.mjs` 用真实粘贴事件（`ClipboardEvent` + `DataTransfer`）验证缩略图出现、
+× 能移除、发送后缩略图条清空、用户气泡经 `/raw` 渲染且图片真的加载成功（`naturalWidth > 0`）。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器

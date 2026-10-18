@@ -13,6 +13,7 @@
     workspaces: [], workspace: null, sessions: [], session: null, messages: [],
     model: null, models: [], modelMenu: false,
     live: null, liveNode: null, streaming: false, abort: null, stopTimer: null,
+    attachments: [],
     ended: false, streamError: null, expanded: {}, stickBottom: true,
     trajectory: [], trajFull: {}, lastTrajectoryId: null,
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
@@ -550,6 +551,31 @@
     });
     return wrap;
   }
+  /// A user bubble: text plus any attached images. Optimistic (just-sent)
+  /// messages carry a data URL; reloaded ones carry a workspace path served by
+  /// the /raw route.
+  function userNode(m) {
+    var node = el('div', 'msg user');
+    if (m.content) node.appendChild(el('div', null, m.content));
+    if (m.images && m.images.length) {
+      var strip = el('div', 'msg-images');
+      m.images.forEach(function (img) {
+        var src = img.dataUrl;
+        if (!src && img.path && state.workspace) {
+          src = apiUrl('api/workspaces/' + encodeURIComponent(state.workspace.id) +
+            '/raw?path=' + encodeURIComponent(img.path));
+        }
+        if (!src) return;
+        var node2 = document.createElement('img');
+        node2.src = src;
+        node2.alt = '图片';
+        strip.appendChild(node2);
+      });
+      if (strip.childNodes.length) node.appendChild(strip);
+    }
+    return node;
+  }
+
   function renderChat() {
     var box = $('messages');
     clear(box);
@@ -563,7 +589,7 @@
     });
     state.messages.forEach(function (m, i) {
       if (m.role === 'tool') return;                            // 工具消息只作为输出附加
-      if (m.role === 'user') box.appendChild(el('div', 'msg user', m.content));
+      if (m.role === 'user') box.appendChild(userNode(m));
       else if (m.role === 'system') box.appendChild(el('div', 'msg system', m.content));
       else box.appendChild(assistantNode(m, outputs, 'm' + i, false));
     });
@@ -898,21 +924,99 @@
     }).then(finish, finish);
     loadSessions();
   }
+  /* ---------- 粘贴图片 ---------- */
+  // 剪贴板里的图片读成 data URL 暂存在 state.attachments，发送时随消息一起提交；
+  // 服务端按内容嗅探真实类型、限制大小，并落到工作区的 artifacts 目录。
+  var ATTACH_MAX = 4;
+  var ATTACH_MAX_BYTES = 8 * 1024 * 1024;
+
+  function renderAttachments() {
+    var strip = $('attach-strip');
+    clear(strip);
+    if (!state.attachments.length) { strip.classList.add('hidden'); return; }
+    strip.classList.remove('hidden');
+    state.attachments.forEach(function (a) {
+      var item = el('div', 'attach-item');
+      var img = document.createElement('img');
+      img.src = a.dataUrl;
+      img.alt = a.name || '粘贴的图片';
+      img.title = (a.name || '图片') + ' · ' + fmtBytes(a.bytes);
+      item.appendChild(img);
+      var del = el('button', 'attach-del', '×');
+      del.type = 'button';
+      del.title = '移除这张图片';
+      del.onclick = function () {
+        state.attachments = state.attachments.filter(function (x) { return x.id !== a.id; });
+        renderAttachments();
+      };
+      item.appendChild(del);
+      strip.appendChild(item);
+    });
+  }
+
+  function addAttachment(file) {
+    if (!file || !/^image\//.test(file.type || '')) return;
+    if (state.attachments.length >= ATTACH_MAX) {
+      toast('一条消息最多 ' + ATTACH_MAX + ' 张图片');
+      return;
+    }
+    if (file.size > ATTACH_MAX_BYTES) {
+      toast('图片太大（' + fmtBytes(file.size) + '），上限 ' + fmtBytes(ATTACH_MAX_BYTES));
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var url = String(reader.result || '');
+      var comma = url.indexOf(',');
+      state.attachments.push({
+        id: 'a' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+        dataUrl: url, mime: (url.slice(5, comma) || file.type || '').replace(';base64', ''),
+        name: file.name || 'pasted-image', bytes: file.size
+      });
+      renderAttachments();
+    };
+    reader.onerror = function () { toast('读取图片失败'); };
+    reader.readAsDataURL(file);
+  }
+
+  /// Collect images out of a paste/drop event. `items` is preferred because
+  /// some platforms put screenshots there with an empty `files` list.
+  function filesFromDataTransfer(dt) {
+    var out = [];
+    if (!dt) return out;
+    if (dt.files && dt.files.length) {
+      Array.prototype.forEach.call(dt.files, function (f) { out.push(f); });
+    } else if (dt.items) {
+      Array.prototype.forEach.call(dt.items, function (it) {
+        if (it.kind === 'file') { var f = it.getAsFile(); if (f) out.push(f); }
+      });
+    }
+    return out;
+  }
+
   function sendMessage() {
     if (state.streaming) return;
     var ta = $('input');
     var text = ta.value.replace(/\s+$/, '');
-    if (!text) return;
+    var images = state.attachments.slice();
+    if (!text && !images.length) return;
     if (!state.workspace) { toast('请先选择工作区'); return; }
     ta.value = ''; autoGrow();
 
     var ready = state.session ? Promise.resolve(state.session)
       : api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions',
-        { method: 'POST', body: { title: text.slice(0, 24) || '新会话' } })
+        { method: 'POST', body: { title: text.slice(0, 24) || '图片' } })
         .then(function (s) { state.session = s; saveLS(); loadSessions(); return s; });
 
+    // 缩略图条立刻清空；乐观消息自己带 data URL，回读会话时换成服务端路径。
+    state.attachments = [];
+    renderAttachments();
+
     ready.then(function (s) {
-      state.messages.push({ role: 'user', content: text, created_at: new Date().toISOString() });
+      state.messages.push({
+        role: 'user', content: text, created_at: new Date().toISOString(),
+        images: images.map(function (a) { return { path: '', mime: a.mime, dataUrl: a.dataUrl }; })
+      });
       state.live = { role: 'assistant', reasoning: '', blocks: [], outputs: {} };
       state.ended = false; state.streamError = null; state.stickBottom = true;
       state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
@@ -926,12 +1030,23 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workspace_id: state.workspace.id, session_id: s.id, message: text,
+          images: images.length ? images.map(function (a) { return a.dataUrl; }) : undefined,
           provider: state.model ? state.model.provider : undefined,
           model: state.model ? state.model.model : undefined
         }),
         signal: ctrl.signal
       }).then(function (res) {
-        if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+        if (!res.ok) {
+          return res.text().then(function (t) {
+            var msg = 'HTTP ' + res.status;
+            try {
+              var j = JSON.parse(t);
+              if (j && j.error && (j.error.message || j.error.code)) msg = j.error.message || j.error.code;
+            } catch (e) { if (t) msg = t.slice(0, 300); }
+            throw new Error(msg);
+          });
+        }
+        if (!res.body) throw new Error('HTTP ' + res.status);
         var reader = res.body.getReader(), dec = new TextDecoder('utf-8'), buf = '';
         var pump = function () {
           return reader.read().then(function (r) {
@@ -1677,6 +1792,27 @@
     });
     $('chat-scroll').addEventListener('scroll', function () { state.stickBottom = nearBottom(); });
     $('input').addEventListener('input', autoGrow);
+    // 粘贴图片：只拦下含图片的剪贴板内容，普通文本照常粘贴。
+    $('input').addEventListener('paste', function (e) {
+      var files = filesFromDataTransfer(e.clipboardData).filter(function (f) {
+        return /^image\//.test(f.type || '');
+      });
+      if (!files.length) return;
+      e.preventDefault();
+      files.forEach(addAttachment);
+    });
+    // 拖放图片到输入框，同样是常见操作。
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      $('input').addEventListener(ev, function (e) { e.preventDefault(); });
+    });
+    $('input').addEventListener('drop', function (e) {
+      var files = filesFromDataTransfer(e.dataTransfer).filter(function (f) {
+        return /^image\//.test(f.type || '');
+      });
+      if (!files.length) return;
+      e.preventDefault();
+      files.forEach(addAttachment);
+    });
     $('input').addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
     });

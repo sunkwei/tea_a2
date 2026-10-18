@@ -266,6 +266,81 @@ std::string mask_secret(const std::string& secret) {
 }
 
 // ---------------------------------------------------------------------------
+// base64
+// ---------------------------------------------------------------------------
+namespace {
+const char kB64Chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+int b64_value(unsigned char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+}  // namespace
+
+std::string base64_encode(const std::string& bytes) {
+  std::string out;
+  out.reserve((bytes.size() + 2) / 3 * 4);
+  std::size_t i = 0;
+  while (i + 2 < bytes.size()) {
+    const unsigned int n = (static_cast<unsigned char>(bytes[i]) << 16) |
+                           (static_cast<unsigned char>(bytes[i + 1]) << 8) |
+                           static_cast<unsigned char>(bytes[i + 2]);
+    out.push_back(kB64Chars[(n >> 18) & 0x3F]);
+    out.push_back(kB64Chars[(n >> 12) & 0x3F]);
+    out.push_back(kB64Chars[(n >> 6) & 0x3F]);
+    out.push_back(kB64Chars[n & 0x3F]);
+    i += 3;
+  }
+  const std::size_t rest = bytes.size() - i;
+  if (rest == 1) {
+    const unsigned int n = static_cast<unsigned char>(bytes[i]) << 16;
+    out.push_back(kB64Chars[(n >> 18) & 0x3F]);
+    out.push_back(kB64Chars[(n >> 12) & 0x3F]);
+    out.push_back('=');
+    out.push_back('=');
+  } else if (rest == 2) {
+    const unsigned int n = (static_cast<unsigned char>(bytes[i]) << 16) |
+                           (static_cast<unsigned char>(bytes[i + 1]) << 8);
+    out.push_back(kB64Chars[(n >> 18) & 0x3F]);
+    out.push_back(kB64Chars[(n >> 12) & 0x3F]);
+    out.push_back(kB64Chars[(n >> 6) & 0x3F]);
+    out.push_back('=');
+  }
+  return out;
+}
+
+bool base64_decode(const std::string& text, std::string* out) {
+  if (out) out->clear();
+  std::string acc;
+  acc.reserve(text.size());
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;  // MIME line breaks
+    if (c == '=') break;                                            // padding: done
+    if (b64_value(c) < 0) return false;
+    acc.push_back(static_cast<char>(c));
+  }
+  if (acc.size() % 4 == 1) return false;  // impossible length
+  std::string decoded;
+  decoded.reserve(acc.size() / 4 * 3 + 2);
+  unsigned int buffer = 0;
+  int bits = 0;
+  for (std::size_t i = 0; i < acc.size(); ++i) {
+    buffer = (buffer << 6) | static_cast<unsigned int>(b64_value(static_cast<unsigned char>(acc[i])));
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      decoded.push_back(static_cast<char>((buffer >> bits) & 0xFF));
+    }
+  }
+  if (out) *out = decoded;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // ids
 // ---------------------------------------------------------------------------
 std::string random_hex(size_t nbytes) {

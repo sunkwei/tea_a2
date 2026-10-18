@@ -6,9 +6,35 @@
 
 namespace tea {
 
-nlohmann::json Message::to_wire(bool include_reasoning) const {
+nlohmann::json Message::to_wire(bool include_reasoning,
+                               const std::map<std::string, std::string>* image_urls) const {
   nlohmann::json j = nlohmann::json::object();
   j["role"] = role;
+
+  // Multimodal user turn: the OpenAI vision shape. Only attachments that
+  // resolved to a data: URL are sent, so a deleted file degrades to a text-only
+  // turn instead of a request the provider rejects.
+  if (role == "user" && !images.empty() && image_urls != nullptr) {
+    nlohmann::json parts = nlohmann::json::array();
+    if (!content.empty()) {
+      nlohmann::json text_part = nlohmann::json::object();
+      text_part["type"] = "text";
+      text_part["text"] = content;
+      parts.push_back(text_part);
+    }
+    for (std::size_t i = 0; i < images.size(); ++i) {
+      std::map<std::string, std::string>::const_iterator it = image_urls->find(images[i].path);
+      if (it == image_urls->end() || it->second.empty()) continue;
+      nlohmann::json part = nlohmann::json::object();
+      part["type"] = "image_url";
+      part["image_url"] = { {"url", it->second} };
+      parts.push_back(part);
+    }
+    if (!parts.empty()) {
+      j["content"] = parts;
+      return j;
+    }
+  }
 
   if (role == "tool") {
     j["tool_call_id"] = tool_call_id;
@@ -74,6 +100,16 @@ nlohmann::json Message::to_store() const {
     }
     j["tool_calls"] = arr;
   }
+  if (!images.empty()) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (std::size_t i = 0; i < images.size(); ++i) {
+      nlohmann::json img = nlohmann::json::object();
+      img["path"] = images[i].path;
+      img["mime"] = images[i].mime;
+      arr.push_back(img);
+    }
+    j["images"] = arr;
+  }
   return j;
 }
 
@@ -97,6 +133,19 @@ Message Message::from_store(const nlohmann::json& j) {
   if (el_it != j.end() && el_it->is_number()) m.elapsed_ms = el_it->get<long long>();
   auto tr_it = j.find("truncated");
   if (tr_it != j.end() && tr_it->is_boolean()) m.truncated = tr_it->get<bool>();
+
+  auto imgs = j.find("images");
+  if (imgs != j.end() && imgs->is_array()) {
+    for (auto it = imgs->begin(); it != imgs->end(); ++it) {
+      if (!it->is_object()) continue;
+      ImageAttachment img;
+      auto pit = it->find("path");
+      if (pit != it->end() && pit->is_string()) img.path = pit->get<std::string>();
+      auto mit = it->find("mime");
+      if (mit != it->end() && mit->is_string()) img.mime = mit->get<std::string>();
+      if (!img.path.empty()) m.images.push_back(img);
+    }
+  }
 
   auto calls = j.find("tool_calls");
   if (calls != j.end() && calls->is_array()) {

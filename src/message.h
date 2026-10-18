@@ -2,6 +2,7 @@
 // and the HTTP API.
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -16,9 +17,20 @@ struct ToolCall {
   std::string raw_arguments;  // exactly what the model emitted (may be invalid JSON)
 };
 
+/// One image attached to a user message (a pasted screenshot, typically).
+/// Only the file reference is stored: sessions stay small and readable, and the
+/// bytes live once in the workspace's artifacts directory. `path` is relative to
+/// the workspace root, which is also what the /raw route serves.
+struct ImageAttachment {
+  std::string path;
+  std::string mime;  // image/png, image/jpeg, image/webp, image/gif
+};
+
 struct Message {
   std::string role;  // "system" | "user" | "assistant" | "tool"
   std::string content;
+  /// Vision input for user messages. Empty for every other role.
+  std::vector<ImageAttachment> images;
   std::string reasoning;
   std::vector<ToolCall> tool_calls;
   std::string tool_call_id;
@@ -32,7 +44,12 @@ struct Message {
   /// `include_reasoning` echoes `reasoning_content` back on assistant turns.
   /// "Thinking mode" gateways (vLLM/SGLang/GLM/Kimi/opencode...) require it on
   /// the follow-up request; api.deepseek.com rejects it outright.
-  nlohmann::json to_wire(bool include_reasoning = false) const;
+  /// When the message has images, `content` becomes the multimodal array
+  /// (text part + image_url parts). `image_urls` maps attachment path to a
+  /// ready data: URL; the caller builds it once per turn (encoding is not free)
+  /// and passes an empty map to drop the images.
+  nlohmann::json to_wire(bool include_reasoning = false,
+                         const std::map<std::string, std::string>* image_urls = nullptr) const;
   /// Storage format: a superset that also keeps reasoning/timing metadata.
   nlohmann::json to_store() const;
   static Message from_store(const nlohmann::json& j);

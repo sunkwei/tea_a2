@@ -48,6 +48,15 @@ std::string human_size(uint64_t bytes);
 std::string mask_secret(const std::string& secret);
 
 // --------------------------------------------------------------------------
+// base64 (used for data: URLs carrying pasted images)
+// --------------------------------------------------------------------------
+std::string base64_encode(const std::string& bytes);
+/// Strict decode: ignores ASCII whitespace and newlines, rejects anything else
+/// that is not in the base64 alphabet. Returns false and leaves `out` empty on
+/// invalid input, so a malformed data: URL cannot become a truncated image.
+bool base64_decode(const std::string& text, std::string* out);
+
+// --------------------------------------------------------------------------
 // ids
 // --------------------------------------------------------------------------
 std::string uuid4();

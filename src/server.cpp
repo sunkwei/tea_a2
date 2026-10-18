@@ -54,6 +54,58 @@ const char* raw_mime_for(const std::string& file_path) {
   return "application/octet-stream";
 }
 
+/// Limits for pasted images. A screenshot is well under 1 MB; the caps exist so
+/// one request cannot exhaust memory or fill the artifacts directory.
+constexpr std::size_t kMaxImagesPerMessage = 4;
+constexpr std::size_t kMaxImageBytes = 8u * 1024u * 1024u;
+
+/// Identify the image by its magic bytes rather than trusting the client's
+/// declared MIME type: the value ends up in a data: URL that the provider
+/// parses, and the extension decides how /raw serves the file back.
+const char* sniff_image_mime(const std::string& bytes) {
+  const unsigned char* b = reinterpret_cast<const unsigned char*>(bytes.data());
+  const std::size_t n = bytes.size();
+  if (n >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return "image/png";
+  if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpeg";
+  if (n >= 6 && bytes.compare(0, 4, "GIF8") == 0) return "image/gif";
+  if (n >= 12 && bytes.compare(0, 4, "RIFF") == 0 && bytes.compare(8, 4, "WEBP") == 0) {
+    return "image/webp";
+  }
+  return nullptr;
+}
+
+std::string image_extension_for(const std::string& mime) {
+  if (mime == "image/png") return ".png";
+  if (mime == "image/jpeg") return ".jpg";
+  if (mime == "image/gif") return ".gif";
+  if (mime == "image/webp") return ".webp";
+  return ".bin";
+}
+
+/// Split a `data:<mime>;base64,<payload>` URL. Also accepts a bare base64
+/// payload (the UI always sends the full URL, but curl users often do not).
+bool decode_image_payload(const std::string& raw, std::string* bytes, std::string* err) {
+  std::string payload = trim(raw);
+  const std::string marker = ";base64,";
+  if (starts_with(payload, "data:")) {
+    const std::size_t at = payload.find(marker);
+    if (at == std::string::npos) {
+      *err = "image data URL must be base64-encoded (expected ';base64,')";
+      return false;
+    }
+    payload = payload.substr(at + marker.size());
+  }
+  if (payload.empty()) {
+    *err = "image payload is empty";
+    return false;
+  }
+  if (!base64_decode(payload, bytes)) {
+    *err = "image payload is not valid base64";
+    return false;
+  }
+  return true;
+}
+
 void send_json(httplib::Response& res, const nlohmann::json& body, int status = 200) {
   res.status = status;
   res.set_header("Access-Control-Allow-Origin", "*");
@@ -1043,7 +1095,13 @@ void ApiServer::Impl::install_routes() {
       return;
     }
     const std::string message = json_string(body, "message");
-    if (trim(message).empty()) {
+    // A message may be image-only ("look at this"), so emptiness is checked
+    // after the attachments are parsed below.
+    nlohmann::json::const_iterator images_it = body.find("images");
+    const nlohmann::json images_json =
+        images_it != body.end() ? *images_it : nlohmann::json();
+    // An empty "images": [] must not turn into an empty turn.
+    if (trim(message).empty() && (!images_json.is_array() || images_json.empty())) {
       send_error(res, 400, "bad_request", "'message' is required");
       return;
     }
@@ -1079,6 +1137,84 @@ void ApiServer::Impl::install_routes() {
     const std::string provider = json_string(body, "provider");
     const std::string model = json_string(body, "model");
 
+    // ---- image attachments ------------------------------------------------
+    std::vector<ImageAttachment> images;
+    if (images_json.is_array() && !images_json.empty()) {
+      if (images_json.size() > kMaxImagesPerMessage) {
+        send_error(res, 400, "too_many_images",
+                   "at most " + std::to_string(kMaxImagesPerMessage) + " images per message");
+        return;
+      }
+      // Reject before doing any work if the target model cannot see images:
+      // otherwise the provider answers with a confusing 400, or silently
+      // ignores them and the user believes the model looked at the picture.
+      const ProviderInfo* pinfo =
+          config->provider(provider.empty() ? config->active_provider : provider);
+      std::string model_name = model.empty() ? (pinfo ? pinfo->default_model : std::string()) : model;
+      const ModelInfo* minfo = pinfo ? pinfo->find_model(model_name) : nullptr;
+      // Mirror the agent's fallback: an unknown model name resolves to the
+      // provider's default, so a stale id in the UI must not look like "this
+      // model cannot see images".
+      if (pinfo && !minfo && !pinfo->models.empty()) {
+        model_name = pinfo->default_model.empty() ? pinfo->models.front() : pinfo->default_model;
+        minfo = pinfo->find_model(model_name);
+      }
+      if (!pinfo || !minfo || !minfo->supports_vision) {
+        send_error(res, 400, "vision_unsupported",
+                   "model '" + (pinfo ? pinfo->name : std::string("?")) + " / " + model_name +
+                       "' does not declare supports_vision; set it in provider.yaml or pick a "
+                       "vision model before attaching images");
+        return;
+      }
+      const std::string artifacts = turn->workspace.artifacts_dir();
+      if (!make_dirs(artifacts)) {
+        send_error(res, 500, "io_error", "cannot create " + artifacts);
+        return;
+      }
+      for (std::size_t i = 0; i < images_json.size(); ++i) {
+        const nlohmann::json& item = images_json[i];
+        std::string raw;
+        if (item.is_string()) raw = item.get<std::string>();
+        else if (item.is_object()) raw = json_string(item, "data");
+        if (raw.empty()) {
+          send_error(res, 400, "bad_request", "image " + std::to_string(i + 1) + " has no data");
+          return;
+        }
+        std::string bytes;
+        std::string decode_err;
+        if (!decode_image_payload(raw, &bytes, &decode_err)) {
+          send_error(res, 400, "bad_image", "image " + std::to_string(i + 1) + ": " + decode_err);
+          return;
+        }
+        if (bytes.size() > kMaxImageBytes) {
+          send_error(res, 413, "image_too_large",
+                     "image " + std::to_string(i + 1) + " is " + human_size(bytes.size()) +
+                         "; the limit is " + human_size(kMaxImageBytes));
+          return;
+        }
+        const char* mime = sniff_image_mime(bytes);
+        if (!mime) {
+          send_error(res, 400, "bad_image",
+                     "image " + std::to_string(i + 1) +
+                         " is not a PNG, JPEG, GIF or WebP (identified by content, not by name)");
+          return;
+        }
+        const std::string file = path_join(artifacts, "img_" + random_hex(8) + image_extension_for(mime));
+        std::string io_err;
+        if (!write_file(file, bytes, false, &io_err)) {
+          send_error(res, 500, "io_error", "cannot store the image: " + io_err);
+          return;
+        }
+        ImageAttachment att;
+        att.mime = mime;
+        // Workspace-relative, so the session file stays portable and the /raw
+        // route can serve it back to the UI.
+        att.path = turn->workspace.display_path(file);
+        images.push_back(att);
+      }
+      LOG_INFO("chat: ", images.size(), " image attachment(s) stored under ", artifacts);
+    }
+
     std::vector<std::shared_ptr<ChatTurn>> graveyard;
     {
       std::lock_guard<std::mutex> lock(mu);
@@ -1096,7 +1232,7 @@ void ApiServer::Impl::install_routes() {
 
     AppConfig* cfg = config;
     ToolRegistry* reg = tools;
-    turn->worker = std::thread([turn, cfg, reg, message, provider, model]() {
+    turn->worker = std::thread([turn, cfg, reg, message, images, provider, model]() {
       Agent agent(cfg, reg);
       TurnOptions options;
       options.provider = provider;
@@ -1104,7 +1240,8 @@ void ApiServer::Impl::install_routes() {
       options.stream = true;
       EventEmitter emit = [turn](const nlohmann::json& event) { turn->emit_event(event); };
       try {
-        agent.run_turn(turn->workspace, &turn->session, message, options, emit, &turn->cancel);
+        agent.run_turn(turn->workspace, &turn->session, message, images, options, emit,
+                       &turn->cancel);
       } catch (const std::exception& e) {
         nlohmann::json event = nlohmann::json::object();
         event["type"] = "error";

@@ -85,7 +85,11 @@
       <div class="composer-wrap">
         <div class="chat-col">
           <div class="composer">
-            <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+            <div class="composer-body">
+              <!-- 粘贴/拖入的图片缩略图；发送后清空 -->
+              <div class="attach-strip hidden" id="attach-strip"></div>
+              <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行（可直接粘贴图片）"></textarea>
+            </div>
             <button class="send" id="send" type="button" title="发送"></button>
           </div>
           <!-- 指标栏：耗时 / 轮次 / 步数 / 输出速度 / 缓存命中率 / 上下文用量

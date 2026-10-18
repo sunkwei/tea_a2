@@ -65,9 +65,13 @@ class Agent {
  public:
   Agent(AppConfig* config, ToolRegistry* tools) : config_(config), tools_(tools) {}
 
+  /// `images` are attachments the caller already persisted inside the
+  /// workspace; the agent reads and base64-encodes them once per turn. They are
+  /// silently dropped when the resolved model does not declare vision support
+  /// (callers should reject the request up front instead).
   TurnResult run_turn(Workspace& workspace, Session* session, const std::string& user_text,
-                      const TurnOptions& options, const EventEmitter& emit,
-                      std::atomic<bool>* cancel);
+                      const std::vector<ImageAttachment>& images, const TurnOptions& options,
+                      const EventEmitter& emit, std::atomic<bool>* cancel);
 
   /// Rough token estimate used for history trimming.
   static long long estimate_tokens(const std::string& text);

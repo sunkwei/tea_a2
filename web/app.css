@@ -305,6 +305,19 @@ button{font-family:inherit}
   resize:none;color:var(--dsw-alias-label-primary);font:14px/20px var(--ds-font-family);overflow-y:auto;
 }
 #input::placeholder{color:var(--dsw-alias-label-caption)}
+/* 粘贴的图片：输入框上方的缩略图条 */
+.composer-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:8px}
+.attach-strip{display:flex;flex-wrap:wrap;gap:8px}
+.attach-item{position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;
+  border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);flex:0 0 auto}
+.attach-item img{width:100%;height:100%;object-fit:cover;display:block}
+.attach-item .attach-del{position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;
+  border:0;cursor:pointer;background:#000a;color:#fff;font:12px/18px var(--ds-font-family);padding:0}
+.attach-item .attach-del:hover{background:#000d}
+.attach-item.uploading::after{content:'';position:absolute;inset:0;background:#0006}
+/* 消息里的图片 */
+.msg-images{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.msg-images img{max-width:240px;max-height:180px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);display:block}
 .send{
   width:28px;height:28px;flex:0 0 28px;border-radius:50%;border:0;cursor:pointer;
   background:var(--dsw-alias-state-business-primary);color:var(--dsw-static-neutral-bluish-1000);
