@@ -1431,7 +1431,11 @@
       var saved = state.model;
       buildModels();
       if (saved && state.models.some(function (m) { return m.provider === saved.provider && m.model === saved.model; })) state.model = saved;
-      renderModelChip(); renderModelMenu(); renderSettings();
+      renderModelChip(); renderModelMenu(); renderSettings(); renderMetrics();
+      // Providers carry max_context_tokens, so the metrics strip can resolve the
+      // context window here; without this it stays "模型未配置" until a stream or a
+      // session switch happens to re-render it.
+      // (dsh: metrics are re-rendered whenever the model catalogue changes.)
     }, function () {});
   }
   function loadTools() {
