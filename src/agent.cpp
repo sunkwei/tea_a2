@@ -13,6 +13,11 @@
 namespace tea {
 namespace {
 
+/// How much of agent.md goes into the system prompt. The file itself is capped
+/// at 32 KB on disk; the prompt only needs the part that changes behaviour, and
+/// a smaller cap keeps the per-turn prompt cache stable and cheap.
+constexpr std::size_t kAgentDocPromptBytes = 6000;
+
 void accumulate_usage(ChatUsage* total, const ChatUsage& part) {
   if (!part.present) return;
   total->present = true;
@@ -227,6 +232,35 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
     out << instructions << "\n";
   }
 
+  // Experience log: unlike instructions.md (the user's rules, cached for the
+  // process lifetime) this file is written by the agent, so it is read fresh on
+  // every turn. It is injected even when empty, together with the rule for
+  // maintaining it - an empty file that nobody is told about never gets used.
+  {
+    bool doc_truncated = false;
+    std::string doc = workspace.load_agent_doc(&doc_truncated);
+    doc = trim(doc);
+    if (doc.size() > kAgentDocPromptBytes) {
+      bool cut = false;
+      doc = truncate_utf8(doc, kAgentDocPromptBytes, &cut) +
+            "\n... [agent.md truncated for the prompt; read the full file with toolkit_agent_doc]";
+      doc_truncated = true;
+    }
+    out << "\nWorkspace experience (`.tea_agent_run/agent.md`, maintained by you across sessions)\n";
+    if (doc.empty()) {
+      out << "(empty so far)\n";
+    } else {
+      out << doc << "\n";
+    }
+    out << "Keep it current: when you hit something specific to THIS workspace that would save "
+           "time next session - a pitfall, a non-obvious command, a script you wrote - append a "
+           "one-line entry with toolkit_agent_doc (op=append). Put reusable scripts under "
+           "`.tea_agent_run/scripts/` and record their path here. Merge or drop stale entries "
+           "instead of piling up history.";
+    if (doc_truncated) out << " (The copy above is truncated.)";
+    out << "\n";
+  }
+
   if (!session.summary.empty()) {
     out << "\nCompact history (older turns were summarised to save context; treat "
            "these as established facts)\n";
@@ -305,7 +339,10 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
   // dsh compacts at a ratio of the window rather than at the hard boundary:
   // threshold 0.8 of the message budget, verbatim tail down to 0.16. Compacting
   // exactly "just enough" would re-trigger on the very next turn.
-  const long long tool_schema_cost = 480;  // 3 tool schemas, measured on the wire
+  // 4 core tool schemas (exec/file/memory/agent_doc); measured from the JSON that
+  // /api/tools serves, ~4 bytes per token. Provider-scoped web tools add more,
+  // which the callers cover by keeping this reserve on the generous side.
+  const long long tool_schema_cost = 960;
   const long long fixed = estimate_tokens(system.content) + tool_schema_cost + 64;
   long long budget = max_context - max_output - fixed;
   const long long floor_budget = max_context / 5;

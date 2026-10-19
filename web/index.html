@@ -184,6 +184,22 @@
           <div class="page-head"><h2 class="page-title">记忆</h2>
             <div class="page-actions"><button class="btn" id="memory-refresh" type="button">刷新</button></div>
           </div>
+          <!-- 工作区经验：agent 自己维护的 agent.md（踩过的坑、可复用命令/脚本、约定），
+               每轮都会注入 system prompt。这里可以人工查看和改写。 -->
+          <div class="doc-card">
+            <div class="doc-head">
+              <span class="doc-title">工作区经验（agent.md）</span>
+              <span class="doc-path" id="agent-doc-path"></span>
+              <span class="doc-actions">
+                <span class="doc-meta" id="agent-doc-meta"></span>
+                <button class="btn" id="agent-doc-revert" type="button" title="放弃未保存的修改">还原</button>
+                <button class="btn primary" id="agent-doc-save" type="button">保存</button>
+              </span>
+            </div>
+            <textarea class="ta doc-editor" id="agent-doc-editor" rows="12"
+                      placeholder="agent.md 会在每一轮注入 system prompt：记录这个工作区特有的坑、可复用的命令与脚本。"></textarea>
+            <div class="doc-scripts" id="agent-doc-scripts"></div>
+          </div>
           <div class="note-add">
             <textarea class="ta" id="memory-input" rows="3" placeholder="记录一条长期记忆…"></textarea>
             <button class="btn primary" id="memory-add" type="button">添加</button>

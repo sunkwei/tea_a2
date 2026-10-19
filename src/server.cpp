@@ -1150,6 +1150,63 @@ void ApiServer::Impl::install_routes() {
                send_ok(res);
              });
 
+  // ---- agent.md (workspace experience log) -------------------------------
+  // The file is injected into the system prompt on every turn and maintained by
+  // the agent through toolkit_agent_doc; these routes let a human read and fix it
+  // from the web UI without shelling into the device.
+  svr.Get(R"(/api/workspaces/([^/]+)/agent-doc)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            bool truncated = false;
+            const std::string content = ws.load_agent_doc(&truncated);
+            std::vector<DirEntryInfo> scripts;
+            list_directory(ws.scripts_dir(), &scripts, nullptr);
+            nlohmann::json list = nlohmann::json::array();
+            for (std::size_t i = 0; i < scripts.size(); ++i) {
+              if (scripts[i].is_dir) continue;
+              list.push_back({{"name", scripts[i].name},
+                              {"size", static_cast<long long>(scripts[i].size)},
+                              {"mtime", scripts[i].mtime}});
+            }
+            nlohmann::json j = nlohmann::json::object();
+            j["path"] = ws.agent_doc_file();
+            j["relative_path"] = ws.display_path(ws.agent_doc_file());
+            j["scripts_dir"] = ws.display_path(ws.scripts_dir());
+            j["content"] = content;
+            j["bytes"] = static_cast<long long>(content.size());
+            j["truncated"] = truncated;
+            j["scripts"] = list;
+            send_json(res, j);
+          });
+
+  svr.Put(R"(/api/workspaces/([^/]+)/agent-doc)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            nlohmann::json body;
+            if (!parse_json_body(req, &body, res)) return;
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string content = json_string(body, "content");
+            if (!ws.save_agent_doc(content, &err)) {
+              send_error(res, 400, "bad_request", err);
+              return;
+            }
+            LOG_INFO("agent.md: rewritten from the web UI (", content.size(), " bytes)");
+            nlohmann::json j = nlohmann::json::object();
+            j["ok"] = true;
+            j["path"] = ws.agent_doc_file();
+            j["bytes"] = static_cast<long long>(file_size(ws.agent_doc_file()));
+            send_json(res, j);
+          });
+
   // ---- logs --------------------------------------------------------------
   svr.Get(R"(/api/workspaces/([^/]+)/logs)",
           [this](const httplib::Request& req, httplib::Response& res) {

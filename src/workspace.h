@@ -70,10 +70,18 @@ class Workspace {
   /// Contents of `<run_dir>/instructions.md` (empty when absent). Stable for the
   /// process lifetime, so it does not destabilise the prompt prefix.
   const std::string& instructions() const { return instructions_; }
+  /// Contents of `<run_dir>/agent.md`: the workspace's accumulated experience,
+  /// written by the agent itself (pitfalls, reusable commands/scripts, project
+  /// conventions). Read fresh on every call - unlike instructions() it changes
+  /// while the process runs, because the agent appends to it mid-turn - and
+  /// capped at `max_bytes` (0 => the on-disk limit).
+  std::string load_agent_doc(bool* truncated = nullptr) const;
   /// Free bytes on the workspace volume, sampled when the workspace was opened.
   uint64_t free_bytes() const { return free_bytes_; }
   std::string settings_file() const;
   std::string instructions_file() const;
+  std::string agent_doc_file() const;
+  std::string scripts_dir() const;
   std::string sessions_dir() const;
   std::string memory_file() const;
   std::string log_file() const;
@@ -93,6 +101,13 @@ class Workspace {
   bool create_session(const std::string& title, Session* out, std::string* err) const;
   bool delete_session(const std::string& id, std::string* err) const;
   bool rename_session(const std::string& id, const std::string& title, std::string* err) const;
+
+  /// Replace agent.md wholesale. The caller is expected to have compacted it;
+  /// a hard byte cap keeps a runaway append from bloating every later prompt.
+  bool save_agent_doc(const std::string& content, std::string* err) const;
+  /// Append one entry to agent.md, stamped with the current UTC time. Creates
+  /// the file (and its template header) when it does not exist yet.
+  bool append_agent_doc(const std::string& text, std::string* err) const;
 
   std::vector<nlohmann::json> load_memory(std::string* err) const;
   nlohmann::json add_memory_note(const std::string& text, std::string* err) const;

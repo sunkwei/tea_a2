@@ -21,7 +21,11 @@
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
     turnStartAt: 0, turnSteps: 0, mdBase: '',
     files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 },
-    memory: [], logsTimer: null, logsAutoScroll: true
+    memory: [], logsTimer: null, logsAutoScroll: true,
+    agentDoc: {
+      content: '', original: '', path: '', scriptsDir: '', scripts: [],
+      loading: false, touched: false
+    }
   };
 
   function saveLS() {
@@ -2021,10 +2025,71 @@
   /* ---------- 10) 记忆视图 ---------- */
   function loadMemory() {
     if (!state.workspace) return Promise.resolve();
+    loadAgentDoc();                       // 经验文件与记忆一起刷新
     return api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/memory').then(function (d) {
       state.memory = d.notes || [];
       renderMemory();
     }, function (e) { toast('读取记忆失败：' + e.message); });
+  }
+
+  /* ---------- 工作区经验 agent.md ---------- */
+  // agent 自己维护、每轮注入 system prompt 的经验文件。这里只做「人也能看/改」：
+  // 编辑框内容与 state.agentDoc.original 比较得出是否有未保存的修改。
+  function loadAgentDoc() {
+    if (!state.workspace) { renderAgentDoc(); return Promise.resolve(); }
+    state.agentDoc.loading = true;
+    renderAgentDoc();
+    var wsid = state.workspace.id;
+    return api('api/workspaces/' + encodeURIComponent(wsid) + '/agent-doc').then(function (d) {
+      if (!state.workspace || state.workspace.id !== wsid) return;   // 期间切了工作区
+      state.agentDoc = {
+        content: d.content || '', original: d.content || '',
+        path: d.relative_path || d.path || '',
+        scriptsDir: d.scripts_dir || '', scripts: d.scripts || [],
+        loading: false, touched: false
+      };
+      renderAgentDoc();
+    }, function (e) {
+      state.agentDoc.loading = false;
+      renderAgentDoc();
+      toast('读取 agent.md 失败：' + e.message);
+    });
+  }
+  function renderAgentDoc() {
+    var doc = state.agentDoc;
+    var editor = $('agent-doc-editor');
+    // touched 由输入事件置位：用户改过就别用服务端内容覆盖（他手里的更新）。
+    // 读取完成、还原、保存成功都会把它复位，编辑器随之跟服务端同步。
+    if (!doc.touched) editor.value = doc.content;
+    $('agent-doc-path').textContent = doc.path;
+    $('agent-doc-path').title = doc.path || '';
+    var dirty = editor.value !== doc.original;
+    var meta = dirty ? '未保存' : (doc.loading ? '读取中…' : fmtBytes(doc.original.length));
+    $('agent-doc-meta').textContent = meta;
+    $('agent-doc-meta').classList.toggle('dirty', dirty);
+    var box = $('agent-doc-scripts');
+    clear(box);
+    if (doc.scripts && doc.scripts.length) {
+      box.appendChild(el('span', null, '可复用脚本（' + (doc.scriptsDir || '.tea_agent_run/scripts/') + '）：'));
+      doc.scripts.forEach(function (s) {
+        var tag = el('span', 's-nm', s.name);
+        tag.title = fmtBytes(s.size) + ' · ' + fmtTime(s.mtime);
+        box.appendChild(tag);
+      });
+    }
+  }
+  function saveAgentDoc() {
+    if (!state.workspace) return;
+    var doc = state.agentDoc;
+    var content = $('agent-doc-editor').value;
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/agent-doc',
+      { method: 'PUT', body: { content: content } }).then(function () {
+        doc.original = content;
+        doc.content = content;
+        doc.touched = false;
+        renderAgentDoc();
+        toast('agent.md 已保存');
+      }, function (e) { toast('保存失败：' + e.message); });
   }
   function renderMemory() {
     var box = $('memory-list');
@@ -2217,6 +2282,16 @@
     };
     $('memory-add').onclick = addMemory;
     $('memory-refresh').onclick = loadMemory;
+    $('agent-doc-save').onclick = saveAgentDoc;
+    $('agent-doc-revert').onclick = function () {
+      state.agentDoc.touched = false;
+      $('agent-doc-editor').value = state.agentDoc.original;
+      renderAgentDoc();
+    };
+    $('agent-doc-editor').addEventListener('input', function () {
+      state.agentDoc.touched = true;
+      renderAgentDoc();
+    });
     $('logs-refresh').onclick = loadLogs;
     $('logs-autoscroll').onchange = function () {
       state.logsAutoScroll = $('logs-autoscroll').checked;

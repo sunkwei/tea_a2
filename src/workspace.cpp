@@ -14,6 +14,31 @@ namespace {
 const char* const kRunDirName = ".tea_agent_run";
 const char* const kMemoryFileName = "memory.json";
 
+/// Hard ceiling for `<run_dir>/agent.md`. The file is injected into the system
+/// prompt of every turn, so an unbounded append would silently eat the context
+/// window (and invalidate the prompt cache with every byte). 32 KB is far more
+/// experience than a single project needs; past it the tool tells the model to
+/// compact the file with op=replace.
+constexpr std::size_t kAgentDocMaxBytes = 32u * 1024u;
+
+/// What a brand-new agent.md starts as. The headings are a suggestion for both
+/// the model and the human editing it; the guidance block above them explains
+/// what belongs here (and what belongs in memory.json instead).
+const char* const kAgentDocTemplate =
+    "# agent.md - workspace experience\n"
+    "\n"
+    "Accumulated by the agent for THIS workspace. Maintained with `toolkit_agent_doc`;\n"
+    "edited by hand is fine too. Keep it short: one line per entry, delete what is no\n"
+    "longer true instead of piling up history. Reusable scripts live in `.tea_agent_run/scripts/`.\n"
+    "\n"
+    "## Overview\n"
+    "\n"
+    "## Commands & scripts worth reusing\n"
+    "\n"
+    "## Pitfalls\n"
+    "\n"
+    "## Conventions\n";
+
 nlohmann::json read_json_file(const std::string& path, bool* ok) {
   *ok = false;
   std::string text;
@@ -266,6 +291,7 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
   dirs.push_back(artifacts_dir());
   dirs.push_back(path_parent(log_file()));
   dirs.push_back(path_parent(memory_file()));
+  dirs.push_back(scripts_dir());
   for (std::size_t i = 0; i < dirs.size(); ++i) {
     if (dirs[i].empty()) continue;
     if (!make_dirs(dirs[i])) {
@@ -287,6 +313,13 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
     nlohmann::json mem = nlohmann::json::object();
     mem["notes"] = nlohmann::json::array();
     write_file(memory_file(), mem.dump(2) + "\n", false, nullptr);
+  }
+  // agent.md is the workspace's experience log (see load_agent_doc). Seeded so
+  // the file is discoverable - by the model (it is injected into the prompt)
+  // and by whoever opens .tea_agent_run/ - instead of appearing only after the
+  // first append.
+  if (!path_exists(agent_doc_file())) {
+    write_file(agent_doc_file(), kAgentDocTemplate, false, nullptr);
   }
   // Per-workspace overrides land on top of the machine-level settings, so a
   // project can pin its own shell/timeouts/system prompt. Loaded once here and
@@ -324,6 +357,74 @@ std::string Workspace::settings_file() const {
 
 std::string Workspace::instructions_file() const {
   return path_join(run_dir_, "instructions.md");
+}
+
+std::string Workspace::agent_doc_file() const {
+  return path_join(run_dir_, "agent.md");
+}
+
+std::string Workspace::scripts_dir() const {
+  return path_join(run_dir_, "scripts");
+}
+
+std::string Workspace::load_agent_doc(bool* truncated) const {
+  if (truncated) *truncated = false;
+  std::string text;
+  bool cut = false;
+  if (!read_file(agent_doc_file(), &text, kAgentDocMaxBytes, &cut)) return std::string();
+  if (truncated) *truncated = cut;
+  return text;
+}
+
+bool Workspace::save_agent_doc(const std::string& content, std::string* err) const {
+  if (content.size() > kAgentDocMaxBytes) {
+    if (err) {
+      *err = "agent.md would be " + std::to_string(content.size()) + " bytes; the limit is " +
+             std::to_string(kAgentDocMaxBytes) + ". Compact it (merge or drop stale entries) " +
+             "and write it again.";
+    }
+    return false;
+  }
+  // Normalise the tail: exactly one trailing newline, and a whitespace-only
+  // document becomes an empty file instead of a lone blank line.
+  std::string body = content;
+  while (!body.empty() && (body.back() == '\n' || body.back() == '\r' || body.back() == ' ' ||
+                           body.back() == '\t')) {
+    body.pop_back();
+  }
+  if (!body.empty()) body += "\n";
+  return write_file(agent_doc_file(), body, false, err);
+}
+
+bool Workspace::append_agent_doc(const std::string& text, std::string* err) const {
+  const std::string body = trim(text);
+  if (body.empty()) {
+    if (err) *err = "text is empty";
+    return false;
+  }
+  std::string current;
+  bool existing = path_exists(agent_doc_file());
+  if (existing) {
+    bool cut = false;
+    if (!read_file(agent_doc_file(), &current, 0, &cut)) {
+      if (err) *err = "cannot read " + agent_doc_file();
+      return false;
+    }
+  } else {
+    current = std::string(kAgentDocTemplate);
+  }
+  if (!current.empty() && current.back() != '\n') current += "\n";
+  // A dated bullet, not a heading: entries stay one glance apart and the file
+  // does not grow a new section for every single observation.
+  current += "- " + now_iso8601() + " " + replace_all(body, "\n", "\n  ") + "\n";
+  if (current.size() > kAgentDocMaxBytes) {
+    if (err) {
+      *err = "agent.md is at its " + std::to_string(kAgentDocMaxBytes) + " byte limit; read it, " +
+             "merge or drop stale entries, and rewrite it with toolkit_agent_doc op=replace";
+    }
+    return false;
+  }
+  return write_file(agent_doc_file(), current, false, err);
 }
 
 std::string Workspace::resolve_path(const std::string& path_in, std::string* err) const {

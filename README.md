@@ -382,6 +382,7 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 | `toolkit_exec` | 执行系统命令。Windows 写成临时 `.cmd`/`.ps1` 再执行（绕开引号问题），超时用 Job Object 杀整个进程树；POSIX 用 `setsid` + 进程组 `kill`。输出统一转 UTF-8 回填模型 |
 | `toolkit_file` | `read` `write` `append` `list` `mkdir` `delete` `move` `stat` |
 | `toolkit_memory` | 工作区长期记忆的增删查，自动注入 system prompt，跨会话保留偏好与项目事实 |
+| `toolkit_agent_doc` | `read` `append` `replace` `scripts`：维护 `.tea_agent_run/agent.md`（本工作区的经验：坑、可复用命令与脚本） |
 
 相对路径基于工作区根目录；默认**禁止越出工作区**（`--allow-outside-workspace` 可放开），
 判定前会解析符号链接，所以工作区里的软链无法把工具带出去。
@@ -475,11 +476,35 @@ macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell�
 ├── sessions/
 │   ├── index.json            # 会话索引（标题/时间/条数）
 │   └── <session_id>.json     # 完整会话（reasoning、工具调用与结果）
-├── memory/memory.json        # 长期记忆
+├── memory/memory.json        # 长期记忆（结构化条目）
+├── agent.md                  # 本工作区的经验（注入 prompt，见下）
+├── scripts/                  # 可复用脚本，跨会话保留
 ├── trajectories/<sid>.jsonl  # 每轮轨迹，一轮一行（见上文「轨迹」）
 ├── tmp/                      # toolkit_exec 的临时脚本
 └── artifacts/                # 预留产物目录
 ```
+
+### agent.md：工作区的「经验」，而不只是「事实」
+
+`memory.json` 记的是**事实与偏好**（「这个项目用 yarn，不用 npm」）；`agent.md` 记的是
+**怎么在这个工作区干活**，由 agent 自己维护：
+
+- 踩过的坑：`- 2026-… cargo test 需要先导出 TEA_ARCH，否则链接失败`
+- 可复用的命令/脚本：临时写的一次性验证脚本放进 `.tea_agent_run/scripts/`，把路径记在这里
+- 项目约定：生成代码的位置、测试怎么跑、哪些目录别碰
+
+它和 `instructions.md` 的区别是**谁写**：instructions 是人写给 agent 的硬规则，进程生命周期内
+只读一次（保证 prompt 前缀稳定）；agent.md 是 agent 写给下一个会话的，每轮读取，所以同一轮里
+`toolkit_agent_doc op=append` 之后，后续那次模型请求就已经能看到新条目。
+
+默认模板给出四个小节（Overview / Commands & scripts worth reusing / Pitfalls / Conventions）。
+两条硬约束：
+
+- **有上限**：文件 32 KB，注入 prompt 的那部分再截到 6 KB。超过上限时 `op=append` 直接报错并
+  要求用 `op=replace` 合并/删除过期条目，绝不静默把 prompt 撑大。
+- **可人工维护**：内置 UI 的「记忆」页上方就是它的编辑框（带未保存提示与还原），
+  `GET/PUT /api/workspaces/{id}/agent-doc` 也能直接读写；文件本身就是纯 Markdown，
+  用编辑器改也行。
 
 `$HOME/.tea_agent/`（可用 `--tea-home` 覆盖）只放三类东西，**不改动任何既有文件**，
 因此可以和别的 agent 实现共用同一个配置目录：
@@ -729,7 +754,7 @@ src/
   llm.{h,cpp}               OpenAI 兼容客户端：SSE、tool_calls 聚合、重试
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
   prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
-  tools.{h,cpp}             工具注册表与三个内置工具
+  tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc）
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆、索引
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源
@@ -788,10 +813,12 @@ node tests/ui_metrics_layout.mjs                          # 指标栏始终单�
 python3 tests/smoke_single_file.py                        # 内嵌证书 + 静态链接 + 静态下的 DNS
 python3 tests/smoke_dir_dialog.py                         # 原生目录选择器（后端选择/取消/不可用）
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
+python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 node tests/ui_workspace_add.mjs                           # 新增工作区（原生对话框 + 手动回退）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
+node tests/ui_agent_doc.mjs                               # 记忆页的 agent.md 编辑框（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -819,6 +846,15 @@ false。选出的路径能直接喂给 `/api/workspaces`。
 下一轮迭代采纳它并出现在后续请求里、落盘为 user 消息；模型已经流式输出完最终答案时入队，
 本轮会继续一次迭代而不是结束；按 id 取消 / 全部取消；停止轮次后未采纳的消息通过
 `queue_unconsumed` 原样退回且不进入会话；没有进行中的轮次返回 409；带图片 / 空消息返回 400。
+
+`tests/smoke_agent_doc.py` 覆盖工作区经验文件：打开工作区即生成带模板的 `agent.md` 与
+`scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的
+下一次请求里；`op=read/replace/scripts` 各自生效；超过 32 KB 的 append 报错并提示压缩且不
+改动文件；`GET/PUT /api/workspaces/{id}/agent-doc` 能读、能改、超限报 400。
+
+`tests/ui_agent_doc.mjs` 在浏览器里操作「记忆」页的 agent.md 卡片：内容来自服务端、路径显示为
+`.tea_agent_run/agent.md`、脚本列在下面；改动后提示「未保存」、还原按钮恢复服务端副本、保存后
+磁盘与 API 都拿到新内容；切到另一个工作区时加载的是它自己的那份（不串内容、不串脚本）。
 
 `tests/ui_workspace_add.mjs` 覆盖两条入口：有选择器时「添加工作区」**不出现表单**、直接采用
 对话框结果并切换；没有选择器时退回手动表单、隐藏「浏览…」按钮、目录不存在时给出创建提示

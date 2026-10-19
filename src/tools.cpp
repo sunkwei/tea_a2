@@ -2,6 +2,7 @@
 
 #include "output_filter.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -423,6 +424,104 @@ ToolResult tool_memory(const nlohmann::json& args, const ToolContext& ctx) {
     return result;
   }
   result.output = "error: unsupported op '" + op + "' (use add|list|delete)";
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// toolkit_agent_doc
+//
+// agent.md is the workspace's experience log: what the agent learned about THIS
+// project and would want to know next session (pitfalls, non-obvious commands,
+// scripts it wrote, conventions). It is injected into the system prompt on every
+// turn, which is why appends are capped: a runaway log would silently eat the
+// context window. op=replace exists so the model can compact the file instead of
+// growing it forever.
+// ---------------------------------------------------------------------------
+ToolResult tool_agent_doc(const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  if (!ctx.workspace) {
+    result.output = "error: no workspace is active";
+    return result;
+  }
+  const std::string op = to_lower(trim(arg_str(args, "op", "read")));
+  std::string err;
+
+  if (op == "read") {
+    bool truncated = false;
+    const std::string doc = ctx.workspace->load_agent_doc(&truncated);
+    result.ok = true;
+    result.output = doc.empty() ? std::string("(agent.md is empty)") : doc;
+    if (truncated) result.output += "\n... [truncated at the file size limit]";
+    result.meta["path"] = ctx.workspace->agent_doc_file();
+    result.meta["bytes"] = static_cast<long long>(doc.size());
+    return result;
+  }
+  if (op == "append") {
+    const std::string text = arg_str(args, "text");
+    if (trim(text).empty()) {
+      result.output = "error: 'text' is required for op=append";
+      return result;
+    }
+    if (!ctx.workspace->append_agent_doc(text, &err)) {
+      result.output = "error: " + err;
+      return result;
+    }
+    result.ok = true;
+    result.meta["path"] = ctx.workspace->agent_doc_file();
+    result.meta["bytes"] = static_cast<long long>(file_size(ctx.workspace->agent_doc_file()));
+    result.output = "appended to agent.md (" + std::to_string(file_size(ctx.workspace->agent_doc_file())) +
+                    " bytes)";
+    return result;
+  }
+  if (op == "replace") {
+    const std::string text = arg_str(args, "content");
+    if (trim(text).empty()) {
+      // Wiping the file is a real operation, but it should be spelled out
+      // rather than triggered by a missing/empty argument.
+      result.output = "error: 'content' is required for op=replace (use op=read first, then send the "
+                      "compacted document)";
+      return result;
+    }
+    if (!ctx.workspace->save_agent_doc(text, &err)) {
+      result.output = "error: " + err;
+      return result;
+    }
+    result.ok = true;
+    result.meta["path"] = ctx.workspace->agent_doc_file();
+    result.meta["bytes"] = static_cast<long long>(file_size(ctx.workspace->agent_doc_file()));
+    result.output = "replaced agent.md (" + std::to_string(file_size(ctx.workspace->agent_doc_file())) +
+                    " bytes)";
+    return result;
+  }
+  if (op == "scripts") {
+    // The reusable half of "reuse what a previous session built": what is in
+    // .tea_agent_run/scripts/ right now, newest first.
+    const std::string dir = ctx.workspace->scripts_dir();
+    std::vector<DirEntryInfo> entries;
+    if (!list_directory(dir, &entries, &err)) {
+      result.output = "error: cannot list " + dir + ": " + err;
+      return result;
+    }
+    if (entries.empty()) {
+      result.ok = true;
+      result.output = "(no scripts yet in .tea_agent_run/scripts/)";
+      return result;
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const DirEntryInfo& a, const DirEntryInfo& b) { return a.mtime > b.mtime; });
+    std::ostringstream out;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      out << (entries[i].is_dir ? "dir  " : "file ") << entries[i].name << "  ("
+          << entries[i].size << " bytes, " << entries[i].mtime << ")\n";
+    }
+    out << "Run them with toolkit_exec, e.g. `sh .tea_agent_run/scripts/<name>`.";
+    result.ok = true;
+    result.output = out.str();
+    result.meta["dir"] = dir;
+    result.meta["count"] = static_cast<long long>(entries.size());
+    return result;
+  }
+  result.output = "error: unsupported op '" + op + "' (use read|append|replace|scripts)";
   return result;
 }
 
@@ -961,6 +1060,35 @@ ToolRegistry::ToolRegistry() {
   }
   {
     ToolDef def;
+    def.name = "toolkit_agent_doc";
+    def.description =
+        "Read and maintain THIS workspace's experience log at .tea_agent_run/agent.md. It is "
+        "injected into your system prompt every turn and survives across sessions, so it is where "
+        "durable, project-specific knowledge belongs: pitfalls you hit, non-obvious build/test "
+        "commands, scripts you wrote under .tea_agent_run/scripts/, conventions to follow next "
+        "time. Not for user preferences or one-off task state - use toolkit_memory for those. "
+        "op=read returns the document; op=append adds one dated entry; op=replace rewrites the "
+        "whole document (use it to merge/drop stale entries when appending complains about the "
+        "size limit); op=scripts lists reusable scripts. 读取/维护工作区经验文件 agent.md。";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "op": { "type": "string", "enum": ["read", "append", "replace", "scripts"] },
+        "text": {
+          "type": "string",
+          "description": "For op=append: one terse entry (a pitfall, a command, a script path). Multi-line is allowed but keep it short."
+        },
+        "content": {
+          "type": "string",
+          "description": "For op=replace: the complete new document, usually the result of compacting what op=read returned."
+        }
+      },
+      "required": ["op"]
+    })JSON");
+    defs_.push_back(def);
+  }
+  {
+    ToolDef def;
     def.name = "toolkit_search";
     def.description =
         "Search the web through the provider's own search endpoint and get structured results "
@@ -1047,6 +1175,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     if (name == "toolkit_exec") return tool_exec(arguments, ctx);
     if (name == "toolkit_file") return tool_file(arguments, ctx);
     if (name == "toolkit_memory") return tool_memory(arguments, ctx);
+    if (name == "toolkit_agent_doc") return tool_agent_doc(arguments, ctx);
     if (name == "toolkit_search") return tool_search(arguments, ctx);
     if (name == "toolkit_fetch") return tool_fetch(arguments, ctx);
   } catch (const std::exception& e) {
