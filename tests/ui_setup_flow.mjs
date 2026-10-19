@@ -67,7 +67,7 @@ try {
   }
   if (!target) throw new Error('no chrome page target');
 
-  const { wsConnect } = await import('/tmp/miniws.mjs');
+  const { wsConnect } = await import('./mini_ws.mjs');
   const ws = wsConnect(target.webSocketDebuggerUrl);
   await new Promise((r) => ws.on('open', r));
   let id = 0;
