@@ -325,7 +325,7 @@ function parseHTML(html) {
 
 const CANNED = {
   '/api/health': {
-    config_loaded: true, dir_picker: true, http_engine: 'auto', model: 'mock-model',
+    config_loaded: true, http_engine: 'auto', model: 'mock-model',
     ok: true, provider: 'mock', uptime_s: 1.588, version: '0.1.3',
   },
   '/api/providers': {
@@ -566,6 +566,15 @@ async function bootState(state, opts) {
     FileReader: class { readAsText() {} },
     File: class {},
     crypto: { randomUUID: () => '00000000-0000-0000-0000-000000000000' },
+    // init() binds window-level events (resize -> the turn index) and schedules
+    // animation frames. Without these the whole page throws before it renders,
+    // which is exactly the kind of breakage this probe exists to catch.
+    addEventListener() {},
+    removeEventListener() {},
+    requestAnimationFrame: (fn) => fakeSetTimeout(fn, 16),
+    cancelAnimationFrame: fakeClear,
+    innerWidth: 1440,
+    innerHeight: 900,
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;

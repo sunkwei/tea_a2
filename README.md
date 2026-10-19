@@ -161,18 +161,20 @@ build/bin/tea_agent --workspace . --open
 
 **切换/新增工作区**（每个工作区就是一个项目目录，各自独立的会话、记忆、文件树和
 `.tea_agent_run/`）：点左上角的**工作区名称**（形如 `tea_a2 ›`）打开下拉，列出所有已注册
-工作区，最后一项是「＋ 添加工作区…」。点它会**直接弹出系统的目录选择对话框**，选中后立刻
-注册并切换过去。
+工作区，最后一项是「＋ 添加工作区…」。点它会弹出一个表单，要求输入项目目录的**完整路径**
+（绝对路径），注册后立刻切换过去。
 
-为什么是服务端弹框：浏览器给不出绝对路径（`showDirectoryPicker()` 返回的是句柄，
-`<input webkitdirectory>` 只有相对名），所以对话框由运行 tea_agent 的那台机器弹出
-（Linux 用 kdialog/zenity，macOS 用 `osascript`，Windows 用 PowerShell 的
-FolderBrowserDialog）。**注意**：如果你从另一台电脑打开这个 UI，对话框会出现在服务器上；
-那种情况下请用手动输入。
+这里没有「浏览…」按钮：浏览器给不出绝对路径（`showDirectoryPicker()` 返回的是句柄，
+`<input webkitdirectory>` 只有相对名），只能由服务端弹系统对话框——那意味着每次点击多一个
+进程、多一份临时脚本，而且 UI 从另一台机器打开时对话框出现在服务器上，反而更迷惑。所以就是
+手输一个完整路径：`C:\Users\me\project`、`\\server\share\project` 或 `/home/me/project`。
 
-服务端没有可用对话框时（无桌面、没装 zenity/kdialog），UI 自动退回手动输入表单，并且会
-问一次「目录不存在，是否创建」——确认后 `mkdir -p` 再注册。`TEA_AGENT_DIR_PICKER` 可以把
-选择器换成任意命令（stdout 即所选路径），用于无桌面环境或 SSH 下的自建选择器。
+路径不对时会**在表单里就地提示**，对话框不关，改一个字符就能重试：
+- 空着或者写成相对路径（如 `project`）→ 直接拒绝，不发请求（服务端 `/api/workspaces` 也会以
+  `path must be a full path` 拒绝：相对路径会被解析成服务端自己的 cwd，用户看不到那个目录）；
+- 目录不存在 → 问一次「目录不存在，是否创建」，确认后 `mkdir -p` 再注册；
+- 路径是个文件、没有权限之类 → 显示服务端返回的原因。
+
 命令行侧对应 `--workspace <path>`（可重复）和 `--workspace-root <dir>`（注册其下所有一级子目录）。
 
 侧边栏的**会话索引**按更新时间倒序列出当前工作区的会话（标题、相对时间、消息条数），
@@ -900,10 +902,9 @@ node tests/ui_setup_flow.mjs                              # 首次运行上传�
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
 python3 tests/smoke_single_file.py                        # 内嵌证书 + 静态链接 + 静态下的 DNS
-python3 tests/smoke_dir_dialog.py                         # 原生目录选择器（后端选择/取消/不可用）
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
-node tests/ui_workspace_add.mjs                           # 新增工作区（原生对话框 + 手动回退）
+node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
@@ -929,11 +930,6 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 `tests/ui_metrics_layout.mjs` 在 9 个窗口宽度（1440→600）下把每个指标填成最宽的真实数值，
 断言指标栏**只有一行**、且最长的那项没有被截断。这类「不许换行」的布局约束加一个指标或
 改一个标签就会破，所以单独钉住。
-
-`tests/smoke_dir_dialog.py` 覆盖目录选择器的后端：`TEA_AGENT_DIR_PICKER` 覆盖、带空格的路径
-原样返回、KDE 走 kdialog / GNOME 走 zenity（用假的可执行文件记录 argv，不弹窗）、取消返回
-200+cancelled、失败返回 500、完全没有选择器时返回 501 且 `/api/health` 的 `dir_picker` 为
-false。选出的路径能直接喂给 `/api/workspaces`。
 
 `tests/smoke_prompt_queue.py` 用三个假 provider 覆盖插队语义：工具执行中入队后，agent 在
 下一轮迭代采纳它并出现在后续请求里、落盘为 user 消息；模型已经流式输出完最终答案时入队，
@@ -977,10 +973,11 @@ false。选出的路径能直接喂给 `/api/workspaces`。
 `.tea_agent_run/agent.md`、脚本列在下面；改动后提示「未保存」、还原按钮恢复服务端副本、保存后
 磁盘与 API 都拿到新内容；切到另一个工作区时加载的是它自己的那份（不串内容、不串脚本）。
 
-`tests/ui_workspace_add.mjs` 覆盖两条入口：有选择器时「添加工作区」**不出现表单**、直接采用
-对话框结果并切换；没有选择器时退回手动表单、隐藏「浏览…」按钮、目录不存在时给出创建提示
-并在确认后真的建目录、取消不产生副作用（并验证服务端对「路径是个文件」仍然拒绝，即使带了
-`create: true`）。
+`tests/ui_workspace_add.mjs` 覆盖「添加工作区」这唯一一条入口：`/api/health` 不再有
+`dir_picker`、`/api/dialog/directory` 返回 404、点菜单直接出表单且**没有「浏览…」按钮**；空路径和
+相对路径在表单里就地报错（且不产生目录、不发请求）；完整路径能添加并切换（标签页标题跟着变）；
+目录不存在时给出创建提示并在确认后真的建目录；路径是个文件时报服务端原因且对话框不关；服务端
+自己也拒绝相对路径（`path must be a full path`）。
 
 `tests/ui_stream_guard.mjs` 起一轮慢速流式回答，在生成过程中点侧边栏：工作区按钮仍可点开菜单
 （不能变成死按钮），切换工作区 / 添加工作区 / 新建会话都被拒绝并给出原因，会话行显示为禁用；

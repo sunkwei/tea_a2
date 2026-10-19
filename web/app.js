@@ -2029,111 +2029,71 @@
       }, function (e) { onError(e); });
   }
 
-  /// Ask the server to open the OS directory dialog.
-  /// Resolves to {path} | {cancelled:true} | {unavailable:true}. The request
-  /// stays open for as long as the dialog does (the server blocks on it), so
-  /// callers should show a waiting state.
-  function requestDirectory(initial) {
-    return api('api/dialog/directory', { method: 'POST', body: { initial: initial || '' } })
-      .then(function (r) {
-        if (r && r.path) return { path: r.path };
-        if (r && r.cancelled) return { cancelled: true };
-        return { unavailable: true };
-      }, function (e) {
-        if (e && e.status === 501) return { unavailable: true };
-        return { error: e && e.message ? e.message : '未知错误' };
-      });
-  }
-
-  /// Fill `pathInput` from the native dialog, showing the wait on the button.
-  function browseForDirectory(pathInput, browseBtn) {
-    var label = browseBtn.textContent;
-    browseBtn.disabled = true;
-    browseBtn.textContent = '等待选择…';
-    var restore = function () { browseBtn.disabled = false; browseBtn.textContent = label; };
-    requestDirectory(pathInput.value.trim()).then(function (r) {
-      restore();
-      if (r.error) { toast('无法打开目录选择器：' + r.error); return; }
-      if (r.unavailable) { toast('服务端没有可用的系统对话框，请直接输入路径'); return; }
-      if (r.cancelled) return;                   // dismissed: keep the old value
-      pathInput.value = r.path;
-      pathInput.dispatchEvent(new Event('input'));
-    });
-  }
-
-  /// "＋ 添加工作区…" opens the OS directory dialog straight away: picking a
-  /// project is a filesystem action, and a form with a path field asks the user
-  /// to do the one thing they cannot easily do from a browser (produce an
-  /// absolute path). The manual form is still there for servers without a
-  /// desktop, and reachable from the dialog if the picker turns out unusable.
-  function openAddWorkspace(isEmpty) {
-    if (!state.health || state.health.dir_picker !== false) {
-      requestDirectory('').then(function (r) {
-        if (r.error) { toast('无法打开目录选择器：' + r.error); openAddWorkspaceForm(isEmpty); return; }
-        if (r.unavailable) { openAddWorkspaceForm(isEmpty); return; }
-        if (r.cancelled) return;               // dismissed: do nothing, that is a valid answer
-        addWorkspace(r.path, deriveWorkspaceName(r.path), false, function (e) {
-          if (e && e.message && e.message.indexOf('does not exist') >= 0) {
-            openCreateWorkspaceDialog(r.path, deriveWorkspaceName(r.path));
-            return;
-          }
-          toast('添加失败：' + e.message);
-        });
-      });
-      return;
-    }
-    openAddWorkspaceForm(isEmpty);
-  }
+  /// "＋ 添加工作区…" opens the path form. There is no directory browser: the
+  /// dialog would have to be drawn on the server's desktop (one extra process
+  /// and one temp script per click) and is invisible when the UI is opened from
+  /// another machine, so the form asks for a complete path and says what is
+  /// wrong when it is not one.
+  function openAddWorkspace(isEmpty) { openAddWorkspaceForm(isEmpty); }
 
   function deriveWorkspaceName(path) {
     return String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'workspace';
   }
 
+  /// 完整路径的判定：Windows 盘符（C:\…）、UNC 共享（\\server\…）和以 / 开头的 POSIX
+  /// 路径都算；其余都是相对路径，服务端会按自己的 cwd 解析，用户在浏览器里看不到那个
+  /// cwd，所以这里先拦下来（服务端 /api/workspaces 也会再校验一次）。
+  function looksAbsolutePath(p) {
+    return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p) || p.charAt(0) === '/';
+  }
+
   function openAddWorkspaceForm(isEmpty) {
     var body = el('div');
     body.appendChild(el('div', 'desc', isEmpty
-      ? '服务端没有可用的系统对话框，请手动输入项目目录（例如 /home/me/project）。'
-      : '手动输入项目目录；目录不存在时会问你是否创建。'));
+      ? '输入项目目录的完整路径（绝对路径），例如 C:\\Users\\me\\project 或 /home/me/project。'
+      : '输入项目目录的完整路径（绝对路径），例如 C:\\Users\\me\\project 或 /home/me/project；目录不存在时会问你是否创建。'));
     var pathInput = el('input', 'ta'), nameInput = el('input', 'ta');
-    pathInput.type = 'text'; pathInput.placeholder = '/home/me/project';
+    pathInput.type = 'text'; pathInput.placeholder = 'C:\\Users\\me\\project';
+    pathInput.autocomplete = 'off'; pathInput.spellcheck = false;
     nameInput.type = 'text'; nameInput.placeholder = 'project';
 
-    // 路径行右侧放「浏览…」：浏览器拿不到绝对路径，所以由服务端弹出系统对话框。
     var pathField = el('div', 'field');
     pathField.appendChild(el('label', null, '路径'));
-    var pathRow = el('div', 'field-row');
-    pathRow.appendChild(pathInput);
-    var browseBtn = btn('btn', '浏览…', function () { browseForDirectory(pathInput, browseBtn); });
-    browseBtn.type = 'button';
-    // No desktop on the server side: hide it rather than offering a dead button.
-    if (state.health && state.health.dir_picker === false) {
-      browseBtn.style.display = 'none';
-      pathInput.placeholder = '/path/on/the/server';
-    }
-    pathRow.appendChild(browseBtn);
-    pathField.appendChild(pathRow);
+    pathField.appendChild(pathInput);
     body.appendChild(pathField);
 
     var nameField = el('div', 'field');
     nameField.appendChild(el('label', null, '名称（可选）'));
     nameField.appendChild(nameInput);
     body.appendChild(nameField);
+
+    // 提示写在表单里，不用 toast：toast 会自己消失，用户来不及对照自己敲的路径，
+    // 而且对话框要一直开着，改一个字符就能重试。
+    var errorNode = el('div', 'form-error');
+    body.appendChild(errorNode);
+    var showError = function (msg) {
+      errorNode.textContent = msg;
+      pathInput.focus(); pathInput.select();
+    };
+    pathInput.addEventListener('input', function () { errorNode.textContent = ''; });
+
     openDialog('添加工作区', body, [
       { label: '取消', onClick: closeDialog },
       {
         label: '添加', primary: true, onClick: function () {
           var p = pathInput.value.trim();
-          if (!p) { toast('请输入路径'); return; }
+          if (!p) { showError('请输入完整的项目目录路径'); return; }
+          if (!looksAbsolutePath(p)) {
+            showError('请写完整的目录路径（绝对路径），例如 C:\\Users\\me\\project 或 /home/me/project');
+            return;
+          }
           var nm = nameInput.value.trim() || deriveWorkspaceName(p);
           addWorkspace(p, nm, false, function (e) {
-            // A brand-new project directory is a normal case, not an error to
-            // dead-end on: offer to create it rather than making the user do
-            // it in a shell and come back.
-            if (e && e.message && e.message.indexOf('does not exist') >= 0) {
-              openCreateWorkspaceDialog(p, nm);
-              return;
-            }
-            toast('添加失败：' + e.message);
+            var msg = (e && e.message) ? e.message : '未知错误';
+            // 新项目目录是常见情况，不该卡死：问一句是否创建，而不是让用户去终端
+            // 手动 mkdir 再回来。
+            if (msg.indexOf('does not exist') >= 0) { openCreateWorkspaceDialog(p, nm); return; }
+            showError('添加失败：' + msg);
           });
         }
       }

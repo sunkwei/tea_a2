@@ -1,17 +1,11 @@
 // Browser test for adding a workspace (a different project directory).
 //
-// Two entry paths matter, and they differ by whether the server has a desktop:
-//
-//  1. native picker available: "＋ 添加工作区…" opens the OS directory dialog
-//     immediately (no form - the browser cannot produce an absolute path, so
-//     asking the user to type one is the awkward part). Picking a directory
-//     adds it and switches to it.
-//  2. no picker (headless server, no zenity/kdialog, no override): the manual
-//     form appears, the 浏览… button is hidden, and a directory that does not
-//     exist yet offers to be created instead of dead-ending.
-//
-// A fake TEA_AGENT_DIR_PICKER stands in for the real dialog so this runs
-// without a desktop.
+// There is exactly one entry path now: "＋ 添加工作区…" opens a form and the user
+// types a complete path. No native directory dialog is involved (that needed a
+// process and a temp script on the server's desktop, per click), so this test
+// asserts the form is what appears, that a bad path is reported in the form
+// itself (the dialog stays open), and that the good paths still work - including
+// the "the directory does not exist, create it?" offer.
 //
 //   node tests/ui_workspace_add.mjs [path-to-tea_agent-binary]
 //
@@ -39,6 +33,17 @@ const getJson = (port, p) => new Promise((res, rej) => {
     let b = ''; r.on('data', (d) => (b += d)); r.on('end', () => res({ status: r.statusCode, body: b }));
   }).on('error', rej);
 });
+const postJson = (port, p, body) => new Promise((res, rej) => {
+  const payload = JSON.stringify(body || {});
+  const req = http.request({ host: '127.0.0.1', port, path: p, method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+    (r) => {
+      let b = ''; r.on('data', (d) => (b += d));
+      r.on('end', () => res({ status: r.statusCode, body: b }));
+    });
+  req.on('error', rej);
+  req.end(payload);
+});
 
 const results = [];
 const check = (name, ok, detail) => {
@@ -49,6 +54,7 @@ const check = (name, ok, detail) => {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tea_wsadd_'));
 fs.mkdirSync(path.join(tmp, 'home'), { recursive: true });
 fs.mkdirSync(path.join(tmp, 'proj_a'), { recursive: true });
+fs.mkdirSync(path.join(tmp, 'proj_b'), { recursive: true });
 fs.writeFileSync(path.join(tmp, 'provider.yaml'), `version: 1
 providers:
   mock:
@@ -59,13 +65,13 @@ providers:
 roles: {main: {provider: mock, model: m}}
 `);
 
-let agent, chrome, ws, cdpPort;
+let agent, chrome, ws;
 
-async function startAgent(env, extraArgs) {
+async function startAgent() {
   const agentPort = await freePort();
   agent = spawn(BIN, ['--config', path.join(tmp, 'provider.yaml'), '--tea-home', path.join(tmp, 'home'),
-    '--port', String(agentPort), '--no-console', '--log-file', path.join(tmp, 'agent.log')]
-    .concat(extraArgs || []), { stdio: 'ignore', env });
+    '--port', String(agentPort), '--no-console', '--log-file', path.join(tmp, 'agent.log'),
+    '--workspace', path.join(tmp, 'proj_a')], { stdio: 'ignore' });
   for (let i = 0; i < 100; i++) {
     try { if ((await getJson(agentPort, '/api/health')).status === 200) return agentPort; } catch {}
     await sleep(150);
@@ -78,11 +84,6 @@ async function stopAgent() {
   agent.kill('SIGTERM');
   await sleep(300);
   agent = null;
-}
-
-async function openPage(agentPort) {
-  await send('Page.navigate', { url: `http://127.0.0.1:${agentPort}/` });
-  await sleep(1600);
 }
 
 let id = 0;
@@ -119,23 +120,30 @@ const fill = (dir, name) => evalJs(`(function(){
   var i = document.querySelectorAll('#dialog .field .ta');
   if (i.length < 1) return false;
   i[0].value = ${JSON.stringify(dir)};
+  i[0].dispatchEvent(new Event('input'));
   if (i.length > 1 && ${JSON.stringify(name)}) i[1].value = ${JSON.stringify(name)};
   return true;
 })()`);
+const dialogState = () => evalJs(`(function(){
+  var d = document.getElementById('dialog');
+  var e = d.querySelector('.form-error');
+  return { open: !document.getElementById('overlay').classList.contains('hidden'),
+           title: (d.querySelector('h3') || {}).textContent,
+           error: e ? e.textContent : '' };
+})()`);
 
 try {
-  // ---- 1) native picker path -------------------------------------------
-  const pickedDir = path.join(tmp, 'picked_by_dialog');
-  fs.mkdirSync(pickedDir, { recursive: true });
-  const picker = path.join(tmp, 'picker.sh');
-  fs.writeFileSync(picker, '#!/bin/sh\necho ' + JSON.stringify(pickedDir) + '\n');
-  fs.chmodSync(picker, 0o755);
+  const agentPort = await startAgent();
 
-  const agentPort = await startAgent(
-    Object.assign({}, process.env, { TEA_AGENT_DIR_PICKER: picker }),
-    ['--workspace', path.join(tmp, 'proj_a')]);
+  // ---- 1) the server no longer offers a directory picker ----------------
+  const health = JSON.parse((await getJson(agentPort, '/api/health')).body);
+  check('/api/health no longer advertises dir_picker', health.dir_picker === undefined,
+    String(health.dir_picker));
+  const gone = await postJson(agentPort, '/api/dialog/directory', {});
+  check('/api/dialog/directory is gone', gone.status === 404, 'HTTP ' + gone.status);
 
-  cdpPort = await freePort();
+  // ---- 2) the browser ------------------------------------------------
+  const cdpPort = await freePort();
   chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox',
     `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, 'chrome')}`,
     'about:blank'], { stdio: 'ignore' });
@@ -157,7 +165,8 @@ try {
   });
   await send('Page.enable');
   await send('Runtime.enable');
-  await openPage(agentPort);
+  await send('Page.navigate', { url: `http://127.0.0.1:${agentPort}/` });
+  await sleep(1600);
 
   const menu = await evalJs(`(function(){
     document.getElementById('ws-chip').click();
@@ -170,70 +179,43 @@ try {
     menu && menu.items.join(' | '));
   await evalJs(`document.getElementById('ws-chip').click(); true`);
 
-  const health = JSON.parse((await getJson(agentPort, '/api/health')).body);
-  check('/api/health reports a usable picker', health.dir_picker === true, String(health.dir_picker));
-
-  // "添加工作区…" must go straight to the dialog, not to a form.
+  // "添加工作区…" opens the form directly: no dialog process, no wait.
   await evalJs(openAdd);
-  await sleep(1500);
-  const afterPick = await evalJs(`(function(){
-    return { dialogOpen: !document.getElementById('overlay').classList.contains('hidden'),
-             chip: document.getElementById('ws-chip-text').textContent };
-  })()`);
-  check('no form is shown: the native dialog is used directly',
-    afterPick && afterPick.dialogOpen === false, JSON.stringify(afterPick));
-  check('the picked directory becomes the workspace', afterPick && afterPick.chip === 'picked_by_dialog',
-    afterPick && afterPick.chip);
-
-  const listed = JSON.parse((await getJson(agentPort, '/api/workspaces')).body).workspaces.map((w) => w.path);
-  check('picked directory is registered', listed.indexOf(pickedDir) >= 0, listed.join(', '));
-
-  // Cancelling the dialog must be a no-op, not an error dialog.
-  const cancelPicker = path.join(tmp, 'cancel.sh');
-  fs.writeFileSync(cancelPicker, '#!/bin/sh\nexit 1\n');
-  fs.chmodSync(cancelPicker, 0o755);
-  await stopAgent();
-  const agentPort2 = await startAgent(
-    Object.assign({}, process.env, { TEA_AGENT_DIR_PICKER: cancelPicker }),
-    ['--workspace', path.join(tmp, 'proj_a')]);
-  await openPage(agentPort2);
-  const beforeCancel = await chip();
-  await evalJs(openAdd);
-  await sleep(1200);
-  const afterCancel = await evalJs(`(function(){
-    return { dialogOpen: !document.getElementById('overlay').classList.contains('hidden'),
-             chip: document.getElementById('ws-chip-text').textContent,
-             toast: document.getElementById('toast').textContent };
-  })()`);
-  check('cancelling the dialog changes nothing',
-    afterCancel && afterCancel.chip === beforeCancel && afterCancel.dialogOpen === false,
-    JSON.stringify(afterCancel));
-
-  // ---- 2) manual fallback when there is no picker ----------------------
-  await stopAgent();
-  const emptyBin = path.join(tmp, 'emptybin');
-  fs.mkdirSync(emptyBin, { recursive: true });
-  const envNoPicker = Object.assign({}, process.env, { PATH: emptyBin });
-  delete envNoPicker.TEA_AGENT_DIR_PICKER;
-  const agentPort3 = await startAgent(envNoPicker, ['--workspace', path.join(tmp, 'proj_a')]);
-  const health3 = JSON.parse((await getJson(agentPort3, '/api/health')).body);
-  check('/api/health reports no picker', health3.dir_picker === false, String(health3.dir_picker));
-
-  await openPage(agentPort3);
-  await evalJs(openAdd);
-  await sleep(900);
+  await sleep(400);
   const form = await evalJs(`(function(){
     var d = document.getElementById('dialog');
-    var row = d.querySelector('.field-row .btn');
+    var inputs = d.querySelectorAll('.field .ta');
     return { open: !document.getElementById('overlay').classList.contains('hidden'),
              title: (d.querySelector('h3') || {}).textContent,
-             browseVisible: !!(row && row.offsetParent !== null) };
+             fields: inputs.length,
+             browseButtons: d.querySelectorAll('.field .btn').length,
+             focused: document.activeElement === inputs[0],
+             placeholder: inputs.length ? inputs[0].placeholder : '' };
   })()`);
-  check('without a picker the manual form appears',
+  check('the add form opens straight away',
     form && form.open === true && form.title === '添加工作区', JSON.stringify(form));
-  check('the browse button is hidden without a picker', form && form.browseVisible === false);
+  check('the form has a path field and no browse button',
+    form && form.fields === 2 && form.browseButtons === 0, JSON.stringify(form));
+  check('the path field shows an example path', form && form.placeholder.length > 0, form && form.placeholder);
+  check('the path field takes focus', form && form.focused === true);
 
-  // A directory that does not exist yet: offer to create it.
+  // ---- 3) an empty path is refused in the form -------------------------
+  await evalJs(submit);
+  await sleep(200);
+  let st = await dialogState();
+  check('an empty path is reported in the form',
+    st && st.open === true && st.error.indexOf('请输入') >= 0, JSON.stringify(st));
+
+  // ---- 4) a relative path is refused before it reaches the server ------
+  await fill('proj_rel', 'proj_rel');
+  await evalJs(submit);
+  await sleep(400);
+  st = await dialogState();
+  check('a relative path is refused in the form',
+    st && st.open === true && st.error.indexOf('绝对路径') >= 0, JSON.stringify(st));
+  check('the refused relative path was not created', !fs.existsSync(path.join(tmp, 'proj_rel')));
+
+  // ---- 5) a missing directory offers to be created ---------------------
   const newDir = path.join(tmp, 'proj_new');
   await fill(newDir, 'proj_new');
   await evalJs(submit);
@@ -248,32 +230,48 @@ try {
   check('UI switches to the new workspace', (await chip()) === 'proj_new', await chip());
   // 标签页标题跟着工作区走：同时开着多个页面时靠它区分。
   const title = await evalJs(`document.title`);
-  check('browser title names the new workspace',
-    title === 'proj_new · TEA AGENT', JSON.stringify(title));
+  check('browser title names the new workspace', title === 'proj_new · TEA AGENT', JSON.stringify(title));
 
-  // Cancel leaves nothing behind.
-  const neverDir = path.join(tmp, 'proj_never');
+  // ---- 6) an existing directory is added as typed ----------------------
   await evalJs(openAdd);
-  await sleep(600);
-  await fill(neverDir, 'proj_never');
-  await evalJs(submit);
-  await sleep(800);
-  await evalJs(`(function(){ var bs = document.querySelectorAll('#dialog .actions .btn'); if (bs.length) bs[0].click(); return true; })()`);
   await sleep(400);
-  check('cancel does not create the directory', !fs.existsSync(neverDir));
-  check('cancel keeps the current workspace', (await chip()) === 'proj_new', await chip());
+  await fill(path.join(tmp, 'proj_b'), 'proj_b');
+  await evalJs(submit);
+  await sleep(1500);
+  check('an existing directory is added', (await chip()) === 'proj_b', await chip());
+  const listed = JSON.parse((await getJson(agentPort, '/api/workspaces')).body).workspaces.map((w) => w.path);
+  check('both directories are registered',
+    listed.indexOf(path.join(tmp, 'proj_new')) >= 0 && listed.indexOf(path.join(tmp, 'proj_b')) >= 0,
+    listed.join(', '));
 
-  // A file path is still refused by the server.
+  // ---- 7) a file is refused, and the dialog stays open -----------------
   const filePath = path.join(tmp, 'not_a_dir.txt');
   fs.writeFileSync(filePath, 'x');
-  const status = await new Promise((res) => {
-    const body = JSON.stringify({ path: filePath, name: 'bad', create: true });
-    const req = http.request({ host: '127.0.0.1', port: agentPort3, path: '/api/workspaces', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
-      (r) => { r.resume(); res(r.statusCode); });
-    req.end(body);
-  });
-  check('a file path is rejected even with create:true', status === 400, 'HTTP ' + status);
+  await evalJs(openAdd);
+  await sleep(400);
+  await fill(filePath, 'nope');
+  await evalJs(submit);
+  await sleep(900);
+  st = await dialogState();
+  check('a file path is refused with a message',
+    st && st.open === true && st.error.indexOf('添加失败') >= 0, JSON.stringify(st));
+  check('a file path is not registered',
+    JSON.parse((await getJson(agentPort, '/api/workspaces')).body).workspaces
+      .every((w) => w.path !== filePath));
+
+  // ---- 8) cancel leaves nothing behind --------------------------------
+  await evalJs(`(function(){ var bs = document.querySelectorAll('#dialog .actions .btn'); if (bs.length) bs[0].click(); return true; })()`);
+  await sleep(400);
+  check('cancel keeps the current workspace', (await chip()) === 'proj_b', await chip());
+
+  // ---- 9) the server enforces the same rule ---------------------------
+  const rel = await postJson(agentPort, '/api/workspaces', { path: 'proj_rel', name: 'rel' });
+  check('POST /api/workspaces rejects a relative path', rel.status === 400, 'HTTP ' + rel.status);
+  check('the rejection says what a full path looks like',
+    rel.body.indexOf('full path') >= 0, rel.body.slice(0, 120));
+  check('the rejected relative path was not created', !fs.existsSync(path.join(tmp, 'proj_rel')));
+  const abs = await postJson(agentPort, '/api/workspaces', { path: path.join(tmp, 'proj_a'), name: 'a' });
+  check('POST /api/workspaces still accepts a full path', abs.status === 200, 'HTTP ' + abs.status);
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });

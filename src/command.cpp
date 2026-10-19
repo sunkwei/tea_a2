@@ -68,8 +68,18 @@ void strip_utf8_bom(std::string* s) {
 
 std::string script_extension(const std::string& shell) {
   if (shell == "powershell" || shell == "pwsh") return ".ps1";
+#ifdef _WIN32
+  // Everything else is executed by cmd.exe on Windows (see run_command), and
+  // cmd.exe only runs a batch file when it is named .bat/.cmd: handed a .sh it
+  // silently does nothing and reports exit 0, so the command looks like it
+  // succeeded with empty output. Never let the name come from the requested
+  // shell here - `shell: "sh"` still means a cmd batch on this platform.
+  (void)shell;
+  return ".cmd";
+#else
   if (shell == "bash" || shell == "sh") return ".sh";
   return ".cmd";
+#endif
 }
 
 /// Build the script body that is written to a temporary file. Running a script

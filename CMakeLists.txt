@@ -266,7 +266,6 @@ set(TEA_SOURCES
   src/http_socket.cpp
   src/tls.cpp
   src/command.cpp
-  src/file_dialog.cpp
   src/tools.cpp
   src/workspace.cpp
   src/llm.cpp
