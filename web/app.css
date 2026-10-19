@@ -420,6 +420,15 @@ button{font-family:inherit}
 .send svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
 .send:hover{background:var(--dsw-static-deepseek-450)}
 .send.stop{background:var(--dsw-alias-state-error-primary);color:#fff}
+/* 停止跟随正在跑的一轮（不中断它）：多客户端下「看够了就走」的出口 */
+.detach{
+  flex:0 0 auto;height:28px;padding:0 10px;border-radius:8px;
+  border:.5px solid var(--dsw-alias-border-l1);background:transparent;
+  color:var(--dsw-alias-label-tertiary);font-size:12px;cursor:pointer;
+}
+.detach:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+/* 侧栏里标出「你已经离开、但服务端还在跑」的会话 */
+.sess-running{color:var(--dsw-alias-state-business-primary)}
 .send.stop:hover{background:var(--dsw-static-red-400)}
 .send:disabled{opacity:.4;cursor:not-allowed}
 

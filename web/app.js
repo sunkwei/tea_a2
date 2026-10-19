@@ -22,6 +22,8 @@
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
     turnStartAt: 0, turnSteps: 0, mdBase: '',
     turnSeq: 0, attachRetries: 0,
+    // 你主动离开了哪个会话的轮次（它还在服务端跑）：别又把人拽回去
+    detached: null,
     files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 },
     memory: [], logsTimer: null, logsAutoScroll: true,
     agentDoc: {
@@ -1509,7 +1511,13 @@
   function maybeAttach(sid) {
     if (!sid || state.streaming) return Promise.resolve();
     return api('api/chat/turn?session_id=' + encodeURIComponent(sid)).then(function (d) {
-      if (!d || !d.running) return;
+      var running = !!(d && d.running);
+      if (!running) {
+        // 那一轮已经结束：侧栏上的「进行中」标记也该消失了。
+        if (state.detached === sid) { state.detached = null; renderSessions(); }
+        return;
+      }
+      if (state.detached === sid) return;      // 你自己离开的：不要又把你拽回去
       if (!state.session || state.session.id !== sid) return;   // 用户已经切走了
       attachTurn(sid);
     }, function () {});
@@ -1551,6 +1559,13 @@
     // 队列属于上一轮：新一轮开始时不可能还有可被采纳的旧条目。
     state.queue = []; state.queueDone = {}; renderQueue();
     state.turnSeq = 0; state.attachRetries = 0;
+    // 你之前离开过这一轮（它还在服务端跑）：新消息会把它顶掉，
+    // 而且顶掉的可能是别人发起的任务，所以说清楚再发。
+    if (state.detached && state.session && state.detached === state.session.id) {
+      state.detached = null;
+      renderSessions();
+      toast('上一轮仍在进行，已被这条消息顶掉');
+    }
 
     var ready = state.session ? Promise.resolve(state.session)
       : api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions',
@@ -1593,6 +1608,18 @@
       finalizeStream();                                          // 仍然重拉会话，保持与服务端一致
     });
   }
+  /// 停止跟随这一轮，但**不打断**它。任务可能是另一台机器（或另一个标签页）发起的，
+  /// 你也可能只是想先去看别的工作区：断开本地这条 SSE 就够了，服务端照跑到底，
+  /// 回到这个会话时会重新接上。和「停止」的区别就在这里——停止是取消所有人的这一轮。
+  function detachStream() {
+    var sid = state.session ? state.session.id : null;
+    if (sid) state.detached = sid;
+    if (state.stopTimer) { clearTimeout(state.stopTimer); state.stopTimer = null; }
+    if (state.abort) state.abort.abort();      // AbortError 不报错，finalizeStream 收尾
+    renderSessions();                          // 侧栏标出「还在跑，你已离开」
+    toast('已停止跟随；这一轮仍在服务端继续，点会话可再接回');
+  }
+
   function stopStream() {
     var sid = state.session ? state.session.id : null;
     if (sid) api('api/chat/stop', { method: 'POST', body: { session_id: sid } }).catch(function () {});
@@ -1601,6 +1628,9 @@
   function updateComposer() {
     var b = $('send');
     b.classList.toggle('stop', state.streaming);
+    // 「离开」只在跟随一轮时出现：停止跟随但不打断它。
+    var d = $('detach');
+    if (d) d.classList.toggle('hidden', !state.streaming);
     b.title = state.streaming ? '停止生成（Enter 排队，采纳前可取消）' : '发送';
     b.innerHTML = state.streaming
       ? '<svg viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1.2" fill="currentColor" stroke="none"/></svg>'
@@ -1792,6 +1822,8 @@
         meta.appendChild(el('span', null, '·'));
         meta.appendChild(el('span', null, s.message_count + ' 条'));
       }
+      // 你已经离开、但服务端还在跑的那一轮：标出来，点一下就接回去。
+      if (state.detached === s.id) meta.appendChild(el('span', 'sess-running', '· 进行中'));
       row.appendChild(meta);
       row.title = (s.title || s.id) + '\n' + fmtTime(s.updated_at || s.created_at) +
         ' · ' + (s.message_count || 0) + ' 条消息\n点击切换会话';
@@ -2114,6 +2146,8 @@
     }, function () { renderSessions(); });
   }
   function openSession(sid) {
+    // 主动点开会话 = 想重新跟上它：清掉「已离开」标记，下面的 maybeAttach 才会接回去。
+    if (state.detached === sid) state.detached = null;
     return api('api/sessions/' + encodeURIComponent(sid)).then(function (d) {
       state.session = d.session || { id: sid };
       state.messages = d.messages || [];
@@ -2630,6 +2664,8 @@
       }
     });
     $('send').onclick = function () { if (state.streaming) stopStream(); else sendMessage(); };
+    var detachBtn = $('detach');
+    if (detachBtn) detachBtn.onclick = detachStream;
     $('sidebar-hide').onclick = function () { toggleSidebar(true); };
     $('sidebar-show').onclick = function () { toggleSidebar(false); };
     $('new-session').onclick = function () {

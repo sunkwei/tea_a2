@@ -119,6 +119,9 @@
               <div class="queue-strip hidden" id="queue-strip"></div>
               <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行（可直接粘贴图片）"></textarea>
             </div>
+            <!-- 停止跟随这一轮，但不打断它：任务可能是另一台机器发起的，看够了就
+                 走，服务端照跑；回到这个会话会重新接上 -->
+            <button class="detach hidden" id="detach" type="button" title="停止跟随（不中断这一轮）">离开</button>
             <button class="send" id="send" type="button" title="发送"></button>
           </div>
           <!-- 指标栏：耗时 / 轮次 / 步数 / 速度 / 缓存命中率 / 上下文用量 / 本轮输出
