@@ -90,7 +90,12 @@ button{font-family:inherit}
 .crumbs button.crumb:hover{color:var(--dsw-alias-label-secondary)}
 .crumbs .crumb.cur{color:var(--dsw-alias-label-primary)}
 .topbar-right{display:flex;align-items:center;gap:12px;flex:0 0 auto}
-.status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-caption)}
+/* 状态灯可点：点了立刻重查（以前只能刷页面，或者等一次失败让它自己变） */
+.status{
+  display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-caption);
+  cursor:pointer;border-radius:var(--dsw-radius-sm);padding:2px 6px;
+}
+.status:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .status-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-caption)}
 .status-dot.ok{background:var(--dsw-alias-state-success-primary)}
 .status-dot.bad{background:var(--dsw-alias-state-error-primary)}

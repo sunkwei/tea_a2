@@ -889,6 +889,7 @@ node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示�
 node tests/ui_agent_doc.mjs                               # 记忆页的 agent.md 编辑框（需 google-chrome）
 node tests/ui_render_perf.mjs                             # 流式渲染不重建气泡（需 google-chrome）
 node tests/ui_crumbs.mjs                                  # 顶栏显示工作区与会话标题（需 google-chrome）
+node tests/ui_status.mjs                                  # 连接状态灯：抖动容忍 / 自愈 / 可点（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -921,6 +922,11 @@ false。选出的路径能直接喂给 `/api/workspaces`。
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的
 下一次请求里；`op=read/replace/scripts` 各自生效；超过 32 KB 的 append 报错并提示压缩且不
 改动文件；`GET/PUT /api/workspaces/{id}/agent-doc` 能读、能改、超限报 400。
+
+`tests/ui_status.mjs` 覆盖右上角状态灯：用 CDP 只屏蔽 `/api/health`（其它接口照常工作，正是
+报告里的情形）。断言单次失败**不会**翻成「未连接」（一次抖动不是掉线）、连续两次才翻且横幅
+说明原因、恢复后**不用刷新**自动变回「已连接」、一次普通请求成功即可提前自愈（不等 10s 轮询）、
+状态灯可点击并立即重查。旧实现在这套断言下会一直停在同一个状态（它只在启动时查一次）。
 
 `tests/ui_crumbs.mjs` 钉住顶栏面包屑：启动后必须显示「工作区 / 会话标题」而不是占位符
 「无工作区 / 新会话」（旧实现只在切换视图时刷新，启动时工作区还没加载完就再也不会更新）；

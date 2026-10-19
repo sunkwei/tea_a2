@@ -67,6 +67,9 @@
           var e2 = new Error((data && data.error && (data.error.message || data.error.code)) || ('HTTP ' + r.status));
           e2.status = r.status; throw e2;
         }
+        // 任何一个成功请求都证明服务活着：如果状态灯正处于「未连接」，立刻复核一次，
+        // 而不是等下一次轮询（用户可能刚重启了服务端）。
+        if (String(p).indexOf('api/health') !== 0) noteRequestOk();
         return data;
       });
     });
@@ -1353,7 +1356,7 @@
     }).then(finalizeStream, function (err) {
       if (!err || err.name !== 'AbortError') {
         state.streamError = '请求失败：' + (err && err.message ? err.message : String(err));
-        loadHealth().catch(function () {});
+        loadHealth(true).catch(function () {});   // 请求都发不出去：立刻如实反映
       }
       finalizeStream();                                          // 仍然重拉会话，保持与服务端一致
     });
@@ -1389,24 +1392,72 @@
       c.appendChild(btn('crumb', it.label, it.onClick || null));
     });
   }
+  /* ---------- 服务状态：只信任「刚刚」的事实 ----------
+     以前 /api/health 只在启动时查一次，之后再也不刷新。于是任何一次瞬时失败
+     （页面打开时服务还在重启、请求撞在一起、后台标签页被系统挂起）都会把
+     「未连接」永久钉在右上角——即使之后每个请求都成功。现在：
+       · 连续失败两次才显示未连接，单次抖动不算；
+       · 前台每 10s 轮询一次，切回标签页时立刻复核；
+       · 任意请求成功即触发复核（服务刚恢复时不用等下一个轮询周期）；
+       · 状态本身可点击，点一下马上重查。 */
+  var healthTimer = null;
+  var healthFailures = 0;
+  var healthRecheck = 0;
+  var statusShown = '';          // '' | 'ok' | 'setup' | 'down' | 'wait'
+
+  function applyStatus(kind, text) {
+    if (statusShown === kind) return;      // 同样的状态不重复写 DOM
+    statusShown = kind;
+    var dot = $('status-dot');
+    dot.className = 'status-dot ' + (kind === 'ok' ? 'ok' : kind === 'wait' ? 'wait' : 'bad');
+    $('status-text').textContent = text;
+    $('status').title = kind === 'down'
+      ? '无法连接到本地服务（点击重新检测）'
+      : '服务状态（点击重新检测）';
+    var banner = $('banner');
+    if (kind === 'setup') {
+      $('banner-text').textContent = '尚未配置 provider.yaml，上传后才能开始对话。';
+      banner.classList.remove('hidden');
+    } else if (kind === 'down') {
+      banner.classList.remove('hidden');
+    } else if (kind === 'ok') {
+      banner.classList.add('hidden');
+    }
+  }
   function markOnline() {
     var needsSetup = state.health && state.health.config_loaded === false;
-    $('status-dot').className = 'status-dot ' + (needsSetup ? 'bad' : 'ok');
-    $('status-text').textContent = needsSetup
-      ? '未配置'
-      : '已连接' + (state.health && state.health.version ? ' v' + state.health.version : '');
     if (needsSetup) {
-      $('banner-text').textContent = '尚未配置 provider.yaml，上传后才能开始对话。';
-      $('banner').classList.remove('hidden');
+      applyStatus('setup', '未配置');
     } else {
-      $('banner').classList.add('hidden');
+      applyStatus('ok', '已连接' +
+        (state.health && state.health.version ? ' v' + state.health.version : ''));
     }
   }
   function markOffline(err) {
-    $('status-dot').className = 'status-dot bad';
-    $('status-text').textContent = '未连接';
-    $('banner-text').textContent = '无法连接到本地服务：' + (err && err.message ? err.message : '未知错误');
-    $('banner').classList.remove('hidden');
+    if (err && err.message) $('banner-text').textContent = '无法连接到本地服务：' + err.message;
+    applyStatus('down', '未连接');
+  }
+  function markChecking() { applyStatus('wait', '连接中…'); }
+
+  /// A non-health request succeeded. If the pill says "未连接", re-verify now
+  /// (debounced) instead of waiting up to a full poll interval.
+  function noteRequestOk() {
+    if (statusShown !== 'down' || healthRecheck) return;
+    healthRecheck = setTimeout(function () {
+      healthRecheck = 0;
+      if (statusShown === 'down') loadHealth(true).catch(function () {});
+    }, 0);
+  }
+
+  function startHealthTimer() {
+    if (healthTimer) return;
+    healthTimer = setInterval(function () {
+      if (document.hidden) return;              // 后台标签页不需要轮询
+      loadHealth(false).catch(function () {});
+    }, 10000);
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) loadHealth(false).catch(function () {});
+    });
   }
   function closeDropdowns() {
     $('model-dropdown').classList.add('hidden');
@@ -1715,10 +1766,29 @@
   }
 
   /* ---------- 7) 数据加载 ---------- */
-  function loadHealth() {
-    return api('api/health').then(function (h) { state.health = h; markOnline(); return h; },
-      function (e) { markOffline(e); throw e; });
+  /// `force` (manual click / recovery check) reports a failure immediately;
+  /// the background poll tolerates one, so a single hiccup never turns the pill
+  /// red while everything else keeps working.
+  function loadHealth(force) {
+    return api('api/health').then(function (h) {
+      healthFailures = 0;
+      state.health = h;
+      markOnline();
+      return h;
+    }, function (e) {
+      healthFailures++;
+      if (force || healthFailures >= 2) markOffline(e);
+      throw e;
+    });
   }
+  /// Manual re-check (status pill / banner button): show the waiting state, then
+  /// report the outcome right away instead of after two poll failures.
+  function recheckNow() {
+    healthFailures = 0;
+    markChecking();
+    loadHealth(true).catch(function () {});
+  }
+
   function loadProviders() {
     return api('api/providers').then(function (p) {
       state.providers = p;
@@ -2342,11 +2412,8 @@
       if (blockedWhileStreaming('新建会话')) return;
       newSessionDraft();
     };
-    $('banner-retry').onclick = function () {
-      $('status-dot').className = 'status-dot wait';
-      $('status-text').textContent = '连接中…';
-      loadHealth().catch(function () {});
-    };
+    $('banner-retry').onclick = recheckNow;
+    $('status').onclick = recheckNow;
     $('ws-chip').onclick = function (e) {
       e.stopPropagation();
       var open = $('ws-dropdown').classList.contains('hidden');
@@ -2416,7 +2483,7 @@
       saveLS();
       if (state.logsAutoScroll) $('logs-pre').scrollTop = $('logs-pre').scrollHeight;
     };
-    $('settings-refresh').onclick = function () { loadProviders(); loadTools(); loadHealth().catch(function () {}); };
+    $('settings-refresh').onclick = function () { loadProviders(); loadTools(); loadHealth(true).catch(function () {}); };
     document.addEventListener('keydown', function (e) {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {   // Ctrl/Cmd+K 聚焦输入框
         e.preventDefault();
@@ -2460,6 +2527,7 @@
       return boot();
     }, boot).catch(function () {});
     startLogsTimer();
+    startHealthTimer();
     autoGrow();
   }
 
