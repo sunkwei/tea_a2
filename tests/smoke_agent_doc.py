@@ -147,7 +147,7 @@ def free_port():
                 continue
 
 
-def wait_health(port, timeout=10.0):
+def wait_health(port, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:

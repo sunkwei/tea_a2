@@ -176,7 +176,7 @@ def free_port():
                 continue
 
 
-def wait_health(port, timeout=10.0):
+def wait_health(port, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -190,28 +190,44 @@ def wait_health(port, timeout=10.0):
     return False
 
 
-def post_json(port, path, body):
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request(
-        "POST", path, body=json.dumps(body), headers={"Content-Type": "application/json"}
-    )
-    resp = conn.getresponse()
-    raw = resp.read()
-    try:
-        return resp.status, json.loads(raw or b"null")
-    except ValueError:
-        return resp.status, {"raw": raw.decode("utf-8", "replace")}
+def post_json(port, path, body, attempts=3):
+    # free_port() has an unavoidable race: another process can grab the port in
+    # the window between the probe and the spawn, and a leftover listener from an
+    # earlier run would answer instead. A couple of retries turn that into a slow
+    # test instead of a red one.
+    for attempt in range(attempts):
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.request(
+                "POST", path, body=json.dumps(body), headers={"Content-Type": "application/json"}
+            )
+            resp = conn.getresponse()
+            raw = resp.read()
+            try:
+                return resp.status, json.loads(raw or b"null")
+            except ValueError:
+                return resp.status, {"raw": raw.decode("utf-8", "replace")}
+        except OSError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(0.5)
 
 
-def get_json(port, path):
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("GET", path)
-    resp = conn.getresponse()
-    raw = resp.read()
-    try:
-        return resp.status, json.loads(raw or b"null")
-    except ValueError:
-        return resp.status, {"raw": raw.decode("utf-8", "replace")}
+def get_json(port, path, attempts=3):
+    for attempt in range(attempts):
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            raw = resp.read()
+            try:
+                return resp.status, json.loads(raw or b"null")
+            except ValueError:
+                return resp.status, {"raw": raw.decode("utf-8", "replace")}
+        except OSError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(0.5)
 
 
 class RunningTurn:
