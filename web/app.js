@@ -12,7 +12,7 @@
     view: 'chat', health: null, providers: null, tools: null, indexPath: '',
     workspaces: [], workspace: null, sessions: [], session: null, messages: [],
     model: null, models: [], modelMenu: false,
-    live: null, liveNode: null, liveView: null, liveFrame: 0,
+    live: null, liveNode: null, liveView: null, liveFrame: 0, liveRenderFallback: 0,
     streaming: false, abort: null, stopTimer: null,
     attachments: [],
     queue: [], queueRestore: [], queueDone: {},
@@ -21,6 +21,7 @@
     trajectory: [], trajFull: {}, lastTrajectoryId: null,
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
     turnStartAt: 0, turnSteps: 0, mdBase: '',
+    turnSeq: 0, attachRetries: 0,
     files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 },
     memory: [], logsTimer: null, logsAutoScroll: true,
     agentDoc: {
@@ -835,15 +836,26 @@
 
   /// 把一帧内的多次 DOM 变更合成一次：SSE 的 delta 经常比刷新率还密，
   /// 逐个渲染不仅慢，还会让浏览器判定页面「拖慢浏览器」。
+  /// rAF 并不总是来：页面被遮挡 / 在后台标签页里时浏览器会挂起它（headless 下
+  /// 导航回来也可能不再产生帧）。只靠 rAF 的话，事件还在收、state.live 还在长，
+  /// 画面却一动不动——所以再挂一个 200ms 的看门狗：帧来了走帧（看门狗被取消），
+  /// 帧不来也保证每 200ms 至少画一次。
   function scheduleLiveRender() {
     if (state.liveFrame) return;
-    var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
-    state.liveFrame = raf(function () {
+    var ran = false;
+    var run = function () {
+      if (ran) return;
+      ran = true;
       state.liveFrame = 0;
+      if (state.liveRenderFallback) { clearTimeout(state.liveRenderFallback); state.liveRenderFallback = 0; }
       renderLive();
-    });
+    };
+    var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
+    state.liveFrame = raf(run);
+    state.liveRenderFallback = setTimeout(run, 200);
   }
   function cancelLiveRender() {
+    if (state.liveRenderFallback) { clearTimeout(state.liveRenderFallback); state.liveRenderFallback = 0; }
     if (!state.liveFrame) return;
     var caf = window.cancelAnimationFrame || clearTimeout;
     caf(state.liveFrame);
@@ -1085,6 +1097,9 @@
 
   function handleEvent(ev) {
     if (ev.type === 'ping') return;                              // 心跳：保持连接存活即可
+    // 每一帧都带序号：断线重连时服务端按它回放，客户端靠它知道自己看到了哪里。
+    if (typeof ev.seq === 'number') state.turnSeq = ev.seq;
+    if (ev.type === 'resync') { resyncFromServer(); return; }
     if (!state.live) return;
     if (ev.type === 'start') {
       if (ev.session_id && (!state.session || state.session.id !== ev.session_id)) {
@@ -1092,10 +1107,16 @@
         saveLS();
         renderCrumbs();
       }
+      // 接回一个正在跑的轮次时，落盘消息里已经有这一轮前几次迭代的结果，而回放会把
+      // 它们重新画进 live 气泡：先截掉重复的那截。正常发送时两者相等，是空操作。
+      if (typeof ev.messages_before === 'number' && state.messages.length > ev.messages_before) {
+        state.messages = state.messages.slice(0, ev.messages_before);
+      }
       state.stats = emptyStats();                 // 新一轮：指标栏先清空，等 metrics 到达再填
       state.liveTokens = 0; state.liveStartAt = 0;
       state.turnSteps = 0; state.turnStartAt = Date.now();
       renderMetrics();
+      renderChat();
       return;
     }
     if (ev.type === 'queue_adopted') {
@@ -1412,6 +1433,102 @@
     return out;
   }
 
+  /// Read one SSE response body and feed every frame to handleEvent. Shared by
+  /// "send a message" and "re-attach to a turn that is already running".
+  function readTurnStream(res) {
+    if (!res.ok) {
+      return res.text().then(function (t) {
+        var msg = 'HTTP ' + res.status;
+        try {
+          var j = JSON.parse(t);
+          if (j && j.error && (j.error.message || j.error.code)) msg = j.error.message || j.error.code;
+        } catch (e) { if (t) msg = t.slice(0, 300); }
+        throw new Error(msg);
+      });
+    }
+    if (!res.body) throw new Error('HTTP ' + res.status);
+    var reader = res.body.getReader(), dec = new TextDecoder('utf-8'), buf = '';
+    var pump = function () {
+      return reader.read().then(function (r) {
+        if (r.done) { if (buf.indexOf('data:') === 0) parseSseChunk(buf); return; }
+        buf += dec.decode(r.value, { stream: true });
+        buf = buf.replace(/\r\n/g, '\n');
+        var idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) { parseSseChunk(buf.slice(0, idx)); buf = buf.slice(idx + 2); }
+        return pump();
+      });
+    };
+    return pump();
+  }
+
+  /// 接回一个还在跑的轮次：服务端从 seq 1 开始回放这一轮的全部事件，然后继续直播。
+  /// 关掉页面、合上笔记本、换台机器打开，都不该让这一轮看起来"断在半句话"。
+  /// 回放是完整的（不是从断点续），所以 live 气泡从零重建，和一直开着页面看到的一样。
+  function attachTurn(sid) {
+    state.turnSeq = 0;
+    state.live = { role: 'assistant', reasoning: '', blocks: [], outputs: {} };
+    state.ended = false; state.streamError = null; state.stickBottom = true;
+    state.turnStartAt = Date.now();
+    renderChat(); scrollMaybe(true); setStreaming(true);
+    restoreQueue(sid);
+    var ctrl = new AbortController();
+    state.abort = ctrl;
+    fetch(apiUrl('api/chat/attach'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid, since: 0 }),
+      signal: ctrl.signal
+    }).then(function (res) {
+      if (res.ok) state.attachRetries = 0;
+      return readTurnStream(res);
+    }).then(finalizeStream, function (err) {
+      finalizeStream();
+      if (err && err.name === 'AbortError') return;
+      // 连接断了不等于那一轮结束了：过一会儿再问一次服务端，还在跑就再接回去。
+      if (state.attachRetries < 3) {
+        state.attachRetries++;
+        setTimeout(function () {
+          if (!state.streaming && state.session && state.session.id === sid) maybeAttach(sid);
+        }, 2000);
+      }
+    });
+  }
+
+  /// 这个会话有没有正在跑的轮次？有就接回去。打开会话、标签页重新可见时都会问一次。
+  function maybeAttach(sid) {
+    if (!sid || state.streaming) return Promise.resolve();
+    return api('api/chat/turn?session_id=' + encodeURIComponent(sid)).then(function (d) {
+      if (!d || !d.running) return;
+      if (!state.session || state.session.id !== sid) return;   // 用户已经切走了
+      attachTurn(sid);
+    }, function () {});
+  }
+
+  /// 排队条跟着一起回来：那些消息还挂在服务端的队列里，等这一轮采纳。
+  function restoreQueue(sid) {
+    return api('api/chat/queue?session_id=' + encodeURIComponent(sid)).then(function (d) {
+      if (!state.session || state.session.id !== sid) return;
+      state.queue = (d.items || []).filter(function (it) { return it && it.id; });
+      renderQueue();
+    }, function () {});
+  }
+
+  /// 回放窗口溢出（一轮输出超过服务端 8MB 上限）时的兜底：重新拉一次会话，清空 live
+  /// 气泡，之后的增量继续往上接。已经生成的那半截看不到了，但落盘的内容一条不少，
+  /// 这一轮结束时还会再对账一次。
+  function resyncFromServer() {
+    var sid = state.session ? state.session.id : null;
+    if (!sid) return;
+    api('api/sessions/' + encodeURIComponent(sid)).then(function (d) {
+      if (!state.session || state.session.id !== sid) return;
+      state.messages = d.messages || [];
+      state.live = { role: 'assistant', reasoning: '', blocks: [], outputs: {} };
+      state.liveNode = null;
+      renderChat(); scrollMaybe(true);
+      toast('这轮输出太长，已按服务端记录重新同步');
+    }, function () {});
+  }
+
   function sendMessage() {
     if (state.streaming) return;
     var ta = $('input');
@@ -1422,6 +1539,7 @@
     ta.value = ''; autoGrow();
     // 队列属于上一轮：新一轮开始时不可能还有可被采纳的旧条目。
     state.queue = []; state.queueDone = {}; renderQueue();
+    state.turnSeq = 0; state.attachRetries = 0;
 
     var ready = state.session ? Promise.resolve(state.session)
       : api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions',
@@ -1455,31 +1573,7 @@
           model: state.model ? state.model.model : undefined
         }),
         signal: ctrl.signal
-      }).then(function (res) {
-        if (!res.ok) {
-          return res.text().then(function (t) {
-            var msg = 'HTTP ' + res.status;
-            try {
-              var j = JSON.parse(t);
-              if (j && j.error && (j.error.message || j.error.code)) msg = j.error.message || j.error.code;
-            } catch (e) { if (t) msg = t.slice(0, 300); }
-            throw new Error(msg);
-          });
-        }
-        if (!res.body) throw new Error('HTTP ' + res.status);
-        var reader = res.body.getReader(), dec = new TextDecoder('utf-8'), buf = '';
-        var pump = function () {
-          return reader.read().then(function (r) {
-            if (r.done) { if (buf.indexOf('data:') === 0) parseSseChunk(buf); return; }
-            buf += dec.decode(r.value, { stream: true });
-            buf = buf.replace(/\r\n/g, '\n');
-            var idx;
-            while ((idx = buf.indexOf('\n\n')) >= 0) { parseSseChunk(buf.slice(0, idx)); buf = buf.slice(idx + 2); }
-            return pump();
-          });
-        };
-        return pump();
-      });
+      }).then(readTurnStream);
     }).then(finalizeStream, function (err) {
       if (!err || err.name !== 'AbortError') {
         state.streamError = '请求失败：' + (err && err.message ? err.message : String(err));
@@ -1583,7 +1677,11 @@
       loadHealth(false).catch(function () {});
     }, 10000);
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden) loadHealth(false).catch(function () {});
+      if (document.hidden) return;
+      loadHealth(false).catch(function () {});
+      // 标签页回来时连接可能已经断了（合盖、断网、被系统挂起）：那一轮如果还在
+      // 服务端跑着，就接回去继续直播，而不是让用户以为它停了。
+      if (state.session && !state.streaming) maybeAttach(state.session.id);
     });
   }
   function closeDropdowns() {
@@ -2004,6 +2102,8 @@
       return loadTrajectories().then(function () {
         attachTrajectories();
         saveLS(); renderSessions(); renderChat(); renderMetrics(); scrollMaybe(true);
+        // 这一轮可能还在服务端跑着（页面刚重新打开、或从别的标签页切回来）：接回去。
+        return maybeAttach(sid);
       });
     }, function (e) { toast('加载会话失败：' + e.message); });
   }

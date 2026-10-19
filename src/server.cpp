@@ -26,6 +26,13 @@ namespace {
 
 constexpr size_t kFileReadLimit = 2u * 1024u * 1024u;
 
+/// Replay buffer for one running turn. A client that disconnected comes back and
+/// asks for everything after the last frame it saw, so the frames have to be
+/// kept for as long as the turn runs; 8 MB is far more than a long agent turn
+/// streams, and the oldest frames are dropped past it (the client is then told
+/// to resync from the persisted session rather than shown a silent gap).
+constexpr std::size_t kTurnLogMaxBytes = 8u * 1024u * 1024u;
+
 /// Images and PDFs are fetched verbatim by the browser, so the raw route needs a
 /// much higher ceiling than the JSON `/file` view. 16 MB is generous for a
 /// screenshot yet small enough that one request cannot exhaust the device.
@@ -155,18 +162,36 @@ std::string json_string(const nlohmann::json& j, const char* key, const std::str
 }
 
 // ---------------------------------------------------------------------------
-// One streaming chat turn, shared between the connection thread that pumps the
-// SSE response and the worker thread that runs the agent loop.
+// One streaming chat turn.
+//
+// The turn outlives the connection that started it. Every event is kept in a
+// bounded log with a sequence number, so a browser that is closed, put to sleep
+// or reopened on another machine can ask whether the session still has a turn
+// running (GET /api/chat/turn) and re-attach (POST /api/chat/attach): it gets
+// the frames it missed and then follows live. A disconnect therefore *detaches*
+// one subscriber; only /api/chat/stop, a newer turn on the same session, or
+// shutting the server down cancels the work.
 // ---------------------------------------------------------------------------
 struct ChatTurn {
   std::string session_id;
   std::string workspace_id;
+  std::string started_at;
   Workspace workspace;
   Session session;
 
   mutable std::mutex mu;
   std::condition_variable cv;
-  std::deque<std::string> queue;
+  /// Every frame this turn produced, verbatim (`data: {...}\n\n`), oldest first.
+  /// This is both the write buffer for attached clients and the replay log.
+  std::deque<std::string> log;
+  /// Sequence number of `log.front()`. Dropping frames from the front raises it.
+  long long log_base = 1;
+  std::size_t log_bytes = 0;
+  /// Frames dropped from the front. A client that asks for one of them is told to
+  /// resync from the persisted session instead of being shown a silent gap.
+  long long log_dropped = 0;
+  /// Sequence number the next event will carry.
+  long long next_seq = 1;
   bool closed = false;
   /// False once the worker has finished the loop and is winding down: after that
   /// a late `enqueue_prompt` must be refused, otherwise it would sit in the inbox
@@ -178,19 +203,38 @@ struct ChatTurn {
   PromptInbox inbox;
   std::thread worker;
 
+  /// One attached HTTP response: which frame it wants next.
+  struct Subscriber {
+    long long cursor = 1;
+  };
+
   ~ChatTurn() {
     if (worker.joinable()) worker.join();
   }
 
-  void push(std::string chunk) {
+  void emit_event(const nlohmann::json& event) {
+    nlohmann::json stamped = event;
+    std::string frame;
     {
       std::lock_guard<std::mutex> lock(mu);
-      queue.push_back(std::move(chunk));
+      // The sequence number is what makes a reconnect lossless: the client tells
+      // us the last one it saw and we replay everything after it.
+      stamped["seq"] = next_seq++;
+      frame = "data: " + stamped.dump() + "\n\n";
+      log.push_back(frame);
+      log_bytes += frame.size();
+      // One turn cannot grow without bound: a long agent run streams a lot of
+      // text. Drop the oldest frames once the cap is hit; `log_dropped` turns
+      // that into an explicit resync for whoever asks for them.
+      while (log_bytes > kTurnLogMaxBytes && log.size() > 1) {
+        log_bytes -= log.front().size();
+        log.pop_front();
+        ++log_base;
+        ++log_dropped;
+      }
     }
     cv.notify_all();
   }
-
-  void emit_event(const nlohmann::json& event) { push("data: " + event.dump() + "\n\n"); }
 
   void close() {
     {
@@ -203,6 +247,22 @@ struct ChatTurn {
   bool finished() const {
     std::lock_guard<std::mutex> lock(mu);
     return closed;
+  }
+
+  /// What GET /api/chat/turn reports. `running` is the only field the UI needs in
+  /// order to decide whether to re-attach; the rest explains the replay window.
+  nlohmann::json status_json() const {
+    std::lock_guard<std::mutex> lock(mu);
+    nlohmann::json j = nlohmann::json::object();
+    j["running"] = !closed;
+    j["session_id"] = session_id;
+    j["workspace_id"] = workspace_id;
+    j["started_at"] = started_at;
+    j["last_seq"] = next_seq - 1;
+    j["oldest_seq"] = log_base;
+    j["buffered"] = static_cast<long long>(log.size());
+    j["dropped"] = log_dropped;
+    return j;
   }
 
   /// Queue one prompt. Returns false when the turn has already stopped accepting
@@ -223,44 +283,65 @@ struct ChatTurn {
     accepting = false;
   }
 
-  /// Called repeatedly by httplib. Returns false to end the response.
-  bool pump(httplib::DataSink& sink) {
-    std::unique_lock<std::mutex> lock(mu);
-    while (queue.empty() && !closed) {
-      if (cv.wait_for(lock, std::chrono::seconds(15)) == std::cv_status::timeout) {
-        if (!queue.empty() || closed) break;
-        lock.unlock();
-        if (!sink.is_writable()) {
-          cancel.store(true);
-          return false;
+  /// Called repeatedly by httplib for one attached response; returns false to end
+  /// it. Frames are copied out under the lock and written outside it, so a slow
+  /// client cannot stall the worker or the other subscribers.
+  bool pump(httplib::DataSink& sink, const std::shared_ptr<Subscriber>& sub) {
+    for (;;) {
+      std::string frame;
+      std::string resync_frame;
+      bool done = false;
+      {
+        std::unique_lock<std::mutex> lock(mu);
+        // Wait for the next frame, but never longer than the heartbeat interval:
+        // writing a ping is also how a client that vanished without a FIN is
+        // noticed. `closed` ends the wait for good.
+        for (;;) {
+          const long long end_seq = log_base + static_cast<long long>(log.size());
+          if (closed || sub->cursor < end_seq) break;
+          if (cv.wait_for(lock, std::chrono::seconds(15)) == std::cv_status::timeout) break;
         }
-        char heartbeat[80];
-        std::snprintf(heartbeat, sizeof(heartbeat), "data: {\"type\":\"ping\",\"t\":%lld}\n\n",
-                      static_cast<long long>(now_ms() / 1000));
-        if (!sink.write(heartbeat, std::strlen(heartbeat))) {
-          cancel.store(true);
-          return false;
+        if (sub->cursor < log_base) {
+          // It missed frames that are already gone. Say so, then continue from
+          // the oldest one still held: the client reloads the persisted session
+          // and picks the live stream up from here.
+          nlohmann::json ev = nlohmann::json::object();
+          ev["type"] = "resync";
+          ev["reason"] = "event_buffer_overflow";
+          ev["dropped"] = log_dropped;
+          ev["oldest_seq"] = log_base;
+          resync_frame = "data: " + ev.dump() + "\n\n";
+          sub->cursor = log_base;
         }
-        lock.lock();
+        const long long end_seq = log_base + static_cast<long long>(log.size());
+        if (sub->cursor >= log_base && sub->cursor < end_seq) {
+          frame = log[static_cast<std::size_t>(sub->cursor - log_base)];
+          ++sub->cursor;
+        }
+        done = closed && sub->cursor >= end_seq;
       }
+      if (!resync_frame.empty() && !sink.write(resync_frame.data(), resync_frame.size())) {
+        return false;
+      }
+      if (!frame.empty()) {
+        if (!sink.write(frame.data(), frame.size())) return false;  // this client is gone
+        continue;
+      }
+      if (done) {
+        // A chunked body is only terminated by done(): returning false here is
+        // treated as a cancellation and aborts the transfer *without* the
+        // terminating "0\r\n\r\n" chunk, which browsers report as "Error in
+        // input stream" (curl silently tolerates it).
+        sink.done();
+        return true;
+      }
+      if (!sink.is_writable()) return false;
+      char heartbeat[80];
+      const int n = std::snprintf(heartbeat, sizeof(heartbeat),
+                                  "data: {\"type\":\"ping\",\"t\":%lld}\n\n",
+                                  static_cast<long long>(now_ms() / 1000));
+      if (n <= 0 || !sink.write(heartbeat, static_cast<std::size_t>(n))) return false;
     }
-    if (queue.empty()) {
-      // The turn is finished and everything has been flushed. A chunked body is
-      // only terminated by done(): returning false here is treated as a
-      // cancellation and aborts the transfer *without* the terminating
-      // "0\r\n\r\n" chunk, which browsers report as "Error in input stream"
-      // (curl silently tolerates it).
-      sink.done();
-      return true;
-    }
-    const std::string chunk = queue.front();
-    queue.pop_front();
-    lock.unlock();
-    if (!sink.write(chunk.data(), chunk.size())) {
-      cancel.store(true);
-      return false;
-    }
-    return true;
   }
 };
 
@@ -1228,6 +1309,7 @@ void ApiServer::Impl::install_routes() {
     }
 
     auto turn = std::make_shared<ChatTurn>();
+    turn->started_at = now_iso8601();
     std::string err;
     if (!open_workspace(workspace_id, &turn->workspace, &err)) {
       send_error(res, 404, "not_found", err);
@@ -1392,10 +1474,88 @@ void ApiServer::Impl::install_routes() {
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
     res.set_header("Access-Control-Allow-Origin", "*");
+    // No resource releaser here on purpose: the response ending (tab closed,
+    // laptop asleep, network dropped) must not cancel the work. Only
+    // /api/chat/stop, a newer turn on the same session, or shutting the server
+    // down does that. Whoever comes back re-attaches below.
+    auto sub = std::make_shared<ChatTurn::Subscriber>();
     res.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
-        [turn](std::size_t, httplib::DataSink& sink) { return turn->pump(sink); },
-        [turn](bool) { turn->cancel.store(true); });
+        [turn, sub](std::size_t, httplib::DataSink& sink) { return turn->pump(sink, sub); });
+  });
+
+  // ---- re-attaching to a turn that is still running -----------------------
+  // "Is this session's turn still running, and from which sequence number can I
+  // replay it?" The UI asks when it opens a session - a reload, a second tab, a
+  // laptop waking up - so a turn that outlived its connection is picked up
+  // instead of being shown as a conversation that stopped mid-sentence.
+  svr.Get("/api/chat/turn", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string session_id =
+        req.has_param("session_id") ? req.get_param_value("session_id") : std::string();
+    if (session_id.empty()) {
+      send_error(res, 400, "bad_request", "'session_id' is required");
+      return;
+    }
+    std::shared_ptr<ChatTurn> turn;
+    std::vector<std::shared_ptr<ChatTurn>> graveyard;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      // Reap turns whose worker already finished. With no client left to notice
+      // them they would otherwise hold their replay log until the next /api/chat.
+      prune_turns_locked(&graveyard);
+      auto it = turns.find(session_id);
+      if (it != turns.end()) turn = it->second;
+    }
+    graveyard.clear();  // ~ChatTurn joins the worker: never under `mu`
+    nlohmann::json j = turn ? turn->status_json() : nlohmann::json::object();
+    if (turn) {
+      j["pending"] = static_cast<long long>(turn->inbox.size());
+    } else {
+      j["running"] = false;
+      j["session_id"] = session_id;
+    }
+    j["ok"] = true;
+    send_json(res, j);
+  });
+
+  // Re-attach: replay everything after `since` (0 or omitted = the whole buffer),
+  // then follow live. This is what a reopened browser calls.
+  svr.Post("/api/chat/attach", [this](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const std::string session_id = json_string(body, "session_id");
+    if (session_id.empty()) {
+      send_error(res, 400, "bad_request", "'session_id' is required");
+      return;
+    }
+    std::shared_ptr<ChatTurn> turn;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      auto it = turns.find(session_id);
+      if (it != turns.end()) turn = it->second;
+    }
+    if (!turn) {
+      send_error(res, 404, "no_active_turn", "this session has no turn to attach to");
+      return;
+    }
+    auto sub = std::make_shared<ChatTurn::Subscriber>();
+    // `since` is the last seq the client saw. A seq older than the buffer (or no
+    // seq at all) replays from the oldest frame still held; when frames were
+    // dropped, pump() sends a `resync` event first so the client reloads the
+    // persisted session instead of showing a hole.
+    nlohmann::json::const_iterator since_it = body.find("since");
+    if (since_it != body.end() && since_it->is_number_integer()) {
+      const long long since = since_it->get<long long>();
+      if (since > 0) sub->cursor = since + 1;
+    }
+    LOG_INFO("chat: re-attaching to the running turn of session ", session_id, " (replay from seq ",
+             sub->cursor, ")");
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_chunked_content_provider(
+        "text/event-stream; charset=utf-8",
+        [turn, sub](std::size_t, httplib::DataSink& sink) { return turn->pump(sink, sub); });
   });
 
   svr.Post("/api/chat/stop", [this](const httplib::Request& req, httplib::Response& res) {

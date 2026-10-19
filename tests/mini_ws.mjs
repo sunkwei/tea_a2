@@ -10,6 +10,14 @@ export function wsConnect(url) {
   let buf = Buffer.alloc(0);
   let upgraded = false;
 
+  // Tearing the browser down resets this socket. Without a handler the 'error'
+  // event is fatal for the process - and it fires after every check has already
+  // passed, so the run dies on its way out. Callers may still register their own.
+  sock.on('error', (err) => {
+    if (handlers.error) handlers.error(err);
+    else if (process.env.WSDEBUG) console.log('[ws error]', err.message);
+  });
+
   function frame(payload) {
     const data = Buffer.from(payload);
     const mask = crypto.randomBytes(4);

@@ -42,6 +42,7 @@ const agent = spawn(BIN, ['--tea-home', path.join(tmp, 'home'), '--port', String
   '--no-console', '--log-file', path.join(tmp, 'agent.log')], { stdio: 'ignore' });
 
 let chrome;
+let ws = null;
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok, detail }); console.log((ok ? 'PASS ' : 'FAIL ') + name + (detail ? '  ' + detail : '')); };
 
@@ -68,7 +69,7 @@ try {
   if (!target) throw new Error('no chrome page target');
 
   const { wsConnect } = await import('./mini_ws.mjs');
-  const ws = wsConnect(target.webSocketDebuggerUrl);
+  ws = wsConnect(target.webSocketDebuggerUrl);
   await new Promise((r) => ws.on('open', r));
   let id = 0;
   const pending = new Map();
@@ -199,6 +200,7 @@ roles:
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });
 } finally {
+  if (ws) ws.close();
   if (chrome) chrome.kill('SIGKILL');
   agent.kill('SIGTERM');
   await sleep(300);

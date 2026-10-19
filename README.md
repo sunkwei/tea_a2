@@ -253,6 +253,8 @@ provider 回报的 `usage` 为准）。
 | `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
 | `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
 | `GET` | `/api/chat/queue?session_id=` | 查看当前排队消息 |
+| `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped`） |
+| `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播 |
 
 ### 一次完整的「远程操控」长这样
 
@@ -270,7 +272,7 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 
 | `type` | 含义 |
 | --- | --- |
-| `start` | 本轮开始（session / provider / model） |
+| `start` | 本轮开始（session / provider / model / `messages_before`） |
 | `reasoning_delta` | 思考流 |
 | `content_delta` | 正文增量 |
 | `tool_args_delta` | 工具调用参数的流式增量（只用于进度/速度统计，不当正文渲染） |
@@ -284,9 +286,42 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 | `stopped` | 被 `/api/chat/stop` 中断 |
 | `error` | `message` / `detail` |
 | `ping` | 空闲心跳（15s），用于判断链路存活 |
+| `resync` | 回放缓冲溢出：重新拉一次 `/api/sessions/{sid}`，再从 `oldest_seq` 接着收 |
+
+每帧都带一个从 1 递增的 `seq`（`ping` 除外），断线重连靠它对齐。
 
 上层 agent 只需要：发一条 `POST /api/chat`，读 SSE，看 `tool_result` 有没成功，`done` 结束。
 需要打断就调 `/api/chat/stop`——它会在下一个模型/工具边界停住，已产生的会话照样落盘。
+
+### 断线重连：关掉页面不会取消这一轮
+
+轮次的生命周期和那条 HTTP 连接是**分开**的。浏览器关掉、笔记本合盖、换台机器打开 UI，服务端
+那一轮照跑到底——断开只是少了一个订阅者。取消只有三条途径：`POST /api/chat/stop`、同一会话上
+发起新的一轮（顶掉旧的）、服务端进程退出。
+
+为此每帧都带一个递增的 `seq`，服务端把这一轮发出的帧原样留在一个有上限的回放缓冲里（8 MB，
+超了丢最旧的，并让客户端 `resync`）。重新打开页面时 UI 做三件事：
+
+1. `GET /api/chat/turn?session_id=…` 问一句「这个会话还有轮次在跑吗」；
+2. 有就 `POST /api/chat/attach` 接回去：先回放这一轮从 `seq 1` 开始的全部事件，再继续直播，
+   直到 `done` / `stopped`；
+3. `start` 里的 `messages_before` 说明落盘历史到哪儿为止——回放会把这一轮已经存盘的前几次
+   迭代重新画进 live 气泡，所以客户端先把超出这个下标的消息截掉，屏幕上不会出现两份。
+
+```bash
+# 还在跑吗？跑到第几帧了？
+curl -s 'http://device:8282/api/chat/turn?session_id=s_xxx'
+# {"ok":true,"running":true,"session_id":"s_xxx","last_seq":137,"oldest_seq":1,
+#  "buffered":137,"dropped":0,"pending":0,"started_at":"...","workspace_id":"ws_xxx"}
+
+# 接回去：从 seq 42 之后继续（0 或省略 = 从头回放）
+curl -N -X POST http://device:8282/api/chat/attach \
+  -H 'Content-Type: application/json' -d '{"session_id":"s_xxx","since":42}'
+```
+
+轮次刚结束、还没被回收时 attach 依然可用（把尾巴放完就 `done`）；已经回收则返回
+`404 no_active_turn`，这时 `/api/sessions/{sid}` 就是最终状态。排队消息也一起回来：
+`GET /api/chat/queue?session_id=` 列出的条目仍然挂在服务端那一轮的队列里，等它采纳。
 
 ### 插队：轮次进行中追加消息
 
@@ -370,7 +405,9 @@ SSE 的 delta 比屏幕刷新还密（一个 30 KB 的回答能有几百条）�
 firefox，可停止此页面」。内置 UI 现在按三条规则做：
 
 1. **一帧一次**：delta 只置脏，真正的渲染在 `requestAnimationFrame` 里做一次，连续 10 条
-   delta 合并成一次 DOM 操作。
+   delta 合并成一次 DOM 操作。rAF 会被浏览器挂起（后台/被遮挡的标签页，headless 下导航回来
+   也可能不再产生帧），所以旁边挂一个 200ms 看门狗：帧来了走帧、看门狗自动取消，帧不来也
+   保证每 200ms 至少画一次——事件在收、`state.live` 在长、画面却一动不动是最坏的组合。
 2. **只改变化的那部分**：气泡的「结构」（段落数、工具行状态、思考行有无、是否已结束）
    变了才整块重建；纯文字增长只重画最后一个段落 + 思考面板，之前的段落和工具行保持
    原来的 DOM 节点，不会被重新解析、重新创建。
@@ -905,6 +942,8 @@ python3 tests/smoke_single_file.py                        # 内嵌证书 + 静�
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
+node tests/smoke_turn_resume.mjs                          # 断线不取消轮次：回放 / 续播 / stop 仍然有效
+node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
@@ -978,6 +1017,16 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 相对路径在表单里就地报错（且不产生目录、不发请求）；完整路径能添加并切换（标签页标题跟着变）；
 目录不存在时给出创建提示并在确认后真的建目录；路径是个文件时报服务端原因且对话框不关；服务端
 自己也拒绝相对路径（`path must be a full path`）。
+
+`tests/smoke_turn_resume.mjs` 在 HTTP 层钉住「轮次比连接活得久」：客户端读到第 8 帧就断开，
+服务端那一轮和它对 provider 的请求都继续（事件序号还在涨）；`GET /api/chat/turn` 报
+`running:true` 与完整回放窗口；`POST /api/chat/attach` 从 `seq 1` 连续回放到 `done`，最终答案
+一字不少地落盘；`since=` 只回放尾巴；轮次结束后 attach 返回 404；`/api/chat/stop` 对没人看的
+轮次照样生效（并真的掐断上游请求）。
+
+`tests/ui_stream_resume.mjs` 在真浏览器里走同一条路：发消息 → 导航到 about:blank（等价于关掉
+标签页）→ 确认服务端还在跑 → 导航回来，断言页面重新进入生成态、live 气泡追上了期间生成的内容、
+**没有重复渲染**，然后跟着直播到结束。
 
 `tests/ui_stream_guard.mjs` 起一轮慢速流式回答，在生成过程中点侧边栏：工作区按钮仍可点开菜单
 （不能变成死按钮），切换工作区 / 添加工作区 / 新建会话都被拒绝并给出原因，会话行显示为禁用；

@@ -698,6 +698,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   start_event["workspace_id"] = workspace.id();
   start_event["provider"] = provider;
   start_event["model"] = model;
+  // Where the persisted history ends and this turn begins. A client that
+  // re-attaches mid-turn has already fetched the messages this turn saved after
+  // its earlier iterations; the replay rebuilds them in the live bubble, so it
+  // drops everything past this index first instead of showing them twice.
+  start_event["messages_before"] = static_cast<long long>(session->messages.size());
   emit(start_event);
 
   // --- build the tool schema ----------------------------------------------
