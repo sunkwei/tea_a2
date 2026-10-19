@@ -12,6 +12,23 @@ rem
 rem IMPORTANT: no `setlocal` - the whole point is to modify the caller's env.
 rem ---------------------------------------------------------------------------
 
+rem ---------------------------------------------------------------------------
+rem Force English compiler diagnostics (VSLANG=1033).
+rem
+rem Two reasons, both practical:
+rem   1. A localized cl.exe prints its /showIncludes lines with a localized
+rem      prefix (on a Chinese VS the English "Note: including file:" becomes a
+rem      Chinese phrase). CMake hands that prefix to
+rem      `cmake -E cmake_cl_compile_depends --filter-prefix=...` through the
+rem      generated makefile, where the non-ASCII bytes do not survive the
+rem      console code page. The filter then matches nothing and every single
+rem      included-file line is echoed into the build log - hundreds of lines
+rem      per translation unit.
+rem   2. English diagnostics are searchable and can be pasted into an issue.
+rem Set VSLANG yourself before calling this script to keep your locale.
+rem ---------------------------------------------------------------------------
+if not defined VSLANG set "VSLANG=1033"
+
 if not "%VCToolsInstallDir%"=="" (
   echo [vcenv] MSVC environment already initialised.
   goto :done

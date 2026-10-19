@@ -91,6 +91,24 @@ scripts\build.bat
 
 产物：`build/bin/tea_agent`（Windows 为 `build-msvc\bin\tea_agent.exe` 等）。
 
+**MSVC 的 `/showIncludes` 刷屏**：本地化的 Visual Studio 会把「包含文件」用本地语言输出，
+CMake 拿到这个前缀后要传给 `cmake -E cmake_cl_compile_depends --filter-prefix=…`，而命令行在
+控制台代码页里存不住非 ASCII 字节，于是过滤一条也匹配不上——日志里每个编译单元都会多出
+上百行 `注意: 包含文件: …`（副作用是 `.obj.d` 为空，改头文件不会触发重编）。修法只有一个：
+让 cl.exe 说英文。`scripts\build.bat` 通过 `scripts\vcenv.bat` 设置 `VSLANG=1033`，前缀变成
+ASCII 的 `Note: including file: `，问题消失，顺带让诊断信息可搜索。
+
+自己手敲 `cmake` 的话：
+
+```bat
+set VSLANG=1033
+cmake -S . -B build-msvc -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
+```
+
+已经配置过的构建目录会把旧前缀缓存在 `CMakeFiles\<ver>\CMakeCXXCompiler.cmake` 里，所以要
+重配一次（`cmake --fresh`，或删掉 `CMakeCache.txt`）。CMakeLists 在检测到「本地化前缀 +
+`VSLANG=1033`」时会自动改用英文前缀并打印一行说明，所以多数情况下直接重跑即可。
+
 ### 跑起来
 
 ```bash

@@ -2,6 +2,44 @@ cmake_minimum_required(VERSION 3.20)
 project(tea_agent VERSION 0.1.0 LANGUAGES CXX)
 
 # ---------------------------------------------------------------------------
+# MSVC: the /showIncludes prefix has to be ASCII, or nothing filters it
+# ---------------------------------------------------------------------------
+# cl.exe reports included files with a localized prefix (on a Chinese VS the
+# English "Note: including file:" becomes a Chinese phrase). CMake passes that
+# prefix to
+#     cmake -E cmake_cl_compile_depends --filter-prefix=<prefix>
+# inside the generated make rules; the command line does not survive the console
+# code page, so nothing matches and **every included-file line is echoed into the
+# build log** - hundreds of lines per translation unit - while the .obj.d files
+# stay empty (editing a header then silently fails to trigger a rebuild).
+#
+# scripts\vcenv.bat (used by scripts\build.bat) sets VSLANG=1033, which makes
+# cl.exe speak English and turns the prefix into the ASCII
+# "Note: including file: ". This block keeps that working:
+#   * a build directory configured while the compiler was still localized has the
+#     old prefix cached in CMakeFiles/<ver>/CMakeCXXCompiler.cmake - override it,
+#     so an existing directory is repaired instead of needing to be wiped;
+#   * without VSLANG, say what to do rather than leaving hundreds of lines of
+#     noise to puzzle over.
+# It has to run here, right after project(): subdirectories added later (the
+# vendored yaml-cpp) inherit the variable at the point they are added.
+if(MSVC AND CMAKE_CXX_CL_SHOWINCLUDES_PREFIX MATCHES "[^ -~]")
+  if("$ENV{VSLANG}" STREQUAL "1033")
+    set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
+    message(STATUS
+      "tea_agent: this build directory cached a localized /showIncludes prefix; using the "
+      "English one now (VSLANG=1033).")
+  else()
+    message(STATUS
+      "tea_agent: this Visual Studio prints /showIncludes in a localized form "
+      "(\"${CMAKE_CXX_CL_SHOWINCLUDES_PREFIX}\"). CMake cannot filter those lines out of the "
+      "build log. Set VSLANG=1033 and reconfigure (scripts\\build.bat does both), or the "
+      "build output will contain one line per included header.")
+  endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
 # The code is written so that it compiles in C++14 mode as well (GCC 6.5 is the
@@ -237,12 +275,11 @@ if(WIN32)
   list(APPEND TEA_SOURCES src/http_winhttp.cpp)
 endif()
 
-# Localized Visual Studio emits a non-ASCII `/showIncludes` prefix (for a
-# Chinese VS: "注意: 包含文件:"). CMake stores that prefix in the generated
-# makefile, where it does not survive the encoding, so the filter matches
-# nothing, the .obj.d files stay empty and editing a header silently does not
-# trigger a rebuild. Declare the dependency explicitly instead: with ~10 TUs it
-# costs a full recompile of our sources only when a header actually changes.
+# Header dependencies are declared explicitly instead of relying on the
+# compiler-generated ones (see the /showIncludes note at the top of this file).
+# With ~10 TUs it only costs a full recompile of our sources when a header
+# actually changes, and it keeps incremental builds correct even on a machine
+# whose localized /showIncludes output CMake cannot parse.
 if(MSVC)
   file(GLOB_RECURSE TEA_PROJECT_HEADERS CONFIGURE_DEPENDS
        ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
