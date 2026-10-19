@@ -374,6 +374,37 @@ endif()
 set_target_properties(tea_agent PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
+
+# --- rebuild while the previous build is still running -----------------------
+# Windows will not let the linker overwrite a running .exe (LNK1104 /
+# "Permission denied"), which would turn every "edit, build, look at the UI"
+# cycle into "stop the agent, build, start the agent". The image only protects its
+# *contents*, not its name, so PRE_LINK moves the old binary aside and POST_BUILD
+# deletes the copy once the link has succeeded; see cmake/free-running-exe.cmake.
+#
+# PRE_LINK only runs when the target really links, so a no-op build does not
+# rename anything. On POSIX the whole step is a no-op: a running image can be
+# overwritten there.
+if(WIN32)
+  foreach(_tea_exe_target tea_agent tea_embed_assets tea_embed_ca_bundle)
+    if(TARGET ${_tea_exe_target})
+      add_custom_command(TARGET ${_tea_exe_target} PRE_LINK
+        COMMAND ${CMAKE_COMMAND}
+                -DEXE=$<TARGET_FILE:${_tea_exe_target}>
+                -DMODE=prepare
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/free-running-exe.cmake
+        COMMENT "Freeing ${_tea_exe_target}.exe for relinking"
+        VERBATIM)
+      add_custom_command(TARGET ${_tea_exe_target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+                -DEXE=$<TARGET_FILE:${_tea_exe_target}>
+                -DMODE=clean
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/free-running-exe.cmake
+        VERBATIM)
+    endif()
+  endforeach()
+endif()
+
 add_custom_command(TARGET tea_agent POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${TEA_WEB_DIR} ${CMAKE_BINARY_DIR}/bin/web
 )

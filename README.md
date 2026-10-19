@@ -125,6 +125,48 @@ CMakeLists 在检测到「本地化前缀 + `VSLANG=1033`」时会自动换成�
 无视 `VSLANG`（极少数本地化安装会这样），它会直接打印一条明确的 WARNING，而不是让你对着
 几百行 `包含文件` 猜。
 
+### 程序正在运行时也能直接构建（Windows）
+
+Windows 不允许链接器写一个正在运行的 `.exe`：
+
+```
+LINK : fatal error LNK1104: 无法打开文件"bin\tea_agent.exe"      (MSVC)
+cannot open output file bin\tea_agent.exe: Permission denied     (MinGW)
+```
+
+以前只能「先停掉 agent → 构建 → 再启动」，而在开发 UI 时这个循环要走上百遍。其实这个锁没
+那么严（实测 Windows 10 19045）：
+
+| 操作 | 运行中的 `.exe` |
+| --- | --- |
+| `CreateFile(WRITE)`（链接器做的事） | ❌ 失败——这就是 LNK1104 的来源 |
+| `DeleteFile`（删除） | ❌ `ERROR_ACCESS_DENIED` |
+| `MoveFile`（改名） | ✅ **可以**，名字可以拿走 |
+
+所以 `cmake/free-running-exe.cmake` 用上了第三条：链接前把旧二进制改名为
+`tea_agent.exe.prev-<时间戳>`，让链接器在原名上写新文件；链接成功后再删掉那份旧拷贝。
+
+```
+Freeing tea_agent.exe for relinking
+-- tea_agent: tea_agent.exe was moved to tea_agent.exe.prev-20261019-185712
+          (it was still running, so the new binary takes the old name; restart the
+           instance to pick up the new code)
+```
+
+要点：
+
+- **旧进程不受影响**，继续用内存里那份代码服务请求，直到你重启它；
+- 旧拷贝在进程退出前删不掉（被映射着），所以它会留到**下一次构建**的 POST_BUILD 才清理；
+- 链接失败也不会丢东西：旧二进制以 `.prev-*` 留在原目录，可以直接改名回去；
+- 只在**真的要链接**时才动作（`PRE_LINK`），空构建不会产生任何改名；
+- POSIX 上整个步骤直接 return（Linux/macOS 允许覆盖运行中的镜像）；
+- 三个产物都覆盖到了：`tea_agent`、`tea_embed_assets`、`tea_embed_ca_bundle`。
+
+回归测试：`pwsh -File tests/relink-while-running.ps1 -Exe build-gcc\bin\tea_agent.exe`
+（会真的起一个隐藏实例、构建一次、验证新二进制就位且旧实例仍在服务，再验证 leftovers 清理；
+MinGW 与 MSVC 各 12 项）。它先断言「运行中的镜像确实打不开写权限」这个前提，前提不成立就说明
+这套机制已经没必要了，而不是静悄悄地通过。
+
 ### 跑起来
 
 ```bash
@@ -980,6 +1022,7 @@ miniz 只取上游 release 里的**合并版两个文件**（`miniz.c` + `miniz.
 ```bash
 pwsh -File tests/e2e.ps1                                  # 默认构建产物
 pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
+pwsh -File tests/relink-while-running.ps1 -Exe build-gcc/bin/tea_agent.exe  # 运行中也能构建（改名让位）
 
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体

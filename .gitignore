@@ -30,4 +30,8 @@ tests/.pc/
 tests/.verify/
 tests/.real/
 
+# A build that relinked while the previous binary was still running keeps the old
+# copy here for one build cycle (see cmake/free-running-exe.cmake)
+*.prev-*
+
 clean/
