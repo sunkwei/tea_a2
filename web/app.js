@@ -12,7 +12,8 @@
     view: 'chat', health: null, providers: null, tools: null, indexPath: '',
     workspaces: [], workspace: null, sessions: [], session: null, messages: [],
     model: null, models: [], modelMenu: false,
-    live: null, liveNode: null, streaming: false, abort: null, stopTimer: null,
+    live: null, liveNode: null, liveView: null, liveFrame: 0,
+    streaming: false, abort: null, stopTimer: null,
     attachments: [],
     queue: [], queueRestore: [], queueDone: {},
     sidebarHidden: false,
@@ -586,6 +587,7 @@
     var box = $('messages');
     clear(box);
     state.liveNode = null;
+    state.liveView = null;
     if (!state.workspaces.length) return;                       // 空状态由添加工作区弹窗接管
     var outputs = {};
     state.messages.forEach(function (m) {
@@ -611,22 +613,121 @@
       box.appendChild(empty);
     }
   }
+  /// 流式渲染只在「结构」变化时才重建气泡；纯文字增长只更新最后一个段落。
+  /// 以前每来一个 delta 就 assistantNode(...) 重建整个气泡：历史段落会被重新
+  /// 跑一遍 markdown 解析，工具行也全部重建，于是一轮长回答的 DOM 工作量是
+  /// O(段落数 × delta 数)。Firefox 的「此网页拖慢了您的 firefox」就是这么来的。
+  function liveStructure(live) {
+    var parts = [live.reasoning ? 'r' : '-'];
+    for (var i = 0; i < live.blocks.length; i++) {
+      var b = live.blocks[i];
+      if (b.type === 'md') { parts.push(b.text ? 'md' : 'md0'); continue; }
+      var tc = b.tc || {};
+      var out = live.outputs && live.outputs[tc.id];
+      parts.push('t:' + tc.id + ':' + (tc.status || '') + ':' +
+        (out ? (out.ok === false ? 'fail' : 'ok') : '-'));
+    }
+    parts.push(state.ended ? 'e' : 's');
+    return parts.join('|');
+  }
+  /// Text of the last markdown block, plus how many markdown elements the block
+  /// list should have produced - so an incremental update can tell whether the
+  /// last .md element really is the block being streamed.
+  function lastMdInfo(live) {
+    var text = '';
+    var rendered = 0;
+    for (var i = 0; i < live.blocks.length; i++) {
+      var b = live.blocks[i];
+      if (b.type !== 'md') continue;
+      if (b.text) { rendered++; text = b.text; }
+    }
+    return { text: text, rendered: rendered };
+  }
+  function lastBlockIsMd(live) {
+    var n = live.blocks.length;
+    return n > 0 && live.blocks[n - 1].type === 'md';
+  }
+  function buildLiveNode(live) {
+    var box = $('messages');
+    var node = assistantNode(live, live.outputs, 'live', true);
+    if (state.liveNode && state.liveNode.parentNode === box) box.replaceChild(node, state.liveNode);
+    else box.appendChild(node);
+    state.liveNode = node;
+    var mds = node.querySelectorAll('.md');
+    var info = lastMdInfo(live);
+    state.liveView = {
+      node: node,
+      sig: liveStructure(live),
+      mdEl: mds.length ? mds[mds.length - 1] : null,
+      mdRendered: info.rendered,
+      mdText: info.text,
+      reasonEl: node.querySelector('.reasoning .reason-panel'),
+      reasonText: live.reasoning || ''
+    };
+  }
   function renderLive() {
     var box = $('messages');
     var hint = box.querySelector('.chat-empty');
     if (hint) hint.remove();
     if (!state.live) {
       if (state.liveNode && state.liveNode.parentNode) state.liveNode.parentNode.removeChild(state.liveNode);
-      state.liveNode = null; return;
+      state.liveNode = null; state.liveView = null; return;
     }
-    var node = assistantNode(state.live, state.live.outputs, 'live', true);
-    if (state.liveNode && state.liveNode.parentNode === box) box.replaceChild(node, state.liveNode);
-    else box.appendChild(node);
-    state.liveNode = node;
+    var live = state.live;
+    var sig = liveStructure(live);
+    var view = state.liveView;
+    var info = lastMdInfo(live);
+    var canPatch = view && view.node && view.node.parentNode === box && view.sig === sig &&
+      view.mdEl && info.rendered === view.mdRendered;
+
+    if (!canPatch) {
+      // 结构变了（新增段落 / 思考开始 / 工具状态变化 / 本轮结束）：整块重建。
+      buildLiveNode(live);
+      scrollMaybe();
+      return;
+    }
+
+    // 结构没变：只有文字在增长。只碰最后一个段落与思考面板。
+    if (info.text && info.text !== view.mdText) {
+      view.mdEl.innerHTML = renderMarkdown(info.text);
+      if (!state.ended && lastBlockIsMd(live)) view.mdEl.appendChild(el('span', 'stream-caret'));
+      view.mdText = info.text;
+    }
+    var reasoning = live.reasoning || '';
+    if (view.reasonEl && reasoning !== view.reasonText) {
+      view.reasonEl.textContent = reasoning;
+      var summary = view.node.querySelector('.reasoning .tool-summary');
+      if (summary) summary.textContent = reasoning.length + ' 字';
+      view.reasonText = reasoning;
+    }
     scrollMaybe();
   }
+
+  /// 把一帧内的多次 DOM 变更合成一次：SSE 的 delta 经常比刷新率还密，
+  /// 逐个渲染不仅慢，还会让浏览器判定页面「拖慢浏览器」。
+  function scheduleLiveRender() {
+    if (state.liveFrame) return;
+    var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
+    state.liveFrame = raf(function () {
+      state.liveFrame = 0;
+      renderLive();
+    });
+  }
+  function cancelLiveRender() {
+    if (!state.liveFrame) return;
+    var caf = window.cancelAnimationFrame || clearTimeout;
+    caf(state.liveFrame);
+    state.liveFrame = 0;
+  }
   function nearBottom() { var s = $('chat-scroll'); return s.scrollHeight - s.scrollTop - s.clientHeight < 80; }
-  function scrollMaybe(force) { var s = $('chat-scroll'); if (force || state.stickBottom) s.scrollTop = s.scrollHeight; }
+  /// 只在真的偏移时才写 scrollTop：贴底滚动是常态，每帧写一次同样的值同样会
+  /// 触发滚动相关的布局工作。
+  function scrollMaybe(force) {
+    var s = $('chat-scroll');
+    if (!force && !state.stickBottom) return;
+    var target = s.scrollHeight - s.clientHeight;
+    if (target > 0 && Math.abs(s.scrollTop - target) > 1) s.scrollTop = target;
+  }
 
   /* ---------- 5b) 指标栏（输出速度 / 缓存命中率 / 上下文用量） ----------
      数据来源是 SSE 的 `metrics` 块（iteration_end / done 都带），配合 usage 里的
@@ -699,17 +800,19 @@
     }
     try { localStorage.setItem(METRICS_KEY, JSON.stringify(map)); } catch (e) { /* 配额满则忽略 */ }
   }
+  /// 指标栏每 500ms 重画一次，但绝大多数时刻文字没有变化。逐项比较后只写真正
+  /// 变了的节点：无谓的 textContent/style 写入同样会触发样式与布局重算。
   function setMetric(id, text, title, cls) {
     var v = $(id + '-v');
-    if (v) v.textContent = text;
+    if (v && v.textContent !== text) v.textContent = text;
     var bar = $(id + '-bar');
-    if (bar && cls && cls.width != null) bar.style.width = cls.width;
+    if (bar && cls && cls.width != null && bar.style.width !== cls.width) bar.style.width = cls.width;
     var box = $(id);
     if (!box) return;
     box.classList.toggle('warn', !!(cls && cls.warn));
     box.classList.toggle('bad', !!(cls && cls.bad));
     box.classList.toggle('est', !!(cls && cls.est));
-    if (title) box.title = title;
+    if (title && box.title !== title) box.title = title;
   }
   function renderMetrics() {
     var s = state.stats || emptyStats();
@@ -900,27 +1003,27 @@
     if (ev.type === 'reasoning_delta') {
       state.live.reasoning += ev.text || '';
       noteLiveTokens(ev.text);
-      renderLive(); scrollMaybe(); return;
+      scheduleLiveRender(); return;
     }
     if (ev.type === 'content_delta') {
       var last = state.live.blocks[state.live.blocks.length - 1];
       if (!last || last.type !== 'md') { last = { type: 'md', text: '' }; state.live.blocks.push(last); }
       last.text += ev.text || '';
       noteLiveTokens(ev.text);
-      renderLive(); scrollMaybe(); return;
+      scheduleLiveRender(); return;
     }
     if (ev.type === 'tool_call' || ev.type === 'tool_start') {
       if (ev.type === 'tool_start') { state.turnSteps++; renderMetrics(); }
       var block = liveBlockForTool(ev.id);
       if (block) block.tc.status = 'running';
       else state.live.blocks.push({ type: 'tool', tc: { id: ev.id, name: ev.name, arguments: ev.arguments, status: 'running' } });
-      renderLive(); scrollMaybe(); return;
+      scheduleLiveRender(); return;
     }
     if (ev.type === 'tool_result') {
       state.live.outputs[ev.id] = { output: ev.output, ok: ev.ok !== false, elapsed_ms: ev.elapsed_ms, truncated: !!ev.truncated };
       var b2 = liveBlockForTool(ev.id);
       if (b2) b2.tc.status = ev.ok === false ? 'fail' : 'ok';
-      renderLive(); scrollMaybe(); return;
+      scheduleLiveRender(); return;
     }
     if (ev.type === 'tool_args_delta') { noteLiveTokens(ev.text); return; }   // 工具调用参数也是输出 token
     if (ev.type === 'iteration_end') {
@@ -933,7 +1036,7 @@
     if (ev.type === 'error') {
       state.ended = true;
       state.streamError = '出错了：' + (ev.message || '未知错误') + (ev.detail ? '\n' + ev.detail : '');
-      renderLive(); scrollMaybe(); return;
+      scheduleLiveRender(); return;
     }
     if (ev.type === 'done' || ev.type === 'stopped') {
       state.ended = true;
@@ -985,7 +1088,8 @@
   }
   function finalizeStream() {
     var sid = state.session ? state.session.id : null;
-    state.live = null; state.liveNode = null; state.ended = false;
+    cancelLiveRender();
+    state.live = null; state.liveNode = null; state.liveView = null; state.ended = false;
     if (state.stopTimer) { clearTimeout(state.stopTimer); state.stopTimer = null; }
     state.abort = null;
     setStreaming(false);

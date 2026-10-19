@@ -307,6 +307,23 @@ token 估算器补上 `context_tokens` / `output_tokens` 并置 `estimated: true
 turn finished ok=true iterations=4 elapsed_ms=3120 output_tokens=512 ttft_ms=640 gen_ms=2140 context=128/128000
 ```
 
+### 流式渲染的预算：别让 UI 成为瓶颈
+
+SSE 的 delta 比屏幕刷新还密（一个 30 KB 的回答能有几百条）。如果每条 delta 都重建气泡，
+工作量就是「段落数 × delta 数」，主线程被占满，Firefox 会直接弹出「此网页拖慢了您的
+firefox，可停止此页面」。内置 UI 现在按三条规则做：
+
+1. **一帧一次**：delta 只置脏，真正的渲染在 `requestAnimationFrame` 里做一次，连续 10 条
+   delta 合并成一次 DOM 操作。
+2. **只改变化的那部分**：气泡的「结构」（段落数、工具行状态、思考行有无、是否已结束）
+   变了才整块重建；纯文字增长只重画最后一个段落 + 思考面板，之前的段落和工具行保持
+   原来的 DOM 节点，不会被重新解析、重新创建。
+3. **指标栏只写变了的项**：每 500ms 的指标刷新逐项比较，`textContent`/`style.width` 没变
+   就不写；贴底滚动也只在真的偏移时才写 `scrollTop`。
+
+同一段 320 条 delta 的流（`tests/ui_render_perf.mjs`）：整块重建从 **324 次降到 4 次**，
+样式与布局时间从 ~420ms 降到 ~170ms。
+
 ### 轨迹：每一轮「实际做了什么」的审计记录
 
 会话记录（`/api/sessions/{sid}`）回答「说了什么」，轨迹回答「做了什么」：每一次模型
@@ -819,6 +836,7 @@ node tests/ui_stream_guard.mjs                            # 生成期间切换/�
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
 node tests/ui_agent_doc.mjs                               # 记忆页的 agent.md 编辑框（需 google-chrome）
+node tests/ui_render_perf.mjs                             # 流式渲染不重建气泡（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -851,6 +869,11 @@ false。选出的路径能直接喂给 `/api/workspaces`。
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的
 下一次请求里；`op=read/replace/scripts` 各自生效；超过 32 KB 的 append 报错并提示压缩且不
 改动文件；`GET/PUT /api/workspaces/{id}/agent-doc` 能读、能改、超限报 400。
+
+`tests/ui_render_perf.mjs` 起一轮 320 条 delta、中间夹一次工具调用的回答，用
+`MutationObserver` 数 live 气泡被替换的次数：**每来一条 delta 就重建整块**是这次的回归点
+（旧实现 320 条 delta → 324 次重建），现在必须是个位数。同时给已完成的段落和工具行打标记，
+断言它们在后续流式过程中没有被重建；结束后的最终渲染仍然完整（正文、工具行、光标消失）。
 
 `tests/ui_agent_doc.mjs` 在浏览器里操作「记忆」页的 agent.md 卡片：内容来自服务端、路径显示为
 `.tea_agent_run/agent.md`、脚本列在下面；改动后提示「未保存」、还原按钮恢复服务端副本、保存后
