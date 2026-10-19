@@ -106,6 +106,9 @@
       <div class="chat-scroll" id="chat-scroll">
         <div class="chat-col" id="messages"></div>
       </div>
+      <!-- 跳转索引：每条用户消息一个编号，悬停显示该条输入的前 64 个字符，点击滚到那一条。
+           条目由 app.js 按当前会话动态生成；不足 2 轮时整条隐藏。 -->
+      <nav class="turn-index hidden" id="turn-index" aria-label="对话跳转索引"></nav>
       <div class="composer-wrap">
         <div class="chat-col">
           <div class="composer">
@@ -244,6 +247,8 @@
 
 <div class="overlay hidden" id="overlay"><div class="dialog" id="dialog"></div></div>
 <div class="toast hidden" id="toast"></div>
+<!-- 跳转索引的悬停提示：fixed 定位，避免被索引条的滚动容器裁掉 -->
+<div class="turn-tip hidden" id="turn-tip" role="tooltip"></div>
 
 <script src="./app.js"></script>
 </body>

@@ -586,12 +586,129 @@
     return node;
   }
 
+  /* ---------- 4b) 对话跳转索引（右侧轮次刻度） ----------
+     一条用户消息 = 一个编号。悬停/聚焦弹出该条输入的前 64 个字符，点击滚到那一条；
+     滚动时高亮当前视口所在的轮次。索引完全由 state.messages 推导，不额外请求服务端。 */
+  var TURN_PREVIEW_CHARS = 64;
+  var turnSpyFrame = 0;
+
+  /// 取用户输入的前 64 个字符。先去掉行首空白，再按 Unicode 码点截断，避免把
+  /// 表情切一半；换行折成空格，让 tip 保持紧凑。纯图片消息没有文字，给一个说明。
+  function turnPreview(m) {
+    var text = String(m && m.content != null ? m.content : '').replace(/\r\n?/g, '\n').replace(/^\s+/, '');
+    var chars = Array.from ? Array.from(text) : text.split('');
+    var cut = chars.length > TURN_PREVIEW_CHARS;
+    var head = chars.slice(0, TURN_PREVIEW_CHARS).join('').replace(/\s+/g, ' ').trim();
+    if (!head) return (m && m.images && m.images.length) ? '（图片消息）' : '（空消息）';
+    return head + (cut ? '…' : '');
+  }
+  function turnList() {
+    var out = [];
+    for (var i = 0; i < state.messages.length; i++) {
+      var m = state.messages[i];
+      if (m && m.role === 'user') out.push({ mid: i, ord: out.length + 1, msg: m, preview: turnPreview(m) });
+    }
+    return out;
+  }
+  function hideTurnTip() {
+    var tip = $('turn-tip');
+    if (tip) tip.classList.add('hidden');
+  }
+  function showTurnTip(dot, ord, preview) {
+    var tip = $('turn-tip');
+    if (!tip) return;
+    clear(tip);
+    tip.appendChild(el('span', 'tip-idx', '第 ' + ord + ' 条'));
+    tip.appendChild(el('span', 'tip-text', preview));
+    tip.dataset.turn = String(ord);
+    tip.classList.remove('hidden');
+    var r = dot.getBoundingClientRect();
+    var top = r.top + r.height / 2;
+    var h = tip.offsetHeight;
+    // 贴边时把 tip 夹回视口，别让第一条/最后一条的提示被窗口切掉。
+    top = Math.max(h / 2 + 8, Math.min(window.innerHeight - h / 2 - 8, top));
+    tip.style.left = (r.left - 8) + 'px';
+    tip.style.top = top + 'px';
+  }
+  function updateActiveTurn() {
+    var rail = $('turn-index');
+    if (!rail || rail.classList.contains('hidden')) return;
+    var dots = rail.querySelectorAll('.turn-dot');
+    if (!dots.length) return;
+    var active = dots.length - 1;
+    if (!state.stickBottom) {
+      // 视口顶部（留 24px 余量）之上最后一条用户消息就是「当前在读」的轮次。
+      var s = $('chat-scroll');
+      var base = s.getBoundingClientRect().top + 24;
+      var nodes = $('messages').querySelectorAll('.msg.user');
+      active = 0;
+      for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].getBoundingClientRect().top <= base) active = i;
+        else break;
+      }
+    }
+    for (var j = 0; j < dots.length; j++) dots[j].classList.toggle('active', j === active);
+    rail.dataset.active = String(active + 1);
+    var ad = dots[active];
+    if (ad && rail.scrollHeight > rail.clientHeight) {
+      var rt = rail.getBoundingClientRect(), ar = ad.getBoundingClientRect();
+      if (ar.top < rt.top + 2) rail.scrollTop -= (rt.top + 2 - ar.top);
+      else if (ar.bottom > rt.bottom - 2) rail.scrollTop += (ar.bottom - rt.bottom + 2);
+    }
+  }
+  function scheduleTurnSpy() {
+    if (turnSpyFrame) return;
+    var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
+    turnSpyFrame = raf(function () { turnSpyFrame = 0; updateActiveTurn(); });
+  }
+  function jumpToTurn(mid) {
+    var s = $('chat-scroll');
+    var node = $('messages').querySelector('.msg.user[data-mid="' + mid + '"]');
+    if (!node) return;
+    hideTurnTip();
+    var top = node.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop - 16;
+    state.stickBottom = false;
+    s.scrollTop = Math.max(0, top);
+    updateActiveTurn();
+    node.classList.add('turn-hit');
+    setTimeout(function () { node.classList.remove('turn-hit'); }, 900);
+  }
+  function renderTurnIndex() {
+    var rail = $('turn-index');
+    if (!rail) return;
+    var turns = turnList();
+    clear(rail);
+    hideTurnTip();
+    if (turns.length < 2) {
+      rail.classList.add('hidden');
+      rail.removeAttribute('data-count');
+      rail.removeAttribute('data-active');
+      return;
+    }
+    rail.classList.remove('hidden');
+    rail.dataset.count = String(turns.length);
+    rail.setAttribute('aria-label', '对话跳转索引：共 ' + turns.length + ' 条用户消息');
+    turns.forEach(function (t) {
+      var dot = btn('turn-dot', String(t.ord), function () { jumpToTurn(t.mid); });
+      dot.dataset.mid = String(t.mid);
+      dot.dataset.turn = String(t.ord);
+      dot.title = '第 ' + t.ord + ' 条：' + t.preview;
+      dot.setAttribute('aria-label', '跳到第 ' + t.ord + ' 条：' + t.preview);
+      dot.onmouseenter = function () { showTurnTip(dot, t.ord, t.preview); };
+      dot.onmouseleave = hideTurnTip;
+      dot.onfocus = function () { showTurnTip(dot, t.ord, t.preview); };
+      dot.onblur = hideTurnTip;
+      rail.appendChild(dot);
+    });
+    updateActiveTurn();
+  }
+
   function renderChat() {
     var box = $('messages');
     clear(box);
     state.liveNode = null;
     state.liveView = null;
-    if (!state.workspaces.length) return;                       // 空状态由添加工作区弹窗接管
+    if (!state.workspaces.length) { renderTurnIndex(); return; } // 空状态由添加工作区弹窗接管
     var outputs = {};
     state.messages.forEach(function (m) {
       if (m.role === 'tool' && m.tool_call_id) {
@@ -600,7 +717,11 @@
     });
     state.messages.forEach(function (m, i) {
       if (m.role === 'tool') return;                            // 工具消息只作为输出附加
-      if (m.role === 'user') box.appendChild(userNode(m));
+      if (m.role === 'user') {
+        var un = userNode(m);
+        un.dataset.mid = String(i);
+        box.appendChild(un);
+      }
       else if (m.role === 'system') box.appendChild(el('div', 'msg system', m.content));
       else box.appendChild(assistantNode(m, outputs, 'm' + i, false));
     });
@@ -615,6 +736,7 @@
       empty.appendChild(el('div', null, state.session ? '在下方输入内容开始对话。' : '直接输入内容，发送时会自动创建会话。'));
       box.appendChild(empty);
     }
+    renderTurnIndex();
   }
   /// 流式渲染只在「结构」变化时才重建气泡；纯文字增长只更新最后一个段落。
   /// 以前每来一个 delta 就 assistantNode(...) 重建整个气泡：历史段落会被重新
@@ -1865,6 +1987,7 @@
       state.session = d.session || { id: sid };
       state.messages = d.messages || [];
       state.live = null; state.streamError = null;
+      state.stickBottom = true;                     // 打开会话默认落在最新一条
       clearQueue();
       renderCrumbs();
       state.stats = statsFor(sid);                 // 恢复该会话上一轮的指标
@@ -1881,6 +2004,7 @@
   }
   function newSessionDraft() {
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
+    state.stickBottom = true;
     clearQueue();
     renderCrumbs();
     state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
@@ -2044,11 +2168,12 @@
   /* ---------- 8) 视图切换 ---------- */
   function showView(name) {
     state.view = name;
+    hideTurnTip();
     saveLS();
     VIEWS.forEach(function (v) { $('view-' + v).classList.toggle('hidden', v !== name); });
     Array.prototype.forEach.call(document.querySelectorAll('.nav-row'), function (b) { b.classList.toggle('active', b.dataset.view === name); });
     renderCrumbs();
-    if (name === 'chat') { scrollMaybe(); setTimeout(autoGrow, 0); }
+    if (name === 'chat') { scrollMaybe(); scheduleTurnSpy(); setTimeout(autoGrow, 0); }
     if (name === 'files') loadTree(state.files.dir);
     if (name === 'memory') loadMemory();
     if (name === 'logs') loadLogs();
@@ -2070,6 +2195,7 @@
     saveLS();
     // 正文栏宽度变了：滚动位置和输入框高度都要按新宽度重算一次。
     scrollMaybe();
+    scheduleTurnSpy();
     autoGrow();
   }
 
@@ -2374,7 +2500,12 @@
     Array.prototype.forEach.call(document.querySelectorAll('.nav-row'), function (b) {
       b.onclick = function () { showView(b.dataset.view); };
     });
-    $('chat-scroll').addEventListener('scroll', function () { state.stickBottom = nearBottom(); });
+    $('chat-scroll').addEventListener('scroll', function () {
+      state.stickBottom = nearBottom();
+      scheduleTurnSpy();
+    });
+    // 窗口宽度变化会改变换行，进而改变每条消息的位置：重新算一次当前轮次。
+    window.addEventListener('resize', function () { hideTurnTip(); scheduleTurnSpy(); });
     $('input').addEventListener('input', autoGrow);
     // 粘贴图片：只拦下含图片的剪贴板内容，普通文本照常粘贴。
     $('input').addEventListener('paste', function (e) {
