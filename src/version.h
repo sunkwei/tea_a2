@@ -1,5 +1,5 @@
 // version.h -- single place for the version string.
 #pragma once
 
-#define TEA_AGENT_VERSION_STRING "0.3.0"
+#define TEA_AGENT_VERSION_STRING "0.4.0"
 #define TEA_AGENT_NAME "tea_agent"
