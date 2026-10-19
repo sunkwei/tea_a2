@@ -22,21 +22,21 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 
 ## 这个项目解决什么问题
 
-嵌入式设备上通常跑不了大模型，但「在设备上干活」需要的是本地能力：执行命令、读写文件、
+嵌入式设备上通常跑不了通用 agent，「在设备上干活」需要的是本地能力：执行命令、读写文件、
 记住上下文。`tea_a2` 就是这部分能力的最小实现：
 
 ```
-┌──────────────────────┐        HTTP / SSE (JSON)         ┌───────────────────────────┐
-│  Remote brain        │  ───────────────────────────▶   │  Embedded device          │
+┌──────────────────────┐        HTTP / SSE (JSON)        ┌───────────────────────────┐
+│  Remote brain        │  ───────────────────────────▶  │  Embedded device          │
 │  (LLM agent /        │                                 │  ┌─────────────────────┐  │
 │   orchestrator /     │   POST /api/chat                │  │ tea_a2 (single exe) │  │
-│   云端 workflow)     │   ◀─── content_delta / tools ──  │  │  · agent loop       │  │
+│   云端 workflow)     │   ◀─── content_delta / tools ── │  │  · agent loop       │  │
 └──────────────────────┘                                 │  │  · tools            │  │
                                                          │  │  · workspaces       │  │
                                                          │  │  · built-in Web UI  │  │
                                                          │  └─────────┬───────────┘  │
                                                          │            │              │
-                                                         │     本地文件 / 本地命令     │
+                                                         │     本地文件 / 本地命令    │
                                                          └───────────────────────────┘
 ```
 
