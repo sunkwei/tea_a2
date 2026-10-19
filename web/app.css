@@ -318,6 +318,28 @@ button{font-family:inherit}
   border:0;cursor:pointer;background:#000a;color:#fff;font:12px/18px var(--ds-font-family);padding:0}
 .attach-item .attach-del:hover{background:#000d}
 .attach-item.uploading::after{content:'';position:absolute;inset:0;background:#0006}
+/* 排队消息：会话进行中按 Enter 进入队列，agent loop 每轮采纳第一条，采纳前可取消。
+   一行一条，单行省略；完整内容在 title 里，取消按钮固定在右侧。 */
+.queue-strip{display:flex;flex-direction:column;gap:6px}
+.queue-item{
+  display:flex;align-items:center;gap:8px;min-width:0;padding:3px 6px 3px 10px;
+  border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);
+  background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px;
+}
+.queue-item .q-tag{
+  flex:0 0 auto;color:var(--dsw-alias-state-business-primary);
+  font:11px/16px var(--ds-font-family-code);
+}
+.queue-item .q-text{
+  flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--dsw-alias-label-secondary);
+}
+.queue-item .q-cancel{
+  flex:0 0 auto;width:18px;height:18px;padding:0;border:0;border-radius:50%;cursor:pointer;
+  background:transparent;color:var(--dsw-alias-label-caption);
+  font:13px/18px var(--ds-font-family);text-align:center;
+}
+.queue-item .q-cancel:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-state-error-primary)}
 /* 消息里的图片 */
 .msg-images{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .msg-images img{max-width:240px;max-height:180px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);display:block}

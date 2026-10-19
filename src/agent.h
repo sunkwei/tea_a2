@@ -11,6 +11,7 @@
 #include "config.h"
 #include "llm.h"
 #include "message.h"
+#include "prompt_queue.h"
 #include "tools.h"
 #include "workspace.h"
 
@@ -23,6 +24,10 @@ struct TurnOptions {
   std::string provider;  // empty => config default
   std::string model;     // empty => config default
   bool stream = true;
+  /// Prompts typed while this turn was already running. The loop adopts one per
+  /// iteration (FIFO) before building that iteration's request; whatever is left
+  /// when the loop stops is reported back as `queue_unconsumed`. May be null.
+  PromptInbox* inbox = nullptr;
 };
 
 /// How much of the stored history actually made it into the model context.

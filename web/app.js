@@ -14,6 +14,7 @@
     model: null, models: [], modelMenu: false,
     live: null, liveNode: null, streaming: false, abort: null, stopTimer: null,
     attachments: [],
+    queue: [], queueRestore: [], queueDone: {},
     ended: false, streamError: null, expanded: {}, stickBottom: true,
     trajectory: [], trajFull: {}, lastTrajectoryId: null,
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
@@ -819,6 +820,31 @@
     state.live.blocks.forEach(function (b) { if (b.type === 'tool' && b.tc.id === id) found = b; });
     return found;
   }
+  /// 采纳一条排队消息时，把当前 live 气泡定格成一条普通 assistant 消息，后续迭代的
+  /// 输出落到新的气泡里。否则整轮（迭代 0 的回答 + 被采纳的 user 消息 + 迭代 1 的回答）
+  /// 会挤在同一个 live 气泡里，模型「先回答后收到消息」的时序就看不出来了。
+  function freezeLiveBeforeQueued() {
+    var live = state.live;
+    if (!live) return;
+    var hasContent = !!(live.reasoning || live.blocks.length);
+    if (!hasContent) return;
+    state.messages.push({
+      role: 'assistant', content: live.content || '', reasoning: live.reasoning || '',
+      blocks: live.blocks.slice()
+    });
+    // 工具输出在 live 气泡里是旁路的；定格后要变成 tool 消息，renderChat 才能
+    // 重新挂回对应的工具行。
+    Object.keys(live.outputs || {}).forEach(function (id) {
+      var o = live.outputs[id] || {};
+      state.messages.push({
+        role: 'tool', tool_call_id: id, content: o.output || '',
+        ok: o.ok !== false, elapsed_ms: o.elapsed_ms, truncated: !!o.truncated
+      });
+    });
+    state.live = { role: 'assistant', reasoning: '', blocks: [], outputs: {} };
+    state.liveNode = null;
+  }
+
   function handleEvent(ev) {
     if (ev.type === 'ping') return;                              // 心跳：保持连接存活即可
     if (!state.live) return;
@@ -831,6 +857,39 @@
       state.liveTokens = 0; state.liveStartAt = 0;
       state.turnSteps = 0; state.turnStartAt = Date.now();
       renderMetrics();
+      return;
+    }
+    if (ev.type === 'queue_adopted') {
+      // 服务端在两次迭代之间采纳了队首消息：从排队条里移除，并把它作为一条普通
+      // 用户消息插进对话（本轮结束后的会话回读会再确认一次）。
+      // queueDone 记住已经处理的 id：POST /api/chat/queue 的响应可能比这条 SSE
+      // 事件晚到，晚到时不能再补一个永远等不到采纳的排队条。
+      if (ev.id) state.queueDone[ev.id] = true;
+      state.queue = state.queue.filter(function (q) { return q.id !== ev.id; });
+      renderQueue();
+      if (ev.content) {
+        freezeLiveBeforeQueued();
+        state.messages.push({
+          role: 'user', content: ev.content,
+          created_at: ev.created_at || new Date().toISOString()
+        });
+        renderChat(); scrollMaybe(true);
+        toast('已采纳排队消息，继续生成');
+      }
+      return;
+    }
+    if (ev.type === 'queue_unconsumed') {
+      // 轮次在采纳之前就结束了（停止 / 报错 / 迭代上限）：先记下来，等流关闭后
+      // 统一放回输入框，避免和用户正在敲的内容交错。
+      var unconsumed = (ev.items || []);
+      var dead = {};
+      unconsumed.forEach(function (it) {
+        if (!it) return;
+        if (it.id) { dead[it.id] = true; state.queueDone[it.id] = true; }
+        if (it.content) state.queueRestore.push(it.content);
+      });
+      state.queue = state.queue.filter(function (q) { return !dead[q.id]; });
+      renderQueue();
       return;
     }
     if (ev.type === 'reasoning_delta') {
@@ -903,6 +962,7 @@
 
   function setStreaming(on) {
     state.streaming = on;
+    $('input').placeholder = on ? QUEUE_PLACEHOLDER : INPUT_PLACEHOLDER;
     updateComposer();
     if (on) {
       startMetricsTicker();
@@ -924,6 +984,31 @@
     if (state.stopTimer) { clearTimeout(state.stopTimer); state.stopTimer = null; }
     state.abort = null;
     setStreaming(false);
+    // 本轮结束时还没被采纳的消息：服务端已经把它们从队列里摘掉，这里放回输入框，
+    // 而不是留在看不见的地方。停止/报错时同样成立——用户按了停止，就不该自动
+    // 再发一轮，但打过的字必须还给他。
+    if (state.queueRestore.length) {
+      var restoredCount = state.queueRestore.length;
+      var restored = state.queueRestore.join('\n\n');
+      state.queueRestore = [];
+      var ta = $('input');
+      ta.value = ta.value.replace(/\s+$/, '');
+      ta.value = ta.value ? (ta.value + '\n\n' + restored) : restored;
+      autoGrow();
+      state.queue = [];
+      renderQueue();
+      toast('本轮已结束，' + restoredCount + ' 条排队消息已放回输入框');
+    }
+    // 连接中断或事件丢失时，以服务端队列为准对账一次：已经不在队列里的条目
+    // 不能继续挂在输入框上方（多半已经在另一条路径上被采纳或退回了）。
+    if (sid && state.queue.length) {
+      api('api/chat/queue?session_id=' + encodeURIComponent(sid)).then(function (d) {
+        var live = {};
+        (d.items || []).forEach(function (it) { if (it && it.id) live[it.id] = true; });
+        var next = state.queue.filter(function (q) { return live[q.id]; });
+        if (next.length !== state.queue.length) { state.queue = next; renderQueue(); }
+      }, function () {});
+    }
     var finish = function () { renderChat(); renderMetrics(); scrollMaybe(); };
     if (!sid) { finish(); return; }
     // 结束后重新拉取，保证渲染状态与服务器一致；轨迹是这一轮结束后才落盘的，
@@ -965,6 +1050,84 @@
       };
       item.appendChild(del);
       strip.appendChild(item);
+    });
+  }
+
+  /* ---------- 排队消息（会话进行中按 Enter） ---------- */
+  // 一轮可能跑很久（长工具、多轮迭代）。这时按 Enter 不再被忽略或直接开第二轮，
+  // 而是把消息放进该轮自己的队列：agent loop 每轮采纳一条，采纳前随时可以取消。
+  // 队列随轮次存活——轮次结束仍未采纳的会被服务端退回（queue_unconsumed），
+  // 这里再放回输入框，绝不悄悄丢掉用户已经打出来的字。
+  var INPUT_PLACEHOLDER = '输入消息，Enter 发送，Shift+Enter 换行（可直接粘贴图片）';
+  var QUEUE_PLACEHOLDER = '会话进行中：Enter 排队（下一轮采纳，采纳前可取消），Shift+Enter 换行';
+
+  function renderQueue() {
+    var strip = $('queue-strip');
+    clear(strip);
+    if (!state.queue.length) { strip.classList.add('hidden'); return; }
+    strip.classList.remove('hidden');
+    state.queue.forEach(function (q, i) {
+      var row = el('div', 'queue-item');
+      row.title = q.content || '';
+      row.appendChild(el('span', 'q-tag', '排队 ' + (i + 1)));
+      row.appendChild(el('span', 'q-text', q.content || ''));
+      var del = btn('q-cancel', '×', function () { cancelQueued(q.id); });
+      del.title = '取消这条排队消息（采纳前都可以取消）';
+      del.setAttribute('aria-label', '取消排队');
+      row.appendChild(del);
+      strip.appendChild(row);
+    });
+  }
+
+  function clearQueue() {
+    state.queue = [];
+    state.queueRestore = [];
+    state.queueDone = {};
+    renderQueue();
+  }
+
+  /// Enter while a turn is running. Returns true when the key press was handled,
+  /// so the caller never falls through to starting a second turn.
+  function queueMessage() {
+    var ta = $('input');
+    var text = ta.value.replace(/\s+$/, '');
+    if (!state.streaming || !text) return false;
+    if (state.attachments.length) {
+      toast('排队消息暂不支持图片：等本轮结束后再发送');
+      return true;
+    }
+    if (!state.session) { toast('请先选择工作区'); return true; }
+    api('api/chat/queue', {
+      method: 'POST',
+      body: { session_id: state.session.id, message: text }
+    }).then(function (res) {
+      ta.value = ''; autoGrow();
+      var q = (res && res.queued) || {};
+      // 这轮可能在响应回来之前就已经采纳了它（SSE 走另一条连接），别再补一条。
+      if (!q.id || !state.queueDone[q.id]) {
+        state.queue.push({
+          id: q.id || '', content: q.content || text, created_at: q.created_at || ''
+        });
+      }
+      renderQueue();
+      toast('已排队，agent 下一轮采纳；采纳前可取消');
+    }, function (e) {
+      toast('排队失败：' + (e && e.message ? e.message : String(e)));
+    });
+    return true;
+  }
+
+  function cancelQueued(id) {
+    if (!id || !state.session) return;
+    api('api/chat/queue/cancel', {
+      method: 'POST',
+      body: { session_id: state.session.id, id: id }
+    }).then(function (res) {
+      state.queue = state.queue.filter(function (q) { return q.id !== id; });
+      renderQueue();
+      toast(res && res.cancelled ? '已取消排队' : '这条消息已经被采纳，无法取消');
+    }, function (e) {
+      toast('取消失败：' + (e && e.message ? e.message : String(e)));
     });
   }
 
@@ -1016,6 +1179,8 @@
     if (!text && !images.length) return;
     if (!state.workspace) { toast('请先选择工作区'); return; }
     ta.value = ''; autoGrow();
+    // 队列属于上一轮：新一轮开始时不可能还有可被采纳的旧条目。
+    state.queue = []; state.queueDone = {}; renderQueue();
 
     var ready = state.session ? Promise.resolve(state.session)
       : api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions',
@@ -1090,7 +1255,7 @@
   function updateComposer() {
     var b = $('send');
     b.classList.toggle('stop', state.streaming);
-    b.title = state.streaming ? '停止生成' : '发送';
+    b.title = state.streaming ? '停止生成（Enter 排队，采纳前可取消）' : '发送';
     b.innerHTML = state.streaming
       ? '<svg viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1.2" fill="currentColor" stroke="none"/></svg>'
       : '<svg viewBox="0 0 16 16"><path d="M8 12.6V3.6M4.2 7.4L8 3.6l3.8 3.8"/></svg>';
@@ -1449,6 +1614,7 @@
       if (!state.workspaces.length) {
         state.workspace = null; state.sessions = []; state.session = null; state.messages = [];
         state.trajectory = []; state.lastTrajectoryId = null;
+        clearQueue();
         renderWorkspaceChip(); renderSessions(); renderChat(); renderSettings();
         openAddWorkspace(true);
         return;
@@ -1465,6 +1631,7 @@
     state.workspace = w;
     if (changed) {
       state.session = null; state.messages = []; state.live = null; state.streamError = null;
+      clearQueue();
       state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
       state.turnSteps = 0; state.turnStartAt = 0;
       state.trajectory = []; state.lastTrajectoryId = null;
@@ -1499,6 +1666,7 @@
       state.session = d.session || { id: sid };
       state.messages = d.messages || [];
       state.live = null; state.streamError = null;
+      clearQueue();
       state.stats = statsFor(sid);                 // 恢复该会话上一轮的指标
       state.turnSteps = num(state.stats.steps);
       state.turnStartAt = 0;
@@ -1513,6 +1681,7 @@
   }
   function newSessionDraft() {
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
+    clearQueue();
     state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
     state.turnSteps = 0; state.turnStartAt = 0;
     state.trajectory = []; state.lastTrajectoryId = null;
@@ -1948,7 +2117,12 @@
       files.forEach(addAttachment);
     });
     $('input').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        // 生成中：进入排队；空闲：正常发送。分工明确，不会因为按了 Enter 就
+        // 在背后开第二轮把当前这一轮顶掉。
+        if (state.streaming) queueMessage(); else sendMessage();
+      }
     });
     $('send').onclick = function () { if (state.streaming) stopStream(); else sendMessage(); };
     $('new-session').onclick = function () {

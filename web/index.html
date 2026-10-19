@@ -90,6 +90,8 @@
             <div class="composer-body">
               <!-- 粘贴/拖入的图片缩略图；发送后清空 -->
               <div class="attach-strip hidden" id="attach-strip"></div>
+              <!-- 会话进行中按 Enter 排队的消息；agent loop 每轮采纳第一条，采纳前都能取消 -->
+              <div class="queue-strip hidden" id="queue-strip"></div>
               <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行（可直接粘贴图片）"></textarea>
             </div>
             <button class="send" id="send" type="button" title="发送"></button>

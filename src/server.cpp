@@ -169,7 +169,14 @@ struct ChatTurn {
   std::condition_variable cv;
   std::deque<std::string> queue;
   bool closed = false;
+  /// False once the worker has finished the loop and is winding down: after that
+  /// a late `enqueue_prompt` must be refused, otherwise it would sit in the inbox
+  /// of a turn that will never read it again.
+  bool accepting = true;
   std::atomic<bool> cancel{false};
+  /// Prompts the user typed while this turn is running. Adopted one per agent
+  /// iteration; see prompt_queue.h.
+  PromptInbox inbox;
   std::thread worker;
 
   ~ChatTurn() {
@@ -197,6 +204,24 @@ struct ChatTurn {
   bool finished() const {
     std::lock_guard<std::mutex> lock(mu);
     return closed;
+  }
+
+  /// Queue one prompt. Returns false when the turn has already stopped accepting
+  /// them (finished, or the worker is winding down). The check and the push share
+  /// `mu` with close()/begin_shutdown(), so a prompt cannot slip into a turn that
+  /// nobody will ever drain.
+  bool enqueue_prompt(const QueuedPrompt& prompt) {
+    std::lock_guard<std::mutex> lock(mu);
+    if (!accepting) return false;
+    inbox.push(prompt);
+    return true;
+  }
+
+  /// Called by the worker after run_turn returned, before the final drain: from
+  /// here on new prompts are refused and the drain below is authoritative.
+  void begin_shutdown() {
+    std::lock_guard<std::mutex> lock(mu);
+    accepting = false;
   }
 
   /// Called repeatedly by httplib. Returns false to end the response.
@@ -1305,6 +1330,7 @@ void ApiServer::Impl::install_routes() {
       options.provider = provider;
       options.model = model;
       options.stream = true;
+      options.inbox = &turn->inbox;
       EventEmitter emit = [turn](const nlohmann::json& event) { turn->emit_event(event); };
       try {
         agent.run_turn(turn->workspace, &turn->session, message, images, options, emit,
@@ -1313,6 +1339,27 @@ void ApiServer::Impl::install_routes() {
         nlohmann::json event = nlohmann::json::object();
         event["type"] = "error";
         event["message"] = std::string("agent crashed: ") + e.what();
+        turn->emit_event(event);
+      }
+      // run_turn drains the queue when it finishes, but a prompt can still land
+      // in the microseconds between that drain and the worker stopping. Refuse
+      // new ones first, then the drain below is final. Anything left is handed
+      // back to the browser, which restores it to the composer; leaking it here
+      // would make a queued message vanish without a trace.
+      turn->begin_shutdown();
+      std::vector<QueuedPrompt> leftover = turn->inbox.drain();
+      if (!leftover.empty()) {
+        nlohmann::json items = nlohmann::json::array();
+        for (std::size_t i = 0; i < leftover.size(); ++i) {
+          nlohmann::json item = nlohmann::json::object();
+          item["id"] = leftover[i].id;
+          item["content"] = leftover[i].text;
+          item["created_at"] = leftover[i].created_at;
+          items.push_back(item);
+        }
+        nlohmann::json event = nlohmann::json::object();
+        event["type"] = "queue_unconsumed";
+        event["items"] = items;
         turn->emit_event(event);
       }
       turn->close();
@@ -1343,6 +1390,133 @@ void ApiServer::Impl::install_routes() {
     nlohmann::json j = nlohmann::json::object();
     j["ok"] = true;
     j["cancelled"] = found;
+    send_json(res, j);
+  });
+
+  // ---- queued prompts ----------------------------------------------------
+  // A prompt typed while a turn is already running does not start a second turn:
+  // it is appended to the running conversation at the next agent iteration. The
+  // queue belongs to that turn, so stopping or replacing the turn throws the
+  // remaining prompts back to the caller (`queue_unconsumed` on the SSE stream)
+  // instead of firing them later in an unrelated turn.
+  svr.Post("/api/chat/queue", [this](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const std::string session_id = json_string(body, "session_id");
+    const std::string message = json_string(body, "message");
+    if (session_id.empty()) {
+      send_error(res, 400, "bad_request", "'session_id' is required");
+      return;
+    }
+    if (trim(message).empty()) {
+      send_error(res, 400, "bad_request", "'message' is required");
+      return;
+    }
+    // Queued prompts are text-only. An image must be decoded, size-checked and
+    // written into the workspace before it can be referenced, which /api/chat
+    // does for the request that starts a turn; silently dropping them here would
+    // be worse than refusing.
+    auto images_it = body.find("images");
+    if (images_it != body.end() && images_it->is_array() && !images_it->empty()) {
+      send_error(res, 400, "images_not_queued",
+                 "a queued prompt cannot carry images; wait for the running turn to finish");
+      return;
+    }
+
+    // No pruning here: this endpoint must stay fast, and destroying a retired
+    // turn joins its worker (which can be stuck in a long tool call). A finished
+    // turn refuses `enqueue_prompt` on its own, and the dead entry is reaped by
+    // the next /api/chat for that session.
+    std::shared_ptr<ChatTurn> turn;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      auto it = turns.find(session_id);
+      if (it != turns.end()) turn = it->second;
+    }
+
+    if (!turn) {
+      send_error(res, 409, "no_active_turn",
+                 "this session has no running turn; send the message directly");
+      return;
+    }
+
+    QueuedPrompt prompt;
+    prompt.id = make_id("q_");
+    prompt.text = trim(message);
+    prompt.created_at = now_iso8601();
+    if (!turn->enqueue_prompt(prompt)) {
+      send_error(res, 409, "no_active_turn",
+                 "the running turn just finished; send the message directly");
+      return;
+    }
+
+    LOG_INFO("chat: queued prompt ", prompt.id, " for session ", session_id, " (",
+             turn->inbox.size(), " pending)");
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["queued"] = {{"id", prompt.id}, {"content", prompt.text}, {"created_at", prompt.created_at}};
+    j["pending"] = static_cast<int>(turn->inbox.size());
+    send_json(res, j);
+  });
+
+  svr.Post("/api/chat/queue/cancel", [this](const httplib::Request& req,
+                                            httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const std::string session_id = json_string(body, "session_id");
+    const std::string id = json_string(body, "id");
+    if (session_id.empty()) {
+      send_error(res, 400, "bad_request", "'session_id' is required");
+      return;
+    }
+    std::shared_ptr<ChatTurn> turn;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      auto it = turns.find(session_id);
+      if (it != turns.end()) turn = it->second;
+    }
+    int cancelled = 0;
+    int pending = 0;
+    if (turn) {
+      if (id.empty()) {
+        cancelled = static_cast<int>(turn->inbox.drain().size());
+      } else {
+        cancelled = turn->inbox.remove(id) ? 1 : 0;
+      }
+      pending = static_cast<int>(turn->inbox.size());
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["cancelled"] = cancelled;
+    j["pending"] = pending;
+    send_json(res, j);
+  });
+
+  svr.Get("/api/chat/queue", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string session_id =
+        req.has_param("session_id") ? req.get_param_value("session_id") : std::string();
+    if (session_id.empty()) {
+      send_error(res, 400, "bad_request", "'session_id' is required");
+      return;
+    }
+    std::shared_ptr<ChatTurn> turn;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      auto it = turns.find(session_id);
+      if (it != turns.end()) turn = it->second;
+    }
+    std::vector<QueuedPrompt> items;
+    if (turn) items = turn->inbox.snapshot();
+    nlohmann::json arr = nlohmann::json::array();
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      arr.push_back({{"id", items[i].id},
+                     {"content", items[i].text},
+                     {"created_at", items[i].created_at}});
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["pending"] = static_cast<int>(items.size());
+    j["items"] = arr;
     send_json(res, j);
   });
 

@@ -694,11 +694,49 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   const int max_iterations = st.max_iterations;
   bool finished = false;
 
+  // Take the oldest prompt the user queued while this turn was running and
+  // append it as a normal user message. Doing it here (rather than in the HTTP
+  // layer) means the adopted prompt lands in the same context/session/trajectory
+  // as everything else, and the model sees it together with all the tool output
+  // that happened since the previous round.
+  auto adopt_queued = [&](int iteration) -> bool {
+    if (!options.inbox) return false;
+    for (;;) {
+      QueuedPrompt queued;
+      if (!options.inbox->pop(&queued)) return false;
+      const std::string text = trim(queued.text);
+      if (text.empty()) continue;  // junk cannot happen via the API, but stay safe
+      Message message = Message::make("user", text);
+      message.created_at = queued.created_at.empty() ? now_iso8601() : queued.created_at;
+      session->messages.push_back(message);
+      session->info.updated_at = now_iso8601();
+      workspace.save_session(*session, nullptr);
+
+      nlohmann::json event = nlohmann::json::object();
+      event["type"] = "queue_adopted";
+      event["id"] = queued.id;
+      event["content"] = text;
+      event["iteration"] = iteration;
+      event["pending"] = static_cast<int>(options.inbox->size());
+      event["created_at"] = message.created_at;
+      emit(event);
+      LOG_INFO("queue: adopted prompt ", queued.id, " at iteration ", iteration,
+               " (", options.inbox->size(), " still queued)");
+      workspace.log("info", "queue: adopted a queued prompt at iteration " +
+                                std::to_string(iteration));
+      return true;
+    }
+  };
+
   for (int iteration = 0; iteration < max_iterations; ++iteration) {
     if (cancel && cancel->load()) {
       out.cancelled = true;
       break;
     }
+    // Iteration 0 is the request the caller just started; a prompt queued in the
+    // tiny window before the worker picked it up belongs to the *next* round, so
+    // we only adopt from iteration 1 onwards.
+    if (iteration > 0) adopt_queued(iteration);
     out.iterations = iteration + 1;
     // Wall-clock start of this iteration; the trajectory reports the whole
     // iteration (including a retry after a provider disagreement) rather than
@@ -883,6 +921,14 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     emit(iteration_event);
 
     if (chat.tool_calls.empty()) {
+      // The model is done, but a prompt queued while it was answering must not
+      // wait for a whole new HTTP turn: continue the loop and adopt it at the
+      // top of the next iteration. When the iteration budget is spent we stop
+      // and report the leftovers instead.
+      if (options.inbox && iteration + 1 < max_iterations && !options.inbox->empty()) {
+        LOG_DEBUG("queue: model finished but a prompt is queued; continuing");
+        continue;
+      }
       finished = true;
       break;
     }
@@ -979,6 +1025,28 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
     if (out.cancelled) break;
     if (iteration == max_iterations - 1) out.hit_iteration_limit = true;
+  }
+
+  // Anything still queued was never adopted: the turn was stopped, failed or hit
+  // the iteration cap. Hand it back so the caller can restore the text instead of
+  // dropping what the user typed.
+  if (options.inbox) {
+    std::vector<QueuedPrompt> leftovers = options.inbox->drain();
+    if (!leftovers.empty()) {
+      nlohmann::json items = nlohmann::json::array();
+      for (std::size_t i = 0; i < leftovers.size(); ++i) {
+        nlohmann::json item = nlohmann::json::object();
+        item["id"] = leftovers[i].id;
+        item["content"] = leftovers[i].text;
+        item["created_at"] = leftovers[i].created_at;
+        items.push_back(item);
+      }
+      nlohmann::json event = nlohmann::json::object();
+      event["type"] = "queue_unconsumed";
+      event["items"] = items;
+      emit(event);
+      LOG_INFO("queue: ", leftovers.size(), " queued prompt(s) not adopted (turn ended)");
+    }
   }
 
   out.ok = out.error.empty() && !out.cancelled;

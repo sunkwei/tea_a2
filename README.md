@@ -189,6 +189,9 @@ provider 回报的 `usage` 为准）。
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
 | **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）** |
 | `POST` | `/api/chat/stop` | 中断当前轮次 |
+| `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
+| `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
+| `GET` | `/api/chat/queue?session_id=` | 查看当前排队消息 |
 
 ### 一次完整的「远程操控」长这样
 
@@ -214,6 +217,8 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 | `tool_start` | 即将执行 |
 | `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated` |
 | `iteration_end` | 单轮结束，带 `usage` 与 `metrics` |
+| `queue_adopted` | 采纳了一条排队消息（`id` / `content` / `pending`） |
+| `queue_unconsumed` | 轮次结束时仍未采纳的排队消息（`items[]`），客户端应放回输入框 |
 | `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` / `trajectory_id` |
 | `stopped` | 被 `/api/chat/stop` 中断 |
 | `error` | `message` / `detail` |
@@ -221,6 +226,46 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 
 上层 agent 只需要：发一条 `POST /api/chat`，读 SSE，看 `tool_result` 有没成功，`done` 结束。
 需要打断就调 `/api/chat/stop`——它会在下一个模型/工具边界停住，已产生的会话照样落盘。
+
+### 插队：轮次进行中追加消息
+
+一轮可能跑很久（长工具、多轮迭代、思考模型）。这段时间里再发一条 `POST /api/chat` 会把
+当前轮次顶掉，所以 `tea_a2` 提供了「排队」而不是「抢占」：消息进入**当前轮次自己的**队列，
+agent loop 在下一轮迭代开始前采纳最早的一条，把它作为普通 user 消息追加进会话，然后带着
+新的上下文继续请求模型。一轮只采纳一条，连发几条不会挤进同一个请求。
+
+```bash
+# 轮次进行中（session_id 来自 start 事件）
+curl -s -X POST http://device:8282/api/chat/queue \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
+# {"ok":true,"queued":{"id":"q_...","content":"..."},"pending":1}
+
+# 采纳前可以取消：带 id 取消一条，不带 id 取消全部
+curl -s -X POST http://device:8282/api/chat/queue/cancel \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"s_xxx","id":"q_..."}'
+```
+
+SSE 上的对应事件：
+
+| `type` | 含义 |
+| --- | --- |
+| `queue_adopted` | 已采纳：`id` / `content` / `iteration` / `pending`。该消息已落盘为 user 消息 |
+| `queue_unconsumed` | 轮次在采纳前结束（停止 / 报错 / 迭代上限），`items[]` 原样退回，客户端应放回输入框 |
+
+几条刻意的约束：
+
+- **队列随轮次存活**。轮次结束队列即销毁，不会留到下一次、无关的对话里突然发出去。
+- **模型已经给完最终答案时也会采纳**：loop 发现队列非空就继续迭代，而不是把消息留成下一轮
+  HTTP 请求；只有停止 / 报错 / 迭代上限才会退回。
+- **只收文本**。图片必须在请求时解码、校验并落到工作区，`/api/chat` 已经为「开始一轮」做了
+  这些；`/api/chat/queue` 带 `images` 会明确返回 `400 images_not_queued`，而不是静默丢掉。
+- 没有进行中的轮次时返回 `409 no_active_turn`：这时直接 `POST /api/chat` 就行。
+
+内置 Web UI 把这条路径做成了输入框行为：生成中按 **Enter** 进入排队（输入框上方显示排队条，
+每条都能点 × 取消），`Shift+Enter` 仍是换行，右侧按钮仍是「停止」。轮次结束时仍未采纳的
+消息会自动放回输入框，不会丢字。
 
 ### `metrics`：指标栏的数据来源
 
@@ -678,6 +723,7 @@ src/
   message.{h,cpp}           消息模型（wire 格式 + 存储格式）
   llm.{h,cpp}               OpenAI 兼容客户端：SSE、tool_calls 聚合、重试
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
+  prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
   tools.{h,cpp}             工具注册表与三个内置工具
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆、索引
@@ -736,8 +782,10 @@ node tests/ui_paste_image.mjs                             # 粘贴图片的浏�
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
 python3 tests/smoke_single_file.py                        # 内嵌证书 + 静态链接 + 静态下的 DNS
 python3 tests/smoke_dir_dialog.py                         # 原生目录选择器（后端选择/取消/不可用）
+python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 node tests/ui_workspace_add.mjs                           # 新增工作区（原生对话框 + 手动回退）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
+node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -761,6 +809,11 @@ node tests/ui_stream_guard.mjs                            # 生成期间切换/�
 200+cancelled、失败返回 500、完全没有选择器时返回 501 且 `/api/health` 的 `dir_picker` 为
 false。选出的路径能直接喂给 `/api/workspaces`。
 
+`tests/smoke_prompt_queue.py` 用三个假 provider 覆盖插队语义：工具执行中入队后，agent 在
+下一轮迭代采纳它并出现在后续请求里、落盘为 user 消息；模型已经流式输出完最终答案时入队，
+本轮会继续一次迭代而不是结束；按 id 取消 / 全部取消；停止轮次后未采纳的消息通过
+`queue_unconsumed` 原样退回且不进入会话；没有进行中的轮次返回 409；带图片 / 空消息返回 400。
+
 `tests/ui_workspace_add.mjs` 覆盖两条入口：有选择器时「添加工作区」**不出现表单**、直接采用
 对话框结果并切换；没有选择器时退回手动表单、隐藏「浏览…」按钮、目录不存在时给出创建提示
 并在确认后真的建目录、取消不产生副作用（并验证服务端对「路径是个文件」仍然拒绝，即使带了
@@ -769,6 +822,10 @@ false。选出的路径能直接喂给 `/api/workspaces`。
 `tests/ui_stream_guard.mjs` 起一轮慢速流式回答，在生成过程中点侧边栏：工作区按钮仍可点开菜单
 （不能变成死按钮），切换工作区 / 添加工作区 / 新建会话都被拒绝并给出原因，会话行显示为禁用；
 一轮结束后切换恢复正常。
+
+`tests/ui_queue.mjs` 在流式回答期间用真实的 Enter 按键入队：排队条按顺序出现、输入框清空、
+没有产生第二个会话；点 × 取消第一条；随后被采纳的一条从排队条消失并变成对话里的 user 气泡，
+本轮在同一 SSE 内继续（恰好两次模型请求），结束后排队条隐藏、输入框恢复「发送」。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器
