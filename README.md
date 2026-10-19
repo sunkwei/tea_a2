@@ -956,6 +956,64 @@ __nss_configure_lookup("hosts", "files dns");   // 仅静态构建
 
 ---
 
+## Windows 登录自启动（相当于 `systemctl --user enable`）
+
+Windows 没有用户级 systemd。最接近的三种做法，差别在于「跟不跟人走」：
+
+| 方案 | 相当于 | 是否推荐 |
+| --- | --- | --- |
+| **任务计划程序 + 登录触发**（`InteractiveToken`） | `systemctl --user enable --now` + `Restart=` | ✅ 本仓库自带脚本 |
+| `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` / 启动文件夹 | 只有 `enable`：没有重启、没有任务管理 | 临时用 |
+| Windows 服务（`sc create`，session 0） | 机器级 `systemctl enable`，**与用户登录无关** | 需要开机即起、多用户共享时 |
+
+Windows 服务不适合这个程序：它跑在 session 0，看不到用户桌面会话，`%USERPROFILE%`、映射的
+网络驱动器、`TEA_AGENT_HOME` 都可能不是你以为的那一个，而且注册要管理员权限。所以这里用
+任务计划程序——在你自己的会话里跑，不弹 UAC，也不用存密码。
+
+```bat
+:: 注册：登录后 5 秒启动（自动找 build-mingw → build-gcc → build-msvc）
+scripts\install-autostart.bat
+
+:: 注册并立刻启动一次；后面的参数原样透传给 tea_agent
+scripts\install-autostart.bat -Start --port 8282 --workspace C:\work\proj
+
+:: 查看 / 停止 / 卸载
+scripts\install-autostart.bat -Status
+schtasks /End /TN tea_agent
+scripts\install-autostart.bat -Uninstall
+
+:: 只看会注册什么（生成 launcher 与任务 XML，不写进计划程序）
+scripts\install-autostart.bat -DryRun
+```
+
+`pwsh -File scripts/install-autostart.ps1 ...` 与 `.bat` 等价。
+
+**它做了什么**
+
+- **隐藏窗口**：任务计划程序直接跑控制台程序会留一个黑窗口。脚本生成
+  `%TEA_AGENT_HOME%\autostart\start-hidden.vbs`，由 `wscript.exe` 用 `SW_HIDE` 起进程——
+  这正是「登录后悄悄跑起来的后台服务」应有的样子。`--no-console` 也会自动补上，
+  日志照旧写 `~/.tea_agent/logs/tea_agent.log`。
+- **崩溃重启**：VBS 在退出码非 0 时 3 秒后重拉；任务本身还配了 `<RestartOnFailure>`
+  （1 分钟一次，最多 999 次），两者叠加接近 `Restart=always`。
+- **单实例**：`<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`，拨弄两下
+  也不会起两个抢同一个端口的进程。
+- **不超时**：`<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`，服务不该被计划程序杀掉。
+- **只用当前用户身份**：`<LogonType>InteractiveToken</LogonType>` + 正常权限，
+  不需要管理员，也不保存密码。
+
+**注意**
+
+- 端口默认仍是 `127.0.0.1:8282`。要在局域网访问就加 `--host 0.0.0.0`，并先读「安全须知」。
+- 自启动用的参数固定在任务里。改参数就重新跑一次脚本（`/F` 会覆盖同名任务）。
+- `-NoHide` 可让任务直接执行 exe（调试时想看到控制台就用它）。
+- 注销/重启时进程随会话结束；下次登录由触发器重新拉起。
+- Linux 上对应的做法是 `~/.config/systemd/user/tea_agent.service` +
+  `systemctl --user enable --now tea_agent`，条件不合适（没有 systemd）时用 `@reboot` 的
+  crontab 也能达到同样效果。
+
+---
+
 ## 源码结构
 
 ```
@@ -982,7 +1040,8 @@ src/
 web/                        index.html / tokens.css / app.css / app.js（构建期嵌入）
 tools/                      embed_assets.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
 tests/e2e.ps1              端到端测试（69 项）；tests/sse_probe.mjs 严格流客户端
-scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat
+scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
+                            install-autostart.ps1（+ .bat）= Windows 登录自启动
 CMakePresets.json           msvc / mingw / posix 预设（msvc 两个 preset 都带 VSLANG=1033）
 3rd/                        第三方依赖
 ```
@@ -1022,6 +1081,7 @@ miniz 只取上游 release 里的**合并版两个文件**（`miniz.c` + `miniz.
 ```bash
 pwsh -File tests/e2e.ps1                                  # 默认构建产物
 pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
+pwsh -File tests/autostart.ps1                            # 登录自启动：launcher/任务 XML + 隐藏启动实测
 pwsh -File tests/relink-while-running.ps1 -Exe build-gcc/bin/tea_agent.exe  # 运行中也能构建（改名让位）
 
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
