@@ -201,16 +201,25 @@ button{font-family:inherit}
 .turn-dot:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 /* 跳过去的那条气泡短暂描边，让「定位到了」有明确落点 */
 .msg.user.turn-hit{box-shadow:0 0 0 2px var(--dsw-alias-state-business-primary)}
+/* 悬停提示：贴着索引条左侧弹出的一块深色卡片。宽度必须写死——元素用 right 定位，
+   只写 max-width 时浏览器会拿「left 到视口右边缘」当可用宽度，索引条贴右时就被压成
+   一列单字。正文 3 行封顶，末尾渐隐，和 dsh 的会话索引提示同一个观感。 */
 .turn-tip{
-  position:fixed;z-index:60;max-width:320px;padding:6px 10px;
-  border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);
-  background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-primary);
-  box-shadow:0 8px 24px #0008;font-size:12px;line-height:18px;
+  position:fixed;z-index:60;width:300px;max-width:calc(100vw - 48px);
+  padding:10px 12px 11px;border:.5px solid var(--dsw-alias-border-l2);
+  border-radius:var(--dsw-radius-lg);background:#232324f2;color:var(--dsw-alias-label-primary);
+  box-shadow:0 10px 28px #000000a6;font-size:13px;line-height:20px;
   white-space:normal;word-break:break-word;pointer-events:none;
-  transform:translate(-100%,-50%);
+  transform:translateY(-50%);
 }
-.turn-tip .tip-idx{color:var(--dsw-alias-label-caption);font-family:var(--ds-font-family-code);margin-right:8px}
-.turn-tip .tip-text{color:var(--dsw-alias-label-secondary)}
+.turn-tip .tip-idx{
+  display:block;margin-bottom:4px;font:11px/15px var(--ds-font-family-code);
+  color:var(--dsw-alias-label-caption);letter-spacing:.03em;
+}
+.turn-tip .tip-text{
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;
+  max-height:80px;overflow:hidden;color:var(--dsw-alias-label-secondary);
+}
 @media (max-width:900px){.turn-index{display:none}}
 .stream-caret{display:inline-block;width:6px;height:14px;margin-left:2px;vertical-align:-2px;
   background:var(--dsw-alias-label-tertiary);animation:blink 1s steps(1,end) infinite}

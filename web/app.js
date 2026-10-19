@@ -623,11 +623,16 @@
     tip.dataset.turn = String(ord);
     tip.classList.remove('hidden');
     var r = dot.getBoundingClientRect();
+    if (!r.width && !r.height) { hideTurnTip(); return; }   // 索引条被窄屏隐藏时不该弹
     var top = r.top + r.height / 2;
     var h = tip.offsetHeight;
     // 贴边时把 tip 夹回视口，别让第一条/最后一条的提示被窗口切掉。
     top = Math.max(h / 2 + 8, Math.min(window.innerHeight - h / 2 - 8, top));
-    tip.style.left = (r.left - 8) + 'px';
+    // 用 right 而不是 left 定位：left + max-width 会让浏览器把「left 到视口右缘」
+    // 当成可用宽度，索引条本来就贴着右边，提示会被压成一列单字。right 定位下宽度
+    // 由 CSS 给定，锚在索引条左缘往左长。
+    tip.style.left = 'auto';
+    tip.style.right = (window.innerWidth - r.left + 10) + 'px';
     tip.style.top = top + 'px';
   }
   function updateActiveTurn() {

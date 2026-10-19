@@ -181,12 +181,23 @@ roles: {main: {provider: mock, model: m}}
     var t = document.getElementById('turn-tip');
     var dot = document.querySelectorAll('#turn-index .turn-dot')[9];
     var tr = t.getBoundingClientRect(), dr = dot.getBoundingClientRect();
+    var text = t.querySelector('.tip-text');
+    // How many lines the preview actually wraps into. The regression we care
+    // about is the tip collapsing to its shrink-to-fit width next to the rail,
+    // which wrapped the preview one character per line.
+    var range = document.createRange();
+    range.selectNodeContents(text);
+    var lines = range.getClientRects().length;
     return {
       hidden: t.classList.contains('hidden'),
       turn: t.dataset.turn,
-      text: t.querySelector('.tip-text') ? t.querySelector('.tip-text').textContent : '',
+      text: text ? text.textContent : '',
       whole: t.textContent,
+      width: Math.round(tr.width),
+      height: Math.round(tr.height),
       leftOfDot: tr.right <= dr.left,
+      insideViewport: tr.left >= 0 && tr.right <= window.innerWidth + 0.5,
+      lines: lines,
       visible: tr.width > 0 && tr.height > 0
     };
   })()`);
@@ -194,6 +205,35 @@ roles: {main: {provider: mock, model: m}}
   check('the tip names the turn and shows the 64-char preview',
     tip.turn === '10' && tip.text === longPreview && tip.whole.indexOf('第 10 条') >= 0, JSON.stringify(tip));
   check('the tip sits beside the marker without covering it', tip.leftOfDot === true, JSON.stringify(tip));
+  check('the tip is a card, not a one-character-per-line column',
+    tip.width >= 260 && tip.width <= 320, 'width=' + tip.width);
+  check('the 64-char preview wraps into at most 4 lines',
+    tip.lines >= 2 && tip.lines <= 4, 'lines=' + tip.lines + ' height=' + tip.height);
+  check('the tip stays inside the viewport', tip.insideViewport === true, JSON.stringify(tip));
+
+  // Same check on a narrower window: the rail is still visible at 950px, and the
+  // tip used to collapse because it was positioned with \`left\` near the edge.
+  await send('Emulation.setDeviceMetricsOverride', { width: 950, height: 900, deviceScaleFactor: 1, mobile: false });
+  await sleep(300);
+  await evalJs(`(function(){
+    var dot = document.querySelectorAll('#turn-index .turn-dot')[9];
+    dot.dispatchEvent(new MouseEvent('mouseenter'));
+    return true;
+  })()`);
+  await sleep(150);
+  const narrow = await evalJs(`(function(){
+    var t = document.getElementById('turn-tip');
+    var dot = document.querySelectorAll('#turn-index .turn-dot')[9];
+    var tr = t.getBoundingClientRect(), dr = dot.getBoundingClientRect();
+    return { width: Math.round(tr.width), height: Math.round(tr.height),
+             leftOfDot: tr.right <= dr.left, inside: tr.left >= 0 };
+  })()`);
+  check('the tip keeps its width when the window is narrow',
+    narrow.width >= 260 && narrow.width <= 320 && narrow.height <= 110, JSON.stringify(narrow));
+  check('the narrow tip still sits beside the marker inside the viewport',
+    narrow.leftOfDot === true && narrow.inside === true, JSON.stringify(narrow));
+  await send('Emulation.clearDeviceMetricsOverride');
+  await sleep(250);
 
   // Click marker 10: the corresponding user bubble must land near the top.
   await evalJs(`document.querySelectorAll('#turn-index .turn-dot')[9].click(); true`);
