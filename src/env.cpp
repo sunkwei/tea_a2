@@ -12,7 +12,12 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <windows.h>
+#include <ws2tcpip.h>
 #else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -249,6 +254,117 @@ EnvironmentInfo probe_machine() {
 const EnvironmentInfo& machine_environment() {
   static const EnvironmentInfo env = probe_machine();
   return env;
+}
+
+namespace {
+
+bool ipv4_is_usable(const std::string& ip) {
+  if (ip.empty() || ip == "0.0.0.0") return false;
+  // Loopback is not an address another device can reach.
+  if (ip.compare(0, 4, "127.") == 0) return false;
+  return true;
+}
+
+void add_unique(std::vector<std::string>* out, const std::string& ip) {
+  if (!ipv4_is_usable(ip)) return;
+  for (std::size_t i = 0; i < out->size(); ++i) {
+    if ((*out)[i] == ip) return;
+  }
+  out->push_back(ip);
+}
+
+/// The local address that would carry traffic to the outside world.
+///
+/// A UDP connect() transmits nothing; it only asks the routing table to pick a
+/// source address, which is exactly the "active" address a phone on the same
+/// LAN has to type. 192.0.2.1 is TEST-NET-1: no DNS lookup is involved and no
+/// host has to exist, only a default route. Empty when the machine has none
+/// (an isolated device), and the caller then falls back to enumeration.
+std::string default_route_ipv4() {
+#ifdef _WIN32
+  // getaddrinfo() and the socket calls below need Winsock; httplib does its own
+  // WSAStartup for the server/client, but this probe may run before either.
+  static bool wsa_ready = false;
+  if (!wsa_ready) {
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return std::string();
+    wsa_ready = true;
+  }
+  SOCKET sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+  const bool valid = sock != INVALID_SOCKET;
+#else
+  int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+  const bool valid = sock >= 0;
+#endif
+  if (!valid) return std::string();
+
+  struct sockaddr_in dst;
+  std::memset(&dst, 0, sizeof(dst));
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(53);
+  inet_pton(AF_INET, "192.0.2.1", &dst.sin_addr);
+
+  std::string ip;
+  if (::connect(sock, reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)) == 0) {
+    struct sockaddr_in self;
+    std::memset(&self, 0, sizeof(self));
+#ifdef _WIN32
+    int len = static_cast<int>(sizeof(self));
+#else
+    socklen_t len = sizeof(self);
+#endif
+    if (::getsockname(sock, reinterpret_cast<struct sockaddr*>(&self), &len) == 0) {
+      char buf[INET_ADDRSTRLEN];
+      if (inet_ntop(AF_INET, &self.sin_addr, buf, sizeof(buf)) != nullptr) ip = buf;
+    }
+  }
+#ifdef _WIN32
+  ::closesocket(sock);
+#else
+  ::close(sock);
+#endif
+  return ip;
+}
+
+/// Every IPv4 address the host resolves to, in interface order. This supplies
+/// the secondary addresses and covers a device that has no default route but is
+/// still reachable on a LAN.
+std::vector<std::string> enumerate_ipv4() {
+  std::vector<std::string> out;
+  const std::string host = machine_environment().hostname;
+  if (host.empty()) return out;
+  struct addrinfo hints;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo* found = nullptr;
+  if (getaddrinfo(host.c_str(), nullptr, &hints, &found) != 0) return out;
+  for (struct addrinfo* it = found; it != nullptr; it = it->ai_next) {
+    if (!it->ai_addr || it->ai_addrlen < sizeof(struct sockaddr_in)) continue;
+    const struct sockaddr_in* in = reinterpret_cast<const struct sockaddr_in*>(it->ai_addr);
+    char buf[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf)) == nullptr) continue;
+    add_unique(&out, buf);
+  }
+  freeaddrinfo(found);
+  return out;
+}
+
+std::vector<std::string> probe_local_ipv4() {
+  std::vector<std::string> out;
+  add_unique(&out, default_route_ipv4());
+  const std::vector<std::string> rest = enumerate_ipv4();
+  for (std::size_t i = 0; i < rest.size(); ++i) add_unique(&out, rest[i]);
+  return out;
+}
+
+}  // namespace
+
+std::vector<std::string> local_ipv4_addresses() {
+  // Probed once: the banner and every "open this in a browser" hint must agree,
+  // and an address that appears later does not have to rewrite what was printed.
+  static const std::vector<std::string> addresses = probe_local_ipv4();
+  return addresses;
 }
 
 uint64_t free_space_bytes(const std::string& path) {
