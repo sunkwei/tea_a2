@@ -246,6 +246,10 @@ try {
   await sleep(1500);
   check('directory is created on confirm', fs.existsSync(newDir));
   check('UI switches to the new workspace', (await chip()) === 'proj_new', await chip());
+  // 标签页标题跟着工作区走：同时开着多个页面时靠它区分。
+  const title = await evalJs(`document.title`);
+  check('browser title names the new workspace',
+    title === 'proj_new · TEA AGENT', JSON.stringify(title));
 
   // Cancel leaves nothing behind.
   const neverDir = path.join(tmp, 'proj_never');

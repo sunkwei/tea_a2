@@ -1339,9 +1339,17 @@
       });
     });
   }
+  /// 浏览器标签页 / 窗口标题：带上当前工作区，同时在开着的多个页面之间一眼区分。
+  /// 工作区名放在最前面，标签页被截断时先保住最能区分的那一段。
+  var APP_NAME = 'TEA AGENT';
+  function updateTitle() {
+    var name = state.workspace ? state.workspace.name : '';
+    document.title = name ? (name + ' · ' + APP_NAME) : APP_NAME;
+  }
   function renderWorkspaceChip() {
     $('ws-chip-text').textContent = state.workspace ? state.workspace.name : '选择工作区';
     $('ws-chip').title = state.workspace ? state.workspace.path : '';
+    updateTitle();
   }
   function renderWorkspaceMenu() {
     var dd = $('ws-dropdown');
@@ -2241,6 +2249,7 @@
     $('logs-autoscroll').checked = state.logsAutoScroll;
     state.sidebarHidden = ls.sidebar_hidden === true;
     applySidebar();
+    updateTitle();                       // 加载工作区之前也先立住一个确定的标题
     state.stats = emptyStats();
     bind();
     updateComposer();

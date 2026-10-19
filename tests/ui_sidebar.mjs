@@ -125,6 +125,8 @@ roles: {main: {provider: mock, model: m}}
 
   let s = await layout();
   check('sidebar starts visible', s && s.sidebarWidth > 200 && s.collapsed === false, JSON.stringify(s));
+  check('the tab title names the current workspace',
+    (await evalJs('document.title')) === 'proj · TEA AGENT', await evalJs('document.title'));
   check('show button is hidden while the sidebar is open', s && s.showVisible === false, JSON.stringify(s));
   check('chat column starts narrow', s && s.columnWidth <= 780 + 2, String(s && s.columnWidth));
 
