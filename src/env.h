@@ -34,6 +34,13 @@ struct EnvironmentInfo {
 /// Machine-level facts, probed once and cached for the process lifetime.
 const EnvironmentInfo& machine_environment();
 
+/// The machine's usable IPv4 addresses (loopback excluded), most useful first:
+/// the address that carries the default route comes first, which is the one a
+/// browser on another device on the same LAN can actually open. Empty when the
+/// device has no network at all. Probed once per process and cached, so every
+/// URL derived from it stays consistent.
+std::vector<std::string> local_ipv4_addresses();
+
 /// Free bytes on the volume holding `path` (0 when unknown). Cheap enough to
 /// call per workspace open; the value is then kept for the process lifetime.
 uint64_t free_space_bytes(const std::string& path);

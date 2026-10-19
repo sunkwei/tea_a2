@@ -296,9 +296,15 @@ int main(int argc, char** argv) {
     LOG_WARN("configuration missing: ", config.error);
     LOG_WARN("starting in setup mode: the web UI will ask for ", config_path);
     // The two WARN lines above already explain the situation (and reach the
-    // console by default); here only the actionable hint for a human.
-    console_write_line("hint: open http://" + args.get("host", "127.0.0.1") + ":" +
-                       args.get("port", "8282") + "/ to upload " + config_path);
+    // console by default); here only the actionable hint for a human. Same URL
+    // expansion as the banner: with `--host 0.0.0.0` the address to type is the
+    // machine's, not its loopback.
+    const std::string setup_port = args.get("port", "8282");
+    const std::vector<std::string> setup_urls =
+        reachable_urls(args.get("host", "127.0.0.1"), std::atoi(setup_port.c_str()));
+    console_write_line("hint: open " +
+                       (setup_urls.empty() ? "http://127.0.0.1:" + setup_port : setup_urls.front()) +
+                       "/ to upload " + config_path);
   }
   if (config_ok) {
     std::string err;
@@ -390,7 +396,20 @@ int main(int argc, char** argv) {
     banner += "\n";
     banner += "  " TEA_AGENT_NAME " " TEA_AGENT_VERSION_STRING "\n";
     banner += "  ------------------------------------------------------------\n";
-    banner += "  Web UI      : " + server.url() + "\n";
+    // `--host 0.0.0.0` binds every interface, so printing 127.0.0.1 there is
+    // useless: the user is starting it precisely so another device can open it.
+    // Show the address that carries the default route first (that is the one a
+    // phone on the same LAN types), then any other interface, then loopback.
+    const std::vector<std::string> urls = server.urls();
+    for (std::size_t i = 0; i < urls.size(); ++i) {
+      banner += (i == 0 ? "  Web UI      : " : "                ") + urls[i];
+      // Only label the loopback line when other addresses came first; with a
+      // specific bind it is the only line and needs no explanation.
+      if (urls.size() > 1 && urls[i].find("//127.0.0.1:") != std::string::npos) {
+        banner += "   (this machine only)";
+      }
+      banner += "\n";
+    }
     banner += "  Config      : " + config.path +
               (config.loaded ? std::string("\n")
                              : std::string("  (missing - upload it in the web UI)\n"));

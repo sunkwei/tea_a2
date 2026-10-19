@@ -189,6 +189,12 @@ build/bin/tea_agent --workspace . --open
 那种情况下静默启动只会把问题藏起来。
 
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
+
+用 `--host 0.0.0.0` 启动时，启动信息里的 `Web UI` 不再是 `127.0.0.1`，而是**这台设备当前的
+活跃地址**（走默认路由的那张网卡，UDP `connect()` 只选源地址、不发包），所以可以直接把它
+念给同一局域网的手机/另一台电脑；其余网卡地址排在其后，`127.0.0.1` 放最后并标注
+`(this machine only)`。绑定了具体地址时只打印那一个。没有任何可用地址（离线的板子）时回落到
+`127.0.0.1`。`--open` 打开的永远是本机回环地址——它跑在服务端这台机器上，不依赖网络状态。
 左侧栏右上角的按钮（或 `Ctrl/Cmd+B`）可以把它收起，把横向空间让给正文；收起后顶栏左侧
 出现同一个图标，点一下即可展开，状态记在浏览器里，下次打开保持原样。
 
@@ -1015,6 +1021,7 @@ scripts\install-autostart.bat -DryRun
 **注意**
 
 - 端口默认仍是 `127.0.0.1:8282`。要在局域网访问就加 `--host 0.0.0.0`，并先读「安全须知」。
+  启动信息会把该网卡的活跃地址（如 `http://192.168.1.38:8282`）直接打印出来。
 - 自启动用的参数固定在任务里。改参数就重新跑一次脚本（`/F` 会覆盖同名任务）。
 - `-NoHide` 可让任务直接执行 exe（调试时想看到控制台就用它）。
 - 注销/重启时进程随会话结束；下次登录由触发器重新拉起。
@@ -1097,6 +1104,7 @@ pwsh -File tests/relink-while-running.ps1 -Exe build-gcc/bin/tea_agent.exe  # �
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
 python3 tests/smoke_console_level.py                      # 控制台只回声 WARN/ERROR、日志文件仍是 INFO
+python3 tests/smoke_bind_urls.py                          # --host 0.0.0.0 打印活跃地址，且该地址真能打开 UI
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
@@ -1162,6 +1170,12 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 只打印一次；`--console-level info` 让终端重新出现 `INFO`；`--no-console` 与 `--quiet` 都不回声
 日志（`--quiet` 还省掉横幅），但文件照写；`--console-level verbose` 报错并按 `warn` 处理；
 `--log-level error` 只收窄文件、不影响控制台；`--help` 同时列出两个开关。
+
+`tests/smoke_bind_urls.py` 钉住启动信息里的 `Web UI` 行：`--host 0.0.0.0` 时第一条必须是
+本机**走默认路由的活跃地址**（与测试自己用 UDP `connect()` 选出的源地址一致），而不是
+`127.0.0.1`；该地址在服务运行期间真的能取到 `/` 且返回内置 UI；回环地址仍然列出并标注
+`(this machine only)`；setup 模式的 `hint: open …` 用同一个地址；`--host 127.0.0.1` 只打印一条
+且没有多余标注；绑定某个具体地址时原样打印。
 
 `tests/ui_turn_index.mjs` 预置一个 30 轮的会话再打开页面：右侧索引必须有 30 个编号；第 10 条
 用户输入故意超过 64 个字符，断言 `title` 与悬停 tip 都只保留前 64 个字符加省略号，且 tip

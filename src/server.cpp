@@ -14,6 +14,7 @@
 
 #include "agent.h"
 #include "archive.h"
+#include "env.h"
 #include "http.h"
 #include "log.h"
 #include "trajectory.h"
@@ -22,6 +23,29 @@
 #include "web_assets.h"
 
 namespace tea {
+
+std::vector<std::string> reachable_urls(const std::string& bind_host, int port) {
+  std::vector<std::string> urls;
+  const std::string port_text = std::to_string(port);
+  const std::string host = bind_host.empty() ? std::string("127.0.0.1") : bind_host;
+  const bool wildcard = host == "0.0.0.0" || host == "::" || host == "[::]" || host == "*";
+  if (!wildcard) {
+    // An explicit bind address is exactly what a browser has to type (an IPv6
+    // literal needs brackets in a URL).
+    const bool ipv6 = host.find(':') != std::string::npos;
+    urls.push_back("http://" + (ipv6 ? "[" + host + "]" : host) + ":" + port_text);
+    return urls;
+  }
+  // Wildcard: every interface is bound, so the useful answer is this machine's
+  // address on the LAN, not the loopback the banner used to print. Loopback is
+  // still listed last, because it is the one that always works.
+  const std::vector<std::string> addresses = local_ipv4_addresses();
+  for (std::size_t i = 0; i < addresses.size(); ++i) {
+    urls.push_back("http://" + addresses[i] + ":" + port_text);
+  }
+  urls.push_back("http://127.0.0.1:" + port_text);
+  return urls;
+}
 
 namespace {
 
@@ -1999,9 +2023,11 @@ bool ApiServer::is_running() const { return impl_ && impl_->server.is_running();
 int ApiServer::port() const { return options_.port; }
 
 std::string ApiServer::url() const {
-  const std::string host = options_.host.empty() ? "127.0.0.1" : options_.host;
-  const std::string display = (host == "0.0.0.0" || host == "::") ? "127.0.0.1" : host;
-  return "http://" + display + ":" + std::to_string(options_.port);
+  return "http://127.0.0.1:" + std::to_string(options_.port);
+}
+
+std::vector<std::string> ApiServer::urls() const {
+  return reachable_urls(options_.host, options_.port);
 }
 
 }  // namespace tea
