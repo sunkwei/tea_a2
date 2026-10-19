@@ -556,6 +556,89 @@ try {
         (-not (Test-Path (Join-Path $wsDir ".tea_agent_run\trajectories\$offSession.jsonl")))
     Check "enable_trajectory=false omits trajectory_id from done" `
         ([string]::IsNullOrEmpty($offDone.trajectory_id)) "got '$($offDone.trajectory_id)'"
+
+    # --- forking: a branch copies the transcript through a selected turn ------
+    # The child must contain the selected turn in full (question + answer + tool
+    # results), the parent must stay byte-for-byte the session it was, and the
+    # lineage has to survive a reload (file + index.json), because the sidebar
+    # shows it.
+    $forkParent = (Invoke-RestMethod -Method Post -Uri "$base/api/workspaces/$wsId/sessions" `
+            -ContentType 'application/json' -Body '{"title":"fork parent"}' -TimeoutSec 10).id
+    $null = Invoke-ChatTurn 'mock' $forkParent 'fork turn one'
+    $null = Invoke-ChatTurn 'mock' $forkParent 'fork turn two'
+    $parent = Invoke-RestMethod "$base/api/sessions/$forkParent"
+    $userIndexes = @()
+    for ($i = 0; $i -lt $parent.messages.Count; $i++) {
+        if ($parent.messages[$i].role -eq 'user') { $userIndexes += $i }
+    }
+    $parentCount = $parent.messages.Count
+    Check "fork parent has two user turns" ($userIndexes.Count -eq 2) "count=$($userIndexes.Count)"
+
+    $fork = Invoke-RestMethod -Method Post -Uri "$base/api/sessions/$forkParent/fork" `
+        -ContentType 'application/json' -Body (@{ message_index = $userIndexes[0] } | ConvertTo-Json -Compress) `
+        -TimeoutSec 15
+    Check "POST fork returns a new session" `
+        (($fork.session.id -ne $forkParent) -and (-not [string]::IsNullOrEmpty($fork.session.id)))
+    Check "the fork records its parent and turn" `
+        (($fork.session.forked_from -eq $forkParent) -and ($fork.session.fork_turn -eq 1)) `
+        "from=$($fork.session.forked_from) turn=$($fork.session.fork_turn)"
+    Check "the fork copies the transcript through the end of turn 1" `
+        (($fork.messages.Count -eq $userIndexes[1]) -and ($fork.messages[$fork.messages.Count - 1].role -eq 'assistant')) `
+        "copied=$($fork.messages.Count) expected=$($userIndexes[1]) last=$($fork.messages[$fork.messages.Count - 1].role)"
+    Check "the fork gets a title that names the branch point" `
+        ($fork.session.title -match '^分叉 1 · ') "title='$($fork.session.title)'"
+
+    $parentAfter = Invoke-RestMethod "$base/api/sessions/$forkParent"
+    Check "the parent is untouched by the fork" `
+        (($parentAfter.messages.Count -eq $parentCount) -and ($parentAfter.session.title -eq 'fork parent'))
+
+    $forkFile = Get-Content (Join-Path $runDir "sessions\$($fork.session.id).json") -Raw | ConvertFrom-Json
+    Check "the fork's lineage is persisted in the session file" `
+        (($forkFile.forked_from -eq $forkParent) -and ($forkFile.fork_turn -eq 1))
+    $forkList = Invoke-RestMethod "$base/api/workspaces/$wsId/sessions"
+    $forkEntry = $forkList.sessions | Where-Object { $_.id -eq $fork.session.id }
+    Check "the session index carries the lineage" `
+        (($forkEntry.forked_from -eq $forkParent) -and ($forkEntry.fork_turn -eq 1)) `
+        "from=$($forkEntry.forked_from) turn=$($forkEntry.fork_turn)"
+
+    $notUserStatus = 0
+    try {
+        Invoke-RestMethod -Method Post -Uri "$base/api/sessions/$forkParent/fork" -ContentType 'application/json' `
+            -Body (@{ message_index = ($userIndexes[0] + 1) } | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
+    } catch { $notUserStatus = [int]$_.Exception.Response.StatusCode }
+    Check "forking at a non-user message is 400" ($notUserStatus -eq 400) "status=$notUserStatus"
+
+    $pastEndStatus = 0
+    try {
+        Invoke-RestMethod -Method Post -Uri "$base/api/sessions/$forkParent/fork" -ContentType 'application/json' `
+            -Body (@{ message_index = ($parentCount + 5) } | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
+    } catch { $pastEndStatus = [int]$_.Exception.Response.StatusCode }
+    Check "forking past the end of the transcript is 400" ($pastEndStatus -eq 400) "status=$pastEndStatus"
+
+    $unknownForkStatus = 0
+    try {
+        Invoke-RestMethod -Method Post -Uri "$base/api/sessions/s_doesnotexist/fork" -ContentType 'application/json' `
+            -Body '{}' -TimeoutSec 10 | Out-Null
+    } catch { $unknownForkStatus = [int]$_.Exception.Response.StatusCode }
+    Check "forking an unknown session is 404" ($unknownForkStatus -eq 404) "status=$unknownForkStatus"
+
+    $forkAll = Invoke-RestMethod -Method Post -Uri "$base/api/sessions/$forkParent/fork" `
+        -ContentType 'application/json' -Body '{}' -TimeoutSec 15
+    Check "a fork without message_index copies the whole session" `
+        (($forkAll.messages.Count -eq $parentCount) -and ($forkAll.session.fork_turn -eq 2)) `
+        "copied=$($forkAll.messages.Count) turn=$($forkAll.session.fork_turn)"
+
+    $null = Invoke-ChatTurn 'mock' $fork.session.id 'branch follow-up'
+    $childAfter = Invoke-RestMethod "$base/api/sessions/$($fork.session.id)"
+    $parentStill = Invoke-RestMethod "$base/api/sessions/$forkParent"
+    $childUsers = @($childAfter.messages | Where-Object { $_.role -eq 'user' })
+    $parentUsers = @($parentStill.messages | Where-Object { $_.role -eq 'user' })
+    Check "a message sent to the fork continues there" `
+        (($childAfter.messages.Count -gt $fork.messages.Count) -and `
+         ($childUsers[$childUsers.Count - 1].content -eq 'branch follow-up'))
+    Check "the branch and the parent keep separate transcripts" `
+        (($parentStill.messages.Count -eq $parentCount) -and `
+         (-not ($parentUsers | Where-Object { $_.content -eq 'branch follow-up' })))
 }
 catch {
     Write-Host "`nUNEXPECTED ERROR: $_" -ForegroundColor Red

@@ -24,6 +24,9 @@
     turnSeq: 0, attachRetries: 0,
     // 你主动离开了哪个会话的轮次（它还在服务端跑）：别又把人拽回去
     detached: null,
+    /// 选中的分叉点：{ sid, mid, ord, preview }。下一条消息先 POST /fork 建一个
+    /// 从这条轮次分出去的新会话，再发进那个会话；当前会话不动。null = 未选。
+    fork: null,
     files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 },
     memory: [], logsTimer: null, logsAutoScroll: true,
     agentDoc: {
@@ -613,6 +616,45 @@
     }
     return out;
   }
+  /// 选中的分叉点：下一条消息会先建一个从这一轮分出去的新会话，再发进去。
+  /// 点同一编号、点 × 或按 Esc 都能取消——它只影响下一条消息。
+  function clearForkPoint(silent) {
+    if (!state.fork) return;
+    state.fork = null;
+    renderForkStrip();
+    renderTurnIndex();
+    if (!silent) toast('已取消分叉点');
+  }
+  function forkPointFor(sid, mid) {
+    return state.fork && state.fork.sid === sid && state.fork.mid === mid ? state.fork : null;
+  }
+  function setForkPoint(t) {
+    if (!state.session) return;
+    state.fork = { sid: state.session.id, mid: t.mid, ord: t.ord, preview: t.preview };
+    renderForkStrip();
+    renderTurnIndex();
+  }
+  function renderForkStrip() {
+    var strip = $('fork-strip');
+    if (!strip) return;
+    clear(strip);
+    var f = state.fork;
+    if (!f || !state.session || state.session.id !== f.sid) {
+      strip.classList.add('hidden');
+      updatePlaceholder();
+      return;
+    }
+    strip.classList.remove('hidden');
+    strip.appendChild(el('span', 'f-tag', '分叉点'));
+    var text = el('span', 'f-text', '第 ' + f.ord + ' 条：' + f.preview);
+    text.title = '下一条消息会写进一个从第 ' + f.ord + ' 条分出来的新会话；当前会话保持原样';
+    strip.appendChild(text);
+    var del = btn('f-cancel', '×', function () { clearForkPoint(); });
+    del.title = '取消分叉点（也可以再点一次索引里的这个编号，或按 Esc）';
+    del.setAttribute('aria-label', '取消分叉点');
+    strip.appendChild(del);
+    updatePlaceholder();
+  }
   function hideTurnTip() {
     var tip = $('turn-tip');
     if (tip) tip.classList.add('hidden');
@@ -621,7 +663,8 @@
     var tip = $('turn-tip');
     if (!tip) return;
     clear(tip);
-    tip.appendChild(el('span', 'tip-idx', '第 ' + ord + ' 条'));
+    tip.appendChild(el('span', 'tip-idx', '第 ' + ord + ' 条' +
+      (dot.classList.contains('fork') ? ' · 分叉点（再点取消）' : '')));
     tip.appendChild(el('span', 'tip-text', preview));
     tip.dataset.turn = String(ord);
     tip.classList.remove('hidden');
@@ -696,8 +739,18 @@
     rail.classList.remove('hidden');
     rail.dataset.count = String(turns.length);
     rail.setAttribute('aria-label', '对话跳转索引：共 ' + turns.length + ' 条用户消息');
+    var sid = state.session ? state.session.id : null;
     turns.forEach(function (t) {
-      var dot = btn('turn-dot', String(t.ord), function () { jumpToTurn(t.mid); });
+      var armed = !!forkPointFor(sid, t.mid);
+      var dot = btn('turn-dot', String(t.ord), function () {
+        jumpToTurn(t.mid);
+        // 生成中按 Enter 只会排队，排队消息不携带分叉；这时只做跳转，避免
+        // 让用户以为排进去的消息会进新会话。
+        if (state.streaming) return;
+        if (forkPointFor(sid, t.mid)) clearForkPoint(); else setForkPoint(t);
+      });
+      dot.classList.toggle('fork', armed);
+      dot.setAttribute('aria-pressed', armed ? 'true' : 'false');
       dot.dataset.mid = String(t.mid);
       dot.dataset.turn = String(t.ord);
       dot.title = '第 ' + t.ord + ' 条：' + t.preview;
@@ -745,6 +798,7 @@
       box.appendChild(empty);
     }
     renderTurnIndex();
+    renderForkStrip();
   }
   /// 流式渲染只在「结构」变化时才重建气泡；纯文字增长只更新最后一个段落。
   /// 以前每来一个 delta 就 assistantNode(...) 重建整个气泡：历史段落会被重新
@@ -1224,7 +1278,7 @@
 
   function setStreaming(on) {
     state.streaming = on;
-    $('input').placeholder = on ? QUEUE_PLACEHOLDER : INPUT_PLACEHOLDER;
+    updatePlaceholder();
     updateComposer();
     if (on) {
       startMetricsTicker();
@@ -1239,6 +1293,11 @@
     $('ws-chip').title = on ? '正在生成回答：结束后才能切换工作区'
                             : '切换工作区，或添加一个新的项目目录';
     Array.prototype.forEach.call(document.querySelectorAll('.sess-row'), function (b) { b.disabled = on; });
+  }
+  function updatePlaceholder() {
+    $('input').placeholder = state.streaming ? QUEUE_PLACEHOLDER
+      : (state.fork && state.session && state.fork.sid === state.session.id
+        ? FORK_PLACEHOLDER : INPUT_PLACEHOLDER);
   }
   function finalizeStream() {
     var sid = state.session ? state.session.id : null;
@@ -1324,6 +1383,7 @@
   // 这里再放回输入框，绝不悄悄丢掉用户已经打出来的字。
   var INPUT_PLACEHOLDER = '输入消息，Enter 发送，Shift+Enter 换行（可直接粘贴图片）';
   var QUEUE_PLACEHOLDER = '会话进行中：Enter 排队（下一轮采纳，采纳前可取消），Shift+Enter 换行';
+  var FORK_PLACEHOLDER = '分叉模式：Enter 会新建一个从选中轮次分出的会话，当前会话保持原样';
 
   function renderQueue() {
     var strip = $('queue-strip');
@@ -1567,10 +1627,43 @@
       toast('上一轮仍在进行，已被这条消息顶掉');
     }
 
-    var ready = state.session ? Promise.resolve(state.session)
-      : api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions',
+    // 分叉点只对「当前会话」有效：先把消息要去的会话建出来，再发进去。分叉
+    // 失败就什么都不发（输入和图片还回输入框），绝不悄悄发进用户正想离开的会话。
+    var fork = state.fork && state.session && state.fork.sid === state.session.id ? state.fork : null;
+    var forkFailed = false;
+    var ready;
+    if (fork) {
+      ready = api('api/sessions/' + encodeURIComponent(fork.sid) + '/fork',
+        { method: 'POST', body: { message_index: fork.mid } })
+        .then(function (d) {
+          if (!d || !d.session || !d.session.id) throw new Error('服务端没有返回新会话');
+          state.session = d.session;
+          state.messages = d.messages || [];
+          state.live = null; state.liveNode = null; state.liveView = null;
+          state.streamError = null; state.ended = false; state.stickBottom = true;
+          clearQueue();
+          state.trajectory = []; state.trajFull = {}; state.lastTrajectoryId = null;
+          clearForkPoint(true);          // 分叉已经落地：别让它影响再下一条
+          saveLS();
+          renderCrumbs(); renderSessions(); renderChat(); renderMetrics();
+          loadSessions();
+          toast('已从第 ' + fork.ord + ' 条分叉：' + (state.session.title || ''));
+          return state.session;
+        }, function (e) {
+          forkFailed = true;
+          ta.value = text; autoGrow();
+          state.attachments = images;
+          renderAttachments();
+          toast('分叉失败：' + e.message);
+          throw e;
+        });
+    } else if (state.session) {
+      ready = Promise.resolve(state.session);
+    } else {
+      ready = api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions',
         { method: 'POST', body: { title: text.slice(0, 24) || '图片' } })
         .then(function (s) { state.session = s; saveLS(); loadSessions(); return s; });
+    }
 
     // 缩略图条立刻清空；乐观消息自己带 data URL，回读会话时换成服务端路径。
     state.attachments = [];
@@ -1601,6 +1694,7 @@
         signal: ctrl.signal
       }).then(readTurnStream);
     }).then(finalizeStream, function (err) {
+      if (forkFailed) return;         // 分叉失败时输入已还回，别再报一次流错误
       if (!err || err.name !== 'AbortError') {
         state.streamError = '请求失败：' + (err && err.message ? err.message : String(err));
         loadHealth(true).catch(function () {});   // 请求都发不出去：立刻如实反映
@@ -2079,6 +2173,7 @@
       state.indexPath = d.index_path || '';
       renderWorkspaceMenu();
       if (!state.workspaces.length) {
+        clearForkPoint(true);
         state.workspace = null; state.sessions = []; state.session = null; state.messages = [];
         state.trajectory = []; state.lastTrajectoryId = null;
         clearQueue();
@@ -2114,6 +2209,7 @@
     var changed = !state.workspace || state.workspace.id !== w.id;
     state.workspace = w;
     if (changed) {
+      clearForkPoint(true);
       state.session = null; state.messages = []; state.live = null; state.streamError = null;
       clearQueue();
       state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
@@ -2148,6 +2244,7 @@
   function openSession(sid) {
     // 主动点开会话 = 想重新跟上它：清掉「已离开」标记，下面的 maybeAttach 才会接回去。
     if (state.detached === sid) state.detached = null;
+    clearForkPoint(true);
     return api('api/sessions/' + encodeURIComponent(sid)).then(function (d) {
       state.session = d.session || { id: sid };
       state.messages = d.messages || [];
@@ -2170,6 +2267,7 @@
     }, function (e) { toast('加载会话失败：' + e.message); });
   }
   function newSessionDraft() {
+    clearForkPoint(true);
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
     state.stickBottom = true;
     clearQueue();
@@ -2810,6 +2908,7 @@
         toggleSidebar();
       }
       if (e.key === 'Escape') {                                          // Esc 关闭浮层
+        if (state.fork) clearForkPoint();                                // 先撤掉分叉点
         closeDropdowns();
         if (!setupGate.open) closeDialog();
       }

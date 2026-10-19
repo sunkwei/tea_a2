@@ -62,6 +62,12 @@ struct SessionInfo {
   std::string created_at;
   std::string updated_at;
   int message_count = 0;
+  /// Lineage of a forked session: the id it was copied from and the 1-based
+  /// user-turn ordinal in that parent. Empty / 0 for a root session. Stored in
+  /// the session file and in the index, so a branch of a branch keeps it and
+  /// the sidebar can say where the branch came from.
+  std::string forked_from;
+  int fork_turn = 0;
 
   nlohmann::json to_json() const;
   static SessionInfo from_json(const nlohmann::json& j);

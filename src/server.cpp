@@ -1109,6 +1109,72 @@ void ApiServer::Impl::install_routes() {
               send_ok(res);
             });
 
+  // ---- forking a session -------------------------------------------------
+  // A branch starts as a copy of the parent's transcript through the end of the
+  // selected turn; the next message sent to it becomes that branch's next turn
+  // while the parent keeps going its own way. `message_index` addresses a user
+  // message of the parent (the child also gets the assistant/tool messages that
+  // answered it), omitted or negative forks at the end, and `title` overrides
+  // the generated "分叉 <turn> · <parent title>".
+  svr.Post(R"(/api/sessions/([^/]+)/fork)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             nlohmann::json body;
+             if (!parse_json_body(req, &body, res)) return;
+             const std::string session_id = req.matches[1].str();
+             Workspace ws;
+             std::string err;
+             if (!find_session_workspace(session_id, &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             long long message_index = -1;
+             auto idx_it = body.find("message_index");
+             if (idx_it != body.end() && !idx_it->is_null()) {
+               if (idx_it->is_number_unsigned()) {
+                 const unsigned long long v = idx_it->get<unsigned long long>();
+                 if (v > 1000000000ull) {
+                   send_error(res, 400, "bad_request", "'message_index' is out of range");
+                   return;
+                 }
+                 message_index = static_cast<long long>(v);
+               } else if (idx_it->is_number_integer()) {
+                 message_index = idx_it->get<long long>();
+               } else {
+                 send_error(res, 400, "bad_request", "'message_index' must be an integer");
+                 return;
+               }
+             }
+             // Copying a transcript that a running turn is still appending to
+             // would freeze a half-finished answer into the branch. The UI does
+             // not arm a fork point while streaming; this covers direct callers.
+             {
+               std::lock_guard<std::mutex> lock(mu);
+               auto it = turns.find(session_id);
+               if (it != turns.end() && it->second && !it->second->finished()) {
+                 send_error(res, 409, "turn_running",
+                            "this session has a turn in progress; it must finish before it "
+                            "can be forked");
+                 return;
+               }
+             }
+             Session child;
+             if (!ws.fork_session(session_id, message_index, json_string(body, "title"), &child,
+                                  &err)) {
+               send_error(res, 400, "fork_failed", err);
+               return;
+             }
+             nlohmann::json messages = nlohmann::json::array();
+             for (std::size_t i = 0; i < child.messages.size(); ++i) {
+               messages.push_back(child.messages[i].to_store());
+             }
+             nlohmann::json j = nlohmann::json::object();
+             j["ok"] = true;
+             j["workspace_id"] = ws.id();
+             j["session"] = child.info.to_json();
+             j["messages"] = messages;
+             send_json(res, j);
+           });
+
   // ---- trajectories (the per-turn audit trail) ---------------------------
   // One JSONL file per session (`<run_dir>/trajectories/<session_id>.jsonl`,
   // one line per turn). The default view is the newest turn summaries first;

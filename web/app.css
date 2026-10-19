@@ -198,6 +198,9 @@ button{font-family:inherit}
 }
 .turn-dot:hover{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary)}
 .turn-dot.active{background:var(--dsw-alias-state-business-primary);color:var(--dsw-static-neutral-bluish-1000);font-weight:600}
+/* 选为分叉点的编号：一条内描边，和「当前阅读位置」的实心高亮能同时看清 */
+.turn-dot.fork{box-shadow:inset 0 0 0 1.5px var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}
+.turn-dot.fork.active{box-shadow:inset 0 0 0 1.5px var(--dsw-static-neutral-bluish-1000);color:var(--dsw-static-neutral-bluish-1000)}
 .turn-dot:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 /* 跳过去的那条气泡短暂描边，让「定位到了」有明确落点 */
 .msg.user.turn-hit{box-shadow:0 0 0 2px var(--dsw-alias-state-business-primary)}
@@ -390,6 +393,15 @@ button{font-family:inherit}
 /* 排队消息：会话进行中按 Enter 进入队列，agent loop 每轮采纳第一条，采纳前可取消。
    一行一条，单行省略；完整内容在 title 里，取消按钮固定在右侧。 */
 .queue-strip{display:flex;flex-direction:column;gap:6px}
+/* 分叉点提示条：和排队条同样占一行，但用业务色描边区分「下一条会开到新会话」 */
+.fork-strip{display:flex;align-items:center;gap:8px;min-width:0;padding:3px 6px 3px 10px;
+  border-radius:8px;border:.5px solid var(--dsw-alias-state-business-primary);
+  background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px}
+.fork-strip .f-tag{flex:0 0 auto;color:var(--dsw-alias-state-business-primary);font:11px/16px var(--ds-font-family-code)}
+.fork-strip .f-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary)}
+.fork-strip .f-cancel{flex:0 0 auto;width:18px;height:18px;padding:0;border:0;border-radius:50%;cursor:pointer;
+  background:transparent;color:var(--dsw-alias-label-caption);font:13px/18px var(--ds-font-family);text-align:center}
+.fork-strip .f-cancel:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-state-error-primary)}
 .queue-item{
   display:flex;align-items:center;gap:8px;min-width:0;padding:3px 6px 3px 10px;
   border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);

@@ -502,6 +502,12 @@ std::vector<SessionInfo> Workspace::list_sessions() const {
           s.updated_at = updated_it->get<std::string>();
         auto msgs = j.find("messages");
         if (msgs != j.end() && msgs->is_array()) s.message_count = static_cast<int>(msgs->size());
+        auto from_it = j.find("forked_from");
+        if (from_it != j.end() && from_it->is_string()) {
+          s.forked_from = from_it->get<std::string>();
+        }
+        auto turn_it = j.find("fork_turn");
+        if (turn_it != j.end() && turn_it->is_number()) s.fork_turn = turn_it->get<int>();
         if (s.title.empty()) s.title = "会话 " + s.id;
         if (s.updated_at.empty()) s.updated_at = files[i].mtime;
         if (s.created_at.empty()) s.created_at = s.updated_at;
@@ -536,6 +542,12 @@ bool Workspace::load_session(const std::string& id, Session* out, std::string* e
   auto updated_it = j.find("updated_at");
   if (updated_it != j.end() && updated_it->is_string())
     out->info.updated_at = updated_it->get<std::string>();
+  auto from_it = j.find("forked_from");
+  if (from_it != j.end() && from_it->is_string()) {
+    out->info.forked_from = from_it->get<std::string>();
+  }
+  auto turn_it = j.find("fork_turn");
+  if (turn_it != j.end() && turn_it->is_number()) out->info.fork_turn = turn_it->get<int>();
   auto summary_it = j.find("summary");
   if (summary_it != j.end() && summary_it->is_string()) {
     out->summary = summary_it->get<std::string>();
@@ -561,6 +573,8 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
   j["title"] = session.info.title;
   j["created_at"] = session.info.created_at;
   j["updated_at"] = session.info.updated_at;
+  if (!session.info.forked_from.empty()) j["forked_from"] = session.info.forked_from;
+  if (session.info.fork_turn > 0) j["fork_turn"] = session.info.fork_turn;
   nlohmann::json msgs = nlohmann::json::array();
   for (std::size_t i = 0; i < session.messages.size(); ++i) {
     msgs.push_back(session.messages[i].to_store());
@@ -639,6 +653,82 @@ bool Workspace::rename_session(const std::string& id, const std::string& title,
   s.info.title = title;
   s.info.updated_at = now_iso8601();
   return save_session(s, err);
+}
+
+bool Workspace::fork_session(const std::string& id, long long message_index,
+                             const std::string& title, Session* out, std::string* err) const {
+  Session parent;
+  if (!load_session(id, &parent, err)) return false;
+  if (parent.messages.empty()) {
+    if (err) *err = "session has no messages to fork: " + id;
+    return false;
+  }
+
+  // A fork point is a *turn*, not a bare message: everything through the
+  // assistant (and tool) messages that answer the selected user message is
+  // copied, so the child starts with a complete exchange instead of an
+  // assistant turn whose tool calls have no results.
+  std::size_t end = parent.messages.size();
+  if (message_index >= 0) {
+    // Compare as unsigned before narrowing: a huge index must not wrap into a
+    // valid slot on a 32-bit build.
+    const unsigned long long at_wide = static_cast<unsigned long long>(message_index);
+    if (at_wide >= parent.messages.size()) {
+      if (err) {
+        *err = "message_index " + std::to_string(message_index) +
+               " is past the end of the session (" +
+               std::to_string(parent.messages.size()) + " messages)";
+      }
+      return false;
+    }
+    const std::size_t at = static_cast<std::size_t>(at_wide);
+    if (parent.messages[at].role != "user") {
+      if (err) {
+        *err = "message " + std::to_string(message_index) + " is not a user message (role: " +
+               parent.messages[at].role + ")";
+      }
+      return false;
+    }
+    end = parent.messages.size();
+    for (std::size_t i = at + 1; i < parent.messages.size(); ++i) {
+      if (parent.messages[i].role == "user") {
+        end = i;
+        break;
+      }
+    }
+  }
+
+  int turn = 0;
+  for (std::size_t i = 0; i < end; ++i) {
+    if (parent.messages[i].role == "user") ++turn;
+  }
+
+  Session child;
+  child.info.id = make_id("s_");
+  child.info.created_at = now_iso8601();
+  child.info.updated_at = child.info.created_at;
+  child.info.forked_from = id;
+  child.info.fork_turn = turn;
+  std::string chosen = trim(title);
+  if (chosen.empty()) {
+    std::string parent_title = parent.info.title.empty() ? std::string("会话") : parent.info.title;
+    bool shortened = false;
+    parent_title = truncate_utf8(parent_title, 48, &shortened);
+    if (shortened) parent_title += "…";
+    chosen = "分叉 " + std::to_string(turn) + " · " + parent_title;
+  }
+  child.info.title = derive_title(chosen);
+  child.messages.assign(parent.messages.begin(), parent.messages.begin() + end);
+  // A rolling summary that reaches past the fork describes messages the child
+  // does not have, so it is dropped rather than replayed as a partial truth.
+  if (parent.summary_upto > 0 && parent.summary_upto <= end) {
+    child.summary = parent.summary;
+    child.summary_upto = parent.summary_upto;
+  }
+  child.info.message_count = static_cast<int>(child.messages.size());
+  if (!save_session(child, err)) return false;
+  if (out) *out = child;
+  return true;
 }
 
 std::vector<nlohmann::json> Workspace::load_memory(std::string* err) const {

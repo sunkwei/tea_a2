@@ -102,6 +102,16 @@ class Workspace {
   bool delete_session(const std::string& id, std::string* err) const;
   bool rename_session(const std::string& id, const std::string& title, std::string* err) const;
 
+  /// Create a new session that starts as a copy of `id`'s transcript through the
+  /// end of the turn containing `message_index` (an index into the parent's
+  /// messages whose role must be "user"; the assistant/tool messages that
+  /// follow it are part of the same turn and are copied too, so the child never
+  /// begins mid-turn). `message_index < 0` copies the whole session. The parent
+  /// is left untouched, and `out->info.forked_from` / `fork_turn` record the
+  /// lineage. The child's title defaults to "分叉 <turn> · <parent title>".
+  bool fork_session(const std::string& id, long long message_index, const std::string& title,
+                    Session* out, std::string* err) const;
+
   /// Replace agent.md wholesale. The caller is expected to have compacted it;
   /// a hard byte cap keeps a runaway append from bloating every later prompt.
   bool save_agent_doc(const std::string& content, std::string* err) const;

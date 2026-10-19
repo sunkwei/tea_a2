@@ -225,6 +225,15 @@ build/bin/tea_agent --workspace . --open
 悬停（或键盘聚焦）在索引条左侧展开一张提示卡片，内容是那条输入的前 **64 个字符**（超出加
 省略号，换行折成空格，最多 4 行），点击直接滚到那一条；滚动时当前视口所在的轮次会高亮。
 索引完全由会话消息推导，不额外请求服务端；不足 2 轮时隐藏，窗口窄于 900px 时也让位给正文。
+
+**分叉**：在跳转索引里点一个编号，除了滚过去，还会把它选成**分叉点**（编号出现一圈描边，
+输入框上方出现「分叉点」提示条，占位符改成「分叉模式」）。这时直接输入并发送，不会往当前
+会话追加：服务端先以当前会话为父本，把截止到这一轮（**含**这一轮的回答与工具结果）的对话
+复制成一个新会话，再把这句话作为新会话的下一轮，原会话一个字节都不动。再点一次同一个编号、
+点提示条上的 ×、按 Esc，或切换会话/工作区，都会撤销分叉点；分叉成功后它自动消失，所以后续
+消息留在新分支里。侧边栏会多出一行（标题形如 `分叉 3 · 原标题`），会话文件和 `index.json` 里
+也记下 `forked_from` / `fork_turn`，重启后仍看得出它从哪一轮分出来。生成回答期间点编号只跳转
+不选中——排队消息不携带分叉，免得让人以为它会进新会话。
 助手输出里的 `![alt](路径)` 会渲染成图片（alt 作为说明文字），工作区相对路径经
 `/api/workspaces/{id}/raw` 取原始字节；围栏代码块、表格、引用、有序/无序列表、标题、
 行内代码、粗斜体与链接都会渲染，链接一律新标签页打开。文件视图里选中图片直接显示，
@@ -299,6 +308,7 @@ provider 回报的 `usage` 为准）。
 | `GET` / `POST` | `/api/workspaces/{id}/sessions` | 会话列表 / 新建 |
 | `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果） |
 | `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
+| `POST` | `/api/sessions/{sid}/fork` | 从某一轮分叉出新会话：`{"message_index":N}` 是父会话里某条**用户消息**的下标，复制到该轮结束（含回答与工具结果）；省略或负数 = 复制整个会话。返回 `session`（带 `forked_from` / `fork_turn`）与复制后的 `messages`；父会话不变 |
 | `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
@@ -671,7 +681,7 @@ macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell�
 ├── logs/agent.log            # 该工作区日志
 ├── sessions/
 │   ├── index.json            # 会话索引（标题/时间/条数）
-│   └── <session_id>.json     # 完整会话（reasoning、工具调用与结果）
+│   └── <session_id>.json     # 完整会话（reasoning、工具调用与结果；分叉会话带 forked_from/fork_turn）
 ├── memory/memory.json        # 长期记忆（结构化条目）
 ├── agent.md                  # 本工作区的经验（注入 prompt，见下）
 ├── scripts/                  # 可复用脚本，跨会话保留
@@ -1107,6 +1117,7 @@ node tests/ui_agent_doc.mjs                               # 记忆页的 agent.m
 node tests/ui_render_perf.mjs                             # 流式渲染不重建气泡（需 google-chrome）
 node tests/ui_crumbs.mjs                                  # 顶栏显示工作区与会话标题（需 google-chrome）
 node tests/ui_turn_index.mjs                              # 对话跳转索引：64 字 tip / 点击定位（需 google-chrome）
+node tests/ui_fork.mjs                                    # 分叉：选中编号→输入即开新会话，再点/Esc 取消（需 google-chrome）
 node tests/ui_status.mjs                                  # 连接状态灯：抖动容忍 / 自愈 / 可点（需 google-chrome）
 ```
 
@@ -1158,6 +1169,14 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 `max-width` 时浏览器拿「left 到视口右缘」当可用宽度，索引条贴右就会把提示压成一列单字，
 所以 950px 窄窗下再验一次；点第 10 个编号后对应的用户气泡滚到视口顶部且高亮第 10 项；滚到
 顶部/底部分别高亮第 1/30 项；新建会话时索引隐藏，重新打开会话后恢复。
+
+`tests/ui_fork.mjs` 预置一个 4 轮会话并开一个只会回「分支回答」的假 provider：点第 3 个编号
+后编号必须有分叉描边、`aria-pressed=true`、输入框上方出现「第 3 条」提示条且占位符变成分叉
+模式；再点同一个编号、点提示条的 ×、按 Esc 都能撤销（提示条隐藏、占位符复原）；重新选第 2 条并发送一句话
+后，必须**多出一个会话**（`forked_from` / `fork_turn=2`，标题以 `分叉 2 · ` 开头），它的用户
+消息恰好是第 1、2 轮加上这句新输入，父会话仍是原来的 4 轮且不含新输入；页面本身也切到分支
+（3 个用户气泡、顶栏跟着换标题）。分叉结束后再发一句普通消息，仍然留在分支里，不会冒出第三个
+会话。
 
 `tests/ui_render_perf.mjs` 起一轮 320 条 delta、中间夹一次工具调用的回答，用
 `MutationObserver` 数 live 气泡被替换的次数：**每来一条 delta 就重建整块**是这次的回归点
@@ -1222,10 +1241,10 @@ CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、
 能填入内容、上传成功后页面自动重载且状态栏变回「已连接」。
 
 `tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
-再以独立 `--tea-home` 启动 agent，覆盖 **69 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
+再以独立 `--tea-home` 启动 agent，覆盖 **124 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
 SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、
-目录树与文件读写、记忆与日志接口、内置 UI 交付（含指标栏）且无 CDN 依赖。全程本地 `http://`，
-不需要 api_key。
+会话分叉（复制到选中轮次、血缘落盘、父会话不变、非法下标/未知会话报错）、目录树与文件读写、
+记忆与日志接口、内置 UI 交付（含指标栏）且无 CDN 依赖。全程本地 `http://`，不需要 api_key。
 
 其中几条是**回归测试**：
 

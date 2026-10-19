@@ -193,6 +193,8 @@ nlohmann::json SessionInfo::to_json() const {
   j["created_at"] = created_at;
   j["updated_at"] = updated_at;
   j["message_count"] = message_count;
+  if (!forked_from.empty()) j["forked_from"] = forked_from;
+  if (fork_turn > 0) j["fork_turn"] = fork_turn;
   return j;
 }
 
@@ -210,6 +212,9 @@ SessionInfo SessionInfo::from_json(const nlohmann::json& j) {
   s.updated_at = str_of("updated_at");
   auto it = j.find("message_count");
   if (it != j.end() && it->is_number()) s.message_count = it->get<int>();
+  s.forked_from = str_of("forked_from");
+  auto turn_it = j.find("fork_turn");
+  if (turn_it != j.end() && turn_it->is_number()) s.fork_turn = turn_it->get<int>();
   return s;
 }
 
