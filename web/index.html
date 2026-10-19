@@ -11,7 +11,18 @@
 <div id="app">
   <!-- ================= 侧边栏 ================= -->
   <aside id="sidebar">
-    <div class="wordmark">TEA AGENT</div>
+    <div class="side-head">
+      <div class="wordmark">TEA AGENT</div>
+      <!-- 收起侧栏：把横向空间让给右侧内容；再点顶栏左侧的同一个图标即可展开 -->
+      <button id="sidebar-hide" class="icon-btn" type="button" title="隐藏侧边栏（Ctrl+B）"
+              aria-controls="sidebar" aria-expanded="true" aria-label="隐藏侧边栏">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.6"/>
+          <path d="M6.4 3.2v9.6"/>
+          <path d="M11.2 6.2L9.4 8l1.8 1.8"/>
+        </svg>
+      </button>
+    </div>
 
     <div class="side-block">
       <div class="side-label"><span>工作区</span></div>
@@ -60,7 +71,18 @@
   <!-- ================= 主区 ================= -->
   <main id="main">
     <header id="topbar">
-      <div class="crumbs" id="crumbs"></div>
+      <div class="topbar-left">
+        <!-- 侧栏收起后留在这里的「展开」按钮：隐藏后仍然一眼能找到回来的路 -->
+        <button id="sidebar-show" class="icon-btn hidden" type="button" title="显示侧边栏（Ctrl+B）"
+                aria-controls="sidebar" aria-expanded="false" aria-label="显示侧边栏">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.6"/>
+            <path d="M6.4 3.2v9.6"/>
+            <path d="M9.2 6.2L11 8l-1.8 1.8"/>
+          </svg>
+        </button>
+        <div class="crumbs" id="crumbs"></div>
+      </div>
       <div class="topbar-right">
         <div class="dd-wrap">
           <button id="model-chip" class="chip" type="button" aria-haspopup="true" aria-expanded="false">

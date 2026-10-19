@@ -25,7 +25,23 @@ button{font-family:inherit}
   border-right:.5px solid var(--dsw-alias-border-l3);
   display:flex;flex-direction:column;min-height:0;
 }
-.wordmark{padding:16px 16px 10px;font-size:16px;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
+/* 收起后整条侧栏让位，右侧内容自己占满（宽度跟着 .chat-col 的 max-width 走） */
+#app.side-collapsed #sidebar{display:none}
+.side-head{display:flex;align-items:center;gap:8px;padding-right:8px}
+.wordmark{
+  flex:1 1 auto;min-width:0;padding:16px 0 10px 16px;
+  font-size:16px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+/* 隐藏 / 显示侧栏的图标按钮（两处，样式一致） */
+.icon-btn{
+  width:24px;height:24px;flex:0 0 24px;padding:0;border:0;border-radius:var(--dsw-radius-sm);
+  background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;
+}
+.icon-btn svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round}
+.icon-btn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary)}
+#topbar .icon-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .side-block{padding:0 8px}
 .side-label{
   display:flex;align-items:center;justify-content:space-between;
@@ -66,6 +82,7 @@ button{font-family:inherit}
   height:56px;flex:0 0 56px;display:flex;align-items:center;justify-content:space-between;
   gap:16px;padding:0 20px;border-bottom:.5px solid var(--dsw-alias-border-l3);
 }
+.topbar-left{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}
 .crumbs{display:flex;align-items:center;gap:8px;font-size:13px;min-width:0;overflow:hidden}
 .crumbs .sep{color:var(--dsw-alias-label-caption)}
 .crumbs .crumb{color:var(--dsw-alias-label-caption);background:none;border:0;padding:0;font-size:13px;cursor:default;white-space:nowrap}
@@ -138,7 +155,13 @@ button{font-family:inherit}
 /* ---------- chat ---------- */
 #view-chat{display:grid;grid-template-rows:1fr auto}
 .chat-scroll{overflow-y:auto;min-height:0;position:relative}
-.chat-col{max-width:780px;margin:0 auto;width:100%;padding:24px;display:flex;flex-direction:column;gap:16px}
+.chat-col{
+  max-width:780px;margin:0 auto;width:100%;padding:24px;
+  display:flex;flex-direction:column;gap:16px;
+  transition:max-width .18s ease;
+}
+/* 侧栏收起后把省下来的横向空间还给内容：正文不用挤在 780px 的窄栏里 */
+#app.side-collapsed .chat-col{max-width:1040px}
 .composer-wrap{position:sticky;bottom:0;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-base) 28%)}
 .composer-wrap .chat-col{padding:8px 24px 20px;gap:0}
 .msg.user{
@@ -388,6 +411,8 @@ button{font-family:inherit}
 
 /* ---------- files ---------- */
 .files-grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;align-items:start}
+/* 文件树同样跟着变宽，长文件名少出省略号 */
+#app.side-collapsed .files-grid{grid-template-columns:340px minmax(0,1fr)}
 .file-list{
   border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg);
   background:var(--dsw-alias-bg-layer-1);padding:6px;max-height:calc(100vh - 200px);overflow:auto;

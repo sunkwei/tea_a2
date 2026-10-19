@@ -113,6 +113,8 @@ build/bin/tea_agent --workspace . --open
 那种情况下静默启动只会把问题藏起来。
 
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
+左侧栏右上角的按钮（或 `Ctrl/Cmd+B`）可以把它收起，把横向空间让给正文；收起后顶栏左侧
+出现同一个图标，点一下即可展开，状态记在浏览器里，下次打开保持原样。
 对话页的输入框下方常驻**一行**指标：耗时、轮次、步数、速度（t/s）、前缀缓存命中率、
 `max_context_tokens` 用量（后两者带进度条，超 70% / 90% 变黄变红）以及本轮输出与首字延迟。
 这一行永远是单行：`flex-wrap:nowrap` 保证不会折成两行（折行会让输入区高度跳动），
@@ -786,6 +788,7 @@ python3 tests/smoke_prompt_queue.py                       # 消息插队：采�
 node tests/ui_workspace_add.mjs                           # 新增工作区（原生对话框 + 手动回退）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
+node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -826,6 +829,10 @@ false。选出的路径能直接喂给 `/api/workspaces`。
 `tests/ui_queue.mjs` 在流式回答期间用真实的 Enter 按键入队：排队条按顺序出现、输入框清空、
 没有产生第二个会话；点 × 取消第一条；随后被采纳的一条从排队条消失并变成对话里的 user 气泡，
 本轮在同一 SSE 内继续（恰好两次模型请求），结束后排队条隐藏、输入框恢复「发送」。
+
+`tests/ui_sidebar.mjs` 覆盖侧栏收起：点隐藏按钮后侧栏宽度归零、顶栏出现展开按钮、正文栏
+变宽（780 → 1040）；刷新后仍是收起状态；再点展开（或 `Ctrl+B`）后侧栏与列宽复原，选择被
+写进 localStorage。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器

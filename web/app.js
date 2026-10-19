@@ -15,6 +15,7 @@
     live: null, liveNode: null, streaming: false, abort: null, stopTimer: null,
     attachments: [],
     queue: [], queueRestore: [], queueDone: {},
+    sidebarHidden: false,
     ended: false, streamError: null, expanded: {}, stickBottom: true,
     trajectory: [], trajFull: {}, lastTrajectoryId: null,
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
@@ -28,7 +29,7 @@
       localStorage.setItem(LS_KEY, JSON.stringify({
         view: state.view, workspace_id: state.workspace ? state.workspace.id : null,
         session_id: state.session ? state.session.id : null, model: state.model,
-        logs_autoscroll: state.logsAutoScroll
+        logs_autoscroll: state.logsAutoScroll, sidebar_hidden: state.sidebarHidden
       }));
     } catch (e) { /* 隐私模式下忽略 */ }
   }
@@ -1853,6 +1854,25 @@
     if (name === 'logs') loadLogs();
     if (name === 'settings') renderSettings();
   }
+  /* ---------- 侧边栏收起 / 展开 ---------- */
+  // 窄屏或专心读回答时，左侧 260px 一直是白占的。收起后由顶栏左侧的同一个图标
+  // 展开回来（Ctrl/Cmd+B 也可以），状态记在 localStorage 里，下次打开保持原样。
+  function applySidebar() {
+    var hidden = !!state.sidebarHidden;
+    $('app').classList.toggle('side-collapsed', hidden);
+    $('sidebar-show').classList.toggle('hidden', !hidden);
+    $('sidebar-hide').setAttribute('aria-expanded', hidden ? 'false' : 'true');
+    $('sidebar-show').setAttribute('aria-expanded', hidden ? 'true' : 'false');
+  }
+  function toggleSidebar(force) {
+    state.sidebarHidden = typeof force === 'boolean' ? force : !state.sidebarHidden;
+    applySidebar();
+    saveLS();
+    // 正文栏宽度变了：滚动位置和输入框高度都要按新宽度重算一次。
+    scrollMaybe();
+    autoGrow();
+  }
+
   function renderCrumbs() {
     var ws = state.workspace ? state.workspace.name : '无工作区';
     if (state.view === 'chat') setCrumbs([{ label: ws }, { label: state.session ? (state.session.title || state.session.id) : '新会话' }]);
@@ -2125,6 +2145,8 @@
       }
     });
     $('send').onclick = function () { if (state.streaming) stopStream(); else sendMessage(); };
+    $('sidebar-hide').onclick = function () { toggleSidebar(true); };
+    $('sidebar-show').onclick = function () { toggleSidebar(false); };
     $('new-session').onclick = function () {
       if (blockedWhileStreaming('新建会话')) return;
       newSessionDraft();
@@ -2200,6 +2222,10 @@
         if (state.view !== 'chat') showView('chat');
         $('input').focus();
       }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) { // Ctrl/Cmd+B 收起侧栏
+        e.preventDefault();
+        toggleSidebar();
+      }
       if (e.key === 'Escape') {                                          // Esc 关闭浮层
         closeDropdowns();
         if (!setupGate.open) closeDialog();
@@ -2213,6 +2239,8 @@
     state.model = ls.model || null;
     state.logsAutoScroll = ls.logs_autoscroll !== false;
     $('logs-autoscroll').checked = state.logsAutoScroll;
+    state.sidebarHidden = ls.sidebar_hidden === true;
+    applySidebar();
     state.stats = emptyStats();
     bind();
     updateComposer();
