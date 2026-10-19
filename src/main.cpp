@@ -72,6 +72,12 @@ struct Args {
 const char* kBooleanFlags[] = {"help", "version", "selftest", "open", "no-console", "quiet",
                                "allow-outside-workspace", "no-color", "insecure"};
 
+bool is_log_level_name(const std::string& value) {
+  const std::string v = to_lower(trim(value));
+  return v == "trace" || v == "debug" || v == "info" || v == "warn" || v == "warning" ||
+         v == "error" || v == "off" || v == "none";
+}
+
 bool is_boolean_flag(const std::string& name) {
   for (std::size_t i = 0; i < sizeof(kBooleanFlags) / sizeof(kBooleanFlags[0]); ++i) {
     if (name == kBooleanFlags[i]) return true;
@@ -108,9 +114,13 @@ void print_usage() {
                   "  --allow-outside-workspace  let file tools touch paths outside the workspace\n"
                   "\n"
                   "Diagnostics\n"
-                  "  --log-level <level>        trace|debug|info|warn|error|off (default info)\n"
+                  "  --log-level <level>        what goes into the log file:\n"
+                  "                             trace|debug|info|warn|error|off (default info)\n"
+                  "  --console-level <level>    what is echoed to the console:\n"
+                  "                             trace|debug|info|warn|error|off (default warn)\n"
                   "  --log-file <path>          global log file (default $HOME/.tea_agent/logs/tea_agent.log)\n"
-                  "  --no-console               do not echo log lines to the console\n"
+                  "  --no-console               do not echo log lines to the console at all\n"
+                  "  --quiet                    same as --no-console\n"
                   "  --help                     show this help\n"
                   "  --version                  show the version\n"
                   "  --selftest                 run built-in checks and exit\n"
@@ -205,13 +215,33 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const LogLevel level = log_level_from_string(args.get("log-level", "info"));
-  const bool console = !args.has("no-console");
+  // Two thresholds on purpose: the log file keeps the full story (INFO by
+  // default) while the terminal stays quiet unless something is actually wrong.
+  // A server left running in a console tab should not scroll per-request INFO
+  // lines past the operator; `--console-level info` brings them back.
+  const bool console = !args.has("no-console") && !args.has("quiet");
+  const std::string log_level_arg = args.get("log-level", "info");
+  const std::string console_level_arg = args.get("console-level", "warn");
+  const LogLevel level = log_level_from_string(log_level_arg);
+  LogLevel console_level = log_level_from_string(console_level_arg);
+  // log_level_from_string() is deliberately lenient (it never fails), so a typo
+  // would silently widen the console back to INFO. Say so instead.
+  if (!is_log_level_name(console_level_arg)) {
+    console_write_line("warning: --console-level '" + console_level_arg +
+                       "' is not a level; using warn");
+    console_level = LogLevel::Warn;
+  }
+  if (!is_log_level_name(log_level_arg)) {
+    console_write_line("warning: --log-level '" + log_level_arg + "' is not a level; using info");
+  }
   const std::string log_file = args.get("log-file", path_join(path_join(tea_home, "logs"),
                                                               "tea_agent.log"));
   Logger::instance().configure(log_file, level, console);
+  Logger::instance().set_console_level(console_level);
 
   LOG_INFO("=== ", TEA_AGENT_NAME, " ", TEA_AGENT_VERSION_STRING, " starting ===");
+  LOG_INFO("console: ", console ? log_level_name(console_level) : "off", " (log file: ",
+           log_level_name(level), ")");
   LOG_INFO("tea home: ", tea_home);
   LOG_INFO("log file: ", log_file);
   LOG_INFO("http engines available: ", http_available_engines());
@@ -255,8 +285,9 @@ int main(int argc, char** argv) {
     if (!config.file_missing) {
       // Malformed or unreadable config: fail loudly. Only a *missing* file is
       // recoverable, because the web UI can then ask for it.
+      // The stamped ERROR line already reaches the console; only the hint is
+      // extra (it is meant for a human, not for the log file).
       LOG_ERROR("configuration error: ", config.error);
-      console_write_line("error: " + config.error);
       console_write_line("hint: create " + config_path +
                          " with a `providers:` mapping (see README.md)");
       return 1;
@@ -264,10 +295,10 @@ int main(int argc, char** argv) {
     // Setup mode: serve the UI so it can upload provider.yaml, then reload.
     LOG_WARN("configuration missing: ", config.error);
     LOG_WARN("starting in setup mode: the web UI will ask for ", config_path);
-    console_write_line("warning: " + config.error);
-    console_write_line("         starting in setup mode; upload the file at " +
-                       std::string("http://") + args.get("host", "127.0.0.1") + ":" +
-                       args.get("port", "8282") + "/");
+    // The two WARN lines above already explain the situation (and reach the
+    // console by default); here only the actionable hint for a human.
+    console_write_line("hint: open http://" + args.get("host", "127.0.0.1") + ":" +
+                       args.get("port", "8282") + "/ to upload " + config_path);
   }
   if (config_ok) {
     std::string err;
@@ -349,8 +380,7 @@ int main(int argc, char** argv) {
   ApiServer server(&config, &tools, &registry);
   std::string start_error;
   if (!server.start(options, &start_error)) {
-    LOG_ERROR("server: ", start_error);
-    console_write_line("error: " + start_error);
+    LOG_ERROR("server: ", start_error);   // also echoed to the console
     return 1;
   }
 
@@ -392,8 +422,10 @@ int main(int argc, char** argv) {
     }
     banner += "  ------------------------------------------------------------\n";
     banner += "  Press Ctrl+C to stop.\n\n";
-    console_write_line(banner);
+    if (!args.has("quiet")) console_write_line(banner);
   }
+  // The banner is written straight to the console (not through the logger), so
+  // --quiet has to skip it explicitly; it is a greeting, not a diagnostic.
   if (args.has("open")) open_browser(server.url());
 
   install_signal_handlers();
@@ -406,7 +438,7 @@ int main(int argc, char** argv) {
   }
 
   LOG_INFO("shutting down");
-  console_write_line("stopping...");
+  if (!args.has("quiet")) console_write_line("stopping...");
   server.stop();
   LOG_INFO("=== ", TEA_AGENT_NAME, " stopped ===");
   return 0;

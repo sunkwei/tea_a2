@@ -204,9 +204,25 @@ provider 回报的 `usage` 为准）。
 --workspace <path>    # 注册工作区，可重复
 --workspace-root <d>  # 注册 <d> 下所有一级子目录
 --provider/--model    # 覆盖配置里的 roles.main
---log-level debug     # trace|debug|info|warn|error|off
+--log-level debug     # 写进日志文件的级别：trace|debug|info|warn|error|off
+--console-level warn  # 回声到控制台的级别（默认 warn，见下）
+--no-console          # 控制台不回声任何日志（--quiet 同义，且连启动横幅也省掉）
 --help                # 全部参数
 ```
+
+**控制台默认只打印 WARNING / ERROR。** 服务是长期挂在终端里的，每次请求的 `INFO`
+（`chat:`、`server:`、`toolkit_*` …）都往终端刷会把真正要紧的告警顶出屏幕；而排查问题时
+又确实需要这些细节。所以两个阈值是分开的：
+
+| 开关 | 作用 | 默认 |
+| --- | --- | --- |
+| `--log-level` | 写进 `logs/tea_agent.log` 与工作区 `logs/agent.log` 的级别 | `info` |
+| `--console-level` | 回声到终端的级别 | `warn` |
+| `--no-console` / `--quiet` | 终端彻底不回声（`--quiet` 连横幅也不打印） | 关 |
+
+完整日志始终在文件里，`--console-level debug` 可以在终端跟着看一次复现过程。写成不认识
+的级别名会打印一行 `warning: … is not a level; using warn` 并按 `warn` 处理，而不是
+静默退回 `info` 把终端重新刷满。启动横幅、`error:` 这类面向人的提示不受级别影响。
 
 ---
 
@@ -879,6 +895,7 @@ pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
 
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
+python3 tests/smoke_console_level.py                      # 控制台只回声 WARN/ERROR、日志文件仍是 INFO
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
@@ -937,6 +954,12 @@ false。选出的路径能直接喂给 `/api/workspaces`。
 「无工作区 / 新会话」（旧实现只在切换视图时刷新，启动时工作区还没加载完就再也不会更新）；
 首轮回答后标题换成服务端从第一条消息生成的标题、刷新后保持、切换工作区、新建会话、
 切回原工作区、重命名，六个时机都要跟着变。
+
+`tests/smoke_console_level.py` 钉住两个阈值的分工：默认启动 + 一次 `/api/providers` 请求后，
+终端上的日志行**没有一条** `INFO`（只剩 WARN/ERROR），而日志文件里照样有 `[INFO]`，横幅仍然
+只打印一次；`--console-level info` 让终端重新出现 `INFO`；`--no-console` 与 `--quiet` 都不回声
+日志（`--quiet` 还省掉横幅），但文件照写；`--console-level verbose` 报错并按 `warn` 处理；
+`--log-level error` 只收窄文件、不影响控制台；`--help` 同时列出两个开关。
 
 `tests/ui_turn_index.mjs` 预置一个 30 轮的会话再打开页面：右侧索引必须有 30 个编号；第 10 条
 用户输入故意超过 64 个字符，断言 `title` 与悬停 tip 都只保留前 64 个字符加省略号，且 tip

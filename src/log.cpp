@@ -119,6 +119,16 @@ LogLevel Logger::level() const {
   return level_;
 }
 
+void Logger::set_console_level(LogLevel level) {
+  std::lock_guard<std::mutex> lock(mu_);
+  console_level_ = level;
+}
+
+LogLevel Logger::console_level() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return console_level_;
+}
+
 std::string Logger::log_file() const {
   std::lock_guard<std::mutex> lock(mu_);
   return global_path_;
@@ -174,7 +184,9 @@ void Logger::write(LogLevel level, const std::string& tag, const std::string& me
     rotate_if_needed(sinks_[i].file);
     sinks_[i].file.write(line);
   }
-  if (console_) console_write(sanitize_for_terminal(line));
+  if (console_ && static_cast<int>(level) >= static_cast<int>(console_level_)) {
+    console_write(sanitize_for_terminal(line));
+  }
 }
 
 }  // namespace tea

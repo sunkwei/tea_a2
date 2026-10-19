@@ -20,9 +20,16 @@ class Logger {
  public:
   static Logger& instance();
 
+  /// `level` is the log-file threshold; `console` only switches the echo on or
+  /// off. What the console actually shows is `console_level()` (default Warn):
+  /// a server that is left running should print warnings and errors, not a
+  /// stream of per-request INFO lines. Use --log-level for the file and
+  /// --console-level to widen or narrow the terminal.
   void configure(const std::string& file_path, LogLevel level, bool console);
   void set_level(LogLevel level);
   LogLevel level() const;
+  void set_console_level(LogLevel level);
+  LogLevel console_level() const;
 
   /// Register/replace a named extra log file. Safe to call repeatedly.
   void add_sink(const std::string& tag, const std::string& file_path);
@@ -46,6 +53,7 @@ class Logger {
   std::string global_path_;
   AppendFile global_file_;
   LogLevel level_ = LogLevel::Info;
+  LogLevel console_level_ = LogLevel::Warn;
   bool console_ = true;
   std::vector<Sink> sinks_;
 };
