@@ -891,9 +891,9 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 | C++14 语言模式（GCC 6.5 兼容性） | ✅ 全量编译通过 |
 | 真实 `api.deepseek.com` / `opencode.ai` | ✅ 含多轮工具调用 |
 | 交叉编译宿主工具机制（`TEA_AGENT_USE_HOST_ASSET_TOOL=ON`） | ✅ 在本机以原生方式验证该路径 |
-| **Linux 构建与运行** | ⚠️ **未实测**（代码已按平台分支处理） |
-| **macOS 构建与运行** | ⚠️ **未实测**（`MSG_NOSIGNAL` / `/proc/self/exe` 已按平台处理） |
-| **真实 ARM 交叉编译产物** | ⚠️ **未实测** |
+| **Linux 构建与运行** | ✅ 在 wsl2, ubuntu20.04 等环境测试 |
+| **macOS 构建与运行** | ✅ 在 Mac OS X 10.6 Snow Leopard 测试通过 |
+| **真实 ARM 交叉编译产物** | ✅ aarch64-linux-gnu-gcc (Linaro GCC 6.5-2018.12) 6.5.0 编译，到 horizon x3 执行正常 GLIBC 2.28 |
 
 Linux / macOS 首次构建若报错，最可能集中在 `src/command.cpp`（`fork`/`setsid`/进程组）与
 `src/platform_fs.cpp`（POSIX `stat`/`dirent`），欢迎提 issue 附报错。
