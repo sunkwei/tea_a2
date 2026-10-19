@@ -29,3 +29,5 @@ tests/.scratch/
 tests/.pc/
 tests/.verify/
 tests/.real/
+
+clean/
