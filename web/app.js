@@ -1494,6 +1494,17 @@
     });
   }
 
+  /// 服务端上所有还在跑的轮次，最近开始的在前。可能是别的机器、别的标签页发起的。
+  function runningTurns() {
+    return api('api/chat/turns').then(function (d) {
+      var t = (d && d.turns) || [];
+      t.sort(function (a, b) {
+        return String(b.started_at || '').localeCompare(String(a.started_at || ''));
+      });
+      return t;
+    }, function () { return []; });
+  }
+
   /// 这个会话有没有正在跑的轮次？有就接回去。打开会话、标签页重新可见时都会问一次。
   function maybeAttach(sid) {
     if (!sid || state.streaming) return Promise.resolve();
@@ -2043,9 +2054,26 @@
         openAddWorkspace(true);
         return;
       }
-      var saved = loadLS().workspace_id;
-      var w = state.workspaces.filter(function (x) { return x.id === saved; })[0] || state.workspaces[0];
-      return selectWorkspace(w.id, true);
+      // 冷启动（换台机器、换个浏览器、清过 localStorage）时，页面并不知道该看哪个
+      // 工作区。先问服务端有没有正在跑的轮次：有就直接切到那个工作区和会话、接回
+      // 直播，而不是落在索引里的第一个工作区、对着一个空对话发呆。这就是「A 机器
+      // 发起的任务，B 机器打开页面能不能接上」的答案。
+      return runningTurns().then(function (running) {
+        var run = running.length ? running[0] : null;
+        var saved = loadLS().workspace_id;
+        var w = (run && state.workspaces.filter(function (x) { return x.id === run.workspace_id; })[0]) ||
+          state.workspaces.filter(function (x) { return x.id === saved; })[0] || state.workspaces[0];
+        return selectWorkspace(w.id, true).then(function () {
+          if (!run || !state.workspace || state.workspace.id !== run.workspace_id) return;
+          // selectWorkspace 已经打开了这个会话（它就是最近更新的那个）：别重复加载，
+          // openSession 里的 maybeAttach 会负责接回直播。
+          if (state.session && state.session.id === run.session_id) return;
+          return openSession(run.session_id).then(function () {
+            toast('已接回正在进行的任务' +
+              (running.length > 1 ? '（另有 ' + (running.length - 1) + ' 个轮次在跑）' : ''));
+          });
+        });
+      });
     });
   }
   function selectWorkspace(id, silent) {

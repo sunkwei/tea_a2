@@ -1518,6 +1518,33 @@ void ApiServer::Impl::install_routes() {
     send_json(res, j);
   });
 
+  // Every turn that is still running, newest first. A browser that opens cold -
+  // another machine, another profile, no localStorage - has no idea what it was
+  // looking at, so this is how it finds work in progress instead of landing on
+  // the first workspace in the index and showing an empty chat.
+  svr.Get("/api/chat/turns", [this](const httplib::Request&, httplib::Response& res) {
+    std::vector<std::shared_ptr<ChatTurn>> live;
+    std::vector<std::shared_ptr<ChatTurn>> graveyard;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      prune_turns_locked(&graveyard);
+      for (auto it = turns.begin(); it != turns.end(); ++it) {
+        if (it->second) live.push_back(it->second);
+      }
+    }
+    graveyard.clear();  // ~ChatTurn joins the worker: never under `mu`
+    nlohmann::json list = nlohmann::json::array();
+    for (std::size_t i = 0; i < live.size(); ++i) {
+      nlohmann::json t = live[i]->status_json();
+      t["pending"] = static_cast<long long>(live[i]->inbox.size());
+      list.push_back(t);
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["turns"] = list;
+    send_json(res, j);
+  });
+
   // Re-attach: replay everything after `since` (0 or omitted = the whole buffer),
   // then follow live. This is what a reopened browser calls.
   svr.Post("/api/chat/attach", [this](const httplib::Request& req, httplib::Response& res) {

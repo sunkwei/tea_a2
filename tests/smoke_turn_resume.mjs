@@ -158,6 +158,13 @@ try {
   check('the replay window still starts at seq 1', st.oldest_seq === 1 && st.dropped === 0,
     JSON.stringify(st));
 
+  // A client that knows nothing about this session - another machine, a fresh
+  // browser profile - finds the work in progress through the list endpoint.
+  const all = JSON.parse((await getJson(agentPort, '/api/chat/turns')).body);
+  const listed = (all.turns || []).filter((t) => t.session_id === sid)[0];
+  check('GET /api/chat/turns lists the running turn with its workspace',
+    !!listed && listed.running === true && listed.workspace_id === wsId, JSON.stringify(all.turns));
+
   // ---- 3) re-attach: full replay, then live to the end ------------------
   const second = sseRequest(agentPort, '/api/chat/attach', { session_id: sid, since: 0 });
   for (let i = 0; i < 80 && !second.frames.some((f) => f.type === 'done' || f.type === 'stopped'); i++) {
@@ -222,6 +229,9 @@ try {
     JSON.stringify(st));
   check('stop aborted the provider request', upstream.open === false && upstream.finished === false,
     'chunks=' + upstream.chunks);
+  const afterStop = JSON.parse((await getJson(agentPort, '/api/chat/turns')).body);
+  check('nothing is listed as running after stop', (afterStop.turns || []).length === 0,
+    JSON.stringify(afterStop.turns));
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });

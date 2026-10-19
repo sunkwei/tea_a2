@@ -254,6 +254,7 @@ provider 回报的 `usage` 为准）。
 | `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
 | `GET` | `/api/chat/queue?session_id=` | 查看当前排队消息 |
 | `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped`） |
+| `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播 |
 
 ### 一次完整的「远程操控」长这样
@@ -322,6 +323,20 @@ curl -N -X POST http://device:8282/api/chat/attach \
 轮次刚结束、还没被回收时 attach 依然可用（把尾巴放完就 `done`）；已经回收则返回
 `404 no_active_turn`，这时 `/api/sessions/{sid}` 就是最终状态。排队消息也一起回来：
 `GET /api/chat/queue?session_id=` 列出的条目仍然挂在服务端那一轮的队列里，等它采纳。
+
+**换一台机器接着看**也是同一条路：轮次属于服务端、按 session 归属，跟发起它的那个浏览器没有
+关系。冷启动的页面（另一台 PC、另一个浏览器 profile、清过 localStorage）不知道自己该看哪个
+工作区，所以开机先问 `GET /api/chat/turns`：有正在跑的轮次就直接切到它的 `workspace_id` +
+`session_id` 并 attach，而不是一头栽进索引里的第一个工作区、对着空对话发呆。多个轮次同时
+在跑时取最近开始的那个，并在 toast 里说明还有几个。
+
+```bash
+curl -s http://device:8282/api/chat/turns
+# {"ok":true,"turns":[{"running":true,"session_id":"s_xxx","workspace_id":"ws_xxx",
+#   "started_at":"...","last_seq":137,"oldest_seq":1,"buffered":137,"dropped":0,"pending":0}]}
+```
+
+注意：默认只监听 `127.0.0.1`，另一台机器要连得上，得用 `--host 0.0.0.0`（或反向代理）启动。
 
 ### 插队：轮次进行中追加消息
 
@@ -944,6 +959,7 @@ python3 tests/smoke_agent_doc.py                          # 工作区经验 agen
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
 node tests/smoke_turn_resume.mjs                          # 断线不取消轮次：回放 / 续播 / stop 仍然有效
 node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
+node tests/ui_second_client.mjs                           # 另一台机器/全新 profile 接回别人发起的轮次（需 google-chrome）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
@@ -1027,6 +1043,11 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 `tests/ui_stream_resume.mjs` 在真浏览器里走同一条路：发消息 → 导航到 about:blank（等价于关掉
 标签页）→ 确认服务端还在跑 → 导航回来，断言页面重新进入生成态、live 气泡追上了期间生成的内容、
 **没有重复渲染**，然后跟着直播到结束。
+
+`tests/ui_second_client.mjs` 换一台「机器」：服务端注册两个工作区，一个纯 HTTP 客户端在
+**第二个**工作区里发起轮次、读到第 9 帧就断开，然后用一个全新的浏览器 profile（没有
+localStorage）打开页面——它必须落在 `proj_b`（而不是索引里的第一个 `proj_a`）、直接进入生成态、
+回放已经生成的内容、继续直播到结束，标签页标题也跟着工作区走。
 
 `tests/ui_stream_guard.mjs` 起一轮慢速流式回答，在生成过程中点侧边栏：工作区按钮仍可点开菜单
 （不能变成死按钮），切换工作区 / 添加工作区 / 新建会话都被拒绝并给出原因，会话行显示为禁用；

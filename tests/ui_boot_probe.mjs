@@ -328,8 +328,10 @@ const CANNED = {
     config_loaded: true, http_engine: 'auto', model: 'mock-model',
     ok: true, provider: 'mock', uptime_s: 1.588, version: '0.1.3',
   },
-  // Asked on every boot: is a turn still running for the session we restored?
+  // Asked on every boot: is a turn still running for the session we restored,
+  // and is any turn running at all (a cold boot jumps to the work in progress)?
   '/api/chat/turn': { ok: true, running: false, session_id: 's_349631df65d5' },
+  '/api/chat/turns': { ok: true, turns: [] },
   '/api/providers': {
     active: { max_context_tokens: 128000, model: 'mock-model', provider: 'mock' },
     config_path: 'C:\\tmp\\home\\provider.yaml',
