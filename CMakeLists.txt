@@ -282,7 +282,7 @@ target_link_libraries(tea_agent PRIVATE Threads::Threads)
 # On macOS a static libc++ does not exist, so the option only applies to ELF
 # targets built with GCC or Clang.
 option(TEA_AGENT_STATIC_RUNTIME
-       "Link the C++ runtime statically so the binary is self-contained" ON)
+       "Link the C++ runtime statically so the binary is self-contained" OFF)
 # Fully static (also libc). On by default: the binary is meant to be copied to
 # devices that may run an older glibc than the build host, and a dynamically
 # linked binary then dies with "version `GLIBC_2.xx' not found" before it can
@@ -295,7 +295,7 @@ option(TEA_AGENT_STATIC_RUNTIME
 # TEA_STATIC_LIBC is defined, so DNS keeps working and mDNS/systemd-resolved's
 # NSS front end is bypassed. musl has no NSS modules at all and needs none of
 # this. Set to OFF for a dynamic binary when the target matches the build host.
-option(TEA_AGENT_STATIC_LIBC "Link libc statically so the binary runs on older systems" ON)
+option(TEA_AGENT_STATIC_LIBC "Link libc statically so the binary runs on older systems" OFF)
 
 if(TEA_AGENT_STATIC_RUNTIME AND NOT WIN32 AND NOT APPLE AND
    CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
