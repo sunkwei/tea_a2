@@ -2333,6 +2333,58 @@
   }
 
   /* ---------- 9) 文件视图 ---------- */
+  /// 从 Content-Disposition 里取文件名：优先 RFC 5987 的 filename*（UTF-8），
+  /// 退回普通的 filename，都没有就用兜底名。
+  function dispositionFilename(header, fallback) {
+    var m = /filename\*=UTF-8''([^;]+)/i.exec(header || '');
+    if (m && m[1]) { try { return decodeURIComponent(m[1]); } catch (e) { /* 用下一个 */ } }
+    m = /filename="?([^";]+)"?/i.exec(header || '');
+    if (m && m[1]) return m[1];
+    return fallback;
+  }
+
+  /// 下载**这台设备上、这个工作区**的 `.tea_agent_run`（会话 / 轨迹 / 日志 / 记忆 /
+  /// agent.md），服务端打成 zip 传回来。用 fetch + blob 而不是直接跳转：出错时能
+  /// 说清原因，而不是让浏览器把一个 JSON 错误体当文件存下来。
+  function downloadRunArchive() {
+    if (!state.workspace) { toast('请先选择工作区'); return; }
+    var b = $('files-download');
+    var label = b.textContent;
+    var restore = function () { b.disabled = false; b.textContent = label; };
+    b.disabled = true; b.textContent = '打包中…';
+    fetch(apiUrl('api/workspaces/' + encodeURIComponent(state.workspace.id) +
+      '/archive?path=' + encodeURIComponent('.tea_agent_run'))).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          var msg = 'HTTP ' + r.status;
+          try {
+            var j = JSON.parse(t);
+            if (j && j.error && (j.error.message || j.error.code)) msg = j.error.message || j.error.code;
+          } catch (e) { if (t) msg = t.slice(0, 200); }
+          throw new Error(msg);
+        });
+      }
+      var head = {
+        name: dispositionFilename(r.headers.get('Content-Disposition'), 'tea_agent_run.zip'),
+        entries: r.headers.get('X-Archive-Entries'),
+        skipped: r.headers.get('X-Archive-Skipped')
+      };
+      return r.blob().then(function (blob) { return { blob: blob, head: head }; });
+    }).then(function (d) {
+      var objUrl = URL.createObjectURL(d.blob);
+      var a = document.createElement('a');
+      a.href = objUrl; a.download = d.head.name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(objUrl); a.remove(); }, 4000);
+      toast('已下载 ' + d.head.name + '（' + fmtBytes(d.blob.size) +
+        (d.head.entries ? '，' + d.head.entries + ' 个条目' : '') +
+        (d.head.skipped && d.head.skipped !== '0' ? '，跳过 ' + d.head.skipped + ' 个' : '') + '）');
+    }, function (e) {
+      toast('下载失败：' + (e && e.message ? e.message : String(e)));
+    }).then(restore, restore);
+  }
+
   function loadTree(dir) {
     if (!state.workspace) return Promise.resolve();
     state.files.dir = dir || '';
@@ -2375,6 +2427,8 @@
     $('files-note').textContent = f.path ? (f.truncated ? '内容已截断，只读显示' : (dirty ? '有未保存修改' : '未修改')) : '';
     $('files-save').disabled = !f.path || f.readOnly || !dirty || isImagePath(f.path);
     $('files-revert').disabled = !f.path || !dirty || isImagePath(f.path);
+    // 下载的是服务端那个工作区的 .tea_agent_run：没有工作区就没什么可打包。
+    $('files-download').disabled = !state.workspace;
     renderFilePane();
   }
   function fileExt(p) { var m = /\.([A-Za-z0-9]+)\s*$/.exec(String(p || '')); return m ? m[1].toLowerCase() : ''; }
@@ -2712,6 +2766,7 @@
       if (e.target === $('overlay')) closeDialog();
     };
     $('files-save').onclick = saveFile;
+    $('files-download').onclick = downloadRunArchive;
     $('files-revert').onclick = function () {
       state.files.content = state.files.original;
       $('files-editor').value = state.files.original;

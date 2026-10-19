@@ -188,6 +188,20 @@ build/bin/tea_agent --workspace . --open
 行内代码、粗斜体与链接都会渲染，链接一律新标签页打开。文件视图里选中图片直接显示，
 选中 `.md` 可在「预览 / 编辑」之间切换。
 
+**下载运行数据**：文件页右上角的「下载 .tea_agent_run」把**这台设备上、这个工作区**的
+`.tea_agent_run/` 整个打成一个 zip 传回来（会话、轨迹、日志、记忆、`agent.md`、`scripts/`），
+不用登到机器上去 `tar`。几个刻意的取舍：
+
+- 归档在内存里组装（`src/archive.cpp` + `3rd/miniz`），**不落临时文件**；单文件 32 MB、
+  合计 256 MB、20000 个条目的上限之外，超限的文件是**跳过并在响应头里报数**
+  （`X-Archive-Skipped`），而不是让整个下载失败；
+- 条目名保留 `.tea_agent_run/` 这个前缀（含那个点），解压出来就是原样的目录；空目录也会
+  存成条目，不会丢；
+- 走 `fetch` + blob 而不是直接跳转，所以服务端报错时 UI 能说清原因，而不是把一个 JSON
+  错误体当文件存下来；成功后 toast 里给出文件名、大小和条目数；
+- `?path=` 可以换成工作区里的任何目录（默认就是 `.tea_agent_run`），越界路径由
+  `resolve_path` 挡在打包之前（`403`）。
+
 **粘贴图片**：在输入框里直接 Ctrl+V 粘贴截图（或把图片拖进输入框），缩略图会出现在
 输入框上方，点 × 可移除，一条消息最多 4 张、单张 8 MB。发送时图片随消息提交，服务端按
 **内容**而不是文件名嗅探真实类型（PNG / JPEG / GIF / WebP），落到工作区的
@@ -247,6 +261,7 @@ provider 回报的 `usage` 为准）。
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
+| `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
 | **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）** |
 | `POST` | `/api/chat/stop` | 中断当前轮次 |
@@ -947,11 +962,16 @@ CMakePresets.json           msvc / mingw / posix 预设（msvc 两个 preset 都
 | `3rd/cpp-httplib/` | 0.61.0 | HTTP 服务端 | MIT |
 | `3rd/yaml-cpp/` | 0.8.0 | YAML 解析 | MIT |
 | `3rd/mbedtls/` | 2.28.9 LTS | TLS 客户端（跨平台） | Apache-2.0 / GPL-2.0（见 `3rd/mbedtls/LICENSE`） |
+| `3rd/miniz/` | 3.1.2 | deflate + ZIP 打包（工作区归档下载） | MIT |
 | `3rd/ca-bundle/` | curl CA | 根证书 | MPL-2.0 |
 
 各目录下的 `UPSTREAM_VERSION.txt` 记录上游版本（不叫 `VERSION`：Windows 文件名不区分大小写，
-会遮蔽标准头 `<version>`）。yaml-cpp 0.8.0 依赖 `<string>` 间接引入 `<cstdint>`，用
-`-include cstdint` 解决，不修改上游源码。
+会遮蔽标准头 `<version>`），并记下上游 URL 与 sha256。yaml-cpp 0.8.0 依赖 `<string>` 间接引入
+`<cstdint>`，用 `-include cstdint` 解决，不修改上游源码。
+
+miniz 只取上游 release 里的**合并版两个文件**（`miniz.c` + `miniz.h`，逐字节未改），作为独立的
+静态库目标 `tea_miniz` 编译：它是 C，所以顶层 `project()` 声明了 `LANGUAGES C CXX`；它的告警
+不是我们的，所以只对这个目标关掉（MSVC `/W0`，其它 `-w`）。
 
 ---
 
@@ -975,6 +995,8 @@ node tests/smoke_turn_resume.mjs                          # 断线不取消轮�
 node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
 node tests/ui_second_client.mjs                           # 另一台机器/全新 profile 接回别人发起的轮次（需 google-chrome）
 node tests/ui_two_clients.mjs                             # 两个客户端同看一轮：插队 / 离开 / 停止（需 google-chrome）
+python3 tests/smoke_run_archive.py                        # 工作区归档下载：真 zip / 沙箱 / 超限跳过
+node tests/ui_files_download.mjs                          # 文件页「下载」按钮真的产出 zip（需 google-chrome）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
@@ -1063,6 +1085,17 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 **第二个**工作区里发起轮次、读到第 9 帧就断开，然后用一个全新的浏览器 profile（没有
 localStorage）打开页面——它必须落在 `proj_b`（而不是索引里的第一个 `proj_a`）、直接进入生成态、
 回放已经生成的内容、继续直播到结束，标签页标题也跟着工作区走。
+
+`tests/smoke_run_archive.py` 把归档当**真 zip** 验：`zipfile.testzip()` 通过、条目名全部以
+`.tea_agent_run/` 开头（那个点必须保住）、空目录也在、`note.txt` 解出来与磁盘逐字节相同且确实被
+压缩过、`X-Archive-Entries` 与包内条目数一致；`?path=` 指子目录只打那一棵；`../..` 返回 403、
+不存在返回 404、指到文件返回 400 `not_a_directory`、未知工作区 404；放一个 33 MB 的文件进去，
+它被跳过（`X-Archive-Skipped: 1`）而其余内容照常打包。
+
+`tests/ui_files_download.mjs` 在真浏览器里点那个按钮：按钮存在、文案与 tooltip 说清下载什么、
+点击后立刻进入「打包中…」并禁用；用 `URL.createObjectURL` 的替身接住 blob，断言它是
+`application/zip`、magic 是 `PK\x03\x04`、大小合理；结束后按钮恢复、toast 报出文件名与条目数；
+最后再直接打一次接口，确认包里真的有这个工作区的标记文件。
 
 `tests/ui_two_clients.mjs` 开两个独立 profile 的浏览器看同一轮：B 冷启动直接落进 A 发起的轮次、
 两边收到的内容长度始终接近；B 插队一条消息，**两边**都看到它被采纳成第二个问题；B 点「离开」
@@ -1158,6 +1191,20 @@ Copyright (c) 2026 sunkwei
 | cpp-httplib | MIT |
 | yaml-cpp | MIT |
 | mbedTLS | Apache-2.0（双许可，另有 GPL-2.0） |
+| miniz | MIT |
 
 分发二进制时注意：mbedTLS 的 Apache-2.0 条款要求保留其许可证与声明，`3rd/mbedtls/LICENSE`
 需随发行物一起带上。
+
+**许可证兼容性**（新增依赖时先看这一段）：本项目是 MIT，`3rd/` 里 nlohmann/json、cpp-httplib、
+yaml-cpp、miniz 也都是 MIT，互相兼容、可直接静态链接进同一个二进制，只需保留各自的版权声明。
+两处需要留意，但都**不构成冲突**：
+
+- **mbedTLS** 是 Apache-2.0 / GPL-2.0 双许可。这里按 **Apache-2.0** 使用：Apache-2.0 与 MIT
+  单向兼容（MIT 代码可以并入 Apache-2.0 分发），只要保留 `3rd/mbedtls/LICENSE` 与声明即可；
+  **不要**选 GPL-2.0 那一支——GPL-2.0 与 MIT 组合会把整个发行物变成 GPL，那才是真冲突。
+- **CA 证书包**（`3rd/ca-bundle/cacert.pem`）是 MPL-2.0。它是**数据**而不是链接进程序的代码，
+  随发行物附带并保留出处即可，不影响二进制的 MIT 许可。
+
+也就是说：新增依赖时优先选 MIT / BSD / zlib / Apache-2.0；**GPL / AGPL 一律不要**（会传染整个
+二进制），LGPL 需要能保证重新链接（静态链接下要提供目标文件），也不建议。

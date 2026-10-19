@@ -5,3 +5,6 @@
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 *.pem text
+# Vendored sources stay byte-identical to upstream, so no checkout may rewrite
+# their line endings: the sha256 recorded next to them has to keep matching.
+3rd/** -text

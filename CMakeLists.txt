@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(tea_agent VERSION 0.1.0 LANGUAGES CXX)
+project(tea_agent VERSION 0.1.0 LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
 # MSVC: the /showIncludes prefix has to be ASCII, or nothing filters it
@@ -100,6 +100,19 @@ target_compile_definitions(tea_3rd_headers INTERFACE
   CPPHTTPLIB_NO_EXCEPTIONS=0
 )
 
+# miniz: deflate + the ZIP writer behind GET /api/workspaces/{id}/archive.
+# Vendored as the upstream amalgamation (miniz.c + miniz.h, unmodified) and built
+# as its own static library: it is C, it is not ours, and its warnings are not
+# interesting, so they are turned off for this target only.
+add_library(tea_miniz STATIC ${TEA_3RD}/miniz/miniz.c)
+target_include_directories(tea_miniz PUBLIC ${TEA_3RD}/miniz)
+set_target_properties(tea_miniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(MSVC)
+  target_compile_options(tea_miniz PRIVATE /W0)
+else()
+  target_compile_options(tea_miniz PRIVATE -w)
+endif()
+
 # yaml-cpp is a real library; build it from source inside 3rd/.
 set(YAML_CPP_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_TOOLS   OFF CACHE BOOL "" FORCE)
@@ -158,7 +171,7 @@ else()
 endif()
 
 add_library(tea_3rd INTERFACE)
-target_link_libraries(tea_3rd INTERFACE tea_3rd_headers yaml-cpp::yaml-cpp)
+target_link_libraries(tea_3rd INTERFACE tea_3rd_headers yaml-cpp::yaml-cpp tea_miniz)
 target_compile_definitions(tea_3rd INTERFACE YAML_CPP_STATIC_DEFINE)
 if(TEA_HAVE_MBEDTLS)
   target_link_libraries(tea_3rd INTERFACE mbedtls mbedx509 mbedcrypto)
@@ -266,6 +279,7 @@ set(TEA_SOURCES
   src/http_socket.cpp
   src/tls.cpp
   src/command.cpp
+  src/archive.cpp
   src/tools.cpp
   src/workspace.cpp
   src/llm.cpp

@@ -13,6 +13,7 @@
 #include "httplib.h"
 
 #include "agent.h"
+#include "archive.h"
 #include "http.h"
 #include "log.h"
 #include "trajectory.h"
@@ -344,6 +345,61 @@ struct ChatTurn {
     }
   }
 };
+
+/// A download name that survives every browser, shell and filesystem: ASCII only,
+/// no separators, and a UTC stamp so two downloads do not collide.
+std::string ascii_archive_name(const std::string& workspace, const std::string& rel) {
+  std::string out;
+  for (std::size_t i = 0; i < workspace.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(workspace[i]);
+    const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '-' || c == '_';
+    out += plain ? static_cast<char>(c) : '_';
+  }
+  if (out.empty()) out = "workspace";
+  if (out.size() > 48) out.resize(48);
+
+  std::string dir;
+  for (std::size_t i = 0; i < rel.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(rel[i]);
+    const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '-' || c == '_';
+    if (c == '.' && dir.empty()) continue;             // no leading dot
+    dir += plain ? static_cast<char>(c) : '_';
+  }
+  if (dir.empty()) dir = "workspace";
+  if (dir.size() > 48) dir.resize(48);
+
+  // 2026-10-19T09:12:33Z -> 20261019-091233
+  std::string digits;
+  const std::string stamp = now_iso8601();
+  for (std::size_t i = 0; i < stamp.size(); ++i) {
+    if (stamp[i] >= '0' && stamp[i] <= '9') digits += stamp[i];
+  }
+  const std::string when =
+      digits.size() >= 14 ? (digits.substr(0, 8) + "-" + digits.substr(8, 6)) : digits;
+  return out + "-" + dir + (when.empty() ? "" : "-" + when) + ".zip";
+}
+
+/// Percent-encode for `filename*=UTF-8''...`, so a non-ASCII workspace name still
+/// arrives readable instead of as a row of underscores (RFC 5987/6266).
+std::string rfc5987_name(const std::string& name) {
+  static const char* kHex = "0123456789ABCDEF";
+  std::string out;
+  for (std::size_t i = 0; i < name.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(name[i]);
+    const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    if (plain) {
+      out += static_cast<char>(c);
+    } else {
+      out += '%';
+      out += kHex[c >> 4];
+      out += kHex[c & 0x0F];
+    }
+  }
+  return out;
+}
 
 const WebAsset* find_embedded_asset(const std::string& path) {
   for (std::size_t i = 0; i < kWebAssetCount; ++i) {
@@ -1279,6 +1335,65 @@ void ApiServer::Impl::install_routes() {
             j["path"] = ws.log_file();
             j["lines"] = list;
             send_json(res, j);
+          });
+
+  // ---- workspace archive download ----------------------------------------
+  // One ZIP with a whole directory of *this device*, so an operator can take the
+  // run data (sessions, trajectories, logs, memory, agent.md) with them without
+  // shelling into the machine. Assembled in memory by src/archive.cpp; the limits
+  // there are what keeps a single request from exhausting the device, and files
+  // that do not fit are reported in X-Archive-Skipped instead of failing the
+  // whole download.
+  svr.Get(R"(/api/workspaces/([^/]+)/archive)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            // The default is the run directory: that is what "download this
+            // workspace's tea_agent data" means. Any other directory inside the
+            // workspace works the same way - resolve_path is what refuses to
+            // leave the sandbox, so `../..` never reaches the zipper.
+            std::string rel = req.has_param("path") ? trim(req.get_param_value("path")) : "";
+            if (rel.empty()) rel = ".tea_agent_run";
+            const std::string target = ws.resolve_path(rel, &err);
+            if (target.empty()) {
+              send_error(res, 403, "forbidden", err);
+              return;
+            }
+            if (!path_exists(target)) {
+              send_error(res, 404, "not_found", "no such directory: " + rel);
+              return;
+            }
+            if (!path_is_dir(target)) {
+              send_error(res, 400, "not_a_directory",
+                         "not a directory: " + rel + " (a single file is /raw)");
+              return;
+            }
+            const ArchiveResult archive = zip_directory(target, rel);
+            if (!archive.ok) {
+              send_error(res, 500, "archive_failed", archive.error);
+              return;
+            }
+            const std::string ascii = ascii_archive_name(path_filename(ws.root()), rel);
+            res.set_header("Content-Disposition",
+                           "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''" +
+                               rfc5987_name(ascii));
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Access-Control-Allow-Origin", "*");
+            // Lets a caller say what it got without unpacking: how much went in
+            // and how much the limits left out.
+            res.set_header("Access-Control-Expose-Headers",
+                           "Content-Disposition, X-Archive-Entries, X-Archive-Skipped, "
+                           "X-Archive-Uncompressed");
+            res.set_header("X-Archive-Entries", std::to_string(archive.entries));
+            res.set_header("X-Archive-Skipped", std::to_string(archive.skipped.size()));
+            res.set_header("X-Archive-Uncompressed", std::to_string(archive.uncompressed));
+            LOG_INFO("archive: ", ws.display_path(target), " -> ", ascii, " (", archive.bytes.size(),
+                     " B, ", archive.entries, " entries, ", archive.skipped.size(), " skipped)");
+            res.set_content(archive.bytes, "application/zip");
           });
 
   // ---- chat (SSE) --------------------------------------------------------
