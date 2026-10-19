@@ -216,8 +216,6 @@ int main(int argc, char** argv) {
   LOG_INFO("log file: ", log_file);
   LOG_INFO("http engines available: ", http_available_engines());
 
-  if (args.has("http-engine")) http_set_engine(args.get("http-engine"));
-
   // ---- TLS ---------------------------------------------------------------
   TlsOptions tls;
   tls.verify_peer = !args.has("insecure");
@@ -280,6 +278,17 @@ int main(int argc, char** argv) {
     }
   }
   if (args.has("allow-outside-workspace")) config.settings.allow_outside_workspace = true;
+
+  // HTTP backend: the CLI flag wins, otherwise the settings files decide
+  // (tea_agent.yaml, plus a workspace's settings.yaml). Persisting
+  // `http_engine: socket` is the cure for a machine where WinHTTP cannot reach
+  // the provider: it skips the probe instead of failing it once per process.
+  if (args.has("http-engine")) {
+    http_set_engine(args.get("http-engine"));
+  } else if (!config.settings.http_engine.empty() && config.settings.http_engine != "auto") {
+    http_set_engine(config.settings.http_engine);
+    LOG_INFO("http: engine pinned to '", config.settings.http_engine, "' by the settings file");
+  }
 
   // ---- workspaces --------------------------------------------------------
   WorkspaceRegistry registry;

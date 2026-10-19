@@ -432,6 +432,11 @@ void ApiServer::Impl::install_routes() {
     j["provider"] = config->active_provider;
     j["model"] = config->active_model;
     j["http_engine"] = http_engine();
+    // Hosts where WinHTTP was given up on and the bundled TLS backend took over
+    // (Windows only, empty otherwise). Makes the fallback visible from outside
+    // instead of only in the log.
+    const std::vector<std::string> fallback = http_socket_fallback_hosts();
+    if (!fallback.empty()) j["http_socket_fallback"] = fallback;
     // The UI hides the "browse" button when the server has no desktop to draw
     // a dialog on (headless box, no zenity/kdialog, no override).
     j["dir_picker"] = directory_picker_available();

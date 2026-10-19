@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <map>
 #include <mutex>
+#include <vector>
 
 #include "log.h"
 #include "tls.h"
@@ -16,6 +18,15 @@ std::atomic<int> g_engine{0};  // 0 = auto, 1 = socket/tls, 2 = winhttp
 
 std::mutex g_tls_mu;
 TlsOptions g_tls_config;
+
+/// Hosts for which WinHTTP already failed at the connection level while the
+/// bundled TLS stack worked. Remembering that turns a permanently broken
+/// schannel setup (or an IPv6-only resolution WinHTTP cannot handle) into one
+/// wasted attempt per process instead of one per request - the agent issues a
+/// request per model iteration, so the old behaviour meant a failed connect,
+/// a retry and a WARN line every few seconds.
+std::mutex g_fallback_mu;
+std::map<std::string, bool> g_winhttp_down;
 
 int engine_from_name(const std::string& name) {
   const std::string v = to_lower(trim(name));
@@ -139,6 +150,13 @@ std::string http_engine() {
   }
 }
 
+std::vector<std::string> http_socket_fallback_hosts() {
+  std::vector<std::string> hosts;
+  std::lock_guard<std::mutex> lock(g_fallback_mu);
+  for (const auto& entry : g_winhttp_down) hosts.push_back(entry.first);
+  return hosts;
+}
+
 std::string http_available_engines() {
   std::string out = "socket";
   if (tls_available()) out += "(tls:" + tls_backend_name() + ")";
@@ -180,15 +198,45 @@ HttpResponse http_perform(const HttpRequest& req, const HttpChunkCallback& on_ch
     res = http_perform_socket(req, on_chunk);
   } else {
 #ifdef _WIN32
-    res = http_perform_winhttp(req, on_chunk);
-    // WinHTTP relies on schannel, which is unavailable in some restricted
-    // environments (sandboxes, service accounts). Fall back to the bundled TLS
-    // stack when the request never even produced a status line.
-    if (res.status == 0 && !res.aborted && tls_available()) {
-      LOG_WARN("http: WinHTTP could not reach ", url.host, " (", res.error,
-               "); retrying with the bundled TLS backend");
-      const HttpResponse retry = http_perform_socket(req, on_chunk);
-      if (retry.ok) res = retry;
+    bool skip_winhttp = false;
+    {
+      std::lock_guard<std::mutex> lock(g_fallback_mu);
+      skip_winhttp = g_winhttp_down.find(url.host) != g_winhttp_down.end();
+    }
+    if (skip_winhttp) {
+      res = http_perform_socket(req, on_chunk);
+    } else {
+      res = http_perform_winhttp(req, on_chunk);
+      // WinHTTP relies on schannel plus its own resolver, which is unavailable or
+      // unusable in some environments (restricted service accounts, machines
+      // whose DNS only answers over IPv6, corporate proxies set in the system
+      // settings). Fall back to the bundled TLS stack when the request never even
+      // produced a status line.
+      if (res.status == 0 && !res.aborted && tls_available()) {
+        const std::string winhttp_error = res.error;
+        const HttpResponse retry = http_perform_socket(req, on_chunk);
+        if (retry.status > 0) {
+          bool first_time = false;
+          {
+            std::lock_guard<std::mutex> lock(g_fallback_mu);
+            first_time = g_winhttp_down.emplace(url.host, true).second;
+          }
+          if (first_time) {
+            LOG_WARN("http: WinHTTP cannot reach ", url.host, " (", winhttp_error,
+                     "); using the bundled TLS backend from now on. Pass --http-engine "
+                     "socket to skip the probe entirely.");
+          } else {
+            LOG_DEBUG("http: ", url.host, " uses the bundled TLS backend (WinHTTP failed "
+                      "earlier: ", winhttp_error, ")");
+          }
+          res = retry;
+        } else {
+          // Both engines failed: report both reasons. Keeping only the WinHTTP
+          // error (as before) hid what the fallback actually said.
+          res.error = "winhttp: " + winhttp_error +
+                      "; tls fallback: " + (retry.error.empty() ? "no response" : retry.error);
+        }
+      }
     }
 #else
     if (tls_available()) {

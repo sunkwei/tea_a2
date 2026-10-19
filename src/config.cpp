@@ -78,6 +78,7 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (yhas(node, "temperature")) s.temperature = ydouble(node, "temperature", s.temperature);
   if (yhas(node, "top_p")) s.top_p = ydouble(node, "top_p", s.top_p);
   if (yhas(node, "max_tokens")) s.max_tokens = yint(node, "max_tokens", s.max_tokens);
+  if (yhas(node, "http_engine")) s.http_engine = ystr(node, "http_engine", s.http_engine);
   if (yhas(node, "command_timeout_ms"))
     s.command_timeout_ms = static_cast<int>(yint(node, "command_timeout_ms", s.command_timeout_ms));
   if (yhas(node, "http_connect_timeout_ms"))

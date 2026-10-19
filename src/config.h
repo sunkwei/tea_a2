@@ -78,6 +78,11 @@ struct Settings {
   int command_timeout_ms = 180000;
   int http_connect_timeout_ms = 30000;
   int http_read_timeout_ms = 600000;
+  /// "auto" | "socket" | "winhttp". Same meaning as `--http-engine`, but
+  /// persistable: on a machine where WinHTTP cannot connect, setting
+  /// `http_engine: socket` in tea_agent.yaml (or a workspace's settings.yaml)
+  /// saves a failing probe. The command line flag still wins.
+  std::string http_engine = "auto";
   /// Web tools (toolkit_search / toolkit_fetch) get their own budget. The
   /// 600s read timeout above exists for LLM streaming; reusing it meant one
   /// slow search endpoint could stall a turn for ten minutes, and the request

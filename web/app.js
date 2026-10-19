@@ -960,6 +960,7 @@
       if (ev.session_id && (!state.session || state.session.id !== ev.session_id)) {
         state.session = { id: ev.session_id, title: '新会话' };
         saveLS();
+        renderCrumbs();
       }
       state.stats = emptyStats();                 // 新一轮：指标栏先清空，等 metrics 到达再填
       state.liveTokens = 0; state.liveStartAt = 0;
@@ -1126,6 +1127,7 @@
       if (state.session && state.session.id === sid) {
         state.session = d.session || state.session;
         state.messages = d.messages || [];
+        renderCrumbs();          // 标题由服务端在第一轮生成，回读后才拿得到
       }
     }, function () { }).then(loadTrajectories).then(function () {
       attachTrajectories();
@@ -1458,6 +1460,9 @@
     $('ws-chip-text').textContent = state.workspace ? state.workspace.name : '选择工作区';
     $('ws-chip').title = state.workspace ? state.workspace.path : '';
     updateTitle();
+    // 面包屑曾经只在 showView() 里刷新，于是启动时（工作区/会话还没加载）画出来的
+    // 「无工作区 / 新会话」会一直留着。工作区变了就重画，和标签页标题同一个时机。
+    renderCrumbs();
   }
   function renderWorkspaceMenu() {
     var dd = $('ws-dropdown');
@@ -1569,7 +1574,14 @@
           if (!t) { toast('标题不能为空'); return; }
           closeDialog();
           api('api/sessions/' + encodeURIComponent(s.id), { method: 'PATCH', body: { title: t } })
-            .then(function () { toast('已重命名'); return loadSessions(); },
+            .then(function () {
+              if (state.session && state.session.id === s.id) {
+                state.session.title = t;
+                renderCrumbs();
+              }
+              toast('已重命名');
+              return loadSessions();
+            },
               function (e) { toast('重命名失败：' + e.message); });
         }
       }
@@ -1784,6 +1796,7 @@
       state.messages = d.messages || [];
       state.live = null; state.streamError = null;
       clearQueue();
+      renderCrumbs();
       state.stats = statsFor(sid);                 // 恢复该会话上一轮的指标
       state.turnSteps = num(state.stats.steps);
       state.turnStartAt = 0;
@@ -1799,6 +1812,7 @@
   function newSessionDraft() {
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
     clearQueue();
+    renderCrumbs();
     state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
     state.turnSteps = 0; state.turnStartAt = 0;
     state.trajectory = []; state.lastTrajectoryId = null;

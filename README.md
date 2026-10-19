@@ -568,6 +568,7 @@ settings:
   max_tool_output: 131072      # 回填给模型的工具输出上限（字节）
   command_timeout_ms: 180000   # toolkit_exec 默认超时
   keep_turns: 10
+  http_engine: auto            # auto | socket | winhttp（也可用 --http-engine 覆盖）
 ```
 
 解析顺序：`--provider`/`--model` → `roles.main` → 第一个 provider 的 `default_model`。
@@ -751,6 +752,21 @@ __nss_configure_lookup("hosts", "files dns");   // 仅静态构建
 ### TLS 与证书
 
 - Windows 默认走 WinHTTP，使用**系统证书库**，无需额外文件；拿不到状态行时自动回退内置 mbedTLS。
+  **内嵌的 `cacert.pem` 与 WinHTTP 无关**：它只被 mbedTLS 后端读取（见下面的覆盖顺序），
+  WinHTTP/schannel 永远用 Windows 的证书库。所以「Windows 上编译时要不要内嵌 CA」不影响
+  WinHTTP 的行为——两者是两套独立的信任链。
+
+  少数 Windows 环境下 WinHTTP 会连不上（常见于 `WinHttpSendRequest failed (WinHTTP error
+  12029)`：schannel 被策略禁用、系统代理只配在 Internet 选项里、或者域名只解析到 IPv6 而
+  WinHTTP 不会 Happy Eyeballs），这时会自动回退到内置 mbedTLS，用户无感。现在的行为：
+
+  - 每个主机**只探测一次**：回退成功后记住该主机，后续请求直接走 mbedTLS，不再每次先失败
+    一次（以前每轮模型调用都会多一次失败的连接尝试和一行 WARN）；
+  - 首次回退记一行 WARN 并提示可以用 `--http-engine socket`（或配置里写
+    `settings: { http_engine: socket }`，可持久化、也可按工作区覆盖）彻底跳过探测，
+    之后降为 DEBUG；
+  - 两个后端都失败时，错误信息同时带上两边的原因，而不是只留 WinHTTP 那句；
+  - `GET /api/health` 的 `http_socket_fallback` 会列出已经改用内置 TLS 的主机（没有则为空）。
 - 其它平台走内置 mbedTLS，根证书**编译进二进制**（`3rd/ca-bundle/cacert.pem` 由
   `tools/embed_ca_bundle.cpp` 生成 `ca_bundle.cpp`），所以单文件部署不需要随附 PEM。
   启动日志会写 `tls: CA bundle embedded in the binary (N bytes)`。
@@ -837,6 +853,7 @@ node tests/ui_queue.mjs                                   # 生成中 Enter 排�
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
 node tests/ui_agent_doc.mjs                               # 记忆页的 agent.md 编辑框（需 google-chrome）
 node tests/ui_render_perf.mjs                             # 流式渲染不重建气泡（需 google-chrome）
+node tests/ui_crumbs.mjs                                  # 顶栏显示工作区与会话标题（需 google-chrome）
 ```
 
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
@@ -869,6 +886,11 @@ false。选出的路径能直接喂给 `/api/workspaces`。
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的
 下一次请求里；`op=read/replace/scripts` 各自生效；超过 32 KB 的 append 报错并提示压缩且不
 改动文件；`GET/PUT /api/workspaces/{id}/agent-doc` 能读、能改、超限报 400。
+
+`tests/ui_crumbs.mjs` 钉住顶栏面包屑：启动后必须显示「工作区 / 会话标题」而不是占位符
+「无工作区 / 新会话」（旧实现只在切换视图时刷新，启动时工作区还没加载完就再也不会更新）；
+首轮回答后标题换成服务端从第一条消息生成的标题、刷新后保持、切换工作区、新建会话、
+切回原工作区、重命名，六个时机都要跟着变。
 
 `tests/ui_render_perf.mjs` 起一轮 320 条 delta、中间夹一次工具调用的回答，用
 `MutationObserver` 数 live 气泡被替换的次数：**每来一条 delta 就重建整块**是这次的回归点

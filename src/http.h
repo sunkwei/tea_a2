@@ -74,6 +74,10 @@ void http_set_engine(const std::string& name);
 std::string http_engine();
 /// Human readable list of backends compiled into this binary.
 std::string http_available_engines();
+/// Hosts for which WinHTTP has been given up on this process: the bundled TLS
+/// backend took over after WinHTTP failed at the connection level. Empty on
+/// non-Windows builds and when WinHTTP works.
+std::vector<std::string> http_socket_fallback_hosts();
 
 /// TLS settings used by the socket backend for https:// URLs.
 void http_set_tls_config(const TlsOptions& config);
