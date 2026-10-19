@@ -25,17 +25,23 @@ project(tea_agent VERSION 0.1.0 LANGUAGES CXX)
 # vendored yaml-cpp) inherit the variable at the point they are added.
 if(MSVC AND CMAKE_CXX_CL_SHOWINCLUDES_PREFIX MATCHES "[^ -~]")
   if("$ENV{VSLANG}" STREQUAL "1033")
+    # The cached prefix was detected while cl.exe still spoke the local language.
+    # cl.exe will print English now (VSLANG=1033), so make the generated filter
+    # agree with it. Doing it here repairs an existing build directory instead of
+    # forcing a from-scratch reconfigure.
     set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
+    set(CMAKE_C_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
     set(CMAKE_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
     message(STATUS
       "tea_agent: this build directory cached a localized /showIncludes prefix; using the "
-      "English one now (VSLANG=1033).")
+      "English one now (VSLANG=1033 is set).")
   else()
     message(STATUS
       "tea_agent: this Visual Studio prints /showIncludes in a localized form "
       "(\"${CMAKE_CXX_CL_SHOWINCLUDES_PREFIX}\"). CMake cannot filter those lines out of the "
-      "build log. Set VSLANG=1033 and reconfigure (scripts\\build.bat does both), or the "
-      "build output will contain one line per included header.")
+      "build log, so it will contain one line per included header. VSLANG=1033 must be set "
+      "both when configuring AND when building (cl.exe reads it, not CMake): use "
+      "scripts\\build.bat or `cmake --preset msvc` / `cmake --build --preset msvc`.")
   endif()
 endif()
 

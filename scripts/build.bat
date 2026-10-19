@@ -23,6 +23,33 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem ---------------------------------------------------------------------------
+rem Check that cl.exe reports includes in English.
+rem
+rem CMake hands the /showIncludes prefix to
+rem     cmake -E cmake_cl_compile_depends --filter-prefix=<prefix>
+rem on every compile line. A localized prefix does not survive the console code
+rem page, so nothing matches and every included header is echoed into the log
+rem (and the .obj.d files stay empty). vcenv.bat sets VSLANG=1033 to make cl.exe
+rem speak English; this probe proves it took effect on this machine instead of
+rem leaving you to wonder why the log is full of included-file lines.
+rem ---------------------------------------------------------------------------
+set "PROBE_C=%TEMP%\tea_include_probe.c"
+set "PROBE_OBJ=%TEMP%\tea_include_probe.obj"
+set "PROBE_LOG=%TEMP%\tea_include_probe.log"
+> "%PROBE_C%" echo #include ^<stdio.h^>
+>> "%PROBE_C%" echo int main(void) { return 0; }
+cl /nologo /showIncludes /c /Fo"%PROBE_OBJ%" "%PROBE_C%" > "%PROBE_LOG%" 2>&1
+set "SHOWINCLUDES_EN="
+findstr /c:"Note: including file" "%PROBE_LOG%" >nul 2>nul && set "SHOWINCLUDES_EN=1"
+if not defined SHOWINCLUDES_EN (
+  echo [build] WARNING: cl.exe does not report includes in English on this machine.
+  echo [build]          The build log will echo every included header, because CMake
+  echo [build]          cannot filter a localized /showIncludes prefix. Set VSLANG=1033
+  echo [build]          in the environment ^(vcenv.bat tries to^) and reconfigure.
+)
+del "%PROBE_C%" "%PROBE_OBJ%" "%PROBE_LOG%" >nul 2>nul
+
 set "BUILD_DIR=%ROOT%\build-msvc"
 set "GEN=NMake Makefiles"
 if not "%~1"=="" set "BUILD_DIR=%ROOT%\%~1"

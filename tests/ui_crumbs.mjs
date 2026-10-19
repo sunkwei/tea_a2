@@ -206,7 +206,9 @@ roles: {main: {provider: mock, model: m}}
     (await crumbs()) === `proj_a / ${text}`, await crumbs());
 
   // Rename from the sidebar: the bar must follow immediately.
-  const renameClicked = await evalJs(`(function(){
+  // The session list is re-rendered asynchronously after the workspace switch,
+  // so wait for the row instead of assuming it is already there.
+  const renameClicked = await waitFor(async () => evalJs(`(function(){
     var item = document.querySelector('.sess-item.active') || document.querySelector('.sess-item');
     if (!item) return false;
     var btns = item.querySelectorAll('.sess-tool');
@@ -214,9 +216,10 @@ roles: {main: {provider: mock, model: m}}
       if (btns[i].textContent === '改名') { btns[i].click(); return true; }
     }
     return false;
-  })()`);
-  await sleep(500);
-  if (renameClicked) {
+  })()`), 6000, 200);
+  const dialogReady = renameClicked && await waitFor(async () =>
+    (await evalJs(`!!document.querySelector('#dialog input.ta')`)) === true, 4000, 100);
+  if (dialogReady) {
     await evalJs(`(function(){
       var input = document.querySelector('#dialog input.ta');
       input.value = 'renamed by test';
@@ -226,10 +229,10 @@ roles: {main: {provider: mock, model: m}}
       }
       return false;
     })()`);
-    await sleep(1000);
   }
-  check('renaming a session updates the bar',
-    (await crumbs()) === 'proj_a / renamed by test', await crumbs());
+  const renamed = await waitFor(async () => (await crumbs()) === 'proj_a / renamed by test', 6000, 150);
+  check('renaming a session updates the bar', renamed,
+    `${await crumbs()} (rename clicked: ${renameClicked}, dialog: ${dialogReady})`);
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });

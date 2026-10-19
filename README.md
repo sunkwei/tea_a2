@@ -98,16 +98,32 @@ CMake 拿到这个前缀后要传给 `cmake -E cmake_cl_compile_depends --filter
 让 cl.exe 说英文。`scripts\build.bat` 通过 `scripts\vcenv.bat` 设置 `VSLANG=1033`，前缀变成
 ASCII 的 `Note: including file: `，问题消失，顺带让诊断信息可搜索。
 
-自己手敲 `cmake` 的话：
+**关键点：`VSLANG` 必须同时存在于「构建」进程的环境里**，不只是配置时——`cl.exe` 自己读它，
+CMake 不读。只在配置时设过、后来在别的窗口里跑 `cmake --build`，日志照样是本地化的。
+
+三种方式任选（都不需要改 IDE 设置）：
 
 ```bat
+:: 1) 仓库自带脚本（vcenv.bat 里设 VSLANG，构建进程继承）
+scripts\build.bat
+
+:: 2) CMake presets（configure/build 两个 preset 都带 VSLANG）
+cmake --preset msvc
+cmake --build --preset msvc
+
+:: 3) 手敲：同一个窗口里设好再 configure/build
 set VSLANG=1033
 cmake -S . -B build-msvc -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build-msvc
 ```
 
-已经配置过的构建目录会把旧前缀缓存在 `CMakeFiles\<ver>\CMakeCXXCompiler.cmake` 里，所以要
-重配一次（`cmake --fresh`，或删掉 `CMakeCache.txt`）。CMakeLists 在检测到「本地化前缀 +
-`VSLANG=1033`」时会自动改用英文前缀并打印一行说明，所以多数情况下直接重跑即可。
+已经配置过的构建目录会把旧前缀缓存在 `CMakeFiles\<ver>\CMakeCXXCompiler.cmake` 里；
+CMakeLists 在检测到「本地化前缀 + `VSLANG=1033`」时会自动换成英文前缀并打印一行说明，所以
+多数情况下重跑即可，实在顽固就 `cmake --fresh`（或删掉 `CMakeCache.txt`）重配一次。
+
+`scripts\build.bat` 在编译前还会真的跑一次 `cl /showIncludes` 探测：如果这台机器上的 `cl.exe`
+无视 `VSLANG`（极少数本地化安装会这样），它会直接打印一条明确的 WARNING，而不是让你对着
+几百行 `包含文件` 猜。
 
 ### 跑起来
 
@@ -822,6 +838,7 @@ web/                        index.html / tokens.css / app.css / app.js（构建�
 tools/                      embed_assets.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
 tests/e2e.ps1              端到端测试（69 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat
+CMakePresets.json           msvc / mingw / posix 预设（msvc 两个 preset 都带 VSLANG=1033）
 3rd/                        第三方依赖
 ```
 
