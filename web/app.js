@@ -2032,6 +2032,41 @@
     pathRow.appendChild(el('span', 'mono', (status && status.path) || '~/.tea_agent/provider.yaml'));
     body.appendChild(pathRow);
 
+    // ---- 快捷通道：只填一个 API key ----
+    // 完整 provider.yaml 有几行到几十行，在手机或没有编辑器的板子上手敲很痛苦。
+    // 这里只问 key：服务端 /api/config/quickstart 生成一份 DeepSeek 配置（默认模型
+    // deepseek-flash）并按上传同样的流程校验、落盘、热加载。
+    var quick = el('div', 'setup-quick');
+    quick.appendChild(el('div', 'setup-quick-title', '快捷开始：只填 API key'));
+    quick.appendChild(el('div', 'setup-quick-hint',
+      '选择 DeepSeek，粘贴 key，回车即可。会生成一份只含该 provider 的 provider.yaml' +
+      '（默认模型 deepseek-flash），之后随时可以手工修改。'));
+    var quickRow = el('div', 'setup-quick-row');
+    var providerSel = document.createElement('select');
+    providerSel.className = 'ta setup-provider';
+    providerSel.id = 'setup-provider';
+    var opt = document.createElement('option');
+    opt.value = 'deepseek';
+    opt.textContent = 'DeepSeek（deepseek-flash）';
+    providerSel.appendChild(opt);
+    quickRow.appendChild(providerSel);
+    var keyInput = document.createElement('input');
+    keyInput.type = 'password';
+    keyInput.className = 'ta setup-key';
+    keyInput.id = 'setup-key';
+    keyInput.placeholder = 'sk-…';
+    keyInput.autocomplete = 'off';
+    keyInput.spellcheck = false;
+    quickRow.appendChild(keyInput);
+    var quickBtn = btn('btn primary setup-quick-btn', '用 key 创建配置', function () {
+      quickApply();
+    });
+    quickBtn.id = 'setup-quick-apply';
+    quickRow.appendChild(quickBtn);
+    quick.appendChild(quickRow);
+    body.appendChild(quick);
+    body.appendChild(el('div', 'setup-or', '—— 或者上传 / 粘贴完整配置 ——'));
+
     // 文件选择 + 拖放
     var drop = el('label', 'setup-drop');
     drop.setAttribute('for', 'setup-file');
@@ -2060,6 +2095,10 @@
       setupGate.busy = b;
       applyBtn.disabled = b;
       applyBtn.textContent = b ? '正在应用…' : '上传并应用';
+      quickBtn.disabled = b;
+      keyInput.disabled = b;
+      providerSel.disabled = b;
+      quickBtn.textContent = b ? '正在应用…' : '用 key 创建配置';
     }
     function apply(text) {
       if (setupGate.busy) return;
@@ -2086,6 +2125,31 @@
       }, function (e) {
         setBusy(false);
         showError('上传失败：' + (e && e.message ? e.message : '未知错误'));
+      });
+    }
+
+    /// 只用一个 key 建配置：服务端写 provider.yaml → 热加载 → 这里刷新页面。
+    function quickApply() {
+      if (setupGate.busy) return;
+      var key = String(keyInput.value || '').trim();
+      if (!key) {
+        showError('请先粘贴 API key（DeepSeek 的 key 形如 sk-…）');
+        keyInput.focus();
+        return;
+      }
+      setBusy(true);
+      err.classList.add('hidden');
+      api('api/config/quickstart', {
+        method: 'POST',
+        body: { provider: providerSel.value || 'deepseek', api_key: key }
+      }).then(function (d) {
+        $('setup-ok').classList.remove('hidden');
+        $('setup-ok').textContent = '已用 DeepSeek 创建配置（' +
+          ((d && d.model) || 'deepseek-flash') + '），正在刷新…';
+        setTimeout(function () { location.reload(); }, 400);
+      }, function (e) {
+        setBusy(false);
+        showError('创建配置失败：' + (e && e.message ? e.message : '未知错误'));
       });
     }
 
@@ -2133,9 +2197,13 @@
       applyBtn = buttons[buttons.length - 1];
       applyBtn.onclick = function () { apply(ta.value); };
     }
+    keyInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); quickApply(); }
+    });
     // 挡住关闭：overlay 点击与 Esc 都不能关掉它。
     $('overlay').classList.add('setup-locked');
-    setTimeout(function () { ta.focus(); }, 0);
+    // 打开就把光标放在最省事的那条路上：粘贴 key、回车。
+    setTimeout(function () { keyInput.focus(); }, 0);
   }
 
   /* ---------- 7) 数据加载 ---------- */

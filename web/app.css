@@ -642,7 +642,20 @@ button{font-family:inherit}
 .setup-drop.filled{border-style:solid;border-color:var(--dsw-alias-brand-primary)}
 .setup-drop-main{font-size:13px;font-weight:500}
 .setup-drop-hint{font-size:12px;color:var(--dsw-alias-label-caption)}
-.setup-paste{font-size:12px;resize:vertical}
+/* 快捷通道：一个 provider 下拉 + key 输入 + 按钮，一行放得下（窄屏折行） */
+.setup-quick{
+  display:flex;flex-direction:column;gap:6px;padding:12px;border-radius:var(--dsw-radius-md);
+  border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);
+}
+.setup-quick-title{font-size:13px;font-weight:600}
+.setup-quick-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-caption)}
+.setup-quick-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.setup-quick-row .setup-provider{flex:0 0 auto;width:auto;padding:0 8px;height:30px}
+.setup-quick-row .setup-key{flex:1 1 200px;min-width:160px}
+.setup-quick-btn{flex:0 0 auto}
+.setup-or{
+  align-self:center;font-size:12px;color:var(--dsw-alias-label-caption);
+}
 .setup-error{font-size:12px;line-height:18px;color:var(--dsw-alias-label-error,#e5484d);white-space:pre-wrap}
 .setup-ok{font-size:12px;color:var(--dsw-alias-label-success,#30a46c)}
 .toast{

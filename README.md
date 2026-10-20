@@ -182,9 +182,18 @@ build/bin/tea_agent --workspace . --open
 ```
 
 **首次运行**：如果 `$HOME/.tea_agent/provider.yaml` 不存在，服务不会退出，而是以「配置模式」
-启动——浏览器打开页面后会被一个不可跳过的对话框挡住，点击（或拖入）`provider.yaml`、
-也可以直接粘贴内容，点「上传并应用」即可。配置会先校验再落盘（校验失败不会覆盖已有文件），
-成功后页面自动刷新，状态栏从「未配置」变成「已连接」，可以直接开始对话。
+启动——浏览器打开页面后会被一个不可跳过的对话框挡住。对话框里有两条路：
+
+1. **快捷开始：只填 API key**（最省事，光标已经在这个输入框里）。选 DeepSeek、粘贴 key、
+   回车即可：服务端据此生成一份只含该 provider 的 `provider.yaml`（默认模型
+   `deepseek-flash`，另附 `deepseek-chat` / `deepseek-reasoner` 备用），按与上传完全相同的
+   流程校验、落盘（POSIX 上权限 `0600`，因为它含密钥）、热加载。
+2. **上传 / 粘贴完整配置**：点击（或拖入）`provider.yaml`，或直接把内容粘到文本框里，点
+   「上传并应用」。
+
+两条路都是**先校验再落盘**（校验失败不会覆盖已有文件），成功后页面自动刷新，状态栏从
+「未配置」变成「已连接」，可以直接开始对话。快捷通道生成的配置就是普通的 `provider.yaml`，
+之后随时可以在「文件」页或编辑器里改（加 provider、换默认模型、打开 DeepSeek 的网页工具等）。
 命令行会打印 `starting in setup mode` 和提示地址，方便无 GUI 环境照常启动后再上传。
 
 注意只有**文件不存在**才进入配置模式；文件存在但 YAML 语法错误仍然会直接报错退出——
@@ -480,6 +489,8 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.6.0
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
+| `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件 |
+| `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"api_key":"sk-…"}` → 生成并应用只含 DeepSeek 的配置（默认模型 `deepseek-flash`）；key 不会出现在任何响应里 |
 | `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
 | `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
@@ -1342,7 +1353,9 @@ python3 tests/smoke_vision.py                             # 粘贴图片：校�
 python3 tests/smoke_console_level.py                      # 控制台只回声 WARN/ERROR、日志文件仍是 INFO
 python3 tests/smoke_bind_urls.py                          # --host 0.0.0.0 打印活跃地址，且该地址真能打开 UI
 node tests/ui_boot_probe.mjs                              # 不启浏览器也能跑：app.js 启动路径不抛异常
+python3 tests/smoke_config_quickstart.py                  # 首次运行只填 key 生成 provider.yaml
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
+node tests/ui_setup_quickstart.mjs                        # 首次运行快捷通道：粘贴 key 回车即开始（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
 python3 tests/smoke_single_file.py                        # 内嵌证书 + 静态链接 + 静态下的 DNS
@@ -1520,6 +1533,17 @@ JSON。任何同步异常或未处理的 Promise rejection 都算失败，状态
 `e2e.ps1` 只检查 HTML/JS 里**有没有**某些字符串，`init()` 里抛错时页面会一直停在
 `index.html` 里写死的「连接中…」，那种静默故障只有真执行一遍才能发现。它支持
 `--base <url>`（跑服务端实际发出来的页面）、`--state noworkspace|setup|…`、`--all` 等变体。
+
+`tests/smoke_config_quickstart.py` 覆盖首次运行的快捷通道：没有配置时 `/api/health` 报
+`config_loaded=false`；只传 `api_key` 就写出 `provider.yaml`（DeepSeek 单个 provider、
+`default_model: deepseek-flash`、`roles.main` 指向同一模型），进程无需重启即可用；key 不出现在
+任何响应里；POSIX 下文件权限是 `0600`；带引号/反斜杠的 key 以单引号标量落盘且仍能解析；缺 key、
+空白 key、控制字符、未知 provider 一律 400 且不写文件；再调一次是替换而不是一次性。
+
+`tests/ui_setup_quickstart.mjs` 在浏览器里走这条快捷通道：首次运行对话框里有 DeepSeek 下拉、
+`password` 类型的 key 输入框和「用 key 创建配置」按钮，光标已在输入框里，完整上传路径也还在；
+空 key 就地报错且不写文件；粘贴 key 按回车后 `provider.yaml` 出现、页面自动刷新、配置对话框
+消失、状态栏变「已连接」、模型按钮显示 `deepseek-flash`。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器
