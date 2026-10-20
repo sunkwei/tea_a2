@@ -132,13 +132,16 @@ try {
     # Prove the premise first: without the PRE_LINK step, writing over the running
     # image is what fails. If this ever stops failing, the whole dance is pointless
     # and the test should be reconsidered rather than silently passing.
+    # Our own instance is identified by its command line (the unique --tea-home
+    # below), not by the exe path: a developer may well have a long-running
+    # instance of the very same binary open, and that one is none of our business.
     $launcher = New-Launcher $Exe (Split-Path -Parent $Exe)
     & wscript.exe $launcher
     Check "agent is listening before the build" (Wait-Port $Port 25)
-    $running = Get-Process -Name tea_agent -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -eq $Exe }
-    Check "agent process found for $Exe" ($null -ne $running)
-    if ($running) { $agentPid = $running.Id }
+    $running = Get-CimInstance Win32_Process -Filter "Name='tea_agent.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -like "*$homeDir*" }
+    Check "our own agent process found" ($null -ne $running) "count=$(@($running).Count)"
+    if ($running) { $agentPid = @($running)[0].ProcessId }
     $overwriteBlocked = $false
     try {
         $fs = [IO.File]::Open($Exe, 'Append', 'Write', 'None')
@@ -149,6 +152,8 @@ try {
     Check "a running image cannot be opened for writing (the premise)" $overwriteBlocked
 
     Write-Host "`n== rebuild while it keeps running ==" -ForegroundColor Cyan
+    $prevBefore = @(Get-ChildItem -Path (Split-Path -Parent $Exe) -Filter $prevPattern -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Name })
     $beforeTime = (Get-Item $Exe).LastWriteTimeUtc
     $beforeSize = (Get-Item $Exe).Length
     $oldMtime = Touch-Source $sourceFile
@@ -164,9 +169,13 @@ try {
     $afterTime = (Get-Item $Exe).LastWriteTimeUtc
     Check "a new binary was linked" ($afterTime -gt $beforeTime) `
         "before=$beforeTime after=$afterTime"
-    $prev = @(Get-ChildItem -Path (Split-Path -Parent $Exe) -Filter $prevPattern -ErrorAction SilentlyContinue)
-    Check "the old binary is preserved as .prev-*" ($prev.Count -ge 1) `
-        "leftovers=$($prev.Count)"
+    # Only the copies this build produced count: another (unrelated) instance may
+    # legitimately hold one of its own from an earlier build.
+    $prevNow = @(Get-ChildItem -Path (Split-Path -Parent $Exe) -Filter $prevPattern -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Name })
+    $newLeftovers = @($prevNow | Where-Object { $prevBefore -notcontains $_ })
+    Check "the old binary is preserved as .prev-*" ($newLeftovers.Count -eq 1) `
+        "new=$($newLeftovers -join ',') all=$($prevNow.Count)"
 
     $stillAlive = Get-Process -Id $agentPid -ErrorAction SilentlyContinue
     Check "the old instance survived the build" ($null -ne $stillAlive)
@@ -175,8 +184,9 @@ try {
 
     Write-Host "`n== the leftover is cleaned once the process is gone ==" -ForegroundColor Cyan
     Stop-Agent
+    $stopped = -not (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)
     $agentPid = 0
-    Check "agent stopped" (-not (Get-Process -Id $running.Id -ErrorAction SilentlyContinue))
+    Check "agent stopped" $stopped
     $oldMtime = Touch-Source $sourceFile
     try {
         $build2 = Invoke-Relink
@@ -184,9 +194,11 @@ try {
         (Get-Item $sourceFile).LastWriteTimeUtc = $oldMtime
     }
     Check "second build succeeds" ($build2.code -eq 0)
-    $prev2 = @(Get-ChildItem -Path (Split-Path -Parent $Exe) -Filter $prevPattern -ErrorAction SilentlyContinue)
-    Check "no .prev-* leftovers remain" ($prev2.Count -eq 0) `
-        ("leftovers=" + (($prev2 | ForEach-Object { $_.Name }) -join ','))
+    $prevAfter = @(Get-ChildItem -Path (Split-Path -Parent $Exe) -Filter $prevPattern -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Name })
+    $oursLeft = @($newLeftovers | Where-Object { $prevAfter -contains $_ })
+    Check "the leftover from this build is cleaned up" ($oursLeft.Count -eq 0) `
+        ("still there: " + ($oursLeft -join ','))
 } catch {
     Write-Host "`nUNEXPECTED ERROR: $_" -ForegroundColor Red
     $failures += "exception"

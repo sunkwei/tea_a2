@@ -41,7 +41,11 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
                   OUTPUT_VARIABLE _tea_cxx_target
                   OUTPUT_STRIP_TRAILING_WHITESPACE
                   ERROR_QUIET)
-  if(_tea_cxx_target MATCHES "mingw" AND NOT CMAKE_CROSSCOMPILING)
+  # `AND NOT WIN32`: on Windows the compiler targeting mingw *is* the native
+  # build (scripts\build-mingw.bat / `cmake --preset mingw`), so only a
+  # non-Windows host pointing at a mingw triplet without a toolchain file is the
+  # mistake this guard is about.
+  if(_tea_cxx_target MATCHES "mingw" AND NOT CMAKE_CROSSCOMPILING AND NOT WIN32)
     message(FATAL_ERROR
       "the C++ compiler (${CMAKE_CXX_COMPILER}) targets ${_tea_cxx_target}, but this "
       "build directory is configured for the host (CMAKE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}).\n"
