@@ -304,7 +304,7 @@ provider 回报的 `usage` 为准）。
 --port 8282           # 端口
 --workspace <path>    # 注册工作区，可重复
 --workspace-root <d>  # 注册 <d> 下所有一级子目录
---provider/--model    # 覆盖配置里的 roles.main
+--provider/--model    # 覆盖配置里的 default:（provider/model）
 --log-level debug     # 写进日志文件的级别：trace|debug|info|warn|error|off
 --console-level warn  # 回声到控制台的级别（默认 warn，见下）
 --no-console          # 控制台不回声任何日志（--quiet 同义，且连启动横幅也省掉）
@@ -1130,7 +1130,7 @@ curl -s -X POST http://127.0.0.1:8282/api/workspaces/<ws_id>/sessions/import \
 
 ## 配置
 
-`provider.yaml` 就是 OpenAI 兼容端点清单，`roles.main` 决定默认用哪个：
+`provider.yaml` 就是 OpenAI 兼容端点清单，顶层 `default:` 决定默认用哪个：
 
 ```yaml
 providers:
@@ -1153,8 +1153,9 @@ providers:
         supports_tools: true
         supports_reasoning: false
 
-roles:
-  main: { provider: DeepSeek, model: deepseek-chat }
+default:                       # 启动后默认用的 provider / 模型
+  provider: DeepSeek
+  model: deepseek-chat
 
 settings:
   max_iterations: 50           # 单条消息最多几轮工具调用
@@ -1164,7 +1165,13 @@ settings:
   http_engine: auto            # auto | socket | winhttp（也可用 --http-engine 覆盖）
 ```
 
-解析顺序：`--provider`/`--model` → `roles.main` → 第一个 provider 的 `default_model`。
+解析顺序：`--provider`/`--model` → 顶层 `default:`（别名 `active:`）→ 第一个 provider 的
+`default_model`。不写 `default:` 也能跑，取第一个 provider 的默认模型。
+
+> **`roles:` 已不再读取。** 它来自 Python 版实现，那里的「role」意味着按角色路由到不同模型，
+> 本实现从来没有这个概念（`cheap`、`interruption` 之类的角色名会让人以为有行为，其实没有）。
+> 配置文件里若还留着 `roles:`，启动时会打一条 WARN 列出被忽略的角色名并提示改用 `default:`，
+> 但**不会**再影响选择——升级后默认模型可能因此变化，请检查一次 `/api/providers` 的 `active`。
 api_key 只在日志里以掩码出现，HTTP 接口从不下发。
 
 ### 网页搜索与抓取（provider 级可选能力）
@@ -1465,7 +1472,7 @@ scripts\install-autostart.bat -DryRun
 ```
 src/
   main.cpp                  CLI、信号、启动横幅
-  config.{h,cpp}            provider.yaml / roles / headers 解析
+  config.{h,cpp}            provider.yaml / default / headers 解析
   message.{h,cpp}           消息模型（wire 格式 + 存储格式）
   llm.{h,cpp}               OpenAI 兼容客户端：SSE、tool_calls 聚合、重试
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
@@ -1776,7 +1783,7 @@ JSON。任何同步异常或未处理的 Promise rejection 都算失败，状态
 
 `tests/smoke_config_quickstart.py` 覆盖首次运行的快捷通道：没有配置时 `/api/health` 报
 `config_loaded=false`；只传 `api_key` 就写出 `provider.yaml`（DeepSeek 单个 provider、
-`default_model: deepseek-flash`、`roles.main` 指向同一模型），进程无需重启即可用；key 不出现在
+`default_model: deepseek-flash`、`default:` 指向同一模型），进程无需重启即可用；key 不出现在
 任何响应里；POSIX 下文件权限是 `0600`；带引号/反斜杠的 key 以单引号标量落盘且仍能解析；缺 key、
 空白 key、控制字符、未知 provider 一律 400 且不写文件；再调一次是替换而不是一次性。
 

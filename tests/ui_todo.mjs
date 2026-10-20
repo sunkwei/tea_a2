@@ -140,7 +140,6 @@ providers:
     api_key: sk-test
     default_model: m
     models: {m: {max_context_tokens: 32768, supports_tools: true}}
-roles: {main: {provider: mock, model: m}}
 `);
 
   const agentPort = await freePort();

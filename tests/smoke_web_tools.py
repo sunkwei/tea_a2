@@ -377,10 +377,6 @@ providers:
         supports_tools: true
         supports_search: true
         supports_fetch: true
-roles:
-  main:
-    provider: mock
-    model: mock-chat
 settings:
   stream: true
   web_tool_timeout_ms: 3000

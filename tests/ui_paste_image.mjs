@@ -114,8 +114,6 @@ providers:
       see:
         supports_tools: true
         supports_vision: true
-roles:
-  main: {provider: mock, model: see}
 `);
 
   const agentPort = await freePort();

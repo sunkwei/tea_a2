@@ -291,10 +291,6 @@ providers:
         max_output_tokens: 4096
         supports_tools: true
         supports_vision: false
-roles:
-  main:
-    provider: mock
-    model: vision
 """ % mock_port)
 
     proc = subprocess.Popen([

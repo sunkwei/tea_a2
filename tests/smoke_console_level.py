@@ -83,7 +83,7 @@ def write_config(tmp, port):
             "    api_key: sk-test\n"
             "    default_model: m\n"
             "    models: {m: {}}\n"
-            "roles: {main: {provider: mock, model: m}}\n"
+            "default: {provider: mock, model: m}\n"
         )
     return path
 

@@ -50,7 +50,6 @@ providers:
     api_key: sk-test
     default_model: m
     models: {m: {}}
-roles: {main: {provider: mock, model: m}}
 `);
 
 let agent, chrome, ws;

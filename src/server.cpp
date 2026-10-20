@@ -484,10 +484,8 @@ std::string deepseek_config_yaml(const std::string& api_key, const std::string& 
          "        supports_tools: true\n"
          "        supports_reasoning: true\n"
          "\n"
-         "roles:\n"
-         "  main:\n"
-         "    provider: DeepSeek\n"
-         "    model: deepseek-flash\n";
+         "# The first provider here is the default; its default_model is what a new\n"
+         "# conversation starts with. Add more providers above it to change that.\n";
   return out.str();
 }
 

@@ -77,11 +77,13 @@ providers:
         supports_tools: true
         supports_reasoning: true
 
-# roles.main selects the provider/model used when --provider/--model are absent.
-roles:
-  main:
-    provider: DeepSeek
-    model: deepseek-chat
+# `default:` selects the provider/model used when --provider/--model are absent.
+# The legacy `roles:` block is no longer read (it came from the Python
+# implementation, where a "role" meant per-role model routing that this runtime
+# does not have); a file that still has one gets a warning at startup.
+default:
+  provider: DeepSeek
+  model: deepseek-chat
 
 settings:
   max_iterations: 50           # tool-calling round trips per user message

@@ -380,11 +380,39 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
     }
   }
 
-  // Resolve the active provider/model: roles.main > first provider default.
-  const YAML::Node main_role = root["roles"] ? root["roles"]["main"] : YAML::Node();
-  if (main_role && main_role.IsMap()) {
-    active_provider = trim(ystr(main_role, "provider"));
-    active_model = trim(ystr(main_role, "model"));
+  // Resolve the default provider/model: the FIRST provider in the file, with its
+  // `default_model` (falling back to the first entry of its `models:` map, which
+  // apply_settings has already copied into default_model).
+  //
+  // One rule, no indirection. The old `roles:` block is not read at all: it came
+  // from the Python implementation, where a "role" meant per-role model routing
+  // that this runtime does not have, so a `cheap:`/`interruption:` entry looked
+  // meaningful while doing nothing. Order in the file is the switch; move a
+  // provider up to make it the default, or pass --provider/--model.
+  if (!provider_order.empty()) {
+    active_provider = provider_order.front();
+    active_model.clear();  // set_active fills in that provider's default_model
+  }
+  if (root["roles"]) {
+    std::string ignored;
+    const YAML::Node roles_root = root["roles"];
+    if (roles_root.IsMap()) {
+      for (auto it = roles_root.begin(); it != roles_root.end(); ++it) {
+        std::string role;
+        try {
+          role = it->first.as<std::string>();
+        } catch (const std::exception&) {
+          continue;
+        }
+        if (!ignored.empty()) ignored += ", ";
+        ignored += role;
+      }
+    }
+    warnings.push_back(
+        "the 'roles:' block is ignored (found: " + (ignored.empty() ? "main" : ignored) +
+        "). The default model is the FIRST provider in this file and its default_model; move "
+        "that provider up, set its default_model, or pass --provider/--model. Roles came from "
+        "the Python implementation and never mapped onto anything here.");
   }
   if (!set_active(active_provider, active_model, nullptr)) {
     if (provider_order.empty()) {

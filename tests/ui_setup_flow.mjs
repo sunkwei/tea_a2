@@ -141,8 +141,6 @@ providers:
     models:
       deepseek-chat:
         supports_tools: true
-roles:
-  main: {provider: FileUp, model: deepseek-chat}
 `);
   const doc = await send('DOM.getDocument', { depth: -1 });
   const node = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#setup-file' });
@@ -166,8 +164,6 @@ providers:
     models:
       deepseek-chat:
         supports_tools: true
-roles:
-  main: {provider: DeepSeek, model: deepseek-chat}
 `;
   await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__reloaded=true;` });
   await evalJs(`(function(){

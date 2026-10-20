@@ -136,8 +136,6 @@ providers:
       blind:
         supports_tools: true
         supports_vision: false
-roles:
-  main: {provider: mock_vision, model: see}
 """
             % (mock_port, mock_port)
         )

@@ -339,10 +339,6 @@ providers:
       stop-model:
         max_context_tokens: 32768
         max_output_tokens: 4096
-roles:
-  main:
-    provider: mock_slow
-    model: slow-model
 settings:
   stream: true
   max_iterations: 8

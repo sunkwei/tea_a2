@@ -84,7 +84,6 @@ providers:
     api_key: sk-test
     default_model: m
     models: {m: {supports_tools: true}}
-roles: {main: {provider: local, model: m}}
 """
         )
 
@@ -162,7 +161,6 @@ providers:
     api_key: sk-test-not-a-real-key
     default_model: m
     models: {m: {supports_tools: true}}
-roles: {main: {provider: remote, model: m}}
 """
                 )
             port = free_port()

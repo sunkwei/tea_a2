@@ -123,7 +123,6 @@ providers:
         max_context_tokens: 32768
         supports_tools: true
         supports_vision: true
-roles: {main: {provider: mock, model: m}}
 """)
     proc = subprocess.Popen([
         binary, "--config", config, "--tea-home", os.path.join(tmp, "home"),

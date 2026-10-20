@@ -163,7 +163,6 @@ providers:
         max_output_tokens: 4096
         supports_tools: true
         supports_vision: true
-roles: {main: {provider: mock, model: vision}}
 `);
 
   const agentPort = await freePort();

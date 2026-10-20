@@ -10,7 +10,8 @@ What this pins:
 
   * without a config, /api/health says config_loaded=false and setup is needed;
   * a POST with just `api_key` creates provider.yaml with that key, DeepSeek as
-    the only provider, deepseek-flash as the default model and roles.main;
+    the only provider, deepseek-flash as the default model and a `default:` block
+    (never the legacy `roles:`);
   * the config is applied immediately: /api/health and /api/providers see it
     without a restart, and the model list has the documented alternatives;
   * the API key is never echoed back in any response;
@@ -148,9 +149,11 @@ def main():
               text[:300])
         check("default_model is deepseek-flash in the file",
               "default_model: deepseek-flash" in text, text)
-        check("roles.main points at deepseek-flash",
-              "roles:" in text and "provider: DeepSeek" in text
-              and text.rstrip().endswith("model: deepseek-flash"), text[-120:])
+        check("DeepSeek is the first provider, so it becomes the default",
+              text.index("DeepSeek:") < text.index("default_model: deepseek-flash"),
+              text[:400])
+        check("the generated file uses neither roles: nor default:",
+              "roles:" not in text and "\ndefault:" not in text, text[-200:])
         check("the secret is not echoed back by the API", key not in body_text,
               body_text[:200])
         if os.name == "posix":
