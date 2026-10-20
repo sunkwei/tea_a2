@@ -457,7 +457,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.8.0
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.8.1
 ```
 
 ### 常见错误的对照表
@@ -490,7 +490,7 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.8.0
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.8.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/health` | 探活、版本（`0.8.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
@@ -1415,8 +1415,8 @@ cmake --build --preset arm64-linux -j"$(nproc)"
 
 | 构建 | 大小 | 运行库依赖 |
 | --- | --- | --- |
-| Windows x64 / MinGW-w64（0.8.0 实测） | 6.5 MB | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
-| Windows x64 / MSVC（已实测） | 1.7 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
+| Windows x64 / MinGW-w64（0.8.1 实测） | 7.1 MB | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
+| Windows x64 / MSVC（0.8.1 实测） | 2.6 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
 | Linux x64（0.8.0 实测，静态构建） | 5.9 MB（`strip` 后 4.9 MB） | **完全静态**：不依赖目标机的 glibc 版本 |
 | Linux aarch64（0.8.0 实测，静态构建） | 17.6 MB，`strip` 后 4.3 MB | 默认完全静态（Arm GNU 11.3 + 静态 glibc）；该工具链的 libstdc++ 自带调试信息，部署前记得 `strip` |
 
@@ -1589,7 +1589,7 @@ src/
   util.{h,cpp} log.{h,cpp}  字符串、时间、编码、日志
 web/                        index.html / tokens.css / app.css / app.js（构建期嵌入）
 tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
-tests/e2e.ps1              端到端测试（69 项）；tests/sse_probe.mjs 严格流客户端
+tests/e2e.ps1              端到端测试（144 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
 CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
@@ -1896,7 +1896,7 @@ CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、
 能填入内容、上传成功后页面自动重载且状态栏变回「已连接」。
 
 `tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
-再以独立 `--tea-home` 启动 agent，覆盖 **124 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
+再以独立 `--tea-home` 启动 agent，覆盖 **144 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
 SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、
 会话分叉（复制到选中轮次、血缘落盘、父会话不变、非法下标/未知会话报错）、目录树与文件读写、
 记忆与日志接口、内置 UI 交付（含指标栏）且无 CDN 依赖。全程本地 `http://`，不需要 api_key。
@@ -1929,8 +1929,8 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 
 | 项 | 状态 |
 | --- | --- |
-| Windows x64 + MinGW-w64 GCC 16.2 | ✅ 构建 0 warning，E2E 42/42 |
-| Windows x64 + MSVC 19.51 | ✅ 构建 0 error，E2E 42/42 |
+| Windows x64 + MinGW-w64 GCC 16.2 | ✅ 构建 0 warning，E2E 144/144 |
+| Windows x64 + MSVC | ✅ 构建 0 error，E2E 144/144 |
 | C++14 语言模式（GCC 6.5 兼容性） | ✅ 全量编译通过 |
 | 真实 `api.deepseek.com` / `opencode.ai` | ✅ 含多轮工具调用 |
 | 交叉编译宿主工具机制（`TEA_AGENT_USE_HOST_ASSET_TOOL=ON`） | ✅ 在本机以原生方式验证该路径 |
