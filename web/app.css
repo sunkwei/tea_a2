@@ -688,6 +688,31 @@ button{font-family:inherit}
 .badge.yes{color:var(--dsw-alias-state-success-primary)}
 .badge.no{color:var(--dsw-alias-state-warn-primary)}
 .mono{font-family:var(--ds-font-family-code);font-size:12px}
+
+/* ---------- 设置页：文件访问范围（受限工作区 / 全局） ---------- */
+.seg{display:flex;gap:8px;padding:0 12px 12px}
+.seg-item{
+  flex:1 1 0;min-width:0;text-align:left;display:flex;flex-direction:column;gap:3px;
+  padding:10px 12px;border-radius:var(--dsw-radius-md);cursor:pointer;
+  border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);
+  color:var(--dsw-alias-label-secondary);font-family:inherit;
+}
+.seg-item:hover:not(:disabled){border-color:var(--dsw-alias-border-l3);color:var(--dsw-alias-label-primary)}
+.seg-item .seg-title{font-size:13px;font-weight:600}
+.seg-item .seg-desc{font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption)}
+.seg-item[aria-checked="true"]{
+  border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-active);
+  color:var(--dsw-alias-label-primary);
+}
+.seg-item[aria-checked="true"] .seg-desc{color:var(--dsw-alias-label-tertiary)}
+/* 「全局」是放宽限制，选中时用警告色，和普通的选中态区分开 */
+.seg-item[aria-checked="true"][data-scope="global"]{
+  border-color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-interactive-bg-active);
+}
+.seg-item[aria-checked="true"][data-scope="global"] .seg-title{color:var(--dsw-alias-state-warn-label)}
+.seg-item:disabled{opacity:.55;cursor:not-allowed}
+#access-card .doc-scripts{margin:0 12px 12px}
+#access-hint.warn{color:var(--dsw-alias-state-warn-label)}
 .tool-card{
   border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg);
   background:var(--dsw-alias-bg-layer-1);padding:12px 14px;margin-bottom:10px;

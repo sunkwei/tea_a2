@@ -314,7 +314,14 @@ int main(int argc, char** argv) {
       }
     }
   }
-  if (args.has("allow-outside-workspace")) config.settings.allow_outside_workspace = true;
+  if (args.has("allow-outside-workspace")) {
+    config.settings.allow_outside_workspace = true;
+    // A floor, not a default: Workspace::open re-applies it after the workspace
+    // settings.yaml, so the web UI can tighten this but never loosen it, and the
+    // switch reports itself as CLI-fixed instead of silently doing nothing.
+    config.settings.force_allow_outside_workspace = true;
+    config.cli_allow_outside_workspace = true;
+  }
 
   // HTTP backend: the CLI flag wins, otherwise the settings files decide
   // (tea_agent.yaml, plus a workspace's settings.yaml). Persisting

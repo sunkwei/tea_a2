@@ -241,7 +241,15 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
   out << "- Workspace root: " << workspace.root() << "\n";
   out << "- Agent run directory: " << workspace.run_dir() << "\n";
   out << "- Default command timeout: " << st.command_timeout_ms << " ms\n";
-  if (!st.allow_outside_workspace) {
+  if (st.allow_outside_workspace) {
+    // Say so explicitly: the boundary being lifted changes what the tools will
+    // actually accept, and a model that assumes it is still sandboxed wastes
+    // turns on refusals (or, worse, tells the user it cannot do something it can).
+    out << "- File tools may access paths OUTSIDE the workspace root: the operator "
+           "lifted the workspace boundary for this workspace (allow_outside_workspace). "
+           "Prefer staying inside the workspace unless the task really needs another "
+           "path, and never modify anything outside it without being asked.\n";
+  } else {
     out << "- File tools are restricted to the workspace root.\n";
   }
   if (!session.info.created_at.empty()) {

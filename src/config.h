@@ -104,6 +104,11 @@ struct Settings {
   /// both slow and (the provider bills per call) expensive.
   int web_tool_max_calls_per_turn = 10;
   bool allow_outside_workspace = false;
+  /// `--allow-outside-workspace` was given on the command line. Not a YAML key:
+  /// it is a floor applied *after* every settings file is layered, so a workspace
+  /// settings.yaml cannot quietly take the boundary back from an operator who
+  /// asked for it to be lifted. The web UI reports it as `fixed_by_cli`.
+  bool force_allow_outside_workspace = false;
   bool stream = true;
   bool stream_include_usage = false;
   bool utf8_console = true;
@@ -166,6 +171,11 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   /// being unreadable or malformed). The server uses this to come up in setup
   /// mode and let the UI upload the file instead of refusing to start.
   bool file_missing = false;
+  /// `--allow-outside-workspace` was passed on the command line. This is an
+  /// operator decision with security weight, so it acts as a floor: the web UI
+  /// may switch the restriction *on*, but never off again while the process runs
+  /// with the flag.
+  bool cli_allow_outside_workspace = false;
 
   bool load(const std::string& config_path, const std::string& tea_home);
 

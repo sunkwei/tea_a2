@@ -291,6 +291,33 @@
                       placeholder="读取中…（这里是当前生效的 system prompt；保存后从下一轮开始生效）"></textarea>
             <div class="doc-scripts" id="system-prompt-hint"></div>
           </div>
+          <!-- 文件访问范围：把 --allow-outside-workspace 搬到网页上。默认「受限
+               工作区」= 工具的路径解析被限制在工作区根目录内（README 的默认值）；
+               「全局」= 取消这个边界，工具和文件页都能碰整台机器。设置写进当前
+               工作区的 .tea_agent_run/settings.yaml，重启后仍然生效；用
+               --allow-outside-workspace 启动时命令行是下限，网页只能收紧、不能
+               放开，此时控件会被禁用并说明原因。 -->
+          <h3 class="sec-title">文件访问范围</h3>
+          <div class="doc-card" id="access-card">
+            <div class="doc-head">
+              <span class="doc-title">文件工具边界</span>
+              <span class="doc-path" id="access-path"></span>
+              <span class="doc-actions">
+                <span class="doc-meta" id="access-meta"></span>
+              </span>
+            </div>
+            <div class="seg" id="access-seg" role="radiogroup" aria-label="文件访问范围">
+              <button class="seg-item" type="button" role="radio" data-scope="workspace" id="access-workspace">
+                <span class="seg-title">受限工作区</span>
+                <span class="seg-desc">工具只能在工作区根目录内读写，越界路径直接报错</span>
+              </button>
+              <button class="seg-item" type="button" role="radio" data-scope="global" id="access-global">
+                <span class="seg-title">全局</span>
+                <span class="seg-desc">取消边界：工具与文件页可访问整台机器上的任意路径</span>
+              </button>
+            </div>
+            <div class="doc-scripts" id="access-hint"></div>
+          </div>
           <h3 class="sec-title">运行环境</h3>
           <div id="settings-paths" class="card"></div>
           <h3 class="sec-title">模型提供方</h3>

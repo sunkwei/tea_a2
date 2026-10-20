@@ -64,7 +64,8 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 - 用 `--host 0.0.0.0` 或放到公网之前，必须自己在前面加一层认证（反向代理 + mTLS / token 校验 /
   VPN），否则等同于把设备的 shell 暴露出去。
 - 只应部署在受信任的网段，或通过隧道访问。
-- 文件工具默认限制在工作区内；`--allow-outside-workspace` 会取消这个限制，慎用。
+- 文件工具默认限制在工作区内；`--allow-outside-workspace`（或设置页的「全局」）会取消这个限制，
+  慎用——放宽后任何能访问这个端口的人都能读写整台机器上的文件。
 
 ---
 
@@ -794,8 +795,8 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 | `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
 | `toolkit_todo` | 把复杂任务分解成阶段列表并维护进度：`list` `set`/`replace` `add` `update` `clear`。列表存在会话里、每轮注入 system prompt、每次变更通过 SSE 的 `todo` 事件推给 UI |
 
-相对路径基于工作区根目录；默认**禁止越出工作区**（`--allow-outside-workspace` 可放开），
-判定前会解析符号链接，所以工作区里的软链无法把工具带出去。
+相对路径基于工作区根目录；默认**禁止越出工作区**，判定前会解析符号链接，所以工作区里的软链
+也无法把工具带出去。这个边界可以在网页上开关——见下面的「文件访问范围」。
 
 ### 图片：`toolkit_load_image`
 
@@ -825,6 +826,46 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 - **历史图片会继续发送**：会话里存的是路径，每轮把上下文里所有图片重新编码成 data URL
   （压缩掉的部分跳过），所以「上一轮看过的那张图还能不能接着问」的答案是能。为免无限增长，
   一次请求的图片总量封顶 24 MB，超出时最旧的几张降级为纯文本并记一条 WARN。
+
+### 文件访问范围：受限工作区 / 全局
+
+`--allow-outside-workspace` 原本只能写在命令行上：想改主意就得重启进程，而 agent 跑在设备上
+时这往往意味着再找一次 shell。现在它同时也是设置页上的一个开关，写进工作区自己的
+`.tea_agent_run/settings.yaml`，所以重启后依然生效，读项目的人也能看见这个项目被放宽了。
+
+```
+设置 → 文件访问范围
+  [ 受限工作区 ]  工具只能在工作区根目录内读写，越界路径直接报错
+  [ 全局 ]        取消边界：工具与文件页可访问整台机器上的任意路径
+```
+
+- **默认是「受限工作区」**，与命令行默认值一致；
+- 切到「全局」会先弹一次确认框——这是一次权限放宽，不该由误点完成。切回「受限」不需要确认；
+- 切换**立即生效**：新请求按新设置走；已经开始的那一轮仍按它开始时的设置执行（工具在调用
+  时才解析路径，但一轮之内的行为保持一致）；
+- 系统提示词里的那一行会跟着变：受限时是「File tools are restricted to the workspace root」，
+  放宽后明确告诉模型边界已解除、但别去动工作区外面的东西。少了这句话，模型会以为它仍然被
+  关着，把本来能做的事说成做不到。
+
+**命令行是下限，不是默认值。** 用 `--allow-outside-workspace` 启动时，工作区的
+`settings.yaml` 和网页开关都**不能**再把边界收回来放开的这一步取消——此时两个按钮都是禁用的，
+卡片上写明「命令行固定」，`PUT` 直接回 `409 fixed_by_cli`。这是有意的：操作员在命令行上做的
+安全决定，不该被一个之后的网页请求悄悄推翻。真想恢复限制，就去掉参数重启。
+
+**接口**
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/workspaces/{id}/settings` | `allow_outside_workspace` / `fixed_by_cli` / `settings_file` |
+| `PUT` | `/api/workspaces/{id}/settings` | `{"allow_outside_workspace": true\|false}`；`409 fixed_by_cli` 表示命令行锁死，`400` 表示值不是布尔 |
+
+写入是**按行修改**，不是把整份 YAML 读进来再序列化回去：注释、键顺序、引号风格和文件里其他
+设置都保持原样，只改那一行（没有这一行就插进 `settings:` 块里）。文件解析不了时直接报错而
+不是重写——把一个手写坏的 settings.yaml 悄悄换成程序生成的版本，会把「为什么这台设备的配置
+没生效」这个线索一起删掉。
+
+浏览器端的回归测试是 `node tests/ui_workspace_access.mjs`（18 项，需要 Chrome）：它真的点按钮、
+真的取消一次确认框、真的去读一个工作区外的文件，并覆盖命令行锁死那种状态。
 
 ### 任务列表：`toolkit_todo`
 
@@ -1612,6 +1653,7 @@ python3 tests/smoke_concurrency.py                        # 并发写：锁 + �
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
+node tests/ui_workspace_access.mjs                        # 文件访问范围开关：受限 / 全局 / 命令行锁死（需 google-chrome）
 node tests/smoke_turn_resume.mjs                          # 断线不取消轮次：回放 / 续播 / stop 仍然有效
 node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
 node tests/ui_second_client.mjs                           # 另一台机器/全新 profile 接回别人发起的轮次（需 google-chrome）

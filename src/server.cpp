@@ -2060,6 +2060,86 @@ void ApiServer::Impl::install_routes() {
             send_json(res, j);
           });
 
+  // ---- workspace access (the 受限工作区 / 全局 switch) ----------------------
+  // `--allow-outside-workspace` used to be a start-up-only decision: changing your
+  // mind meant restarting the process (and, if the agent runs headless on a
+  // device, finding a shell). The switch below persists the same setting into the
+  // workspace's own settings.yaml, which is exactly the file the layered config
+  // already reads, so it survives a restart and is visible to whoever reads the
+  // project next. Two rules keep it honest:
+  //
+  //   * the CLI flag is a floor - the UI may tighten, never loosen it;
+  //   * the response always says what is in effect *now*, read back from the
+  //     freshly updated Workspace rather than echoed from the request.
+  svr.Get(R"(/api/workspaces/([^/]+)/settings)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            nlohmann::json j = nlohmann::json::object();
+            j["allow_outside_workspace"] = ws.settings().allow_outside_workspace;
+            j["fixed_by_cli"] = config->cli_allow_outside_workspace;
+            j["workspace_root"] = ws.root();
+            j["settings_file"] = ws.settings_file();
+            j["relative_settings_file"] = ws.display_path(ws.settings_file());
+            send_json(res, j);
+          });
+
+  svr.Put(R"(/api/workspaces/([^/]+)/settings)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            nlohmann::json body;
+            if (!parse_json_body(req, &body, res)) return;
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+
+            auto want = body.find("allow_outside_workspace");
+            if (want == body.end() || !want->is_boolean()) {
+              send_error(res, 400, "bad_request",
+                         "'allow_outside_workspace' must be a boolean");
+              return;
+            }
+            const bool value = want->get<bool>();
+
+            if (!value && config->cli_allow_outside_workspace) {
+              send_error(res, 409, "fixed_by_cli",
+                          "this process was started with --allow-outside-workspace, which "
+                          "cannot be switched off from the web UI; restart it without the "
+                          "flag to restore the workspace boundary");
+              return;
+            }
+
+            if (!ws.write_setting_bool("allow_outside_workspace", value, &err)) {
+              send_error(res, 400, "settings_error", err);
+              return;
+            }
+            if (value) {
+              // Worth a WARN of its own: from now on the tools (and the file page)
+              // reach the whole machine, not just this directory.
+              LOG_WARN("workspace ", ws.id(), ": file access widened to the whole machine "
+                                              "(allow_outside_workspace = true) via the web UI");
+            } else {
+              LOG_INFO("workspace ", ws.id(),
+                       ": file access restricted to the workspace again (allow_outside_workspace "
+                       "= false)");
+            }
+
+            nlohmann::json j = nlohmann::json::object();
+            j["ok"] = true;
+            j["allow_outside_workspace"] = ws.settings().allow_outside_workspace;
+            j["fixed_by_cli"] = config->cli_allow_outside_workspace;
+            j["workspace_root"] = ws.root();
+            j["settings_file"] = ws.settings_file();
+            j["relative_settings_file"] = ws.display_path(ws.settings_file());
+            send_json(res, j);
+          });
+
   // ---- logs --------------------------------------------------------------
   svr.Get(R"(/api/workspaces/([^/]+)/logs)",
           [this](const httplib::Request& req, httplib::Response& res) {

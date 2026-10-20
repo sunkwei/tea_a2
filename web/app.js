@@ -19,6 +19,7 @@
     sidebarHidden: false,
     ended: false, streamError: null, expanded: {}, stickBottom: true,
     trajectory: [], trajFull: {}, lastTrajectoryId: null,
+    access: null,                                    // 文件访问范围（受限工作区 / 全局）
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
     turnStartAt: 0, turnSteps: 0, mdBase: '',
     turnSeq: 0, attachRetries: 0,
@@ -2569,7 +2570,7 @@
       if (state.view === 'files') loadTree(state.files.dir);
       if (state.view === 'memory') loadMemory();
       if (state.view === 'logs') loadLogs();
-      if (state.view === 'settings') { renderSettings(); loadSystemPrompt(); }
+      if (state.view === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); }
       if (!silent) toast('已切换工作区：' + w.name);
     });
   }
@@ -2754,7 +2755,7 @@
     if (name === 'files') loadTree(state.files.dir);
     if (name === 'memory') loadMemory();
     if (name === 'logs') loadLogs();
-    if (name === 'settings') { renderSettings(); loadSystemPrompt(); }
+    if (name === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); }
   }
   /* ---------- 侧边栏收起 / 展开 ---------- */
   // 窄屏或专心读回答时，左侧 260px 一直是白占的。收起后由顶栏左侧的同一个图标
@@ -3334,6 +3335,88 @@
     }, 3000);
   }
 
+  /* ---------- 12b) 文件访问范围（受限工作区 / 全局） ---------- */
+  // `state.access` 是 GET /api/workspaces/{id}/settings 的最后一次结果。控件永远
+  // 显示服务端回报的生效值，而不是本地猜测：切换失败时不会留下一个「看起来已经
+  // 生效」的界面。
+  function loadAccess() {
+    if (!state.workspace) { state.access = null; renderAccess(); return Promise.resolve(); }
+    return api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/settings')
+      .then(function (d) { state.access = d; renderAccess(); },
+        function (e) {
+          state.access = { error: e.message };
+          renderAccess();
+        });
+  }
+  function renderAccess() {
+    var a = state.access || {};
+    var on = a.allow_outside_workspace === true;
+    var fixed = a.fixed_by_cli === true;
+    var wsBtn = $('access-workspace'), glBtn = $('access-global');
+    if (!wsBtn || !glBtn) return;
+    wsBtn.setAttribute('aria-checked', on ? 'false' : 'true');
+    glBtn.setAttribute('aria-checked', on ? 'true' : 'false');
+    // 命令行给了下限：只能收紧，不能在网页上放开；读不到设置时也不让点，
+    // 免得两个状态互相打架。
+    wsBtn.disabled = fixed || !!a.error;
+    glBtn.disabled = fixed || !!a.error;
+    $('access-card').classList.toggle('global', on);
+
+    $('access-path').textContent = a.relative_settings_file || '';
+    $('access-path').title = a.settings_file || '';
+    $('access-meta').textContent = a.error ? '读取失败' : (fixed ? '命令行固定' : (on ? '全局' : '受限'));
+
+    var hint = $('access-hint');
+    hint.classList.toggle('warn', on || fixed);
+    if (a.error) {
+      hint.textContent = '读取设置失败：' + a.error;
+    } else if (fixed) {
+      hint.textContent = '本进程以 --allow-outside-workspace 启动，边界已解除且不能在网页上关闭；' +
+        '要恢复限制，请去掉该参数后重启。';
+    } else if (on) {
+      hint.textContent = '⚠ 已取消工作区边界：toolkit_exec / toolkit_file 与「文件」页都能访问整台机器上的任意路径。' +
+        '设置已写入上面的 settings.yaml，重启后仍然生效。';
+    } else {
+      hint.textContent = '工具与「文件」页只能在当前工作区内活动，越出根目录的路径会被拒绝。' +
+        '切换后立即对新的请求生效；已经开始的那一轮仍按它开始时的设置执行。';
+    }
+  }
+  function setAccessScope(scope) {
+    if (!state.workspace) return;
+    var a = state.access || {};
+    if (a.error) { toast('设置还没读到，请先点「刷新」'); return; }
+    var want = scope === 'global';
+    if (want === (a.allow_outside_workspace === true)) return;      // 没有变化
+    if (!want) { commitAccess(false); return; }                     // 收紧是安全动作
+    // 放宽必须先确认：这一步不可逆地扩大了工具的权限，不该由一次误点完成。
+    var body = el('div');
+    body.appendChild(el('div', 'desc',
+      '「全局」意味着 toolkit_file / toolkit_exec 以及「文件」页可以读写本机任意路径，不再局限于当前工作区。'));
+    var row = el('div', 'field');
+    row.appendChild(el('label', null, '写入'));
+    row.appendChild(el('span', 'mono', a.relative_settings_file || '.tea_agent_run/settings.yaml'));
+    body.appendChild(row);
+    body.appendChild(el('div', 'desc', '重启后仍然生效。只在确实需要跨目录工作时打开，用完切回「受限工作区」。'));
+    openDialog('解除工作区边界？', body, [
+      { label: '取消', onClick: closeDialog },
+      { label: '解除边界', primary: true, onClick: function () { closeDialog(); commitAccess(true); } }
+    ]);
+  }
+  function commitAccess(want) {
+    if (!state.workspace) return;
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/settings',
+      { method: 'PUT', body: { allow_outside_workspace: want } }).then(function (d) {
+        state.access = d;
+        renderAccess();
+        toast(want ? '已解除工作区边界（全局）' : '已恢复为受限工作区');
+        loadSystemPrompt();          // system prompt 里那行说明也跟着变了
+      }, function (e) {
+        // 409 fixed_by_cli / 400 settings_error：显示真实原因，界面回到服务端状态
+        toast('切换失败：' + e.message);
+        loadAccess();
+      });
+  }
+
   /* ---------- 12) 设置视图（只展示是否已配置密钥，绝不回显任何密钥） ---------- */
   function renderSettings() {
     var home = $('destroy-home');
@@ -3544,6 +3627,8 @@
       renderAgentDoc();
     });
     $('logs-refresh').onclick = loadLogs;
+    $('access-workspace').onclick = function () { setAccessScope('workspace'); };
+    $('access-global').onclick = function () { setAccessScope('global'); };
     $('logs-autoscroll').onchange = function () {
       state.logsAutoScroll = $('logs-autoscroll').checked;
       saveLS();
@@ -3551,7 +3636,8 @@
     };
     $('destroy-run').onclick = openDestroyDialog;
     $('settings-refresh').onclick = function () {
-      loadProviders(); loadTools(); loadSystemPrompt(); loadHealth(true).catch(function () {});
+      loadProviders(); loadTools(); loadSystemPrompt(); loadAccess();
+      loadHealth(true).catch(function () {});
     };
     document.addEventListener('keydown', function (e) {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {   // Ctrl/Cmd+K 聚焦输入框

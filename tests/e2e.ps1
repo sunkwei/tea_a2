@@ -394,6 +394,126 @@ try {
     }
     Check "workspace index written to tea home" (Test-Path (Join-Path $homeDir 'workspaces.json'))
 
+    # --- 文件访问范围：受限工作区 / 全局（Web 上的 --allow-outside-workspace） ---
+    # 这个开关决定工具的路径解析是否被限制在工作区根目录内，所以测试是真的去读
+    # 一个工作区之外的文件，而不是只看接口回显的布尔值。
+    $outsideFile = Join-Path $scratch 'outside-the-workspace.txt'
+    Set-Content -Path $outsideFile -Value 'outside the workspace boundary' -Encoding ASCII
+    $outsideQuery = "$base/api/workspaces/$wsId/file?path=" + [uri]::EscapeDataString($outsideFile)
+
+    $access = Invoke-RestMethod "$base/api/workspaces/$wsId/settings"
+    Check "GET workspace settings reports the restriction" `
+        ($access.allow_outside_workspace -eq $false) "got=$($access.allow_outside_workspace)"
+    Check "GET workspace settings is not CLI-fixed" ($access.fixed_by_cli -eq $false)
+    Check "GET workspace settings names the settings file" `
+        ($access.relative_settings_file -eq '.tea_agent_run/settings.yaml') "got='$($access.relative_settings_file)'"
+
+    # /file reports a refused path as 400 bad_path (same contract as /file PUT
+    # and /tree); /raw uses 403 forbidden. Assert the code, not just "some error".
+    $escapedStatus = 0
+    $escapedCode = ''
+    try { Invoke-RestMethod $outsideQuery -TimeoutSec 10 | Out-Null }
+    catch {
+        $escapedStatus = [int]$_.Exception.Response.StatusCode
+        $escapedCode = ($_.ErrorDetails.Message | ConvertFrom-Json).error.code
+    }
+    Check "reading outside the workspace is refused while restricted" `
+        (($escapedStatus -eq 400) -and ($escapedCode -eq 'bad_path')) `
+        "status=$escapedStatus code=$escapedCode"
+
+    $widened = Invoke-RestMethod -Method Put -Uri "$base/api/workspaces/$wsId/settings" `
+        -ContentType 'application/json' -Body '{"allow_outside_workspace":true}' -TimeoutSec 15
+    Check "PUT allow_outside_workspace=true takes effect" ($widened.allow_outside_workspace -eq $true)
+    Check "the widened setting is reported by a fresh GET" `
+        ((Invoke-RestMethod "$base/api/workspaces/$wsId/settings").allow_outside_workspace -eq $true)
+
+    $settingsText = Get-Content (Join-Path $runDir 'settings.yaml') -Raw
+    Check "the switch is persisted to the workspace settings.yaml" `
+        ($settingsText -match 'allow_outside_workspace:\s*true') $settingsText.Trim()
+
+    $escapedContent = $null
+    try { $escapedContent = (Invoke-RestMethod $outsideQuery -TimeoutSec 10).content }
+    catch { }
+    Check "reading outside the workspace works while global" `
+        ($escapedContent -match 'outside the workspace boundary') "content='$escapedContent'"
+
+    $promptGlobal = (Invoke-RestMethod "$base/api/workspaces/$wsId/prompt").system_prompt
+    Check "the system prompt tells the model the boundary is lifted" `
+        ($promptGlobal -match 'OUTSIDE the workspace root')
+    Check "the system prompt no longer claims a hard restriction" `
+        (-not ($promptGlobal -match 'File tools are restricted to the workspace root'))
+
+    $narrowed = Invoke-RestMethod -Method Put -Uri "$base/api/workspaces/$wsId/settings" `
+        -ContentType 'application/json' -Body '{"allow_outside_workspace":false}' -TimeoutSec 15
+    Check "PUT allow_outside_workspace=false restores the restriction" ($narrowed.allow_outside_workspace -eq $false)
+    $escapedAgain = 0
+    try { Invoke-RestMethod $outsideQuery -TimeoutSec 10 | Out-Null }
+    catch { $escapedAgain = [int]$_.Exception.Response.StatusCode }
+    Check "outside paths are refused again" ($escapedAgain -eq 400) "status=$escapedAgain"
+    $promptRestricted = (Invoke-RestMethod "$base/api/workspaces/$wsId/prompt").system_prompt
+    Check "the system prompt is back to the restricted wording" `
+        ($promptRestricted -match 'File tools are restricted to the workspace root')
+
+    # A hand-written settings.yaml must survive: the endpoint edits one line, it
+    # does not reformat (or drop the comments of) a file the operator maintains.
+    Set-Content -Path (Join-Path $runDir 'settings.yaml') -Encoding ASCII -Value @(
+        '# written by hand - must survive',
+        'settings:',
+        '  keep_turns: 3',
+        '  allow_outside_workspace: true',
+        '  # inline comment',
+        '  command_timeout_ms: 4242'
+    )
+    $null = Invoke-RestMethod -Method Put -Uri "$base/api/workspaces/$wsId/settings" `
+        -ContentType 'application/json' -Body '{"allow_outside_workspace":false}' -TimeoutSec 15
+    $edited = Get-Content (Join-Path $runDir 'settings.yaml') -Raw
+    Check "editing the switch keeps the file's comments and other keys" `
+        (($edited -match 'written by hand - must survive') -and ($edited -match 'keep_turns: 3') -and `
+         ($edited -match '# inline comment') -and ($edited -match 'command_timeout_ms: 4242'))
+    Check "editing the switch rewrites only that one line" `
+        (($edited -match 'allow_outside_workspace: false') -and -not ($edited -match 'allow_outside_workspace: true')) `
+        $edited.Trim()
+
+    $badTypeStatus = 0
+    try {
+        Invoke-RestMethod -Method Put -Uri "$base/api/workspaces/$wsId/settings" `
+            -ContentType 'application/json' -Body '{"allow_outside_workspace":"yes"}' -TimeoutSec 10 | Out-Null
+    } catch { $badTypeStatus = [int]$_.Exception.Response.StatusCode }
+    Check "a non-boolean value is rejected" ($badTypeStatus -eq 400) "status=$badTypeStatus"
+
+    # The CLI flag is a floor: with it the UI may tighten but never loosen, so the
+    # refusal has to be explicit instead of silently ignoring the request.
+    $pinnedPort = $AgentPort + 40
+    Assert-PortFree $pinnedPort 'agent (cli floor)'
+    $pinned = Start-Process -FilePath $Exe `
+        -ArgumentList '--host', '127.0.0.1', '--port', "$pinnedPort", '--tea-home', $homeDir,
+                      '--workspace', $wsDir, '--allow-outside-workspace', '--log-level', 'warn' `
+        -PassThru -NoNewWindow `
+        -RedirectStandardOutput (Join-Path $scratch 'pinned.out') `
+        -RedirectStandardError (Join-Path $scratch 'pinned.err')
+    try {
+        if (-not (Wait-Port $pinnedPort 20)) { throw "the --allow-outside-workspace instance did not start" }
+        $pinnedBase = "http://127.0.0.1:$pinnedPort"
+        $pinnedSettings = Invoke-RestMethod "$pinnedBase/api/workspaces/$wsId/settings"
+        Check "a CLI-started instance reports the boundary as lifted" `
+            ($pinnedSettings.allow_outside_workspace -eq $true)
+        Check "a CLI-started instance marks the switch as CLI-fixed" ($pinnedSettings.fixed_by_cli -eq $true)
+        $pinStatus = 0
+        try {
+            Invoke-RestMethod -Method Put -Uri "$pinnedBase/api/workspaces/$wsId/settings" `
+                -ContentType 'application/json' -Body '{"allow_outside_workspace":false}' -TimeoutSec 10 | Out-Null
+        } catch { $pinStatus = [int]$_.Exception.Response.StatusCode }
+        Check "the web UI cannot loosen a CLI-fixed boundary" ($pinStatus -eq 409) "status=$pinStatus"
+        $pinnedAfter = Invoke-RestMethod "$pinnedBase/api/workspaces/$wsId/settings"
+        Check "the refused request left the boundary in place" ($pinnedAfter.allow_outside_workspace -eq $true)
+    } finally {
+        if ($pinned -and -not $pinned.HasExited) { Stop-Process -Id $pinned.Id -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Leave the workspace restricted and without a stray settings.yaml: later
+    # checks (compaction) write that file themselves and expect a clean slate.
+    Remove-Item (Join-Path $runDir 'settings.yaml') -Force -ErrorAction SilentlyContinue
+
     $sessionFiles = Get-ChildItem (Join-Path $runDir 'sessions') -Filter '*.json' -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -ne 'index.json' }
     Check "session transcript persisted" ($sessionFiles.Count -ge 1)

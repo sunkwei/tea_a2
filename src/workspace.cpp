@@ -1,5 +1,7 @@
 #include "workspace.h"
 
+#include <yaml-cpp/yaml.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <fstream>
@@ -372,6 +374,9 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
       LOG_DEBUG("workspace ", entry_.id, ": applied ", settings_file());
     }
   }
+  // The CLI flag is a floor: a workspace settings.yaml may tighten the boundary
+  // but not re-open a lift the operator asked for on the command line.
+  if (settings_.force_allow_outside_workspace) settings_.allow_outside_workspace = true;
 
   instructions_.clear();
   if (path_exists(instructions_file())) {
@@ -409,6 +414,189 @@ std::string Workspace::agent_doc_file() const {
 
 std::size_t Workspace::system_prompt_max_bytes() const {
   return kSystemPromptMaxBytes;
+}
+
+bool Workspace::write_setting_bool(const std::string& key, bool value, std::string* err) {
+  StateLock lock(state_mutex());
+  const std::string path = settings_file();
+  const std::string literal = std::string(key) + ": " + (value ? "true" : "false");
+  const std::string indent_unit = "  ";
+
+  std::string text;
+  if (path_exists(path)) {
+    if (!read_file(path, &text, 1024u * 1024u)) {
+      if (err) *err = "cannot read " + path;
+      return false;
+    }
+  }
+
+  // Refuse to edit something we cannot understand: a hand-written settings.yaml
+  // with a syntax error should keep failing loudly (the workspace already logs a
+  // WARN for it) instead of being quietly replaced by a file we generated.
+  bool has_settings_block = false;
+  if (!trim(text).empty()) {
+    try {
+      const YAML::Node root = YAML::Load(text);
+      if (!root || !root.IsMap()) {
+        if (err) *err = path + " is not a YAML mapping";
+        return false;
+      }
+      const YAML::Node block = root["settings"];
+      if (block) {
+        if (!block.IsMap()) {
+          if (err) *err = path + ": 'settings' is not a mapping";
+          return false;
+        }
+        has_settings_block = true;
+      }
+    } catch (const std::exception& e) {
+      if (err) *err = std::string("cannot parse ") + path + ": " + e.what();
+      return false;
+    }
+  }
+
+  const bool crlf = text.find("\r\n") != std::string::npos;
+  const std::string nl = crlf ? "\r\n" : "\n";
+  std::vector<std::string> lines;
+  {
+    std::string cur;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+      if (text[i] == '\n') {
+        if (!cur.empty() && cur.back() == '\r') cur.pop_back();
+        lines.push_back(cur);
+        cur.clear();
+      } else {
+        cur.push_back(text[i]);
+      }
+    }
+    if (!cur.empty()) lines.push_back(cur);
+  }
+
+  // Indentation of a line, tabs counted as one column (every settings.yaml in the
+  // wild uses spaces, and a mixed file is not worth being clever about).
+  // Returns npos for blank and comment-only lines, which take no part in the
+  // structure but must be kept.
+  const auto content_indent = [](const std::string& line) -> std::size_t {
+    std::size_t k = 0;
+    while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+    if (k >= line.size() || line[k] == '#') return std::string::npos;
+    return k;
+  };
+  const auto trimmed = [](const std::string& line) -> std::string {
+    std::size_t a = 0;
+    while (a < line.size() && (line[a] == ' ' || line[a] == '\t')) ++a;
+    std::size_t b = line.size();
+    while (b > a && (line[b - 1] == ' ' || line[b - 1] == '\r' || line[b - 1] == '\t')) --b;
+    return line.substr(a, b - a);
+  };
+
+  bool written = false;
+
+  if (has_settings_block) {
+    // Locate the top-level `settings:` line, then walk its direct children.
+    std::size_t start = lines.size();
+    std::size_t child_indent = std::string::npos;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+      if (content_indent(lines[i]) != 0) continue;
+      if (trimmed(lines[i]) == "settings:") {
+        start = i;
+        break;
+      }
+    }
+    if (start == lines.size()) {
+      // Parsed as a block but the key is spelled differently (flow style, or
+      // `settings :`); refuse rather than guess where to put the line.
+      if (err) *err = path + ": cannot locate the 'settings:' line to edit";
+      return false;
+    }
+    std::size_t end = lines.size();
+    for (std::size_t i = start + 1; i < lines.size(); ++i) {
+      const std::size_t ind = content_indent(lines[i]);
+      if (ind == std::string::npos) continue;                 // blank / comment
+      if (ind == 0) { end = i; break; }                       // next top-level key
+      if (child_indent == std::string::npos) child_indent = ind;
+    }
+    if (child_indent == std::string::npos) child_indent = indent_unit.size();
+
+    std::size_t replace_at = lines.size();
+    for (std::size_t i = start + 1; i < end; ++i) {
+      const std::size_t ind = content_indent(lines[i]);
+      if (ind != child_indent) continue;                      // nested deeper
+      const std::string t = trimmed(lines[i]);
+      if (t.compare(0, key.size(), key) != 0) continue;
+      if (t.size() <= key.size() || t[key.size()] != ':') continue;
+      replace_at = i;
+      break;
+    }
+
+    const std::string body = std::string(child_indent, ' ') + literal;
+    if (replace_at != lines.size()) {
+      lines[replace_at] = body;
+    } else {
+      // Insert after the last non-blank line of the block so a trailing comment
+      // stays attached to whatever it was commenting on.
+      std::size_t insert_at = end;
+      while (insert_at > start + 1 && content_indent(lines[insert_at - 1]) == std::string::npos) {
+        --insert_at;
+      }
+      lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_at), body);
+    }
+    written = true;
+  } else if (trim(text).empty()) {
+    lines.clear();
+    lines.push_back("# Per-workspace overrides; see README「按工作区覆盖设置」.");
+    lines.push_back("settings:");
+    lines.push_back(indent_unit + literal);
+    written = true;
+  } else {
+    // A flat settings file: apply_settings_yaml accepts `key: value` at the top
+    // level too, so edit it in place rather than reshaping the file into a
+    // `settings:` block the operator never wrote.
+    std::size_t replace_at = lines.size();
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+      if (content_indent(lines[i]) != 0) continue;
+      const std::string t = trimmed(lines[i]);
+      if (t.compare(0, key.size(), key) != 0) continue;
+      if (t.size() <= key.size() || t[key.size()] != ':') continue;
+      replace_at = i;
+      break;
+    }
+    if (replace_at != lines.size()) {
+      lines[replace_at] = literal;
+    } else {
+      std::size_t insert_at = lines.size();
+      while (insert_at > 0 && content_indent(lines[insert_at - 1]) == std::string::npos) {
+        --insert_at;
+      }
+      lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_at), literal);
+    }
+    written = true;
+  }
+
+  if (!written) {
+    if (err) *err = "could not locate a place for '" + std::string(key) + "' in " + path;
+    return false;
+  }
+
+  std::string out;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    out += lines[i];
+    out += nl;
+  }
+  if (!write_file_atomic(path, out, err)) return false;
+
+  // Reflect the change in this object so the caller does not have to reopen the
+  // workspace to see it. Everything the file does not mention keeps whatever the
+  // CLI / machine-level settings gave it.
+  std::string apply_err;
+  if (!apply_settings_yaml(&settings_, path, &apply_err)) {
+    if (err) *err = apply_err;
+    return false;
+  }
+  if (settings_.force_allow_outside_workspace) settings_.allow_outside_workspace = true;
+  LOG_INFO("workspace ", entry_.id, ": ", key, " = ", value ? "true" : "false", " written to ",
+           display_path(path));
+  return true;
 }
 
 std::string Workspace::load_system_prompt(bool* custom) const {

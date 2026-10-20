@@ -101,6 +101,14 @@ class Workspace {
   /// reject an oversized edit with the real number.
   std::size_t system_prompt_max_bytes() const;
 
+  /// Set one boolean key in `<run_dir>/settings.yaml`, then reload that file into
+  /// this object's settings. A targeted line edit rather than a YAML round-trip:
+  /// the file belongs to the operator, so comments, key order, quoting and the
+  /// rest of the document survive byte for byte. Creates the file (with a
+  /// `settings:` block) when it does not exist yet. Refuses to touch a file it
+  /// cannot parse - silently rewriting a broken settings.yaml would hide the
+  /// reason the workspace came up with the wrong settings.
+  bool write_setting_bool(const std::string& key, bool value, std::string* err);
 
   /// Map a user/model supplied path to an absolute one, enforcing the
   /// workspace boundary unless allow_outside_workspace is set.
