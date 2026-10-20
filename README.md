@@ -56,7 +56,7 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 
 ## ⚠️ 安全须知
 
-**这个程序完全由 tea_agent 项目基于 deepseek-flash 完成**
+**这个程序由 tea_agent 项目创建 0.1 版本；之后版本由 a2 自己进化完成，模型使用 deepseek-flash **
 
 **这个程序没有任何认证机制。** `toolkit_exec` 可以执行任意系统命令，所以：
 
