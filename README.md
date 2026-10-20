@@ -90,6 +90,8 @@ scripts\build.bat
 ```
 
 产物：`build/bin/tea_agent`（Windows 为 `build-msvc\bin\tea_agent.exe` 等）。
+本机编译只有这几条命令；**交叉编译（Linux → Windows / Linux aarch64）见下面的
+[跨平台编译](#跨平台编译) 一节**，那里有编译矩阵、toolchain 文件、产物校验与错误对照。
 
 **MSVC 的 `/showIncludes` 刷屏**：本地化的 Visual Studio 会把「包含文件」用本地语言输出，
 CMake 拿到这个前缀后要传给 `cmake -E cmake_cl_compile_depends --filter-prefix=…`，而命令行在
@@ -296,6 +298,162 @@ provider 回报的 `usage` 为准）。
 完整日志始终在文件里，`--console-level debug` 可以在终端跟着看一次复现过程。写成不认识
 的级别名会打印一行 `warning: … is not a level; using warn` 并按 `warn` 处理，而不是
 静默退回 `info` 把终端重新刷满。启动横幅、`error:` 这类面向人的提示不受级别影响。
+
+---
+
+## 跨平台编译
+
+同一份源码，构建命令只取决于「宿主 → 目标」这一组组合。全部分支都收在
+`CMakePresets.json` 与 `cmake/toolchains/` 里，下面这张表就是全部入口。
+
+### 编译矩阵
+
+| 宿主 → 目标 | 命令 | 产物 | 状态 |
+| --- | --- | --- | --- |
+| Linux x86_64 → 本机 | `./scripts/build.sh` 或 `cmake --preset posix && cmake --build --preset posix -j"$(nproc)"` | `build/bin/tea_agent` | ✅ 实测 |
+| macOS → 本机 | 同上（`Xcode`/`Unix Makefiles`） | `build/bin/tea_agent` | ✅ 实测（10.6+） |
+| Windows → 本机（MinGW-w64） | `scripts\build-mingw.bat` 或 `cmake --preset mingw` | `build-mingw\bin\tea_agent.exe` | ✅ 实测 |
+| Windows → 本机（MSVC） | `scripts\build.bat` 或 `cmake --preset msvc` | `build-msvc\bin\tea_agent.exe` | ✅ 实测 |
+| Linux / macOS → **Windows x64** | `cmake --preset win64-mingw-cross && cmake --build --preset win64-mingw-cross -j"$(nproc)"` | `build-win64/bin/tea_agent.exe`（PE32+，CA 已内嵌） | ✅ 产出；运行需 Windows |
+| Linux x86_64 → **Linux aarch64** | `cmake --preset arm64-linux && cmake --build --preset arm64-linux -j"$(nproc)"` | `build-arm64/bin/tea_agent`（静态） | ✅ 真机运行 |
+
+两类「交叉」用的都是 toolchain 文件（`cmake/toolchains/*.cmake`），它们的区别只是
+`CMAKE_SYSTEM_NAME` 与编译器前缀，机制相同。
+
+### 先装好编译器
+
+```bash
+# Debian / Ubuntu：本机
+sudo apt install build-essential cmake
+# Debian / Ubuntu：交叉到 Windows（会同时装上 -posix 线程模型的 g++，必需，见下文）
+sudo apt install mingw-w64
+```
+
+```bash
+# Linux x86_64 → aarch64：推荐 Arm GNU Toolchain 11.3，解压到 /opt 即可被自动发现
+#   /opt/arm-gnu-toolchain-11.3.rel1-x86_64-aarch64-none-linux-gnu
+# 或显式指定前缀目录（该目录下有 bin/aarch64-linux-gnu-gcc 或 aarch64-none-linux-gnu-gcc）
+export TEA_AARCH64_PREFIX=/path/to/aarch64-toolchain
+```
+
+工具链查找顺序：`TEA_AARCH64_PREFIX` → `/opt/arm-gnu-toolchain-11.3…` →
+`/opt/gcc-linaro-6.5.0-2018.12…` → `PATH` 上的 `aarch64-*-gcc`。Linaro 6.5 排在最后是
+故意的（原因见下面的坑）。
+
+```bash
+# macOS
+xcode-select --install
+brew install cmake
+brew install mingw-w64      # 只有要交叉出 Windows 版时才需要
+```
+
+Windows 本机：装 Visual Studio Build Tools（MSVC，配 `scripts\build.bat`）或 winlibs
+MinGW-w64（`scripts\build-mingw.bat` 会依次找 `%MINGW_HOME%`、`.toolchain\mingw64`、`PATH`）。
+两条路径都会设置 `VSLANG=1033`（MSVC）或 `TEMP`（MinGW），细节见「快速开始」。
+
+### 本机编译
+
+```bash
+# Linux / macOS，手敲（等价于 scripts/build.sh）
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+./build/bin/tea_agent --version
+
+# 或者用 preset（configure 与 build 各一个）
+cmake --preset posix
+cmake --build --preset posix -j"$(nproc)"
+```
+
+```bat
+:: Windows
+scripts\build-mingw.bat            :: MinGW-w64
+scripts\build.bat                  :: MSVC（NMake，带 VSLANG=1033）
+```
+
+### 交叉编译：必须走 toolchain 文件
+
+**只把 `CMAKE_C(XX)_COMPILER` 换成目标编译器不算交叉编译**：没设 `CMAKE_SYSTEM_NAME` 时
+`CMAKE_CROSSCOMPILING` 仍是假，`WIN32` 也不会打开，构建期工具路径不启用，最终报出的错误
+和目标平台毫无关系（两个真实症状见下面的对照表）。所以要么用 preset，要么显式传
+`-DCMAKE_TOOLCHAIN_FILE=...`：
+
+```bash
+# Linux x86_64 → Windows x64
+cmake -S . -B build-win64 -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake
+cmake --build build-win64 -j"$(nproc)"
+```
+
+```bash
+# Linux x86_64 → Linux aarch64
+cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-linux-gnu.cmake
+cmake --build build-arm64 -j"$(nproc)"
+```
+
+CMakeLists.txt 在 configure 阶段就会拦下两种「看起来像交叉、其实不是」的配置，并直接给出
+修法，而不是留到编译到一半才炸：
+
+- 编译器目标是 mingw，但 `CMAKE_CROSSCOMPILING` 为假 → 让你改用 toolchain 文件 / preset；
+- 编译器是 MinGW 的 win32 线程模型且 GCC < 13 → 告诉你这份 libstdc++ 根本没有 `std::mutex`。
+
+#### 构建期工具必须用宿主编译器
+
+`tools/embed_assets.cpp`（`web/` → C++ 源）与 `tools/embed_ca_bundle.cpp`
+（`cacert.pem` → C++ 源）是在**构建机**上运行的：用目标编译器编出来的程序，宿主机根本跑不了。
+交叉编译时它们由 `tools/host_embed/` 子项目用宿主编译器单独构建，
+`TEA_AGENT_USE_HOST_ASSET_TOOL` 默认为 `CMAKE_CROSSCOMPILING`（本机构建也可以
+`-DTEA_AGENT_USE_HOST_ASSET_TOOL=ON` 来验证这条路径）。相关的两个细节：
+
+- 宿主工具的**可执行后缀**按宿主算（`TEA_HOST_EXE_SUFFIX`）：从 Linux 交叉到 Windows 时，
+  宿主工具叫 `tea_embed_assets`，没有 `.exe`——用目标的 `CMAKE_EXECUTABLE_SUFFIX` 会找不到；
+- 生成规则按**路径**而不是 target 引用它们（`COMMAND ${TEA_CA_BUNDLE_EXE}`），否则
+  `COMMAND <target>` 会解析成目标架构的二进制。
+
+### 校验产物
+
+```bash
+file build-win64/bin/tea_agent.exe   # PE32+ executable (console) x86-64, for MS Windows, 19 sections
+file build-arm64/bin/tea_agent       # ELF 64-bit LSB executable, ARM aarch64, version 1 (GNU/Linux),
+                                     #   statically linked, for GNU/Linux 3.7.0
+readelf -d build-arm64/bin/tea_agent | head -1
+                                     # There is no dynamic section in this file.   ← 默认全静态
+grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
+                                     # 121  ← CA 真的内嵌进构建产物了
+```
+
+`file` 说明架构对了，`readelf -d` 说明不依赖目标机的 glibc（用 `-DTEA_AGENT_STATIC_LIBC=OFF`
+构建时会反过来出现 `Dynamic section` 与 `NEEDED … libc.so.6`），CA 计数说明证书进二进制了。
+上面几行是本机实测输出。**别用 `ldd` 检查跨架构的产物**：宿主上的 `ldd` 跑不了 ARM 二进制，
+它会一律回答 `not a dynamic executable`，看起来像通过、其实什么都没验证。
+
+aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
+
+```bash
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.5.0
+```
+
+### 常见错误的对照表
+
+| 症状 | 原因 | 修法 |
+| --- | --- | --- |
+| 运行 embed 工具时报 `Could not open '/lib/ld-linux-aarch64.so.1'`（或 `cannot execute binary file`） | 没设 `CMAKE_SYSTEM_NAME`，宿主工具用目标编译器编了 | 用 toolchain 文件 / preset 重配 |
+| `src/config.h:178: 'mutex' in namespace 'std' does not name a type`（明明 `#include <mutex>` 了） | ① 同上，配置其实不是交叉构建；② 选了 MinGW 的 **win32** 线程模型，GCC < 13 的 libstdc++ 在该模型下不提供 `std::mutex`/`std::thread` | 用 toolchain 文件 / preset（它们优先选 `-posix`）；手敲时用 `x86_64-w64-mingw32-g++-posix` |
+| 找不到 `.../tea_embed_assets.exe` | 用目标侧后缀找宿主工具 | 已由 `TEA_HOST_EXE_SUFFIX` 处理，别自己改回 `CMAKE_EXECUTABLE_SUFFIX` |
+| aarch64 启动约 1 秒后 `terminate called without an active exception` | Linaro 6.5 的静态 glibc 2.23 在 4.14 内核上 `pthread_cond_wait()` 立即失败 | 换成 Arm GNU Toolchain 11.3（默认），或 `-DTEA_AGENT_STATIC_LIBC=OFF` |
+| 启动即 abort，日志里 `Invalid range in bracket expression` | GCC ≤ 6 的 `std::regex` 不接受方括号里转义的 `\-` | 已修（`-` 放最后、不转义）：`[A-Za-z0-9_.-]` |
+| Windows 重新链接时 `LNK1104` / `Permission denied` | 旧的 `.exe` 还在运行 | 见上文「程序正在运行时也能直接构建」 |
+
+### 可调开关
+
+| 选项 | 默认 | 作用 |
+| --- | --- | --- |
+| `TEA_AGENT_CXX_STANDARD` | `17` | 设成 `14` 验证「C++14 也能编」（GCC 6.5 是参照的老工具链） |
+| `TEA_AGENT_USE_MBEDTLS` | `ON` | 关掉可显著减小体积，但 Linux 上就没有 `https://` |
+| `TEA_AGENT_STATIC_RUNTIME` | `OFF`（aarch64 toolchain 置 `ON`） | 静态链接 `libstdc++`/`libgcc` |
+| `TEA_AGENT_STATIC_LIBC` | `OFF`（aarch64 toolchain 置 `ON`） | 再静态链接 libc（`-static -no-pie`） |
+| `TEA_AGENT_USE_HOST_ASSET_TOOL` | `= CMAKE_CROSSCOMPILING` | 强制用宿主编译器构建 embed 工具 |
+| `CMAKE_BUILD_TYPE` | `Release` | 想更小用 `MinSizeRel`，再 `strip` |
 
 ---
 
@@ -903,56 +1061,23 @@ settings:
 
 ### 交叉编译
 
-构建期辅助工具必须**在构建机上运行**：`tools/embed_assets.cpp`（把 Web UI 生成 C++ 源）与
-`tools/embed_ca_bundle.cpp`（把 `cacert.pem` 生成 C++ 源）。所以交叉编译时它们会用宿主编译器
-在 `tools/host_embed/` 子项目里单独编译，不会出现「用 ARM 工具链编出一个宿主跑不起来的程序」，
-构建也不会断在 `Embedding the CA bundle into ca_bundle.cpp` 这一步。
-该行为由 `TEA_AGENT_USE_HOST_ASSET_TOOL` 控制，交叉编译时自动为 `ON`。
-
-仓库自带两个 toolchain 文件（`cmake/toolchains/`），各对应一个 preset：
-
-| 目标 | 命令 | 说明 |
-| --- | --- | --- |
-| Linux aarch64 | `cmake --preset arm64-linux && cmake --build --preset arm64-linux -j"$(nproc)"` | 全静态 + 内嵌 CA；工具链位置用 `TEA_AARCH64_PREFIX=<前缀目录>` 覆盖 |
-| Windows x64（MinGW-w64） | `cmake --preset win64-mingw-cross && cmake --build --preset win64-mingw-cross -j"$(nproc)"` | 在 Linux/macOS 上直接产出 `tea_agent.exe`；Windows 自身请用 `mingw` preset |
-
-等价的手写形式（不走 preset 时）：
+通用的交叉编译方法（编译矩阵、toolchain 文件、宿主工具、产物校验、错误对照）在
+[跨平台编译](#跨平台编译) 一节。嵌入式这边只多两件事：
 
 ```bash
-cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-linux-gnu.cmake
-cmake --build build-arm64 -j"$(nproc)"
+cmake --preset arm64-linux          # 工具链位置用 TEA_AARCH64_PREFIX 覆盖
+cmake --build --preset arm64-linux -j"$(nproc)"
 ```
 
-五个坑（本仓库都在真机上踩过，toolchain 文件已替你绕开前四个；前两个现在会在 configure 阶段
-直接报错并给出修法，而不是在编译到一半时冒出看不懂的错误）：
-
-- **必须让 CMake 知道目标系统**：只换 `CMAKE_C_COMPILER` 而不设 `-DCMAKE_SYSTEM_NAME=Linux`
-  （Windows 则是 `=Windows`），`CMAKE_CROSSCOMPILING` 仍为假，宿主工具路径不启用，构建会在运行
-  embed 工具时报 `aarch64-binfmt-P: Could not open '/lib/ld-linux-aarch64.so.1'`；换到 MinGW 时
-  症状更迷惑：能编到一半，然后 `src/config.h` 里 `mutable std::mutex reasoning_mu_;` 报
-  `'mutex' in namespace 'std' does not name a type`。
-- **MinGW-w64 的 `-win32` 线程模型没有 `std::mutex`**：Debian/Ubuntu 的 mingw-w64 同时提供
-  `x86_64-w64-mingw32-g++`（GCC 12，win32 线程）与 `x86_64-w64-mingw32-g++-posix`。前者的
-  libstdc++ 在 GCC 13 之前把 `bits/std_mutex.h`／`<thread>` 的内容整体包在
-  `#ifdef _GLIBCXX_HAS_GTHREADS` 里，于是 `<mutex>` **包含成功但什么都没定义**，错误只在第一次
-  使用 `std::mutex` 的地方出现（本项目端到端都是多线程，必然撞上）。toolchain 文件优先选
-  `-posix`，CMakeLists.txt 也会在选中 win32 模型且 GCC < 13 时直接报错。
-- **宿主工具的可执行名按宿主编译**：从 Linux 交叉到 Windows 时产物没有 `.exe`，
-  期望路径不能用目标侧的 `CMAKE_EXECUTABLE_SUFFIX`（见 CMakeLists.txt 里的 `TEA_HOST_EXE_SUFFIX`）。
-- **别用 Linaro GCC 6.5 出全静态产物**：它内嵌的是 glibc 2.23，在 4.14 内核的 aarch64 设备上
-  `pthread_cond_wait()` 一进 `std::condition_variable::wait()`（noexcept）就抛错 → 进程启动 1 秒后
-  `terminate called without an active exception`（第一个受害者是 cpp-httplib 的线程池）。
-  20 行 mutex/condvar 复现程序在真机上的结论：Linaro 静态 ❌、Linaro 动态 ✅、
-  Arm GNU Toolchain 11.3（glibc 2.35）静态 ✅。所以 aarch64 toolchain 文件默认选 11.3；
-  非要用 Linaro 就 `-DTEA_AGENT_STATIC_LIBC=OFF`（C++ 运行库仍静态，只要求目标机有 glibc 2.23+）。
-- **老 libstdc++（GCC ≤ 6）的 `std::regex` 不认方括号里转义的 `\-`**：路由
-  `/([A-Za-z0-9_\-\.]+)` 会抛 `Invalid range in bracket expression`，进程启动即 abort。
-  方括号里把 `-` 放最后、不转义（`[A-Za-z0-9_.-]`）两边行为一致，且新老运行时都能解析。
-
-aarch64 的 toolchain 文件默认打开 `TEA_AGENT_STATIC_RUNTIME` 与 `TEA_AGENT_STATIC_LIBC`
-（目标设备的 glibc 版本无关紧要）；目标机与构建机环境一致时用 `-DTEA_AGENT_STATIC_LIBC=OFF`
-改回动态链接——静态 glibc 无法 dlopen NSS 模块，域名解析行为会变，详见下文单文件部署。
+- **默认全静态**：aarch64 的 toolchain 文件打开 `TEA_AGENT_STATIC_RUNTIME` 与
+  `TEA_AGENT_STATIC_LIBC`，目标机的 glibc 版本无关紧要；构建机与目标机环境一致时用
+  `-DTEA_AGENT_STATIC_LIBC=OFF` 改回动态（静态 glibc 无法 `dlopen` NSS 模块，域名解析行为
+  会变，详见下文「单文件部署」）。
+- **选对工具链**：默认用 Arm GNU Toolchain 11.3（glibc 2.35）。Linaro 6.5 会被选中时
+  toolchain 文件会给 WARNING——它的静态 glibc 2.23 在 4.14 内核设备上一进
+  `std::condition_variable::wait()` 就抛错，进程启动约 1 秒即
+  `terminate called without an active exception`（真机结论：Linaro 静态 ❌、Linaro 动态 ✅、
+  11.3 静态 ✅）。
 
 ### 体积
 
@@ -960,8 +1085,8 @@ aarch64 的 toolchain 文件默认打开 `TEA_AGENT_STATIC_RUNTIME` 与 `TEA_AGE
 | --- | --- | --- |
 | Windows x64 / MinGW-w64（已实测） | 6.1 MB | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
 | Windows x64 / MSVC（已实测） | 1.7 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
-| Linux x64（已实测） | 5.7 MB | **完全静态**：不依赖目标机的 glibc 版本 |
-| Linux / ARM（未实测） | 取决于工具链 | 默认完全静态，需要目标架构的静态 libc |
+| Linux x64（已实测，静态构建） | 5.7 MB | **完全静态**：不依赖目标机的 glibc 版本 |
+| Linux aarch64（已实测） | 取决于工具链 | 默认完全静态（Arm GNU 11.3 + 静态 glibc），已在真机与 qemu-user 上验证 |
 
 想进一步压：`-DCMAKE_BUILD_TYPE=MinSizeRel` + `strip`；不需要 HTTPS 可
 `-DTEA_AGENT_USE_MBEDTLS=OFF`（体积显著下降，但 Linux 上就没有 `https://` 了）；
@@ -975,21 +1100,26 @@ aarch64 的 toolchain 文件默认打开 `TEA_AGENT_STATIC_RUNTIME` 与 `TEA_AGE
 
 | 平台 | 链接方式 | 目标机需要什么 |
 | --- | --- | --- |
-| Windows / MinGW-w64 | `-static-libgcc -static-libstdc++ -static` | 只有 Windows 自带的 `KERNEL32/ADVAPI32/SHELL32/WINHTTP/WS2_32` + UCRT |
-| Linux / 其它 ELF（GCC/Clang） | `-static -no-pie`（默认开启） | **什么都不需要**，连 glibc 都不用 |
+| Windows / MinGW-w64 | `-static-libgcc -static-libstdc++ -static`（自动） | 只有 Windows 自带的 `KERNEL32/ADVAPI32/SHELL32/WINHTTP/WS2_32` + UCRT |
+| Linux / 其它 ELF（GCC/Clang） | `-static -no-pie`（**需显式打开**，aarch64 toolchain 已默认打开） | **什么都不需要**，连 glibc 都不用 |
 | macOS | 不适用 | 系统不提供静态 `libc++`，自动跳过 |
 
+本机构建默认是**动态**的（能跑、编译快）；要做单文件部署就显式打开两个开关：
+
 ```bash
-file build/bin/tea_agent     # → statically linked
-ldd  build/bin/tea_agent     # → not a dynamic executable
+cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release \
+  -DTEA_AGENT_STATIC_RUNTIME=ON -DTEA_AGENT_STATIC_LIBC=ON
+cmake --build build-static -j"$(nproc)"
+file    build-static/bin/tea_agent     # → statically linked
+readelf -d build-static/bin/tea_agent  # → There is no dynamic section in this file.
 ```
 
 三个相关开关：
 
 | 选项 | 默认 | 作用 |
 | --- | --- | --- |
-| `TEA_AGENT_STATIC_RUNTIME` | `ON` | 静态链接 `libstdc++`/`libgcc` |
-| `TEA_AGENT_STATIC_LIBC` | `ON` | 再静态链接 libc（`-static -no-pie`） |
+| `TEA_AGENT_STATIC_RUNTIME` | `OFF`（aarch64 toolchain: `ON`） | 静态链接 `libstdc++`/`libgcc` |
+| `TEA_AGENT_STATIC_LIBC` | `OFF`（aarch64 toolchain: `ON`） | 再静态链接 libc（`-static -no-pie`） |
 | `TEA_AGENT_USE_MBEDTLS` | `ON` | 关掉可显著减小体积，但 Linux 上就没有 `https://` 了 |
 
 #### glibc 的 NSS 陷阱（已处理）
@@ -1128,7 +1258,8 @@ tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/
 tests/e2e.ps1              端到端测试（69 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
-CMakePresets.json           msvc / mingw / posix 预设（msvc 两个 preset 都带 VSLANG=1033）
+CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
+cmake/toolchains/           aarch64-linux-gnu.cmake / mingw-w64-x86_64.cmake（交叉编译入口）
 3rd/                        第三方依赖
 ```
 
