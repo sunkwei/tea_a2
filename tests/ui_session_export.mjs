@@ -299,6 +299,75 @@ roles: {main: {provider: mock, model: m}}
     JSON.stringify(page && page.jsonBlocks));
   check('nothing is fetched from the network', page && page.external === false,
     JSON.stringify(page && page.external));
+
+  // ---- colours in both schemes ------------------------------------------
+  // Regression: the dark rules used to be written before the light ones, so at
+  // equal specificity the later light declarations won - a dark page with white
+  // cards and near-invisible grey text. Pin the computed colours and the
+  // contrast ratio in BOTH schemes, in the exported file itself.
+  const palette = () => evalJs(`(function(){
+    // Read the three channel numbers rather than parsing a specific syntax:
+    // Chrome answers legacy "rgb(1, 2, 3)" and modern "rgb(1 2 3)" depending on
+    // the version, and a split(',') silently yields NaN for the latter.
+    function rgb(el, prop) {
+      var nums = (getComputedStyle(el)[prop].match(/[0-9.]+/g) || []).map(Number);
+      if (nums.length < 3) return null;
+      return { r: nums[0], g: nums[1], b: nums[2] };
+    }
+    function lum(c) {
+      function ch(x) { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); }
+      return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+    }
+    function contrast(a, b) {
+      var la = lum(a), lb = lum(b);
+      return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+    }
+    var body = document.body;
+    var card = document.querySelector('.msg.user');
+    var pre = document.querySelector('pre');
+    var out = {
+      bodyBg: rgb(body, 'backgroundColor'), bodyFg: rgb(body, 'color'),
+      cardBg: rgb(card, 'backgroundColor'), cardFg: rgb(card, 'color'),
+      preBg: rgb(pre, 'backgroundColor'),
+      bodyLum: lum(rgb(body, 'backgroundColor')),
+      cardLum: lum(rgb(card, 'backgroundColor')),
+      bodyContrast: contrast(rgb(body, 'backgroundColor'), rgb(body, 'color')),
+      cardContrast: contrast(rgb(card, 'backgroundColor'), rgb(card, 'color')),
+      // In dark mode card vs page is a subtle lift plus a border, so compare
+      // luminance with a small epsilon (a visible step, not an exact match).
+      cardVisible: Math.abs(lum(rgb(card, 'backgroundColor')) -
+                           lum(rgb(body, 'backgroundColor'))) > 0.002
+    };
+    return out;
+  })()`);
+
+  const light = await palette();
+  check('light scheme: the page is light', light && light.bodyLum > 0.7, JSON.stringify(light));
+  check('light scheme: cards are light too (not an inverted page)',
+    light && light.cardLum > 0.7, JSON.stringify(light && [light.cardLum, light.cardBg]));
+  check('light scheme: text contrasts with its background',
+    light && light.bodyContrast > 7 && light.cardContrast > 7,
+    JSON.stringify(light && [light.bodyContrast, light.cardContrast]));
+
+  await send('Emulation.setEmulatedMedia',
+    { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
+  await sleep(500);
+  const dark = await palette();
+  check('dark scheme is honoured by the exported file', dark && dark.bodyLum < 0.2,
+    JSON.stringify(dark && dark.bodyBg));
+  check('dark scheme: cards follow the page (this was the bug)',
+    dark && dark.cardLum < 0.35 && Math.abs(dark.cardLum - dark.bodyLum) < 0.1,
+    JSON.stringify(dark && [dark.cardLum, dark.bodyLum, dark.cardBg]));
+  check('dark scheme: cards stay distinguishable from the page',
+    dark && dark.cardVisible === true, JSON.stringify(dark && dark.cardBg));
+  check('dark scheme: text is readable on the card',
+    dark && dark.cardContrast > 7, JSON.stringify(dark && dark.cardContrast));
+  check('dark scheme: code blocks are dark as well',
+    dark && dark.preBg && dark.preBg.r < 60 && dark.preBg.g < 60,
+    JSON.stringify(dark && dark.preBg));
+  check('dark scheme: the body text is light, not grey-on-white',
+    dark && dark.bodyFg.r > 150, JSON.stringify(dark && dark.bodyFg));
+  await send('Emulation.setEmulatedMedia', { features: [] });
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });
