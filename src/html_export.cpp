@@ -551,6 +551,34 @@ h1{font-size:22px;line-height:1.35;margin:0 0 12px}
 .meta dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   word-break:break-all}
 .lede{font-size:13px;color:var(--muted);margin:14px 0 0}
+.artifacts{margin:18px 0 0;padding:12px 14px;border:1px solid var(--card-border);
+  border-radius:12px;background:var(--card);box-shadow:var(--shadow)}
+.artifacts-head{display:flex;align-items:baseline;gap:10px}
+.artifacts-head h2{margin:0;font-size:14px}
+.artifacts-count{margin-left:auto;font:11px/1.5 ui-monospace,monospace;color:var(--muted)}
+.artifacts-list{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
+.artifact{display:flex;gap:10px;align-items:baseline;font-size:13px}
+.artifact .kind{flex:0 0 auto;font:10px/16px ui-monospace,monospace;padding:0 6px;
+  border-radius:8px;border:1px solid var(--card-border);color:var(--muted)}
+.artifact .name{flex:1 1 auto;font:12px/1.6 ui-monospace,monospace;color:var(--fg);
+  word-break:break-all}
+.artifact .size{flex:0 0 auto;font:11px/1.6 ui-monospace,monospace;color:var(--muted)}
+.artifacts-note{margin:8px 0 0;font-size:12px;color:var(--muted)}
+.todos{margin:18px 0 0;padding:12px 14px;border:1px solid var(--card-border);
+  border-radius:12px;background:var(--card);box-shadow:var(--shadow)}
+.todos-head{display:flex;align-items:baseline;gap:10px}
+.todos-head h2{margin:0;font-size:14px}
+.todos-count{margin-left:auto;font:11px/1.5 ui-monospace,monospace;color:var(--muted)}
+.todos-bar{height:4px;border-radius:2px;background:var(--inline-bg);overflow:hidden;margin:8px 0 10px}
+.todos-bar i{display:block;height:100%;background:var(--assistant);border-radius:2px}
+.todos-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}
+.todo{display:flex;gap:8px;align-items:baseline;font-size:13px;color:var(--fg)}
+.todo .mark{flex:0 0 auto;width:13px;text-align:center;font-size:11px;color:var(--muted)}
+.todo.done{color:var(--muted)}
+.todo.done .txt{text-decoration:line-through}
+.todo.done .mark{color:var(--ok)}
+.todo.active{font-weight:600}
+.todo.active .mark{color:var(--link)}
 .turns{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:14px}
 .msg{background:var(--card);color:var(--fg);border:1px solid var(--card-border);
   border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
@@ -757,6 +785,20 @@ nlohmann::json export_session_json(const Workspace& workspace, const Session& se
     j["summary"] = session.summary;
     j["summary_upto"] = static_cast<long long>(session.summary_upto);
   }
+  if (!session.artifacts.empty()) {
+    nlohmann::json arts = nlohmann::json::array();
+    for (std::size_t i = 0; i < session.artifacts.size(); ++i) {
+      arts.push_back(session.artifacts[i].to_json());
+    }
+    j["artifacts"] = arts;  // what the session produced, for a restore
+  }
+  if (!session.todos.empty()) {
+    nlohmann::json todos = nlohmann::json::array();
+    for (std::size_t i = 0; i < session.todos.size(); ++i) {
+      todos.push_back(session.todos[i].to_json());
+    }
+    j["todos"] = todos;  // progress travels with the conversation
+  }
   if (image_data && !image_data->empty()) {
     nlohmann::json images = nlohmann::json::object();
     for (std::map<std::string, std::string>::const_iterator it = image_data->begin();
@@ -887,6 +929,14 @@ bool import_session_payload(const Workspace& workspace, const nlohmann::json& pa
       }
     }
   }
+  if (payload.contains("todos") && payload["todos"].is_array()) {
+    for (auto it = payload["todos"].begin(); it != payload["todos"].end(); ++it) {
+      TodoItem item = TodoItem::from_json(*it);
+      if (trim(item.text).empty()) continue;
+      if (item.id.empty()) item.id = "t" + std::to_string(session.todos.size() + 1);
+      session.todos.push_back(item);
+    }
+  }
   if (!workspace.save_session(session, err)) return false;
   *out = session;
   return true;
@@ -947,6 +997,40 @@ std::string export_session_html(const Workspace& workspace, const Session& sessi
   }
   out << "<dt>导出</dt><dd>tea_agent " << esc(version) << " · " << esc(now_iso8601())
       << "</dd>\n</dl>\n";
+  if (!session.artifacts.empty()) {
+    out << "<section class=\"artifacts\">\n<div class=\"artifacts-head\"><h2>本轮产出</h2>"
+           "<span class=\"artifacts-count\">"
+        << session.artifacts.size() << " 个文件</span></div>\n"
+        << "<ul class=\"artifacts-list\">\n";
+    for (std::size_t i = 0; i < session.artifacts.size(); ++i) {
+      const SessionArtifact& a = session.artifacts[i];
+      out << "<li class=\"artifact\"><span class=\"kind\">" << esc(a.kind) << "</span>"
+          << "<span class=\"name\">" << esc(a.path) << "</span>"
+          << "<span class=\"size\">" << human_size(static_cast<uint64_t>(a.bytes))
+          << "</span></li>\n";
+    }
+    out << "</ul>\n<p class=\"artifacts-note\">这些文件留在原工作区里，本 HTML 是静态快照，"
+           "不含文件本体。</p>\n</section>\n";
+  }
+
+  if (!session.todos.empty()) {
+    int total = 0, done = 0;
+    todo_counts(session.todos, &total, &done);
+    const int pct = total > 0 ? static_cast<int>(done * 100 / total) : 0;
+    out << "<section class=\"todos\">\n<div class=\"todos-head\"><h2>任务</h2>"
+           "<span class=\"todos-count\">"
+        << done << "/" << total << " 完成 · " << pct << "%</span></div>\n"
+        << "<div class=\"todos-bar\"><i style=\"width:" << pct << "%\"></i></div>\n"
+        << "<ol class=\"todos-list\">\n";
+    for (std::size_t i = 0; i < session.todos.size(); ++i) {
+      const TodoItem& t = session.todos[i];
+      out << "<li class=\"todo " << esc(t.status) << "\"><span class=\"mark\">"
+          << (t.status == "done" ? "✓" : (t.status == "active" ? "●" : "○")) << "</span>"
+          << "<span class=\"txt\">" << esc(t.text) << "</span></li>\n";
+    }
+    out << "</ol>\n</section>\n";
+  }
+
   out << "<p class=\"lede\">这是 tea_agent 导出的静态快照：不依赖服务器、不请求网络，"
          "直接双击打开即可阅读。页末的 <code>tea-session-data</code> 块保存了完整会话 JSON，"
          "可用 <code>POST /api/workspaces/{id}/sessions/import</code> 恢复成一个新会话。</p>\n"

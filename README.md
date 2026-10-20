@@ -494,9 +494,11 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.8.0
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
 | `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件 |
-| `GET` | `/api/workspaces/{id}/raw?path=` | 读文件原始字节（图片 / PDF 等，16 MB 上限） |
+| `GET` | `/api/workspaces/{id}/raw?path=` | 读文件原始字节（图片 / PDF 等，**16 MB 上限**，用于在页面里显示） |
+| `GET` | `/api/workspaces/{id}/download?path=` | 以附件形式下载文件（`Content-Disposition: attachment`），**从磁盘流式发送、无 16 MB 限制**；`&inline=1` 改为在浏览器里直接打开（视频 / PDF） |
 | `GET` / `POST` | `/api/workspaces/{id}/sessions` | 会话列表 / 新建 |
 | `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果） |
+| `GET` / `PUT` | `/api/sessions/{sid}/todos` | 任务列表：GET 随 `/api/sessions/{sid}` 一起返回；PUT 用 `{"items":[…]}` 整体替换，或 `{"index":n,"status":"…"}` 改一条 |
 | `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
 | `POST` | `/api/sessions/{sid}/fork` | 从某一轮分叉出新会话：`{"message_index":N}` 是父会话里某条**用户消息**的下标，复制到该轮结束（含回答与工具结果）；省略或负数 = 复制整个会话。返回 `session`（带 `forked_from` / `fork_turn`）与复制后的 `messages`；父会话不变 |
 | `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON） |
@@ -642,6 +644,8 @@ SSE 上的对应事件：
 | --- | --- |
 | `queue_adopted` | 已采纳：`id` / `content` / `iteration` / `pending`。该消息已落盘为 user 消息 |
 | `queue_unconsumed` | 轮次在采纳前结束（停止 / 报错 / 迭代上限），`items[]` 原样退回，客户端应放回输入框 |
+| `artifacts` | 本轮产出了新文件：`items[]`（`path` / `bytes` / `kind` / `tool` / `turn`）。UI 用它把下载链接补到回答下面 |
+| `todo` | 任务列表变了：`items[]`（`{id,text,status}`）、`total`、`done`。UI 用它实时更新进度条，不需要等轮次结束 |
 | `tool_images` | `toolkit_load_image` 把图片附加进了对话：`content` 是那条 user 消息的文本，`images[]` 是 `{path, mime}`。客户端应把它插进当前对话（图片走 `/raw`），与本轮结束时回读会话的结果一致 |
 
 几条刻意的约束：
@@ -788,6 +792,7 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 | `toolkit_memory` | 工作区长期记忆的增删查，自动注入 system prompt，跨会话保留偏好与项目事实 |
 | `toolkit_agent_doc` | `read` `append` `replace` `scripts`：维护 `.tea_agent_run/agent.md`（本工作区的经验：坑、可复用命令与脚本） |
 | `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
+| `toolkit_todo` | 把复杂任务分解成阶段列表并维护进度：`list` `set`/`replace` `add` `update` `clear`。列表存在会话里、每轮注入 system prompt、每次变更通过 SSE 的 `todo` 事件推给 UI |
 
 相对路径基于工作区根目录；默认**禁止越出工作区**（`--allow-outside-workspace` 可放开），
 判定前会解析符号链接，所以工作区里的软链无法把工具带出去。
@@ -820,6 +825,73 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 - **历史图片会继续发送**：会话里存的是路径，每轮把上下文里所有图片重新编码成 data URL
   （压缩掉的部分跳过），所以「上一轮看过的那张图还能不能接着问」的答案是能。为免无限增长，
   一次请求的图片总量封顶 24 MB，超出时最旧的几张降级为纯文本并记一条 WARN。
+
+### 任务列表：`toolkit_todo`
+
+一个「实现 X」的请求往往会跑几十步，只说「我正在做」没有任何信息量。`toolkit_todo` 让模型把
+工作写下来，而这份列表同时是**给人看的进度**：
+
+```jsonc
+// 开工时写计划（也可以直接带初始状态）
+{"op":"set","items":["读取现有实现","实现 todo 工具","在界面上呈现","补充测试"]}
+
+// 开工前把要做的这一条置为 active，做完立刻 done
+{"op":"update","index":2,"status":"active"}
+{"op":"update","index":2,"status":"done"}
+```
+
+几条刻意的约束：
+
+- **同时只有一条 `active`**：把另一条置为 `active` 时，原来那条自动退回 `pending`。这是让列表
+  能回答「现在到哪儿了」的前提——两条同时「进行中」等于没有信息。
+- **状态只有三档**：`pending` / `active` / `done`。想表达「被跳过」就删掉或用 `set` 重写。
+- **每轮都注入 system prompt**（末尾一节 `Task list (3/7 done)`）：压缩过历史、或者进程重启
+  之后，模型仍然知道自己走到哪一步。放在最后是因为它是唯一会在一轮里变化的块，这样更新列表
+  只影响提示词尾部，不破坏前缀缓存。
+- **改一次就落盘并推送一次**：`session.json` 里存 `todos`，索引里存 `todo_total` / `todo_done`，
+  SSE 发 `todo` 事件（`items` + `total` + `done`），所以 UI 在**生成过程中**就能看到进度条前进。
+- **上限 50 条、单条 300 字节**，某个模型把自己当项目管理软件时不会把提示词撑爆。
+
+Web UI 里它在输入框上方：
+
+- 进度条 + `3/7`，全部完成时数字变绿；
+- 每条前面是 `✓ / ● / ○`，进行中那条加粗、已完成的划掉并压暗；
+- **点一下即可勾选完成**（`PUT /api/sessions/{id}/todos`），不需要等模型自己更新；
+- 点标题行可以折叠，省出屏幕空间；
+- 侧栏的会话行也带一个「3/7」小徽章，不用点进去就能看出哪个会话还没做完。
+
+导出的 HTML 同样带这块进度（见下文「导出会话」），导入回来连进度一起恢复。
+
+### 本轮产出：把做好的文件交出去
+
+agent 干活的结果经常是**文件**而不是文字：一份报告、一张趋势图、一段渲染好的视频。这些
+不该只留在工作区里等人自己去翻。会话因此维护一份 `artifacts` 列表：
+
+- **谁写进去的**：`toolkit_file` 的 `write` / `append` 直接报路径；`toolkit_exec` 无法知道命令
+  写了什么，所以命令结束后扫描一次工作时间窗内变更的文件（有深度/条目上限，跳过
+  `.git`、`build*`、`node_modules`、`3rd` 等噪声目录，只收「有意思的扩展名」——`.md`/`.pdf`/
+  `.csv`/`.png`/`.mp4`/`.zip`… 而 `.o`/`.a`/`.d` 一律不算）；
+- **不收录什么**：`.tea_agent_run/` 下的内部状态（会话、轨迹、日志、`toolkit_load_image` 的
+  私有副本）与空文件——把它们列出来只会淹没真正的那两个文件；
+- **去重**：同一个路径改写多次只出现一次，大小取最新；
+- **落在哪里**：`<session>.json` 的 `artifacts[]`（`path` / `bytes` / `kind` / `tool` /
+  `created_at` / `turn`），每发现新文件就发一个 SSE `artifacts` 事件。
+
+Web UI 只在**这一轮的最终回答下面**列出它们（这是「final msg 给出下载链接」的落点）：
+
+```text
+本轮产出  3 个文件
+▤ report.md   文档 · 22 B                     下载
+▣ chart.png   图片 · 68 B              下载   查看
+▶ demo.mp4    视频 · 2.0 KB            下载   查看
+```
+
+- 「下载」走 `GET /api/workspaces/{id}/download?path=…`：`Content-Disposition: attachment`，
+  从磁盘流式发送，所以一段 200 MB 的视频不会被 `/raw` 的 16 MB 上限挡掉（`/raw` 仍然是
+  「在页面里显示」用的，两者分工明确）；
+- 「查看」只对图片 / 视频 / 音频出现：图片进原图查看器，视频 / 音频用 `&inline=1` 在新标签页打开；
+- 会话滚动到旧轮次时，旧的产出仍挂在**那一轮**的回答下面——不是把全会话的文件堆在一起；
+- 导出的 HTML 里有一节静态清单（文件名、类型、大小），并说明它是快照、不含文件本体。
 
 ---
 
@@ -1027,7 +1099,10 @@ U 盘或另一台电脑，双击即可在浏览器里离线阅读——那台机
 - 工具输出单条超过 8 KB 会截断，并在原处注明原始字节数；
 - 会话里所有图片：内联成 `data:` URL（单张上限 8 MB、总计 40 MB；超出的显示成说明文字，
   而不是把文件撑到几个 GB）；
-- 页眉：工作区名与路径、会话 id、创建/更新时间、导出时的 tea_agent 版本。
+- 页眉：工作区名与路径、会话 id、创建/更新时间、导出时的 tea_agent 版本；
+- 会话的**任务列表**（如果有）：同样的进度条与三态标记，导出的记录因此能一眼看出做到哪一步；
+- **本轮产出的文件清单**（文件名 / 类型 / 大小）。这是静态快照，不含文件本体，也不会写出
+  指向本机的死链接——需要文件请从 Web UI 的「下载」取。
 
 配色跟随系统的深浅色（`prefers-color-scheme`），两边都保证正文字号与对比度：所有颜色走
 CSS 变量，深色只在 `:root` 上覆盖——早期版本把深色规则写在浅色规则之前，同优先级下后写的
@@ -1375,9 +1450,9 @@ src/
   llm.{h,cpp}               OpenAI 兼容客户端：SSE、tool_calls 聚合、重试
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
   prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
-  tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image）
+  tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image/todo）
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
-  workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆、索引
+  workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆/产出文件、索引
   html_export.{h,cpp}       会话 → 自包含 HTML（内联 CSS/图片、可导入的 JSON 区块）
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源
   http.{h,cpp}              传输分派（socket+TLS / WinHTTP，自动回退）
@@ -1458,6 +1533,10 @@ node tests/smoke_turn_resume.mjs                          # 断线不取消轮�
 node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
 node tests/ui_second_client.mjs                           # 另一台机器/全新 profile 接回别人发起的轮次（需 google-chrome）
 node tests/ui_two_clients.mjs                             # 两个客户端同看一轮：插队 / 离开 / 停止（需 google-chrome）
+python3 tests/smoke_todo.py                               # 任务列表：分解/进度/唯一的 active/落盘/导入
+python3 tests/smoke_artifacts.py                          # 产出文件与 /download：收录/去重/流式/超限
+node tests/ui_artifacts.mjs                               # 最终回答下方的下载链接（需 google-chrome）
+node tests/ui_todo.mjs                                    # 输入框上方的进度面板与侧栏徽章（需 google-chrome）
 python3 tests/smoke_export_html.py                        # 导出会话为单文件 HTML：内联/转义/往返导入
 node tests/ui_session_export.mjs                          # 导出按钮 → 下载 → 离线打开 → 导入（需 google-chrome）
 python3 tests/smoke_run_archive.py                        # 工作区归档下载：真 zip / 沙箱 / 超限跳过
@@ -1601,6 +1680,31 @@ data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/image
 **第二个**工作区里发起轮次、读到第 9 帧就断开，然后用一个全新的浏览器 profile（没有
 localStorage）打开页面——它必须落在 `proj_b`（而不是索引里的第一个 `proj_a`）、直接进入生成态、
 回放已经生成的内容、继续直播到结束，标签页标题也跟着工作区走。
+
+`tests/smoke_todo.py` 覆盖任务列表：`set` 写入整份计划、`list`/`add`/`update`/`clear` 各自生效；
+列表出现在**下一轮**的 system prompt 里（压缩或重启后仍然在）；每次变更都发一个 `todo` 事件并
+带 `items`/`total`/`done`；状态落盘在 `session.json`，索引里的 `todo_total`/`todo_done` 不用打开
+会话就能读；把另一条置为 `active` 会把原来那条降回 `pending`（永远只有一条进行中）；全部完成时
+工具结果明说「All steps are done」；两条 active / 越界下标 / 未知 op 都被拒绝且不改动现有列表；
+`PUT /api/sessions/{id}/todos` 能整体替换也能勾选一条，非法状态 400、未知下标 404；进程重启后
+列表还在，并且仍然注入提示词；导出的 HTML 与其中的 JSON 都带列表，导入后进度一并恢复。
+
+`tests/smoke_artifacts.py` 覆盖产出文件：写的文档、命令生成的 SVG 都进 `artifacts`（带种类、
+大小、turn、产出工具），`.o` 之类的构建噪声与 `.tea_agent_run/` 下的内部副本都不收录；
+同一路径改写两次只出现一次；进程重启后仍在；`/download` 返回 `attachment` 与逐字节相同的内容，
+`&inline=1` 变成 `inline`，17 MB 的文件 `/raw` 拒绝（413）而 `/download` 正常发完；越过工作区
+的路径被拒、缺文件 404、缺参数 400；导出的 HTML 里有静态清单且不含死链接。
+
+`tests/ui_artifacts.mjs` 在真浏览器里看「本轮产出」：它贴在**最后一条助手消息**下面、只列
+本轮的若干个文件（上一轮的 `old.csv` 不出现）、每行有种类与大小、下载链接指向 `/download` 并
+带 `download` 属性、文档没有「查看」而图片/视频有；点链接真的拿到文件（状态 200、
+`Content-Disposition: attachment`、内容与磁盘一致）；一轮运行中产出的图片在结束后自动出现且
+可下载；没有产出的那一轮不显示这块。
+
+`tests/ui_todo.mjs` 在真浏览器里看这块面板：有任务列表的会话显示面板、`1/4`、进度条 25%、三态
+标记与 `aria-checked`；侧栏会话行同步显示「1/4」；点第三条即勾选完成且**写进 session.json**，
+刷新后仍是 `2/4` 且样式为已完成；点标题行折叠/展开；一轮运行中 agent 改列表时面板**实时**更新
+（`todo` 事件）；没有列表的会话整个面板隐藏；新建草稿也会清掉。
 
 `tests/smoke_export_html.py` 把导出当成「要离开这台机器」的文件来验：HTML 完整、CSS 内联、
 没有任何 `<link>` 或外部 `src`；Markdown 各元素都渲染出来；模型回答里的 `<script>` 被转义、

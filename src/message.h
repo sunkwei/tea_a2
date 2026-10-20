@@ -56,12 +56,31 @@ struct Message {
   static Message make(const std::string& role, const std::string& content);
 };
 
+/// One entry of a session's task list. A complex job is decomposed into steps,
+/// the agent keeps this list current with `toolkit_todo`, and the same list is
+/// what the Web UI (and the exported HTML) shows as progress - so "where is it
+/// now?" is answered by looking, not by reading the transcript.
+struct TodoItem {
+  std::string id;    // stable within a session ("t1", "t2", ...)
+  std::string text;  // the step, short enough to read at a glance
+  std::string status;  // "pending" | "active" | "done"
+
+  static bool valid_status(const std::string& s);
+  nlohmann::json to_json() const;
+  static TodoItem from_json(const nlohmann::json& j);
+};
+
 struct SessionInfo {
   std::string id;
   std::string title;
   std::string created_at;
   std::string updated_at;
   int message_count = 0;
+  /// Progress of the session's task list. Kept in the index (not recomputed by
+  /// the sidebar) so the session list can show "3/7" without loading every
+  /// session file.
+  int todo_total = 0;
+  int todo_done = 0;
   /// Lineage of a forked session: the id it was copied from and the 1-based
   /// user-turn ordinal in that parent. Empty / 0 for a root session. Stored in
   /// the session file and in the index, so a branch of a branch keeps it and
@@ -73,6 +92,31 @@ struct SessionInfo {
   static SessionInfo from_json(const nlohmann::json& j);
 };
 
+/// A file the session produced (a document the agent wrote, a chart, a video a
+/// command rendered, an image it loaded). The Web UI offers these as downloads
+/// next to the final answer, and the exported HTML lists them - so "where did
+/// that report go?" is answered by looking.
+struct SessionArtifact {
+  std::string path;    // workspace-relative (served by /download and /raw)
+  long long bytes = 0;
+  std::string kind;    // image | video | audio | document | data | other
+  std::string tool;    // which tool produced it ("toolkit_file", "toolkit_exec", ...)
+  std::string created_at;
+  /// 1-based user turn it was produced in, so the UI can show "this turn's
+  /// output" under the final message. 0 = unknown (e.g. imported).
+  int turn = 0;
+
+  nlohmann::json to_json() const;
+  static SessionArtifact from_json(const nlohmann::json& j);
+};
+
+/// Map a file name to one of the kinds above (by extension).
+std::string artifact_kind_for(const std::string& path);
+/// True when the extension is one we track as a produced artifact. Build noise
+/// (.o, .a, .log, ...) is deliberately absent: an artifact list that contains
+/// object files is noise, not an answer.
+bool artifact_extension_interesting(const std::string& path);
+
 struct Session {
   SessionInfo info;
   std::vector<Message> messages;
@@ -81,6 +125,18 @@ struct Session {
   /// keeps them out of the model's context.
   std::string summary;
   std::size_t summary_upto = 0;
+  /// The task list for this conversation: what the user asked for, broken into
+  /// steps, with their progress. Persisted with the session, injected into the
+  /// system prompt (so a compacted or restarted turn still knows the plan) and
+  /// pushed to clients on every change.
+  std::vector<TodoItem> todos;
+  /// Files produced during the conversation, newest last. Deduplicated by path
+  /// (a file rewritten three times appears once, with its latest size).
+  std::vector<SessionArtifact> artifacts;
+
 };
+
+/// "3/7" style progress for a task list.
+void todo_counts(const std::vector<TodoItem>& todos, int* total, int* done);
 
 }  // namespace tea

@@ -6,7 +6,9 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -386,6 +388,26 @@ std::string ascii_archive_name(const std::string& workspace, const std::string& 
   const std::string when =
       digits.size() >= 14 ? (digits.substr(0, 8) + "-" + digits.substr(8, 6)) : digits;
   return out + "-" + dir + (when.empty() ? "" : "-" + when) + ".zip";
+}
+
+/// ASCII-only fallback for a `Content-Disposition: attachment` name. The real
+/// name travels in `filename*` (RFC 5987); this one exists for old clients and
+/// must not contain quotes, separators or control bytes.
+std::string ascii_download_name(const std::string& name) {
+  std::string out;
+  for (std::size_t i = 0; i < name.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(name[i]);
+    const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    out += plain ? static_cast<char>(c) : '_';
+  }
+  if (out.empty() || out == "." || out == "..") out = "download";
+  if (out.size() > 96) {
+    // Keep the extension: it decides what the receiving OS does with the file.
+    const std::string ext = path_extension(out);
+    out = out.substr(0, 96 - ext.size()) + ext;
+  }
+  return out;
 }
 
 /// Percent-encode for `filename*=UTF-8''...`, so a non-ASCII workspace name still
@@ -1255,6 +1277,89 @@ void ApiServer::Impl::install_routes() {
             res.set_content(bytes, raw_mime_for(target));
           });
 
+  // ---- download (attachment, streamed) -----------------------------------
+  // /raw is for showing a file in the browser (images, PDFs) and reads it into
+  // memory with a 16 MB cap. Artifacts can be a 200 MB video, so this route
+  // hands the file to the client as an attachment and streams it from disk.
+  svr.Get(R"(/api/workspaces/([^/]+)/download)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string rel = req.has_param("path") ? req.get_param_value("path") : "";
+            if (rel.empty()) {
+              send_error(res, 400, "bad_request", "'path' is required");
+              return;
+            }
+            const std::string target = ws.resolve_path(rel, &err);
+            if (target.empty()) {
+              send_error(res, 403, "forbidden", err);
+              return;
+            }
+            if (!path_is_file(target)) {
+              send_error(res, 404, "not_found",
+                         path_exists(target) ? "not a regular file" : "file not found");
+              return;
+            }
+            const uint64_t size = file_size(target);
+            // `inline=1` renders in place (a video, a PDF) instead of saving.
+            const bool inline_file = req.has_param("inline") &&
+                                     (req.get_param_value("inline") == "1" ||
+                                      req.get_param_value("inline") == "true");
+            const std::string name = path_filename(target);
+            res.set_header("Content-Disposition",
+                           std::string(inline_file ? "inline" : "attachment") +
+                               "; filename=\"" + ascii_download_name(name) +
+                               "\"; filename*=UTF-8''" + rfc5987_name(name));
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_header("Access-Control-Expose-Headers",
+                           "Content-Disposition, Content-Length");
+            const std::string mime = raw_mime_for(target);
+            LOG_INFO("download: ", ws.display_path(target), " (", human_size(size), ", ",
+                     mime, ")");
+            if (size == 0) {
+              res.set_content("", mime);
+              return;
+            }
+            // Streamed: random access via fseek, so a 500 MB video never has to
+            // sit in memory. (Range requests are not supported; a download does
+            // not need them.)
+            // MSVC needs the wide path (a non-ASCII name would otherwise fail);
+            // POSIX takes the narrow one.
+            auto file = std::make_shared<std::ifstream>();
+#ifdef _WIN32
+            file->open(utf8_to_wide(target).c_str(), std::ios::binary);
+#else
+            file->open(target.c_str(), std::ios::binary);
+#endif
+            if (!file->is_open()) {
+              send_error(res, 500, "io_error", "cannot open " + rel);
+              return;
+            }
+            res.set_content_provider(
+                static_cast<size_t>(size), mime,
+                [file](size_t offset, size_t length, httplib::DataSink& sink) {
+                  file->clear();
+                  file->seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+                  std::vector<char> buf(64 * 1024);
+                  size_t remaining = length;
+                  while (remaining > 0) {
+                    const size_t chunk = remaining < buf.size() ? remaining : buf.size();
+                    file->read(buf.data(), static_cast<std::streamsize>(chunk));
+                    const std::streamsize got = file->gcount();
+                    if (got <= 0) return false;
+                    if (!sink.write(buf.data(), static_cast<size_t>(got))) return false;
+                    remaining -= static_cast<size_t>(got);
+                  }
+                  return true;
+                },
+                nullptr);
+          });
+
   svr.Put(R"(/api/workspaces/([^/]+)/file)",
           [this](const httplib::Request& req, httplib::Response& res) {
             nlohmann::json body;
@@ -1453,10 +1558,20 @@ void ApiServer::Impl::install_routes() {
             for (std::size_t i = 0; i < session.messages.size(); ++i) {
               messages.push_back(session.messages[i].to_store());
             }
+            nlohmann::json todos = nlohmann::json::array();
+            for (std::size_t i = 0; i < session.todos.size(); ++i) {
+              todos.push_back(session.todos[i].to_json());
+            }
+            nlohmann::json artifacts = nlohmann::json::array();
+            for (std::size_t i = 0; i < session.artifacts.size(); ++i) {
+              artifacts.push_back(session.artifacts[i].to_json());
+            }
             nlohmann::json j = nlohmann::json::object();
             j["session"] = session.info.to_json();
             j["workspace_id"] = ws.id();
             j["messages"] = messages;
+            j["todos"] = todos;
+            j["artifacts"] = artifacts;
             send_json(res, j);
           });
 
@@ -1558,6 +1673,88 @@ void ApiServer::Impl::install_routes() {
              send_json(res, {{"ok", true}, {"session", j},
                              {"messages", session.messages.size()}});
            });
+
+  // The task list is writeable from outside as well: the UI ticks items off, and
+  // a controlling agent can drive the plan without going through a chat turn.
+  // Body: {"items": [...]} replaces the list, or {"index": n | "id": "t1",
+  // "status": "...", "text": "..."} updates one entry.
+  svr.Put(R"(/api/sessions/([^/]+)/todos)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            nlohmann::json body;
+            if (!parse_json_body(req, &body, res)) return;
+            Workspace ws;
+            std::string err;
+            if (!find_session_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            Session session;
+            if (!ws.load_session(req.matches[1].str(), &session, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            if (body.contains("items")) {
+              if (!body["items"].is_array()) {
+                send_error(res, 400, "bad_request", "'items' must be an array");
+                return;
+              }
+              std::vector<TodoItem> next;
+              for (auto it = body["items"].begin(); it != body["items"].end(); ++it) {
+                TodoItem item = TodoItem::from_json(*it);
+                if (trim(item.text).empty()) continue;
+                if (item.id.empty()) item.id = "t" + std::to_string(next.size() + 1);
+                next.push_back(item);
+              }
+              session.todos = next;
+            } else {
+              const std::string id = json_string(body, "id");
+              const long long index = body.contains("index") && body["index"].is_number()
+                                          ? body["index"].get<long long>()
+                                          : 0;
+              std::size_t at = session.todos.size();
+              for (std::size_t i = 0; i < session.todos.size(); ++i) {
+                if ((!id.empty() && session.todos[i].id == id) ||
+                    (id.empty() && index >= 1 &&
+                     static_cast<std::size_t>(index) == i + 1)) {
+                  at = i;
+                  break;
+                }
+              }
+              if (at >= session.todos.size()) {
+                send_error(res, 404, "not_found", "no such todo item");
+                return;
+              }
+              const std::string status = to_lower(trim(json_string(body, "status")));
+              const std::string text = json_string(body, "text");
+              if (!status.empty()) {
+                if (!TodoItem::valid_status(status)) {
+                  send_error(res, 400, "bad_request", "status must be pending, active or done");
+                  return;
+                }
+                if (status == "active") {
+                  for (std::size_t i = 0; i < session.todos.size(); ++i) {
+                    if (i != at && session.todos[i].status == "active") {
+                      session.todos[i].status = "pending";
+                    }
+                  }
+                }
+                session.todos[at].status = status;
+              }
+              if (!trim(text).empty()) session.todos[at].text = trim(text);
+            }
+            session.info.updated_at = now_iso8601();
+            if (!ws.save_session(session, &err)) {
+              send_error(res, 500, "io_error", err);
+              return;
+            }
+            int total = 0, done = 0;
+            todo_counts(session.todos, &total, &done);
+            nlohmann::json items = nlohmann::json::array();
+            for (std::size_t i = 0; i < session.todos.size(); ++i) {
+              items.push_back(session.todos[i].to_json());
+            }
+            send_json(res, {{"ok", true}, {"items", items}, {"total", total}, {"done", done}});
+          });
 
   svr.Delete(R"(/api/sessions/([^/]+))",
              [this](const httplib::Request& req, httplib::Response& res) {

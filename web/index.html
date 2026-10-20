@@ -123,6 +123,18 @@
       <nav class="turn-index hidden" id="turn-index" aria-label="对话跳转索引"></nav>
       <div class="composer-wrap">
         <div class="chat-col">
+          <!-- 任务列表（todo）：复杂任务被分解成阶段时，进度就贴在输入框上方。
+               由 agent 的 toolkit_todo 维护，SSE 的 todo 事件实时更新；点条目可勾选完成。 -->
+          <div class="todo-panel hidden" id="todo-panel">
+            <button class="todo-head" id="todo-head" type="button" aria-expanded="true"
+                    title="任务进度（点条目可直接勾选完成）">
+              <span class="todo-title">任务</span>
+              <span class="todo-count" id="todo-count">0/0</span>
+              <span class="todo-bar"><i id="todo-bar"></i></span>
+              <span class="todo-chev" id="todo-chev">›</span>
+            </button>
+            <ol class="todo-list" id="todo-list"></ol>
+          </div>
           <div class="composer">
             <div class="composer-body">
               <!-- 选中的分叉点：下一条消息会开一个新会话（当前会话不动）；点 × 取消 -->
@@ -310,6 +322,13 @@
 </div>
 
 <div class="overlay hidden" id="overlay"><div class="dialog" id="dialog"></div></div>
+<!-- 图片查看器：双击对话里的缩略图，按**原图尺寸**显示（大于视口时可滚动）。
+     点击背景、按 Esc 或再双击关闭。 -->
+<div class="image-viewer hidden" id="image-viewer" role="dialog" aria-modal="true"
+     aria-label="图片预览">
+  <img id="image-viewer-img" alt="">
+  <div class="iv-meta" id="image-viewer-meta"></div>
+</div>
 <div class="toast hidden" id="toast"></div>
 <!-- 跳转索引的悬停提示：fixed 定位，避免被索引条的滚动容器裁掉 -->
 <div class="turn-tip hidden" id="turn-tip" role="tooltip"></div>

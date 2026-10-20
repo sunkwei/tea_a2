@@ -207,6 +207,104 @@ Message Message::make(const std::string& role, const std::string& content) {
   return m;
 }
 
+bool TodoItem::valid_status(const std::string& s) {
+  return s == "pending" || s == "active" || s == "done";
+}
+
+nlohmann::json TodoItem::to_json() const {
+  nlohmann::json j = nlohmann::json::object();
+  j["id"] = id;
+  j["text"] = text;
+  j["status"] = status.empty() ? "pending" : status;
+  return j;
+}
+
+TodoItem TodoItem::from_json(const nlohmann::json& j) {
+  TodoItem t;
+  if (!j.is_object()) return t;
+  if (j.contains("id") && j["id"].is_string()) t.id = j["id"].get<std::string>();
+  if (j.contains("text") && j["text"].is_string()) t.text = j["text"].get<std::string>();
+  if (j.contains("status") && j["status"].is_string()) {
+    t.status = j["status"].get<std::string>();
+  }
+  if (!valid_status(t.status)) t.status = "pending";
+  return t;
+}
+
+nlohmann::json SessionArtifact::to_json() const {
+  nlohmann::json j = nlohmann::json::object();
+  j["path"] = path;
+  j["bytes"] = bytes;
+  j["kind"] = kind.empty() ? "other" : kind;
+  if (!tool.empty()) j["tool"] = tool;
+  if (!created_at.empty()) j["created_at"] = created_at;
+  if (turn > 0) j["turn"] = turn;
+  return j;
+}
+
+SessionArtifact SessionArtifact::from_json(const nlohmann::json& j) {
+  SessionArtifact a;
+  if (!j.is_object()) return a;
+  if (j.contains("path") && j["path"].is_string()) a.path = j["path"].get<std::string>();
+  if (j.contains("bytes") && j["bytes"].is_number()) a.bytes = j["bytes"].get<long long>();
+  if (j.contains("kind") && j["kind"].is_string()) a.kind = j["kind"].get<std::string>();
+  if (j.contains("tool") && j["tool"].is_string()) a.tool = j["tool"].get<std::string>();
+  if (j.contains("created_at") && j["created_at"].is_string()) {
+    a.created_at = j["created_at"].get<std::string>();
+  }
+  if (j.contains("turn") && j["turn"].is_number()) a.turn = j["turn"].get<int>();
+  return a;
+}
+
+std::string artifact_kind_for(const std::string& path) {
+  const std::string ext = path_extension(path);
+  if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".webp" ||
+      ext == ".svg" || ext == ".bmp" || ext == ".ico") {
+    return "image";
+  }
+  if (ext == ".mp4" || ext == ".webm" || ext == ".mov" || ext == ".mkv" || ext == ".avi" ||
+      ext == ".m4v") {
+    return "video";
+  }
+  if (ext == ".mp3" || ext == ".wav" || ext == ".m4a" || ext == ".ogg" || ext == ".flac") {
+    return "audio";
+  }
+  if (ext == ".pdf" || ext == ".md" || ext == ".txt" || ext == ".html" || ext == ".htm" ||
+      ext == ".doc" || ext == ".docx" || ext == ".xls" || ext == ".xlsx" || ext == ".ppt" ||
+      ext == ".pptx" || ext == ".odt" || ext == ".rtf") {
+    return "document";
+  }
+  if (ext == ".csv" || ext == ".json" || ext == ".jsonl" || ext == ".xml" || ext == ".yaml" ||
+      ext == ".yml" || ext == ".tsv" || ext == ".sql" || ext == ".db") {
+    return "data";
+  }
+  if (ext == ".zip" || ext == ".tar" || ext == ".gz" || ext == ".7z" || ext == ".xz") {
+    return "archive";
+  }
+  return "other";
+}
+
+bool artifact_extension_interesting(const std::string& path) {
+  const std::string kind = artifact_kind_for(path);
+  if (kind != "other") return true;
+  const std::string ext = path_extension(path);
+  // A few source-ish outputs are worth offering too (a generated script or
+  // patch), but build products explicitly are not.
+  return ext == ".sh" || ext == ".py" || ext == ".js" || ext == ".patch" || ext == ".diff" ||
+         ext == ".log";
+}
+
+void todo_counts(const std::vector<TodoItem>& todos, int* total, int* done) {
+  int t = 0, d = 0;
+  for (std::size_t i = 0; i < todos.size(); ++i) {
+    if (trim(todos[i].text).empty()) continue;
+    ++t;
+    if (todos[i].status == "done") ++d;
+  }
+  if (total) *total = t;
+  if (done) *done = d;
+}
+
 nlohmann::json SessionInfo::to_json() const {
   nlohmann::json j = nlohmann::json::object();
   j["id"] = id;
@@ -214,6 +312,10 @@ nlohmann::json SessionInfo::to_json() const {
   j["created_at"] = created_at;
   j["updated_at"] = updated_at;
   j["message_count"] = message_count;
+  if (todo_total > 0) {
+    j["todo_total"] = todo_total;
+    j["todo_done"] = todo_done;
+  }
   if (!forked_from.empty()) j["forked_from"] = forked_from;
   if (fork_turn > 0) j["fork_turn"] = fork_turn;
   return j;
@@ -233,6 +335,10 @@ SessionInfo SessionInfo::from_json(const nlohmann::json& j) {
   s.updated_at = str_of("updated_at");
   auto it = j.find("message_count");
   if (it != j.end() && it->is_number()) s.message_count = it->get<int>();
+  auto tt = j.find("todo_total");
+  if (tt != j.end() && tt->is_number()) s.todo_total = tt->get<int>();
+  auto td = j.find("todo_done");
+  if (td != j.end() && td->is_number()) s.todo_done = td->get<int>();
   s.forked_from = str_of("forked_from");
   auto turn_it = j.find("fork_turn");
   if (turn_it != j.end() && turn_it->is_number()) s.fork_turn = turn_it->get<int>();

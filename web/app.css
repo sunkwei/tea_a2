@@ -424,6 +424,34 @@ button{font-family:inherit}
 /* 消息里的图片 */
 .msg-images{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .msg-images img{max-width:240px;max-height:180px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);display:block}
+/* 缩略图是个索引：双击按原图尺寸查看 */
+.msg-images img.zoomable{cursor:zoom-in}
+.msg-images img.zoomable:hover{border-color:var(--dsw-alias-brand-primary)}
+
+/* ---------- 图片查看器（双击缩略图） ---------- */
+/* 按原图像素显示：不缩放、不限宽高，比视口大就滚动。图片用 margin:auto 居中，
+   这样超大图向左/向上滚动时也能看到边角（flex 居中会把溢出部分裁掉）。 */
+.image-viewer{
+  position:fixed;inset:0;z-index:70;overflow:auto;
+  /* 近乎不透明：后面的界面还看得清就没法专心看图 */
+  background:#08090bf2;
+  padding:24px;text-align:center;
+}
+.image-viewer.hidden{display:none}
+.image-viewer img{
+  display:block;margin:0 auto;width:auto;height:auto;max-width:none;max-height:none;
+  background:#fff;border-radius:2px;box-shadow:0 8px 40px #000a;outline:none;
+  image-rendering:auto;
+}
+.image-viewer .iv-meta{
+  position:sticky;bottom:0;width:max-content;margin:12px auto 0;padding:4px 12px;
+  border-radius:999px;background:#000000b3;
+  font:11px/18px var(--ds-font-family-code);color:#e6e8eb;text-shadow:0 1px 2px #000;
+  pointer-events:none;
+}
+/* 原图比视口大时给出滚动提示（图片本身不缩放，这是刻意的） */
+.image-viewer .iv-meta.large{color:#ffd479}
+
 .send{
   width:28px;height:28px;flex:0 0 28px;border-radius:50%;border:0;cursor:pointer;
   background:var(--dsw-alias-state-business-primary);color:var(--dsw-static-neutral-bluish-1000);
@@ -518,7 +546,87 @@ button{font-family:inherit}
 }
 .ta:focus{border-color:var(--dsw-alias-border-l3)}
 
+/* ---------- 任务列表（todo，贴在工作区上方） ---------- */
+.todo-panel{
+  margin-bottom:8px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg);
+  background:var(--dsw-alias-bg-layer-1);overflow:hidden;
+}
+.todo-head{
+  display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;
+  border:0;background:transparent;cursor:pointer;text-align:left;
+  color:var(--dsw-alias-label-secondary);font-size:12px;
+}
+.todo-head:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.todo-title{font-weight:600;color:var(--dsw-alias-label-primary)}
+.todo-count{
+  font:11px/16px var(--ds-font-family-code);color:var(--dsw-alias-label-caption);
+  border:.5px solid var(--dsw-alias-border-l2);border-radius:9px;padding:0 6px;
+}
+.todo-count.all-done{color:var(--dsw-alias-state-success-primary);
+  border-color:var(--dsw-alias-state-success-primary)}
+.todo-bar{
+  flex:1 1 auto;height:4px;border-radius:2px;overflow:hidden;
+  background:var(--dsw-alias-bg-layer-3);min-width:40px;
+}
+.todo-bar i{display:block;height:100%;width:0;border-radius:2px;
+  background:var(--dsw-alias-brand-primary);transition:width .25s ease}
+.todo-chev{color:var(--dsw-alias-label-caption);font-size:11px;transition:transform .15s ease}
+.todo-panel.collapsed .todo-chev{transform:rotate(90deg)}
+.todo-list{
+  list-style:none;margin:0;padding:2px 4px 8px;display:flex;flex-direction:column;gap:1px;
+  max-height:34vh;overflow:auto;
+}
+.todo-panel.collapsed .todo-list{display:none}
+.todo-item{
+  display:flex;gap:8px;align-items:flex-start;padding:4px 6px;border-radius:6px;
+  font-size:13px;line-height:19px;color:var(--dsw-alias-label-secondary);cursor:pointer;
+}
+.todo-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.todo-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.todo-item .todo-mark{flex:0 0 auto;width:14px;text-align:center;font-size:11px;
+  color:var(--dsw-alias-label-caption);line-height:19px}
+.todo-item .todo-text{flex:1 1 auto;word-break:break-word}
+/* 三态：未开始 / 进行中 / 已完成。进行中高亮成品牌色，已完成划掉并压暗。 */
+.todo-item.active{color:var(--dsw-alias-label-primary);font-weight:500}
+.todo-item.active .todo-mark{color:var(--dsw-alias-brand-primary)}
+.todo-item.done{color:var(--dsw-alias-label-caption)}
+.todo-item.done .todo-mark{color:var(--dsw-alias-state-success-primary)}
+.todo-item.done .todo-text{text-decoration:line-through}
+
 /* ---------- memory ---------- */
+/* ---------- 本轮产出（下载链接，挂在最终回答下面） ---------- */
+.artifacts{
+  margin:8px 0 4px;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l1);
+  border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);
+}
+.artifacts-head{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}
+.artifacts .a-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+.artifacts .a-count{font-size:11px;color:var(--dsw-alias-label-caption)}
+.artifacts-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.artifact{
+  display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:6px;
+  font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary);
+}
+.artifact:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.artifact .a-ico{flex:0 0 auto;width:14px;text-align:center;color:var(--dsw-alias-label-caption)}
+.artifact .a-ico.image{color:var(--dsw-alias-brand-primary)}
+.artifact .a-ico.video{color:var(--dsw-alias-state-success-primary)}
+.artifact .a-name{
+  flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--dsw-alias-label-primary);
+  font-family:var(--ds-font-family-code);font-size:12px;
+}
+.artifact .a-meta{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-caption)}
+.artifact .a-dl,.artifact .a-view{
+  flex:0 0 auto;margin-left:auto;border:0;background:transparent;cursor:pointer;
+  font-size:11px;padding:1px 6px;border-radius:4px;color:var(--dsw-alias-brand-primary);
+  text-decoration:none;
+}
+.artifact .a-view{margin-left:0}
+.artifact .a-dl:hover,.artifact .a-view:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.artifact .a-dl:focus-visible,.artifact .a-view:focus-visible{
+  outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+
 .note-add{display:flex;gap:10px;align-items:flex-start;margin-bottom:16px}
 .note-add .ta{flex:1 1 auto}
 .note-list{display:flex;flex-direction:column;gap:8px}
@@ -689,6 +797,13 @@ button{font-family:inherit}
 }
 .sess-tool:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .sess-tool.danger:hover{color:var(--dsw-alias-state-error-primary)}
+/* 会话行上的任务进度（3/7）；全部完成时变绿 */
+.sess-todo{
+  font:10px/14px var(--ds-font-family-code);padding:0 5px;border-radius:7px;
+  border:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption);
+}
+.sess-todo.done{color:var(--dsw-alias-state-success-primary);
+  border-color:var(--dsw-alias-state-success-primary)}
 .sess-tool:disabled{opacity:.4;cursor:not-allowed}
 
 /* ---------- markdown：图片 / 表格 ---------- */

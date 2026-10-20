@@ -131,6 +131,18 @@ class Workspace {
   /// the file (and its template header) when it does not exist yet.
   bool append_agent_doc(const std::string& text, std::string* err) const;
 
+  /// Record a file this session produced (the tools call this). Internal paths
+  /// (`.tea_agent_run/...`), uninteresting extensions and empty files are
+  /// ignored; a path already listed keeps its first turn and gets the new size.
+  /// Returns true when the list changed.
+  bool record_artifact(Session* session, const std::string& relative_path,
+                       const std::string& tool, int turn) const;
+  /// Files under the workspace with an "interesting" extension whose mtime is at
+  /// or after `since_ms` (used after a command, which cannot know what it wrote).
+  /// Bounded: depth, entries visited and results are all capped, and the usual
+  /// noise directories are skipped.
+  std::vector<std::string> recent_artifacts(long long since_ms) const;
+
   std::vector<nlohmann::json> load_memory(std::string* err) const;
   nlohmann::json add_memory_note(const std::string& text, std::string* err) const;
   bool delete_memory_note(const std::string& note_id, std::string* err) const;

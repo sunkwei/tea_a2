@@ -299,6 +299,28 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
       out << "- " << notes[i].value("text", std::string()) << "\n";
     }
   }
+
+  // The task list is last on purpose: it is the one block that changes during a
+  // turn, and keeping it behind the (stable) environment/instructions/agent.md
+  // text means a todo update only invalidates the tail of the prompt cache.
+  // It is injected every turn, not just when it changes, so a compacted
+  // conversation or a fresh process still knows what the plan was.
+  if (!session.todos.empty()) {
+    int total = 0, done = 0;
+    todo_counts(session.todos, &total, &done);
+    out << "\nTask list (" << done << "/" << total
+        << " done; maintained with toolkit_todo, shown to the user as live progress)\n";
+    for (std::size_t i = 0; i < session.todos.size(); ++i) {
+      const TodoItem& t = session.todos[i];
+      out << "- [" << (t.status == "done" ? "x" : (t.status == "active" ? "~" : " "))
+          << "] " << t.text;
+      if (t.status == "active") out << "   <- in progress";
+      out << "\n";
+    }
+    out << "Keep it current: mark a step active before starting it and done as soon as it is "
+           "finished (exactly one active at a time). Do not restate the list in your answer - "
+           "the user already sees it.";
+  }
   return out.str();
 }
 namespace {
@@ -664,6 +686,12 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     }
   }
   session->messages.push_back(user_message);
+  // Which user turn this is (1-based): artifacts carry it, so the UI can show
+  // "this turn's output" under the final answer instead of an ever-growing list.
+  int turn_number = 0;
+  for (std::size_t i = 0; i < session->messages.size(); ++i) {
+    if (session->messages[i].role == "user") ++turn_number;
+  }
 
   // Vision input is stored as file references and encoded to data: URLs once
   // per turn (every iteration re-sends the whole context; re-encoding a few
@@ -1094,6 +1122,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         tool_ctx.provider = provider_info;
         tool_ctx.model = model_info;
         tool_ctx.workspace = &workspace;
+        tool_ctx.session = session;
         tool_ctx.cancel = cancel;
         tool_ctx.web_tool_calls = &web_tool_calls;
         tool_result = tools_->execute(call.name, parsed_arguments, tool_ctx);
@@ -1127,6 +1156,80 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         image_urls[att.path] = "data:" + att.mime + ";base64," + base64_encode(bytes);
         tool_images.push_back(att);
         ++tool_images_attached;
+      }
+
+      // Files this call produced. toolkit_file/toolkit_load_image report the
+      // path themselves; a command cannot, so its output window is scanned for
+      // files with an interesting extension (bounded, noise dirs skipped).
+      {
+        bool changed = false;
+        const nlohmann::json& meta = tool_result.meta;
+        if (tool_result.ok && meta.is_object()) {
+          const std::string file_op =
+              meta.contains("file_op") && meta["file_op"].is_string()
+                  ? meta["file_op"].get<std::string>()
+                  : std::string();
+          const std::string reported =
+              meta.contains("path") && meta["path"].is_string()
+                  ? meta["path"].get<std::string>()
+                  : std::string();
+          // toolkit_load_image copies into .tea_agent_run/artifacts, which
+          // record_artifact filters out on purpose: the user already has the
+          // original, and offering an internal copy as "produced" is noise.
+          if (!reported.empty() && (file_op == "write" || file_op == "append")) {
+            changed |= workspace.record_artifact(session, reported, call.name, turn_number);
+          }
+          if (file_op == "move" && meta.contains("dest") && meta["dest"].is_string()) {
+            changed |= workspace.record_artifact(
+                session, meta["dest"].get<std::string>(), call.name, turn_number);
+          }
+          const std::string command =
+              meta.contains("command") && meta["command"].is_string()
+                  ? meta["command"].get<std::string>()
+                  : std::string();
+          if (!command.empty()) {
+            const std::vector<std::string> touched =
+                workspace.recent_artifacts(tool_started);
+            for (std::size_t k = 0; k < touched.size(); ++k) {
+              changed |= workspace.record_artifact(session, touched[k], call.name, turn_number);
+            }
+          }
+        }
+        if (changed) {
+          nlohmann::json arts = nlohmann::json::array();
+          for (std::size_t k = 0; k < session->artifacts.size(); ++k) {
+            arts.push_back(session->artifacts[k].to_json());
+          }
+          nlohmann::json art_event = nlohmann::json::object();
+          art_event["type"] = "artifacts";
+          art_event["iteration"] = iteration;
+          art_event["turn"] = turn_number;
+          art_event["items"] = arts;
+          emit(art_event);
+        }
+      }
+
+      // A changed task list is user-visible state, not just tool output: persist
+      // it now (a long iteration must not lose it) and push it to every attached
+      // client so progress updates while the turn is still running.
+      if (tool_result.todos_changed) {
+        nlohmann::json todo_event = nlohmann::json::object();
+        todo_event["type"] = "todo";
+        todo_event["iteration"] = iteration;
+        int total = 0, done = 0;
+        todo_counts(session->todos, &total, &done);
+        todo_event["total"] = total;
+        todo_event["done"] = done;
+        nlohmann::json items = nlohmann::json::array();
+        for (std::size_t k = 0; k < session->todos.size(); ++k) {
+          items.push_back(session->todos[k].to_json());
+        }
+        todo_event["items"] = items;
+        emit(todo_event);
+        std::string todo_save_err;
+        if (!workspace.save_session(*session, &todo_save_err)) {
+          LOG_WARN("todo: cannot persist the session: ", todo_save_err);
+        }
       }
 
       tool_message.content = tool_result.output;

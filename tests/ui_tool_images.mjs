@@ -86,7 +86,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tea_toolimg_ui_'));
 const proj = path.join(tmp, 'proj');
 fs.mkdirSync(proj, { recursive: true });
 fs.mkdirSync(path.join(tmp, 'home'), { recursive: true });
-const png = makePng(40, 30, [220, 40, 40]);
+const png = makePng(800, 600, [220, 40, 40]);
 fs.writeFileSync(path.join(proj, 'shot.png'), png);
 
 let agent, chrome, ws, mockServer;
@@ -262,7 +262,7 @@ roles: {main: {provider: mock, model: vision}}
   check('the image is served by the /raw route',
     withImage[0] && withImage[0].src.indexOf('/raw?path=') > 0,
     JSON.stringify(withImage[0] && withImage[0].src));
-  check('the browser really decoded it', withImage[0] && withImage[0].width === 40,
+  check('the browser really decoded it', withImage[0] && withImage[0].width === 800,
     JSON.stringify(withImage[0] && [withImage[0].width, withImage[0].loaded]));
   // The tool row is collapsed by default; its panel carries the real output.
   await evalJs(`(function(){
@@ -302,7 +302,87 @@ roles: {main: {provider: mock, model: vision}}
   check('only one bubble after the reload (no duplicate)',
     b.userWithImage.length === 2, JSON.stringify(b.userWithImage.map((u) => u.text)));
   check('the session keeps the image in place',
-    reloaded.length === 1 && reloaded[0].width === 40, JSON.stringify(reloaded));
+    reloaded.length === 1 && reloaded[0].width === 800, JSON.stringify(reloaded));
+
+  // ---- double-click opens the original size ------------------------------
+  // The bubble thumbnail is capped at 240x180 to keep the transcript readable;
+  // that is useless for reading text inside a screenshot, so a double-click must
+  // show the image at its own pixel size (800x600 here), not at 240.
+  const thumb = await evalJs(`(function(){
+    var img = document.querySelector('.msg.user .msg-images img');
+    if (!img) return null;
+    var r = img.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height),
+             natural: img.naturalWidth, title: img.title,
+             cursor: getComputedStyle(img).cursor, tabIndex: img.tabIndex };
+  })()`);
+  check('the bubble thumbnail is scaled down', thumb && thumb.w <= 240 && thumb.natural === 800,
+    JSON.stringify(thumb));
+  check('the thumbnail advertises the zoom', thumb && thumb.title.indexOf('双击') >= 0
+    && thumb.cursor === 'zoom-in', JSON.stringify(thumb && [thumb.title, thumb.cursor]));
+
+  const viewer = () => evalJs(`(function(){
+    var box = document.getElementById('image-viewer');
+    var img = document.getElementById('image-viewer-img');
+    var r = img.getBoundingClientRect();
+    return {
+      open: !box.classList.contains('hidden'),
+      natural: img.naturalWidth,
+      w: Math.round(r.width), h: Math.round(r.height),
+      loaded: img.complete && img.naturalWidth > 0,
+      meta: document.getElementById('image-viewer-meta').textContent,
+      scrollable: box.scrollHeight >= box.clientHeight,
+      zIndex: getComputedStyle(box).zIndex
+    };
+  })()`);
+
+  await evalJs(`(function(){
+    var img = document.querySelector('.msg.user .msg-images img');
+    img.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    return true;
+  })()`);
+  await sleep(600);
+  let v = await viewer();
+  check('double-clicking a thumbnail opens the viewer', v && v.open === true, JSON.stringify(v));
+  check('the viewer loads the picture', v && v.loaded === true && v.natural === 800,
+    JSON.stringify(v && [v.loaded, v.natural]));
+  check('it is shown at the original pixel size (not the thumbnail size)',
+    v && v.w === 800 && v.h === 600, JSON.stringify(v && [v.w, v.h]));
+  check('the viewer says the size and how to close it',
+    v && v.meta.indexOf('800 × 600') === 0 && v.meta.indexOf('Esc') > 0, v && v.meta);
+  check('the viewer sits above the page', v && Number(v.zIndex) >= 60,
+    JSON.stringify(v && v.zIndex));
+
+  // Esc closes it and the big bitmap is released.
+  await evalJs(`document.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true })); true`);
+  await sleep(300);
+  v = await viewer();
+  check('Esc closes the viewer', v && v.open === false, JSON.stringify(v && v.open));
+  const released = await evalJs(
+    `document.getElementById('image-viewer-img').getAttribute('src')`);
+  check('closing releases the full-size bitmap', released === null,
+    JSON.stringify(released && released.slice(0, 40)));
+
+  // Reopen (keyboard: Enter on the focused thumbnail) and close by clicking the
+  // backdrop - both are documented affordances.
+  await evalJs(`(function(){
+    var img = document.querySelector('.msg.user .msg-images img');
+    img.focus();
+    img.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    return true;
+  })()`);
+  await sleep(500);
+  v = await viewer();
+  check('Enter on the thumbnail opens it too', v && v.open === true, JSON.stringify(v && v.open));
+  await evalJs(`(function(){
+    var box = document.getElementById('image-viewer');
+    box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return true;
+  })()`);
+  await sleep(300);
+  v = await viewer();
+  check('clicking the backdrop closes it', v && v.open === false, JSON.stringify(v && v.open));
 
   const health = JSON.parse((await getJson(agentPort, '/api/health')).body);
   check('the server is still healthy', health.ok === true, JSON.stringify(health));

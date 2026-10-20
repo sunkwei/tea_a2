@@ -526,6 +526,236 @@ ToolResult tool_agent_doc(const nlohmann::json& args, const ToolContext& ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// toolkit_todo
+//
+// A long job is easier to follow - for the model and for the person watching -
+// when it is written down as steps. The list lives on the session (persisted,
+// re-injected into the prompt every turn, pushed to the UI on every change), so
+// it survives compaction, a restart and "what was it doing again?".
+// ---------------------------------------------------------------------------
+constexpr std::size_t kMaxTodoItems = 50;
+constexpr std::size_t kMaxTodoTextBytes = 300;
+
+std::string todo_status_glyph(const std::string& status) {
+  if (status == "done") return "[x]";
+  if (status == "active") return "[~]";
+  return "[ ]";
+}
+
+/// "3/7 done" plus a per-status breakdown; also the text the model reads back
+/// after every mutation, so it can see its own progress.
+std::string todo_render(const std::vector<TodoItem>& todos, const std::string& headline) {
+  int total = 0, done = 0;
+  todo_counts(todos, &total, &done);
+  int active = 0;
+  for (std::size_t i = 0; i < todos.size(); ++i) {
+    if (todos[i].status == "active") ++active;
+  }
+  std::ostringstream out;
+  if (!headline.empty()) out << headline << "\n";
+  out << "todo list: " << done << "/" << total << " done";
+  if (active > 0) out << ", " << active << " in progress";
+  out << "\n";
+  if (todos.empty()) {
+    out << "(empty)\n";
+    return out.str();
+  }
+  for (std::size_t i = 0; i < todos.size(); ++i) {
+    out << "  " << (i + 1) << ". " << todo_status_glyph(todos[i].status) << " "
+        << todos[i].text;
+    if (todos[i].status == "active") out << "   <- in progress";
+    out << "\n";
+  }
+  if (total > 0 && done == total) {
+    out << "All steps are done. Say what was accomplished; add follow-up steps if the work "
+           "continues.\n";
+  } else if (active == 0) {
+    out << "No step is in progress: mark the next one active before working on it.\n";
+  }
+  return out.str();
+}
+
+/// Find an item by "id" first, then by 1-based "index".
+std::size_t todo_find(const std::vector<TodoItem>& todos, const nlohmann::json& args,
+                      bool* found) {
+  *found = false;
+  const std::string id = trim(arg_str(args, "id"));
+  if (!id.empty()) {
+    for (std::size_t i = 0; i < todos.size(); ++i) {
+      if (todos[i].id == id) {
+        *found = true;
+        return i;
+      }
+    }
+  }
+  const long long index = arg_int(args, "index", 0);
+  if (index >= 1 && static_cast<std::size_t>(index) <= todos.size()) {
+    *found = true;
+    return static_cast<std::size_t>(index - 1);
+  }
+  return 0;
+}
+
+/// Normalise one incoming entry: {"text": "...", "status": "..."} or a bare
+/// string (=> pending). Long text is clipped rather than rejected: a truncated
+/// step is still usable, a failed call is not.
+TodoItem todo_from_arg(const nlohmann::json& value, std::size_t ordinal) {
+  TodoItem item;
+  item.id = "t" + std::to_string(ordinal);
+  item.status = "pending";
+  if (value.is_string()) {
+    item.text = trim(value.get<std::string>());
+  } else if (value.is_object()) {
+    if (value.contains("text") && value["text"].is_string()) {
+      item.text = trim(value["text"].get<std::string>());
+    } else if (value.contains("content") && value["content"].is_string()) {
+      item.text = trim(value["content"].get<std::string>());
+    }
+    if (value.contains("status") && value["status"].is_string()) {
+      const std::string st = to_lower(trim(value["status"].get<std::string>()));
+      if (TodoItem::valid_status(st)) item.status = st;
+    }
+  }
+  if (item.text.size() > kMaxTodoTextBytes) item.text = truncate_utf8(item.text, kMaxTodoTextBytes);
+  return item;
+}
+
+ToolResult tool_todo(const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  if (!ctx.session) {
+    result.output = "error: no session is active";
+    return result;
+  }
+  const std::string op = to_lower(trim(arg_str(args, "op", "list")));
+  std::vector<TodoItem>& todos = ctx.session->todos;
+
+  if (op == "list") {
+    result.ok = true;
+    result.output = todo_render(todos, "");
+    return result;
+  }
+
+  if (op == "clear") {
+    todos.clear();
+    result.ok = true;
+    result.todos_changed = true;
+    result.output = "todo list cleared";
+    return result;
+  }
+
+  if (op == "set" || op == "replace") {
+    nlohmann::json items;
+    if (args.is_object()) {
+      if (args.contains("items")) items = args["items"];
+      else if (args.contains("todos")) items = args["todos"];
+    }
+    if (!items.is_array()) {
+      result.output = "error: op=set needs 'items': an array of steps (strings, or "
+                      "{text, status})";
+      return result;
+    }
+    if (items.size() > kMaxTodoItems) {
+      result.output = "error: at most " + std::to_string(kMaxTodoItems) +
+                      " steps; group the small ones together";
+      return result;
+    }
+    std::vector<TodoItem> next;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      TodoItem item = todo_from_arg(items[i], next.size() + 1);
+      if (item.text.empty()) continue;
+      next.push_back(item);
+    }
+    int active = 0;
+    for (std::size_t i = 0; i < next.size(); ++i) {
+      if (next[i].status == "active") ++active;
+    }
+    if (active > 1) {
+      result.output = "error: only one step may be 'active' at a time (the work in progress); "
+                      "mark the others pending or done";
+      return result;
+    }
+    todos = next;
+    result.ok = true;
+    result.todos_changed = true;
+    result.output = todo_render(todos, "todo list set (" + std::to_string(todos.size()) +
+                                            " step(s))");
+    return result;
+  }
+
+  if (op == "add") {
+    if (todos.size() >= kMaxTodoItems) {
+      result.output = "error: the list already has " + std::to_string(kMaxTodoItems) +
+                      " steps; merge or drop finished ones with op=set";
+      return result;
+    }
+    TodoItem item = todo_from_arg(args, todos.size() + 1);
+    if (item.text.empty()) {
+      // Accept the common shorthand {"op":"add","text":"..."} only; anything
+      // else means the caller meant something else.
+      item = todo_from_arg(args.is_object() && args.contains("items") ? args["items"]
+                                                                     : nlohmann::json(),
+                           todos.size() + 1);
+    }
+    if (item.text.empty()) {
+      result.output = "error: op=add needs 'text' (the step to add)";
+      return result;
+    }
+    if (item.status == "active") {
+      for (std::size_t i = 0; i < todos.size(); ++i) {
+        if (todos[i].status == "active") todos[i].status = "pending";
+      }
+    }
+    todos.push_back(item);
+    result.ok = true;
+    result.todos_changed = true;
+    result.output = todo_render(todos, "added step " + std::to_string(todos.size()));
+    return result;
+  }
+
+  if (op == "update") {
+    bool found = false;
+    const std::size_t at = todo_find(todos, args, &found);
+    if (!found) {
+      result.output = "error: no such step; pass 'index' (1-based, from op=list) or 'id'";
+      return result;
+    }
+    const std::string status = to_lower(trim(arg_str(args, "status")));
+    const std::string text = trim(arg_str(args, "text"));
+    if (status.empty() && text.empty()) {
+      result.output = "error: op=update needs 'status' and/or 'text'";
+      return result;
+    }
+    if (!status.empty()) {
+      if (!TodoItem::valid_status(status)) {
+        result.output = "error: status must be pending, active or done";
+        return result;
+      }
+      if (status == "active") {
+        // Exactly one step in progress, always: that is what makes the list
+        // readable as "where is it now".
+        for (std::size_t i = 0; i < todos.size(); ++i) {
+          if (i != at && todos[i].status == "active") todos[i].status = "pending";
+        }
+      }
+      todos[at].status = status;
+    }
+    if (!text.empty()) {
+      todos[at].text = text.size() > kMaxTodoTextBytes
+                           ? truncate_utf8(text, kMaxTodoTextBytes)
+                           : text;
+    }
+    result.ok = true;
+    result.todos_changed = true;
+    result.output = todo_render(todos, "updated step " + std::to_string(at + 1));
+    return result;
+  }
+
+  result.output = "error: unsupported op '" + op +
+                  "' (use list | set | add | update | clear)";
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // toolkit_load_image
 //
 // The only way an image used to enter a conversation was a human pasting one:
@@ -1161,6 +1391,52 @@ ToolRegistry::ToolRegistry() {
   }
   {
     ToolDef def;
+    def.name = "toolkit_todo";
+    def.description =
+        "Break a multi-step job into an explicit task list and keep it current: the list is "
+        "shown to the user as live progress and injected into your prompt every turn. Use "
+        "op=set (or replace) with the whole plan when you start a non-trivial task, then "
+        "op=update to mark the step you are working on 'active' before starting it and 'done' "
+        "immediately after finishing it. Exactly one step may be active at a time. Keep "
+        "steps short and outcome-shaped (\"add the todo tool\", not \"work on stuff\"). A "
+        "single trivial edit does not need a list. 复杂任务分解为阶段任务列表，并记录完成情况。";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": ["list", "set", "replace", "add", "update", "clear"],
+          "description": "list: read it back; set/replace: write the whole plan; add: append one step; update: change one step's status/text; clear: drop the list."
+        },
+        "items": {
+          "type": "array",
+          "description": "For op=set/replace: the ordered steps. Each item is a string or {\"text\": \"...\", \"status\": \"pending|active|done\"}.",
+          "items": {}
+        },
+        "text": {
+          "type": "string",
+          "description": "For op=add: the new step. For op=update: the replacement text."
+        },
+        "index": {
+          "type": "integer",
+          "description": "1-based step number, as printed by op=list."
+        },
+        "id": {
+          "type": "string",
+          "description": "Step id (t1, t2, ...) instead of index."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "active", "done"],
+          "description": "New status for op=update (or the initial status for op=add)."
+        }
+      },
+      "required": ["op"]
+    })JSON");
+    defs_.push_back(def);
+  }
+  {
+    ToolDef def;
     def.name = "toolkit_load_image";
     def.description =
         "Load an image file from disk (PNG, JPEG, GIF or WebP) and attach it to the conversation "
@@ -1303,6 +1579,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     if (name == "toolkit_exec") return tool_exec(arguments, ctx);
     if (name == "toolkit_file") return tool_file(arguments, ctx);
     if (name == "toolkit_memory") return tool_memory(arguments, ctx);
+    if (name == "toolkit_todo") return tool_todo(arguments, ctx);
     if (name == "toolkit_load_image") return tool_load_image(arguments, ctx);
     if (name == "toolkit_agent_doc") return tool_agent_doc(arguments, ctx);
     if (name == "toolkit_search") return tool_search(arguments, ctx);

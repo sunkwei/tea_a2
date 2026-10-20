@@ -37,6 +37,10 @@ struct ToolResult {
   /// these into a follow-up user message; the text `output` alone is what
   /// reaches the model as the tool result.
   std::vector<ImageAttachment> images;
+  /// True when the tool mutated the session's task list (toolkit_todo). The agent
+  /// loop then persists the session and pushes a `todo` event, so the UI and the
+  /// next request both see the new state.
+  bool todos_changed = false;
 };
 
 struct ToolContext {
@@ -49,6 +53,9 @@ struct ToolContext {
   /// attaching an image the model cannot read.
   const ModelInfo* model = nullptr;
   Workspace* workspace = nullptr;
+  /// The session this turn belongs to. toolkit_todo reads and rewrites its task
+  /// list; null means the tool refuses rather than inventing a list somewhere.
+  Session* session = nullptr;
   std::atomic<bool>* cancel = nullptr;
   /// Per-turn counter of billed web-tool calls (null => no budget enforced).
   int* web_tool_calls = nullptr;

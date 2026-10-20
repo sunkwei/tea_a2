@@ -29,6 +29,13 @@
     fork: null,
     files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 },
     memory: [], logsTimer: null, logsAutoScroll: true,
+    /// 当前会话的任务列表（todo）：agent 用 toolkit_todo 维护，SSE 的 todo 事件
+    /// 实时推送。done/total 用于「3/7」这样的进度显示。
+    todos: [], todoDone: 0, todoTotal: 0, todoCollapsed: false,
+    /// 本会话产出的文件（工具写出的文档、生成的图表/视频等）。agent 每发现一个新
+    /// 文件就发一个 artifacts 事件；这里按 turn 分组，只在这一轮的**最终回答**下面
+    /// 列出下载链接。
+    artifacts: [],
     agentDoc: {
       content: '', original: '', path: '', scriptsDir: '', scripts: [],
       loading: false, touched: false
@@ -581,6 +588,78 @@
   /// A user bubble: text plus any attached images. Optimistic (just-sent)
   /// messages carry a data URL; reloaded ones carry a workspace path served by
   /// the /raw route.
+  /* ---------- 本轮产出（下载链接） ----------
+     工具写出的文档、渲染出的图表/视频，都记在会话的 artifacts 里（带 turn 编号）。
+     只在这一轮的最终回答下面列出来：会话里攒了 50 个文件也不该铺满屏幕。 */
+  var ARTIFACT_LABEL = {
+    image: '图片', video: '视频', audio: '音频', document: '文档',
+    data: '数据', archive: '压缩包', other: '文件'
+  };
+  function artifactIcon(kind) {
+    if (kind === 'image') return '▣';
+    if (kind === 'video') return '▶';
+    if (kind === 'audio') return '♪';
+    if (kind === 'document') return '▤';
+    if (kind === 'data') return '▦';
+    if (kind === 'archive') return '▧';
+    return '▢';
+  }
+  function downloadUrl(path, inline) {
+    return apiUrl('api/workspaces/' + encodeURIComponent(state.workspace.id) +
+      '/download?path=' + encodeURIComponent(path) + (inline ? '&inline=1' : ''));
+  }
+  /// 这一轮的产出：turn 为 0（导入的历史记录）时按「全部」处理，但只在最后一条
+  /// 助手消息下显示一次。
+  function artifactsForTurn(turn) {
+    return (state.artifacts || []).filter(function (a) {
+      if (!a || !a.path) return false;
+      return turn > 0 ? (a.turn || 0) === turn : true;
+    });
+  }
+  function currentTurnNumber() {
+    var n = 0;
+    state.messages.forEach(function (m) { if (m.role === 'user') n++; });
+    return n;
+  }
+  function artifactStrip(items) {
+    if (!items.length) return null;
+    var box = el('div', 'artifacts');
+    var head = el('div', 'artifacts-head');
+    head.appendChild(el('span', 'a-title', '本轮产出'));
+    head.appendChild(el('span', 'a-count', items.length + ' 个文件'));
+    box.appendChild(head);
+    var list = el('ul', 'artifacts-list');
+    items.forEach(function (a) {
+      var li = el('li', 'artifact');
+      var kind = a.kind || 'other';
+      li.appendChild(el('span', 'a-ico ' + kind, artifactIcon(kind)));
+      var name = el('span', 'a-name', String(a.path).split('/').pop());
+      name.title = a.path;
+      li.appendChild(name);
+      li.appendChild(el('span', 'a-meta',
+        (ARTIFACT_LABEL[kind] || '文件') + ' · ' + fmtBytes(a.bytes || 0)));
+      var link = document.createElement('a');
+      link.className = 'a-dl';
+      link.href = downloadUrl(a.path, false);
+      link.setAttribute('download', '');
+      link.textContent = '下载';
+      link.title = '下载 ' + a.path;
+      li.appendChild(link);
+      // 图片和视频可以直接在浏览器里预览，省一次下载。
+      if (kind === 'image' || kind === 'video' || kind === 'audio') {
+        var view = btn('a-view', '查看', function () {
+          if (kind === 'image') { openImageViewer(downloadUrl(a.path, true), a.path); return; }
+          window.open(downloadUrl(a.path, true), '_blank', 'noopener');
+        });
+        view.title = '在浏览器里打开 ' + a.path;
+        li.appendChild(view);
+      }
+      list.appendChild(li);
+    });
+    box.appendChild(list);
+    return box;
+  }
+
   function userNode(m) {
     var node = el('div', 'msg user');
     if (m.content) node.appendChild(el('div', null, m.content));
@@ -596,11 +675,151 @@
         var node2 = document.createElement('img');
         node2.src = src;
         node2.alt = '图片';
+        // 缩略图只是索引：双击（或回车）按原图尺寸打开。单击不动，避免误触。
+        node2.classList.add('zoomable');
+        node2.tabIndex = 0;
+        node2.title = '双击查看原图';
+        node2.setAttribute('role', 'button');
+        node2.ondblclick = function (e) {
+          e.preventDefault();
+          openImageViewer(src, '图片');
+        };
+        node2.onkeydown = function (e) {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            openImageViewer(src, '图片');
+          }
+        };
         strip.appendChild(node2);
       });
       if (strip.childNodes.length) node.appendChild(strip);
     }
     return node;
+  }
+
+  /* ---------- 图片查看器（双击缩略图看原图） ---------- */
+  // 缩略图受 240x180 限制，看不清截图里的文字。双击后按**原图像素尺寸**显示
+  // （width/height:auto + max-*:none），比视口大就滚动查看——缩放会让 1px 的
+  // 分隔线糊掉，而看截图时那正是要找的东西。
+  var imageViewer = { open: false };
+  function openImageViewer(src, alt) {
+    var box = $('image-viewer');
+    var img = $('image-viewer-img');
+    if (!box || !img || !src) return;
+    box.classList.remove('hidden');
+    imageViewer.open = true;
+    img.src = src;
+    img.alt = alt || '图片';
+    $('image-viewer-meta').textContent = '加载中…';
+    var describe = function () {
+      if (!img.naturalWidth) return;
+      var box = $('image-viewer');
+      // 原图比视口大时不缩放（缩了就看不清 1px 的线），而是允许滚动，并把这件事说出来。
+      var big = img.naturalWidth > box.clientWidth || img.naturalHeight > box.clientHeight;
+      var meta = $('image-viewer-meta');
+      meta.textContent = img.naturalWidth + ' × ' + img.naturalHeight + ' px · 原图尺寸' +
+        (big ? ' · 可滚动查看' : '') + ' · 点击背景或按 Esc 关闭';
+      meta.classList.toggle('large', big);
+    };
+    if (img.complete && img.naturalWidth) describe();
+    else img.onload = describe;
+    // 打开前把焦点放到图片上，Esc 才收得到（键盘用户从缩略图进来）。
+    setTimeout(function () { img.focus(); }, 0);
+  }
+  function closeImageViewer() {
+    if (!imageViewer.open) return false;
+    var box = $('image-viewer');
+    var img = $('image-viewer-img');
+    box.classList.add('hidden');
+    imageViewer.open = false;
+    img.onload = null;
+    img.removeAttribute('src');   // 释放可能很大的原图
+    return true;
+  }
+
+  /* ---------- 产出文件（artifacts） ---------- */
+  function setArtifacts(items) {
+    state.artifacts = (items || []).filter(function (a) { return a && a.path; });
+    renderChat();
+  }
+
+  /* ---------- 4a) 任务列表（todo） ----------
+     复杂任务由 agent 用 toolkit_todo 分解成阶段；这里只负责呈现和让人手动勾选。
+     数据来自三处：打开会话时的 session.todos、SSE 的 todo 事件、以及本地勾选后的
+     PUT 响应，三者都走 setTodos()，所以看到的状态永远是同一份。 */
+  function setTodos(items, opts) {
+    opts = opts || {};
+    state.todos = (items || []).filter(function (t) { return t && String(t.text || '').trim(); });
+    var done = 0;
+    state.todos.forEach(function (t) { if (t.status === 'done') done++; });
+    state.todoDone = done;
+    state.todoTotal = state.todos.length;
+    // 同步侧栏里的「3/7」：不改会话文件，只更新内存里的那份索引。
+    if (state.session) {
+      state.sessions.forEach(function (s) {
+        if (s.id === state.session.id) {
+          s.todo_total = state.todoTotal;
+          s.todo_done = state.todoDone;
+        }
+      });
+      if (!opts.noSidebar) renderSessions();
+    }
+    // 新任务开始（还有没做完的）就展开：进度是这一轮的重点，不该藏在折叠里。
+    if (!opts.keepCollapsed && state.todos.length && done < state.todos.length) {
+      state.todoCollapsed = false;
+    }
+    renderTodos();
+  }
+  function renderTodos() {
+    var panel = $('todo-panel');
+    if (!panel) return;
+    panel.classList.toggle('hidden', !state.todos.length);
+    panel.classList.toggle('collapsed', !!state.todoCollapsed);
+    $('todo-head').setAttribute('aria-expanded', state.todoCollapsed ? 'false' : 'true');
+    $('todo-count').textContent = state.todoDone + '/' + state.todoTotal;
+    $('todo-count').classList.toggle('all-done',
+      state.todoTotal > 0 && state.todoDone === state.todoTotal);
+    var pct = state.todoTotal ? Math.round(state.todoDone * 100 / state.todoTotal) : 0;
+    $('todo-bar').style.width = pct + '%';
+    $('todo-bar').parentNode.title = '已完成 ' + state.todoDone + ' / ' + state.todoTotal +
+      '（' + pct + '%）';
+    var list = $('todo-list');
+    clear(list);
+    state.todos.forEach(function (t, i) {
+      var li = el('li', 'todo-item ' + (t.status || 'pending'));
+      var mark = el('span', 'todo-mark',
+        t.status === 'done' ? '✓' : (t.status === 'active' ? '●' : '○'));
+      mark.setAttribute('aria-hidden', 'true');
+      li.appendChild(mark);
+      li.appendChild(el('span', 'todo-text', t.text));
+      li.title = t.status === 'done' ? '已完成（点击改回未完成）'
+        : (t.status === 'active' ? '进行中（点击标记完成）' : '未开始（点击标记完成）');
+      li.tabIndex = 0;
+      li.setAttribute('role', 'checkbox');
+      li.setAttribute('aria-checked', t.status === 'done' ? 'true' : 'false');
+      var toggle = function () { toggleTodo(i); };
+      li.onclick = toggle;
+      li.onkeydown = function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      };
+      list.appendChild(li);
+    });
+  }
+  /// 手动勾选一条：先本地更新（点完立刻有反馈），再把整份列表写回服务端。
+  function toggleTodo(index) {
+    if (!state.session || !state.workspace) return;
+    var t = state.todos[index];
+    if (!t) return;
+    var copy = state.todos.slice();
+    copy[index] = { id: t.id, text: t.text, status: t.status === 'done' ? 'pending' : 'done' };
+    setTodos(copy, { keepCollapsed: true });
+    api('api/sessions/' + encodeURIComponent(state.session.id) + '/todos',
+      { method: 'PUT', body: { items: copy } }).then(function (d) {
+        setTodos(d.items, { keepCollapsed: true });
+      }, function (e) {
+        toast('更新任务失败：' + e.message);
+        if (state.session) openSession(state.session.id);
+      });
   }
 
   /* ---------- 4b) 对话跳转索引（右侧轮次刻度） ----------
@@ -787,6 +1006,13 @@
         outputs[m.tool_call_id] = { output: m.content, ok: m.ok !== false, elapsed_ms: m.elapsed_ms };
       }
     });
+    // The final answer of the latest turn is the natural place for "here are the
+    // files I produced": find that message first so the strip can be attached
+    // after the loop (a turn can contain several assistant messages).
+    var lastAssistant = -1;
+    for (var k = state.messages.length - 1; k >= 0; k--) {
+      if (state.messages[k] && state.messages[k].role === 'assistant') { lastAssistant = k; break; }
+    }
     state.messages.forEach(function (m, i) {
       if (m.role === 'tool') return;                            // 工具消息只作为输出附加
       if (m.role === 'user') {
@@ -795,7 +1021,16 @@
         box.appendChild(un);
       }
       else if (m.role === 'system') box.appendChild(el('div', 'msg system', m.content));
-      else box.appendChild(assistantNode(m, outputs, 'm' + i, false));
+      else {
+        var an = assistantNode(m, outputs, 'm' + i, false);
+        box.appendChild(an);
+        if (i === lastAssistant && !state.live) {
+          // Only once the turn is over (no live bubble): while it runs, files are
+          // still being produced and the list would jump around.
+          var strip = artifactStrip(artifactsForTurn(currentTurnNumber()));
+          if (strip) box.appendChild(strip);
+        }
+      }
     });
     if (state.live) {
       state.liveNode = assistantNode(state.live, state.live.outputs, 'live', true);
@@ -1184,6 +1419,16 @@
       state.turnSteps = 0; state.turnStartAt = Date.now();
       renderMetrics();
       renderChat();
+      return;
+    }
+    if (ev.type === 'artifacts') {
+      // agent 产出了文件：立刻把下载链接补到这一轮的回答下面。
+      setArtifacts(ev.items);
+      return;
+    }
+    if (ev.type === 'todo') {
+      // agent 改动了任务列表：实时更新进度条，不打断正在生成的回答。
+      setTodos(ev.items);
       return;
     }
     if (ev.type === 'tool_images') {
@@ -1942,6 +2187,14 @@
         meta.appendChild(el('span', null, '·'));
         meta.appendChild(el('span', null, s.message_count + ' 条'));
       }
+      // 任务进度：侧栏一眼能看出哪个会话还没做完（3/7），不用点进去。
+      if (s.todo_total > 0) {
+        meta.appendChild(el('span', null, '·'));
+        var chip = el('span', 'sess-todo' + (s.todo_done >= s.todo_total ? ' done' : ''),
+          s.todo_done + '/' + s.todo_total);
+        chip.title = '任务进度：' + s.todo_done + ' / ' + s.todo_total + ' 完成';
+        meta.appendChild(chip);
+      }
       // 你已经离开、但服务端还在跑的那一轮：标出来，点一下就接回去。
       if (state.detached === s.id) meta.appendChild(el('span', 'sess-running', '· 进行中'));
       row.appendChild(meta);
@@ -2342,6 +2595,8 @@
     return api('api/sessions/' + encodeURIComponent(sid)).then(function (d) {
       state.session = d.session || { id: sid };
       state.messages = d.messages || [];
+      setTodos(d.todos || []);
+      state.artifacts = d.artifacts || [];
       state.live = null; state.streamError = null;
       state.stickBottom = true;                     // 打开会话默认落在最新一条
       clearQueue();
@@ -2363,6 +2618,8 @@
   function newSessionDraft() {
     clearForkPoint(true);
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
+    setTodos([]);
+    state.artifacts = [];
     state.stickBottom = true;
     clearQueue();
     renderCrumbs();
@@ -2488,6 +2745,7 @@
   function showView(name) {
     state.view = name;
     hideTurnTip();
+    closeImageViewer();
     saveLS();
     VIEWS.forEach(function (v) { $('view-' + v).classList.toggle('hidden', v !== name); });
     Array.prototype.forEach.call(document.querySelectorAll('.nav-row'), function (b) { b.classList.toggle('active', b.dataset.view === name); });
@@ -3174,6 +3432,18 @@
     if (detachBtn) detachBtn.onclick = detachStream;
     $('sidebar-hide').onclick = function () { toggleSidebar(true); };
     $('sidebar-show').onclick = function () { toggleSidebar(false); };
+    // 点击背景（不是图片本身）或双击关闭；Esc 在下面的全局键盘处理里。
+    $('image-viewer').onclick = function (e) {
+      if (e.target === this) closeImageViewer();
+    };
+    $('image-viewer-img').ondblclick = function (e) {
+      e.preventDefault();
+      closeImageViewer();
+    };
+    $('todo-head').onclick = function () {
+      state.todoCollapsed = !state.todoCollapsed;
+      renderTodos();
+    };
     $('session-export').onclick = exportSession;
     $('session-import').onclick = function () {
       if (!state.workspace) { toast('请先选择工作区'); return; }
@@ -3294,6 +3564,7 @@
         toggleSidebar();
       }
       if (e.key === 'Escape') {                                          // Esc 关闭浮层
+        if (closeImageViewer()) return;                                  // 先关图片查看器
         if (state.fork) clearForkPoint();                                // 先撤掉分叉点
         closeDropdowns();
         if (!setupGate.open) closeDialog();

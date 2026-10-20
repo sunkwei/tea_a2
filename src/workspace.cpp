@@ -571,6 +571,8 @@ bool Workspace::load_session(const std::string& id, Session* out, std::string* e
   out->messages.clear();
   out->summary.clear();
   out->summary_upto = 0;
+  out->todos.clear();
+  out->artifacts.clear();
   out->info.id = id;
   auto title_it = j.find("title");
   if (title_it != j.end() && title_it->is_string()) out->info.title = title_it->get<std::string>();
@@ -595,6 +597,22 @@ bool Workspace::load_session(const std::string& id, Session* out, std::string* e
     out->summary_upto = upto_it->get<std::size_t>();
   }
   if (out->summary_upto > 0 && out->summary.empty()) out->summary_upto = 0;
+  auto artifacts_it = j.find("artifacts");
+  if (artifacts_it != j.end() && artifacts_it->is_array()) {
+    for (auto it = artifacts_it->begin(); it != artifacts_it->end(); ++it) {
+      SessionArtifact a = SessionArtifact::from_json(*it);
+      if (a.path.empty()) continue;
+      out->artifacts.push_back(a);
+    }
+  }
+  auto todos_it = j.find("todos");
+  if (todos_it != j.end() && todos_it->is_array()) {
+    for (auto it = todos_it->begin(); it != todos_it->end(); ++it) {
+      TodoItem item = TodoItem::from_json(*it);
+      if (trim(item.text).empty()) continue;
+      out->todos.push_back(item);
+    }
+  }
   auto msgs = j.find("messages");
   if (msgs != j.end() && msgs->is_array()) {
     for (auto it = msgs->begin(); it != msgs->end(); ++it) {
@@ -620,14 +638,30 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
   j["messages"] = msgs;
   if (!session.summary.empty()) j["summary"] = session.summary;
   if (session.summary_upto > 0) j["summary_upto"] = session.summary_upto;
+  if (!session.artifacts.empty()) {
+    nlohmann::json arts = nlohmann::json::array();
+    for (std::size_t i = 0; i < session.artifacts.size(); ++i) {
+      arts.push_back(session.artifacts[i].to_json());
+    }
+    j["artifacts"] = arts;
+  }
+  if (!session.todos.empty()) {
+    nlohmann::json todos = nlohmann::json::array();
+    for (std::size_t i = 0; i < session.todos.size(); ++i) {
+      todos.push_back(session.todos[i].to_json());
+    }
+    j["todos"] = todos;
+  }
   const std::string dir = sessions_dir();
   if (!write_file(session_file_for(dir, session.info.id), j.dump(2) + "\n", false, err)) {
     return false;
   }
 
-  // Keep the lightweight index in sync.
+  // Keep the lightweight index in sync. Progress is part of it: the session
+  // list shows "3/7" without opening every session file.
   SessionInfo info = session.info;
   info.message_count = static_cast<int>(session.messages.size());
+  todo_counts(session.todos, &info.todo_total, &info.todo_done);
   const std::string index_path = path_join(dir, "index.json");
   bool ok = false;
   nlohmann::json index = read_json_file(index_path, &ok);
@@ -767,6 +801,103 @@ bool Workspace::fork_session(const std::string& id, long long message_index,
   if (!save_session(child, err)) return false;
   if (out) *out = child;
   return true;
+}
+
+bool Workspace::record_artifact(Session* session, const std::string& relative_path,
+                                const std::string& tool, int turn) const {
+  if (!session) return false;
+  std::string rel = trim(relative_path);
+  if (rel.empty()) return false;
+  // Accept an absolute path inside the workspace too (tools report in both forms).
+  if (!rel.empty() && (rel[0] == '/' || rel.find(':') == 1)) rel = display_path(rel);
+  while (!rel.empty() && rel[0] == '.') {
+    if (starts_with(rel, "./")) rel = rel.substr(2);
+    else break;
+  }
+  // Internal state is not an output; listing sessions and trajectories would
+  // bury the one report the user actually asked for.
+  if (starts_with(rel, ".tea_agent_run/")) return false;
+  if (!artifact_extension_interesting(rel)) return false;
+
+  const std::string absolute = resolve_path(rel, nullptr);
+  if (absolute.empty() || !path_is_file(absolute)) return false;
+  const uint64_t size = file_size(absolute);
+  if (size == 0) return false;
+
+  for (std::size_t i = 0; i < session->artifacts.size(); ++i) {
+    SessionArtifact& a = session->artifacts[i];
+    if (a.path != rel) continue;
+    a.bytes = static_cast<long long>(size);
+    a.created_at = now_iso8601();
+    if (!tool.empty()) a.tool = tool;
+    if (turn > 0) a.turn = turn;
+    if (a.kind.empty()) a.kind = artifact_kind_for(rel);
+    return true;
+  }
+  SessionArtifact a;
+  a.path = rel;
+  a.bytes = static_cast<long long>(size);
+  a.kind = artifact_kind_for(rel);
+  a.tool = tool;
+  a.created_at = now_iso8601();
+  a.turn = turn;
+  session->artifacts.push_back(a);
+  return true;
+}
+
+std::vector<std::string> Workspace::recent_artifacts(long long since_ms) const {
+  // A command cannot report what it wrote, so after one runs we look for files
+  // that appeared or changed. The walk is bounded and filters by extension, so
+  // a build (thousands of .o/.a/.d) produces nothing here.
+  constexpr int kMaxDepth = 8;
+  constexpr std::size_t kMaxVisited = 20000;
+  constexpr std::size_t kMaxResults = 20;
+  static const char* const kSkipDirs[] = {
+      ".git",      ".tea_agent_run", "node_modules", ".venv",        "venv",
+      "__pycache__", "target",       "dist",         ".cache",       ".idea",
+      ".vscode",   "build",          "build-arm64",  "build-win64",  "build-mingw",
+      "build-msvc", "cmake-build-debug", "obj",      ".gradle",      "3rd",
+  };
+
+  std::vector<std::string> out;
+  std::size_t visited = 0;
+  // DirEntryInfo carries an ISO-8601 string; those sort lexicographically, so
+  // converting the cut-off once is cheaper than parsing every mtime.
+  const std::string since_iso = iso8601_from_unix(since_ms / 1000);
+
+  struct Frame {
+    std::string dir;
+    int depth;
+  };
+  std::vector<Frame> stack;
+  stack.push_back({root_, 0});
+  while (!stack.empty() && visited < kMaxVisited && out.size() < kMaxResults) {
+    const Frame frame = stack.back();
+    stack.pop_back();
+    std::vector<DirEntryInfo> entries;
+    if (!list_directory(frame.dir, &entries, nullptr)) continue;
+    for (std::size_t i = 0; i < entries.size() && visited < kMaxVisited; ++i) {
+      ++visited;
+      const DirEntryInfo& e = entries[i];
+      if (e.is_dir) {
+        if (frame.depth + 1 > kMaxDepth) continue;
+        bool skip = false;
+        for (std::size_t k = 0; k < sizeof(kSkipDirs) / sizeof(kSkipDirs[0]); ++k) {
+          if (e.name == kSkipDirs[k]) {
+            skip = true;
+            break;
+          }
+        }
+        if (!skip) stack.push_back({e.path, frame.depth + 1});
+        continue;
+      }
+      if (!artifact_extension_interesting(e.name)) continue;
+      if (!e.mtime.empty() && e.mtime < since_iso) continue;
+      out.push_back(display_path(e.path));
+      if (out.size() >= kMaxResults) break;
+    }
+  }
+  return out;
 }
 
 std::vector<nlohmann::json> Workspace::load_memory(std::string* err) const {
