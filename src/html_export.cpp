@@ -594,6 +594,14 @@ details[open]>summary{margin-bottom:8px}
 details.reasoning{border-style:dashed}
 details.call,details.tool{font-size:13px}
 details.tool.fail>summary{color:var(--fail)}
+/* Collapsed blocks keep a right-aligned one-line preview (tool output, call
+   arguments). It is elided rather than wrapped: a summary that grows to three
+   lines defeats the point of collapsing. */
+details>summary{display:flex;gap:8px;align-items:baseline;min-width:0}
+details>summary .pv{margin-left:auto;max-width:62%;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font-weight:400;color:var(--muted);
+  font:400 11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+details.tool.fail>summary .pv{color:var(--fail)}
 .badge{font:11px/1 ui-monospace,monospace;padding:2px 7px;border-radius:999px;
   border:1px solid currentColor}
 .badge.ok{color:var(--ok)}
@@ -609,6 +617,56 @@ details.tool.fail>summary{color:var(--fail)}
 footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--hairline);
   font-size:12px;color:var(--muted)}
 )CSS";
+
+/// One-line preview for a collapsed <summary>: the first non-empty line, with
+/// runs of whitespace flattened and the tail elided. Collapsed blocks still have
+/// to say *something*, or a reader has to open every one of them to find out
+/// which command produced what.
+std::string preview_line(const std::string& text, std::size_t max_chars) {
+  std::string first;
+  std::size_t i = 0;
+  while (i < text.size()) {
+    const std::size_t end = text.find('\n', i);
+    const std::string line = trim(text.substr(i, end == std::string::npos ? std::string::npos
+                                                                        : end - i));
+    if (!line.empty()) {
+      first = line;
+      break;
+    }
+    if (end == std::string::npos) break;
+    i = end + 1;
+  }
+  std::string flat;
+  bool space = false;
+  for (std::size_t k = 0; k < first.size(); ++k) {
+    const char c = first[k];
+    if (c == ' ' || c == '\t' || c == '\r') {
+      space = true;
+      continue;
+    }
+    if (space && !flat.empty()) flat += ' ';
+    space = false;
+    flat += c;
+  }
+  // Count characters, not bytes, so a CJK preview is not cut mid-glyph.
+  std::size_t chars = 0;
+  for (std::size_t k = 0; k < flat.size();) {
+    const unsigned char c = static_cast<unsigned char>(flat[k]);
+    const std::size_t step = (c < 0x80) ? 1 : ((c >> 5) == 0x6 ? 2 : ((c >> 4) == 0xE ? 3 : 4));
+    k += step;
+    ++chars;
+  }
+  if (chars <= max_chars) return esc(flat);
+  // Cut on a character boundary, not a byte one.
+  std::size_t bytes = 0, seen = 0;
+  while (bytes < flat.size() && seen < max_chars) {
+    const unsigned char c = static_cast<unsigned char>(flat[bytes]);
+    const std::size_t step = (c < 0x80) ? 1 : ((c >> 5) == 0x6 ? 2 : ((c >> 4) == 0xE ? 3 : 4));
+    bytes += step;
+    ++seen;
+  }
+  return esc(flat.substr(0, bytes)) + "…";
+}
 
 std::string message_html(const Workspace& ws, const Message& m, std::size_t* image_budget,
                          const ExportLimits& limits, std::size_t* json_budget,
@@ -643,8 +701,15 @@ std::string message_html(const Workspace& ws, const Message& m, std::size_t* ima
       body = truncate_utf8(body, limits.tool_output_bytes, &cut) +
              "\n... [导出时截断：原始输出 " + std::to_string(m.content.size()) + " 字节]";
     }
-    out << "<details class=\"tool " << (m.ok ? "ok" : "fail") << "\" open><summary>输出"
-        << (cut ? "（已截断）" : "") << "</summary><pre>" << esc(body) << "</pre></details>";
+    // Collapsed by default: a transcript is read, not scrolled through - the
+    // summary carries the size and the first line so a reader can tell which
+    // block to open.
+    out << "<details class=\"tool " << (m.ok ? "ok" : "fail") << "\"><summary>"
+        << (m.ok ? "输出" : "输出（失败）") << " · " << human_size(m.content.size())
+        << (cut ? " · 已截断" : "");
+    const std::string pv = preview_line(m.content, 90);
+    if (!pv.empty()) out << "<span class=\"pv\">" << pv << "</span>";
+    out << "</summary><pre>" << esc(body) << "</pre></details>";
   } else if (!m.content.empty()) {
     out << "<div class=\"body\">" << markdown_to_html(m.content) << "</div>";
   }
@@ -653,8 +718,12 @@ std::string message_html(const Workspace& ws, const Message& m, std::size_t* ima
     const ToolCall& call = m.tool_calls[i];
     const std::string args = call.raw_arguments.empty() ? call.arguments.dump(2)
                                                        : call.raw_arguments;
-    out << "<details class=\"call\"><summary>调用 " << esc(call.name) << "</summary><pre>"
-        << esc(args) << "</pre></details>";
+    out << "<details class=\"call\"><summary>调用 " << esc(call.name);
+    // The interesting part of a call is usually one field ("command", "path").
+    // Show it in the summary so a collapsed call still reads as a sentence.
+    const std::string pv = preview_line(args, 80);
+    if (!pv.empty()) out << "<span class=\"pv\">" << pv << "</span>";
+    out << "</summary><pre>" << esc(args) << "</pre></details>";
   }
 
   for (std::size_t i = 0; i < m.images.size(); ++i) {

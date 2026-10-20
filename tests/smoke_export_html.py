@@ -232,6 +232,29 @@ roles: {main: {provider: mock, model: m}}
         check("tool calls are shown", "调用 toolkit_exec" in text and "ls" in text)
         check("tool output is truncated with a note",
               "导出时截断" in text and len(text) < 400000, len(text))
+        # Collapsed by default: a long transcript must not dump every tool
+        # result into the page. The summary keeps the size and a first-line hint.
+        m_tool = re.search(r'<details class="tool (?:ok|fail)"\s*(open)?>(.*?)</summary>',
+                           text, re.S)
+        check("tool output is a <details> block", m_tool is not None)
+        check("tool output is collapsed by default", m_tool and not m_tool.group(1),
+              m_tool and m_tool.group(1))
+        check("the collapsed summary states the size",
+              m_tool and "输出" in m_tool.group(2) and "KB" in m_tool.group(2),
+              m_tool and m_tool.group(2)[:120])
+        check("the collapsed summary previews the first line",
+              m_tool and 'class="pv"' in m_tool.group(2) and "line" in m_tool.group(2),
+              m_tool and m_tool.group(2)[:160])
+        m_call = re.search(r'<details class="call"><summary>(.*?)</summary>', text, re.S)
+        check("tool calls are collapsed too", m_call is not None)
+        check("a collapsed call shows its main argument",
+              m_call and 'class="pv"' in m_call.group(1) and "command" in m_call.group(1),
+              m_call and m_call.group(1)[:160])
+        check("nothing else is expanded by default", text.count("<details") ==
+              text.count("<details class=\"reasoning\">") + text.count("<details class=\"call\">")
+              + text.count("<details class=\"tool ok\">") + text.count("<details class=\"tool fail\">")
+              and "details open" not in text and "<details open" not in text,
+              text.count("<details"))
         check("the reasoning is available but collapsed",
               'class="reasoning"' in text and "先想想" in text)
 
