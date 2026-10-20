@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.20)
 # It used to say 0.1.0 while the binary said 0.4.1, which made the configure-time
 # line `tea_agent 0.1.0: compiler=...` a lie and left the bump to be done twice
 # (and forgotten once). Splitting on the first two dots keeps the build working
-# if the string ever gains a pre-release suffix (0.7.0-rc1 -> version 0.7.0).
+# if the string ever gains a pre-release suffix (0.8.0-rc1 -> version 0.8.0).
 set(TEA_VERSION_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/src/version.h)
 if(NOT EXISTS ${TEA_VERSION_HEADER})
   message(FATAL_ERROR "missing ${TEA_VERSION_HEADER}; it defines TEA_AGENT_VERSION_STRING")
@@ -24,7 +24,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_HEADER}; expected\n"
-    "  #define TEA_AGENT_VERSION_STRING \"0.7.0\"")
+    "  #define TEA_AGENT_VERSION_STRING \"0.8.0\"")
 endif()
 project(tea_agent VERSION ${TEA_AGENT_VERSION} LANGUAGES C CXX)
 
