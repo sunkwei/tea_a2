@@ -191,6 +191,9 @@ build/bin/tea_agent --workspace . --open
 那种情况下静默启动只会把问题藏起来。
 
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
+「设置」页分成三块：工作区级 **system prompt**（编辑框里就是当前生效的人设，保存后下一轮生效）、
+运行环境与模型提供方 / 工具清单，以及最下方的 **危险操作 → 销毁**（删除 tea home 与所有工作区的
+`.tea_agent_run`，见「工作区与运行时存储」）。
 
 用 `--host 0.0.0.0` 启动时，启动信息里的 `Web UI` 不再是 `127.0.0.1`，而是**这台设备当前的
 活跃地址**（走默认路由的那张网卡，UDP `connect()` 只选源地址、不发包），所以可以直接把它
@@ -430,7 +433,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.5.0
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.6.0
 ```
 
 ### 常见错误的对照表
@@ -463,7 +466,7 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.5.0
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本、当前 provider/model、传输引擎 |
+| `GET` | `/api/health` | 探活、版本（`0.6.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
@@ -1116,10 +1119,10 @@ cmake --build --preset arm64-linux -j"$(nproc)"
 
 | 构建 | 大小 | 运行库依赖 |
 | --- | --- | --- |
-| Windows x64 / MinGW-w64（已实测） | 6.1 MB | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
+| Windows x64 / MinGW-w64（0.6.0 实测） | 6.3 MB | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
 | Windows x64 / MSVC（已实测） | 1.7 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
-| Linux x64（已实测，静态构建） | 5.7 MB | **完全静态**：不依赖目标机的 glibc 版本 |
-| Linux aarch64（已实测） | 取决于工具链 | 默认完全静态（Arm GNU 11.3 + 静态 glibc），已在真机与 qemu-user 上验证 |
+| Linux x64（0.6.0 实测，静态构建） | 5.7 MB（`strip` 后 4.8 MB） | **完全静态**：不依赖目标机的 glibc 版本 |
+| Linux aarch64（0.6.0 实测，静态构建） | 17.4 MB，`strip` 后 4.2 MB | 默认完全静态（Arm GNU 11.3 + 静态 glibc）；该工具链的 libstdc++ 自带调试信息，部署前记得 `strip` |
 
 想进一步压：`-DCMAKE_BUILD_TYPE=MinSizeRel` + `strip`；不需要 HTTPS 可
 `-DTEA_AGENT_USE_MBEDTLS=OFF`（体积显著下降，但 Linux 上就没有 `https://` 了）；
@@ -1338,6 +1341,7 @@ python3 tests/smoke_web_tools.py                          # 网页工具（本�
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
 python3 tests/smoke_console_level.py                      # 控制台只回声 WARN/ERROR、日志文件仍是 INFO
 python3 tests/smoke_bind_urls.py                          # --host 0.0.0.0 打印活跃地址，且该地址真能打开 UI
+node tests/ui_boot_probe.mjs                              # 不启浏览器也能跑：app.js 启动路径不抛异常
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
@@ -1509,6 +1513,13 @@ localStorage）打开页面——它必须落在 `proj_b`（而不是索引里�
 `tests/ui_sidebar.mjs` 覆盖侧栏收起：点隐藏按钮后侧栏宽度归零、顶栏出现展开按钮、正文栏
 变宽（780 → 1040）；刷新后仍是收起状态；再点展开（或 `Ctrl+B`）后侧栏与列宽复原，选择被
 写进 localStorage。同一个脚本还断言标签页标题带上了当前工作区。
+
+`tests/ui_boot_probe.mjs` 不需要浏览器：它把真实的 `web/index.html` 解析成一个最小 DOM，然后
+在 Node 里执行真实的 `web/app.js`、按浏览器的方式触发 `DOMContentLoaded`，喂给它与服务端同形的
+JSON。任何同步异常或未处理的 Promise rejection 都算失败，状态灯没走到「已连接」也算失败——
+`e2e.ps1` 只检查 HTML/JS 里**有没有**某些字符串，`init()` 里抛错时页面会一直停在
+`index.html` 里写死的「连接中…」，那种静默故障只有真执行一遍才能发现。它支持
+`--base <url>`（跑服务端实际发出来的页面）、`--state noworkspace|setup|…`、`--all` 等变体。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器
