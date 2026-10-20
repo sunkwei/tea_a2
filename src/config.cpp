@@ -380,18 +380,23 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
     }
   }
 
-  // Resolve the default provider/model: the FIRST provider in the file, with its
-  // `default_model` (falling back to the first entry of its `models:` map, which
-  // apply_settings has already copied into default_model).
+  // Resolve the default provider/model: the FIRST provider in the file and the
+  // FIRST model in its `models:` map. Order in the file is the switch - put a
+  // provider or a model higher to make it the default, or pass --provider/--model.
   //
-  // One rule, no indirection. The old `roles:` block is not read at all: it came
-  // from the Python implementation, where a "role" meant per-role model routing
-  // that this runtime does not have, so a `cheap:`/`interruption:` entry looked
-  // meaningful while doing nothing. Order in the file is the switch; move a
-  // provider up to make it the default, or pass --provider/--model.
+  // `default_model:` deliberately does not take part: a knob that quietly
+  // disagreed with the visible order (and with what a fresh `provider.yaml`
+  // implies) caused more "why is it using that model?" than it solved. It still
+  // works as a fallback for a provider that declares no model list.
+  //
+  // The old `roles:` block is not read at all: it came from the Python
+  // implementation, where a "role" meant per-role model routing that this
+  // runtime does not have, so a `cheap:`/`interruption:` entry looked meaningful
+  // while doing nothing.
   if (!provider_order.empty()) {
     active_provider = provider_order.front();
-    active_model.clear();  // set_active fills in that provider's default_model
+    const ProviderInfo* first = provider(active_provider);
+    active_model = first ? first->primary_model() : std::string();
   }
   if (root["roles"]) {
     std::string ignored;
@@ -410,9 +415,9 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
     }
     warnings.push_back(
         "the 'roles:' block is ignored (found: " + (ignored.empty() ? "main" : ignored) +
-        "). The default model is the FIRST provider in this file and its default_model; move "
-        "that provider up, set its default_model, or pass --provider/--model. Roles came from "
-        "the Python implementation and never mapped onto anything here.");
+        "). The default is the FIRST provider in this file and the FIRST model in its "
+        "'models:' map; move them up, or pass --provider/--model. Roles came from the Python "
+        "implementation and never mapped onto anything here.");
   }
   if (!set_active(active_provider, active_model, nullptr)) {
     if (provider_order.empty()) {
@@ -464,8 +469,9 @@ bool AppConfig::set_active(const std::string& provider_name, const std::string& 
 
   std::string mname = model_name;
   if (mname.empty() && pname == active_provider) mname = active_model;
-  if (mname.empty()) mname = p->default_model;
-  if (mname.empty() && !p->models.empty()) mname = p->models.front();
+  // The first model in the list is the default; `default_model:` only matters
+  // for a provider that has no list at all.
+  if (mname.empty()) mname = p->primary_model();
   if (p->find_model(mname) == nullptr) {
     if (!p->models.empty()) {
       if (err) *err = "model '" + mname + "' not found for provider '" + p->name + "'; using '" +

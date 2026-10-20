@@ -15,6 +15,8 @@ What this pins:
   * the config is applied immediately: /api/health and /api/providers see it
     without a restart, and the model list has the documented alternatives;
   * the API key is never echoed back in any response;
+  * the default is the first provider's first model (reordering decides;
+    `default_model:` does not);
   * the file is owner-only on POSIX (it holds a secret);
   * a key containing quotes/backslashes survives the YAML round trip (it is a
     single-quoted scalar, so it cannot inject mapping keys);
@@ -147,11 +149,16 @@ def main():
         check("the key is in the file", key in text, text[:200])
         check("the provider is DeepSeek", "DeepSeek:" in text and "https://api.deepseek.com" in text,
               text[:300])
-        check("default_model is deepseek-flash in the file",
-              "default_model: deepseek-flash" in text, text)
-        check("DeepSeek is the first provider, so it becomes the default",
-              text.index("DeepSeek:") < text.index("default_model: deepseek-flash"),
-              text[:400])
+        # The first model in the list is the default; there is no default_model:
+        # key to disagree with it.
+        check("deepseek-flash is the first model in the file",
+              text.index("models:") < text.index("deepseek-flash:"), text)
+        # Line-anchored: the trailing comment may mention the key by name.
+        check("the file needs no default_model: key",
+              not any(line.strip().startswith("default_model:") for line in text.splitlines()),
+              text)
+        check("DeepSeek is the first provider, so it is the default",
+              text.index("providers:") < text.index("DeepSeek:"), text[:400])
         check("the generated file uses neither roles: nor default:",
               "roles:" not in text and "\ndefault:" not in text, text[-200:])
         check("the secret is not echoed back by the API", key not in body_text,
@@ -159,6 +166,49 @@ def main():
         if os.name == "posix":
             mode = stat.S_IMODE(os.stat(config_path).st_mode)
             check("the file is owner-only", mode == 0o600, oct(mode))
+
+        # ---- the default is the first model of the first provider ----------
+        # `default_model:` is deliberately NOT the switch: it used to disagree
+        # with the visible order, which made "why is it using that model?"
+        # unanswerable. Reordering the models list must move the default.
+        os.makedirs(os.path.join(tmp, "order_ws"), exist_ok=True)
+        order_cfg = os.path.join(tmp, "order.yaml")
+        with open(order_cfg, "w", encoding="utf-8") as f:
+            f.write('''version: 1
+providers:
+  first:
+    api_url: http://127.0.0.1:9/v1
+    api_key: sk-a
+    default_model: second-model
+    models:
+      first-model: {}
+      second-model: {}
+  later:
+    api_url: http://127.0.0.1:9/v1
+    api_key: sk-b
+    models:
+      later-model: {}
+''')
+        order_port = free_port()
+        order_proc = subprocess.Popen([
+            binary, "--config", order_cfg, "--tea-home", os.path.join(tmp, "order_home"),
+            "--host", "127.0.0.1", "--port", str(order_port), "--no-console",
+            "--log-file", os.path.join(tmp, "order.log"),
+            "--workspace", os.path.join(tmp, "order_ws"),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("the ordering fixture comes up", wait_health(order_port), order_port)
+            _, order_health, _ = call(order_port, "GET", "/api/health")
+            check("the first provider wins over later ones",
+                  order_health.get("provider") == "first", order_health.get("provider"))
+            check("the first model wins over default_model",
+                  order_health.get("model") == "first-model", order_health.get("model"))
+        finally:
+            try:
+                order_proc.terminate()
+                order_proc.wait(timeout=10)
+            except Exception:
+                order_proc.kill()
 
         # ---- applied immediately ------------------------------------------
         _, health, _ = call(port, "GET", "/api/health")

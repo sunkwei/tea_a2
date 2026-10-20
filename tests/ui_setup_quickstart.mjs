@@ -170,8 +170,13 @@ try {
   check('provider.yaml was written', fs.existsSync(configPath), configPath);
   const text = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
   check('the file carries the pasted key', text.indexOf(KEY) >= 0, text.slice(0, 200));
-  check('the file defaults to deepseek-flash',
-    text.indexOf('default_model: deepseek-flash') >= 0, text.slice(0, 400));
+  // No default_model: key - the FIRST model in the list is the default.
+  check('the first model in the file is deepseek-flash',
+    text.indexOf('models:') >= 0 &&
+    text.indexOf('deepseek-flash:') === text.indexOf('deepseek-flash:', text.indexOf('models:')) &&
+    text.indexOf('deepseek-flash:') < text.indexOf('deepseek-chat:'), text.slice(0, 500));
+  check('the file carries no default_model: key',
+    !/^\s*default_model:/m.test(text), text.slice(0, 400));
   check('the file only declares DeepSeek',
     text.indexOf('DeepSeek:') >= 0 && text.indexOf('opencode:') < 0, text.slice(0, 200));
 

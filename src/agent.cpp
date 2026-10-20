@@ -655,8 +655,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   }
   const ModelInfo* model_info = provider_info->find_model(model);
   if (!model_info && !provider_info->models.empty()) {
-    model = provider_info->default_model.empty() ? provider_info->models.front()
-                                                 : provider_info->default_model;
+    model = provider_info->primary_model();
     model_info = provider_info->find_model(model);
   }
   out.model = model;

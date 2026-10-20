@@ -304,7 +304,7 @@ provider 回报的 `usage` 为准）。
 --port 8282           # 端口
 --workspace <path>    # 注册工作区，可重复
 --workspace-root <d>  # 注册 <d> 下所有一级子目录
---provider/--model    # 覆盖配置里的 default:（provider/model）
+--provider/--model    # 临时换用别的 provider / 模型（默认是第一个）
 --log-level debug     # 写进日志文件的级别：trace|debug|info|warn|error|off
 --console-level warn  # 回声到控制台的级别（默认 warn，见下）
 --no-console          # 控制台不回声任何日志（--quiet 同义，且连启动横幅也省掉）
@@ -1130,7 +1130,7 @@ curl -s -X POST http://127.0.0.1:8282/api/workspaces/<ws_id>/sessions/import \
 
 ## 配置
 
-`provider.yaml` 就是 OpenAI 兼容端点清单，顶层 `default:` 决定默认用哪个：
+`provider.yaml` 就是 OpenAI 兼容端点清单（第一个 provider 的第一个模型是默认，见下）：
 
 ```yaml
 providers:
@@ -1138,7 +1138,6 @@ providers:
     api_url: https://api.deepseek.com      # 无路径 → 追加 /v1/chat/completions
                                            # 以 /v1 结尾 → 追加 /chat/completions
     api_key: sk-xxx
-    default_model: deepseek-chat
     headers:                               # 可选：网关自定义头
       x-opencode-session: '${session_id}'  # ${session_id} 会替换为当前会话 id
     reasoning_content: auto                # keep | strip | auto（默认 auto，见下）
@@ -1153,10 +1152,6 @@ providers:
         supports_tools: true
         supports_reasoning: false
 
-default:                       # 启动后默认用的 provider / 模型
-  provider: DeepSeek
-  model: deepseek-chat
-
 settings:
   max_iterations: 50           # 单条消息最多几轮工具调用
   max_tool_output: 131072      # 回填给模型的工具输出上限（字节）
@@ -1165,13 +1160,33 @@ settings:
   http_engine: auto            # auto | socket | winhttp（也可用 --http-engine 覆盖）
 ```
 
-解析顺序：`--provider`/`--model` → 顶层 `default:`（别名 `active:`）→ 第一个 provider 的
-`default_model`。不写 `default:` 也能跑，取第一个 provider 的默认模型。
+默认值只有一条规则：**文件里第一个 provider 的 `models:` 里的第一个模型**。
+
+```yaml
+providers:
+  DeepSeek:                 # ← 第一个 provider
+    api_url: https://api.deepseek.com
+    api_key: sk-...
+    models:
+      deepseek-flash: {}    # ← 第一个模型，默认就用它
+      deepseek-chat: {}
+      deepseek-reasoner: {}
+  local:                    # 后面的 provider 不会自动成为默认
+    api_url: http://127.0.0.1:11434/v1
+    ...
+```
+
+想换默认：把某个 provider 挪到最前面，或把某个模型挪到它 `models:` 的最前面；临时切换用
+`--provider` / `--model`（UI 顶部的模型菜单也是同一回事）。
+
+`default_model:` 仍会被解析，但**只在某个 provider 完全没有 `models:` 列表时**才当模型名用——
+它是给「只有一个端点、连模型清单都懒得写」的配置留的兜底，而不是第二个「默认」旋钮。
 
 > **`roles:` 已不再读取。** 它来自 Python 版实现，那里的「role」意味着按角色路由到不同模型，
 > 本实现从来没有这个概念（`cheap`、`interruption` 之类的角色名会让人以为有行为，其实没有）。
-> 配置文件里若还留着 `roles:`，启动时会打一条 WARN 列出被忽略的角色名并提示改用 `default:`，
-> 但**不会**再影响选择——升级后默认模型可能因此变化，请检查一次 `/api/providers` 的 `active`。
+> 配置文件里若还留着 `roles:`，启动时会打一条 WARN 列出被忽略的角色名，但**不会**再影响选择
+> ——升级后默认模型可能因此变化（变成第一个 provider 的第一个模型），请检查一次
+> `/api/providers` 的 `active`。
 api_key 只在日志里以掩码出现，HTTP 接口从不下发。
 
 ### 网页搜索与抓取（provider 级可选能力）
@@ -1782,8 +1797,9 @@ JSON。任何同步异常或未处理的 Promise rejection 都算失败，状态
 `--base <url>`（跑服务端实际发出来的页面）、`--state noworkspace|setup|…`、`--all` 等变体。
 
 `tests/smoke_config_quickstart.py` 覆盖首次运行的快捷通道：没有配置时 `/api/health` 报
-`config_loaded=false`；只传 `api_key` 就写出 `provider.yaml`（DeepSeek 单个 provider、
-`default_model: deepseek-flash`、`default:` 指向同一模型），进程无需重启即可用；key 不出现在
+`config_loaded=false`；只传 `api_key` 就写出 `provider.yaml`（DeepSeek 单个 provider，
+`models:` 里 `deepseek-flash` 排第一，于是它就是默认 —— 文件里不写 `default_model:` 也不用
+`roles:`），进程无需重启即可用；key 不出现在
 任何响应里；POSIX 下文件权限是 `0600`；带引号/反斜杠的 key 以单引号标量落盘且仍能解析；缺 key、
 空白 key、控制字符、未知 provider 一律 400 且不写文件；再调一次是替换而不是一次性。
 

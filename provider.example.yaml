@@ -13,7 +13,7 @@ providers:
     # has no path, and /chat/completions when it ends with /v1.
     api_url: https://api.deepseek.com
     api_key: sk-REPLACE-ME
-    default_model: deepseek-chat
+    default_model: deepseek-chat   # fallback only: the FIRST model in models: wins
     # Provider-scoped web tools. The endpoints (POST /v1/tools/search and
     # /v1/tools/fetch, same Bearer auth) are DeepSeek-specific, not
     # OpenAI-standard, so they are declared instead of probed. When enabled,
@@ -77,13 +77,11 @@ providers:
         supports_tools: true
         supports_reasoning: true
 
-# `default:` selects the provider/model used when --provider/--model are absent.
-# The legacy `roles:` block is no longer read (it came from the Python
-# implementation, where a "role" meant per-role model routing that this runtime
-# does not have); a file that still has one gets a warning at startup.
-default:
-  provider: DeepSeek
-  model: deepseek-chat
+# There is no default:/roles: block: the default is the FIRST provider in this
+# file and the FIRST model in its models: list. Move a provider or a model up to
+# change what a new conversation starts with, or pass --provider/--model. A file
+# that still carries the legacy `roles:` block gets a warning at startup (roles
+# came from the Python implementation and never mapped onto anything here).
 
 settings:
   max_iterations: 50           # tool-calling round trips per user message

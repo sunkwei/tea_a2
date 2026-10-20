@@ -45,6 +45,16 @@ struct ProviderInfo {
   std::vector<std::string> api_keys;
   std::vector<std::string> models;  // ordered model names
   std::map<std::string, ModelInfo> model_map;
+
+  /// The model a fresh conversation starts with: the FIRST entry of `models:`,
+  /// i.e. the order in provider.yaml is the switch. `default_model` is only a
+  /// fallback for a provider that declares no model list at all - keeping a
+  /// separate "default" knob that silently disagreed with the visible order was
+  /// more confusing than useful.
+  std::string primary_model() const {
+    if (!models.empty()) return models.front();
+    return default_model;
+  }
   /// Extra request headers sent with every completion call. Values may contain
   /// the placeholder ${session_id}, which is replaced per conversation.
   std::vector<std::pair<std::string, std::string> > headers;
