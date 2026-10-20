@@ -893,6 +893,52 @@ std::size_t utf8_char_count(const std::string& s) {
   return n;
 }
 
+/// `localization` is geolocation, not language: the provider rejects anything
+/// that is not an IP literal ("'localization' must be a valid IP address"). Models
+/// reach for a language tag here constantly, so the value is checked before a
+/// billed call is sent and the error explains where language filtering lives.
+bool looks_like_ip_literal(const std::string& value) {
+  if (value.empty() || value.size() > 45) return false;
+  bool has_colon = false, has_dot = false;
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    const char c = value[i];
+    if (c == ':') {
+      has_colon = true;
+      continue;
+    }
+    if (c == '.') {
+      has_dot = true;
+      continue;
+    }
+    const bool hexish = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    if (!hexish) return false;  // a letter past 'f', a '-', a space, a slash...
+  }
+  if (has_colon) return true;              // IPv6 (possibly with an embedded IPv4)
+  if (!has_dot) return false;              // "en", "203", "1.2" ...
+  int parts = 1;
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    if (value[i] == '.') ++parts;
+  }
+  if (parts != 4) return false;
+  // Dotted quad: every octet must parse to 0..255.
+  std::size_t i = 0;
+  while (i <= value.size()) {
+    const std::size_t dot = value.find('.', i);
+    const std::string octet = value.substr(i, dot == std::string::npos ? std::string::npos
+                                                                     : dot - i);
+    if (octet.empty() || octet.size() > 3) return false;
+    int n = 0;
+    for (std::size_t k = 0; k < octet.size(); ++k) {
+      if (octet[k] < '0' || octet[k] > '9') return false;
+      n = n * 10 + (octet[k] - '0');
+    }
+    if (n > 255) return false;
+    if (dot == std::string::npos) break;
+    i = dot + 1;
+  }
+  return true;
+}
+
 /// Null-safe field accessors: web-tool responses mark missing values as JSON
 /// null, which nlohmann's value() would reject with a type error.
 std::string json_field_str(const nlohmann::json& j, const char* key,
@@ -1119,6 +1165,14 @@ ToolResult tool_search(const nlohmann::json& args, const ToolContext& ctx) {
     return result;
   }
   const std::string localization = trim(arg_str(args, "localization"));
+  if (!localization.empty() && !looks_like_ip_literal(localization)) {
+    result.output = "error: 'localization' must be an IP address (an IPv4/IPv6 literal such as "
+                    "203.0.113.5) used to prioritise geographically close results; '" +
+                    localization +
+                    "' is not one. To filter by language put lang:zh (or lang:en, ...) inside "
+                    "'query' instead. No request was sent.";
+    return result;
+  }
   const bool need_content = arg_bool(args, "need_content", false);
 
   nlohmann::json payload = nlohmann::json::object();
@@ -1519,7 +1573,7 @@ ToolRegistry::ToolRegistry() {
         },
         "localization": {
           "type": "string",
-          "description": "Optional: an IP address used to prioritize localized results."
+          "description": "Optional geolocation hint: an IPv4/IPv6 literal (e.g. \"203.0.113.5\") used to prioritise nearby results. NOT a language code - for language use the lang:zh / lang:en operator inside query."
         },
         "need_content": {
           "type": "boolean",

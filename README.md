@@ -1170,7 +1170,27 @@ api_key 只在日志里以掩码出现，HTTP 接口从不下发。
 ### 网页搜索与抓取（provider 级可选能力）
 
 DeepSeek 对所有 API 用户开放了两个原生端点（`POST /v1/tools/search`、`POST /v1/tools/fetch`，
-与 chat 相同的 Bearer 鉴权）。这不是 OpenAI 标准协议，探测不了，所以按 provider 声明：
+与 chat 相同的 Bearer 鉴权）。这不是 OpenAI 标准协议，探测不了，所以按 provider 声明
+（**写在 provider 块上**；误写在某个 model 下也认，但会在日志里提醒搬上去）：
+
+```yaml
+providers:
+  deepseek:
+    api_url: https://api.deepseek.com
+    api_key: sk-...
+    supports_search: true      # 放开 toolkit_search
+    supports_fetch: true       # 放开 toolkit_fetch
+    # supports_featch: true    # ← 拼错不会报错，但会有一条 WARN 告诉你
+```
+
+两个易踩的坑（都是实测踩到的）：
+
+- `supports_search` / `supports_fetch` 是 **provider 级**能力，不是模型级。写在 `models:` 下面
+  过去会被静默忽略——结果是模型永远拿不到这两个工具，日志里也看不出原因。
+- 搜索参数 `localization` 是**地理定位用的 IP 地址**（如 `203.0.113.5`），不是语言码。传
+  `"en"` 会被服务端 400；现在工具在发请求之前就拒绝并提示「语言过滤请用 `lang:en`」，
+  不会浪费一次计费调用。
+
 
 ```yaml
 providers:

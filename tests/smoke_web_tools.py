@@ -207,13 +207,21 @@ class MockProvider(BaseHTTPRequestHandler):
                     last_user = m.get("content") or ""
                     break
             query = "DeepSeek V4 release"
+            args = {"query": query, "count": 5}
             if "stall" in last_user:
                 query = "stall"
+                args = {"query": query, "count": 5}
             elif "trickle" in last_user:
                 query = "trickle"
-            return tool_call_chunk(
-                "toolkit_search", {"query": query, "count": 5}, "call_search"
-            ) + finish("tool_calls")
+                args = {"query": query, "count": 5}
+            elif "localization_bad" in last_user:
+                # Exactly what a model does when it reads the parameter as a
+                # language filter: the provider would answer 400, so the tool must
+                # refuse locally instead of spending a call.
+                args = {"query": query, "count": 5, "localization": "en"}
+            elif "localization_ip" in last_user:
+                args = {"query": query, "count": 5, "localization": "203.0.113.5"}
+            return tool_call_chunk("toolkit_search", args, "call_search") + finish("tool_calls")
         if len(tool_msgs) == 1:
             return tool_call_chunk(
                 "toolkit_fetch", {"url": "https://example.com/doc"}, "call_fetch"
@@ -358,6 +366,17 @@ providers:
         max_context_tokens: 32768
         max_output_tokens: 4096
         supports_tools: true
+  mock_modelflag:
+    api_url: http://127.0.0.1:%d
+    api_key: sk-test
+    default_model: mock-chat
+    models:
+      mock-chat:
+        max_context_tokens: 32768
+        max_output_tokens: 4096
+        supports_tools: true
+        supports_search: true
+        supports_fetch: true
 roles:
   main:
     provider: mock
@@ -367,7 +386,7 @@ settings:
   web_tool_timeout_ms: 3000
   web_tool_connect_timeout_ms: 2000
 """
-            % (mock_port, mock_port, mock_port, mock_port)
+            % (mock_port, mock_port, mock_port, mock_port, mock_port)
         )
 
     proc = subprocess.Popen(
@@ -458,6 +477,46 @@ settings:
             failures.append("turn 4: stop did not cancel the transfer, got %r" % (r or {}))
         if elapsed > 10:
             failures.append("turn 4: stop took %.1fs to take effect" % elapsed)
+
+        # ---- localization is geolocation, not a language ------------------
+        # A model that fills in "en" here would make the provider answer 400, so
+        # the tool refuses locally: no request may reach the search endpoint.
+        before = len(MockProvider.records["search"])
+        events = drive_turn(agent_port, workspace_id, "mock", message="localization_bad please")
+        r = next((e for e in events if e.get("type") == "tool_result"
+                  and e.get("name") == "toolkit_search"), None)
+        if r is None or r["ok"]:
+            failures.append("turn 5: a language tag was not refused, got %r" % (r or {}))
+        elif "must be an IP address" not in r["output"] or "lang:zh" not in r["output"]:
+            failures.append("turn 5: refusal does not explain the fix: %r" % r["output"][:200])
+        if len(MockProvider.records["search"]) != before:
+            failures.append("turn 5: a billed search request was sent anyway")
+
+        events = drive_turn(agent_port, workspace_id, "mock", message="localization_ip please")
+        r = next((e for e in events if e.get("type") == "tool_result"
+                  and e.get("name") == "toolkit_search"), None)
+        if r is None or not r["ok"]:
+            failures.append("turn 6: a real IP literal was refused: %r" % (r or {}))
+        else:
+            sent = MockProvider.records["search"][-1]["payload"]
+            if sent.get("localization") != "203.0.113.5":
+                failures.append("turn 6: localization not forwarded: %r" % sent)
+
+        # ---- flags declared on a model still enable the provider tools -----
+        before = len(MockProvider.records["chat"])
+        events = drive_turn(agent_port, workspace_id, "mock_modelflag", message="smoke")
+        modelflag_chats = MockProvider.records["chat"][before:]
+        if not modelflag_chats:
+            failures.append("no chat requests recorded for provider 'mock_modelflag'")
+        for chat in modelflag_chats:
+            offered = {t["function"]["name"] for t in chat.get("tools", [])}
+            for name in ("toolkit_search", "toolkit_fetch"):
+                if name not in offered:
+                    failures.append("model-level %s was not promoted to the provider" % name)
+        log_text = open(os.path.join(tmp, "tea_agent.log"), encoding="utf-8",
+                        errors="replace").read()
+        if "declared on a model" not in log_text:
+            failures.append("the promotion was not reported in the log")
 
         # ---- advertisement checks from the mock's point of view -----------
         chats = MockProvider.records["chat"]

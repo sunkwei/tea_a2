@@ -313,8 +313,40 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
       // every API user; the protocol is not OpenAI-standard, so support is
       // declared rather than probed). Off by default: every call is billed
       // per request by the provider.
+      //
+      // The documented place is the provider block. A model block is accepted
+      // too, because that is where people put it first (the capability always
+      // travels with a specific model in the docs), and silently ignoring it
+      // hides the tools with no diagnostic at all - the model simply never gets
+      // them. A warning names the canonical spot so the file can be tidied.
       info.supports_search = ybool(pn, "supports_search", false);
       info.supports_fetch = ybool(pn, "supports_fetch", false);
+      if (!info.supports_search || !info.supports_fetch) {
+        bool model_search = false, model_fetch = false;
+        const YAML::Node models_node = pn["models"];
+        if (models_node && models_node.IsMap()) {
+          for (auto mit = models_node.begin(); mit != models_node.end(); ++mit) {
+            const YAML::Node mn = mit->second;
+            if (!mn || !mn.IsMap()) continue;
+            if (ybool(mn, "supports_search", false)) model_search = true;
+            if (ybool(mn, "supports_fetch", false)) model_fetch = true;
+          }
+        }
+        if (model_search) info.supports_search = true;
+        if (model_fetch) info.supports_fetch = true;
+        if (model_search || model_fetch) {
+          warnings.push_back("provider '" + name +
+                             "': supports_search/supports_fetch are declared on a model; they "
+                             "are provider-scoped, so they were promoted. Move them up to the "
+                             "provider block.");
+        }
+      }
+      if (yhas(pn, "supports_featch")) {
+        // A typo that looks right and does nothing: say so instead of leaving the
+        // operator wondering why toolkit_fetch never shows up.
+        warnings.push_back("provider '" + name +
+                           "': unknown key 'supports_featch' (did you mean supports_fetch?)");
+      }
       info.search_path = trim(ystr(pn, "search_path"));
       info.fetch_path = trim(ystr(pn, "fetch_path"));
 

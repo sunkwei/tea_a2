@@ -20,6 +20,12 @@ providers:
     # toolkit_search / toolkit_fetch join the advertised tool set. The provider
     # bills every successful call per request (5 CNY / 1000 calls each), so the
     # default is off.
+    #
+    # These two flags belong HERE, on the provider - not on a model below. A
+    # model-level `supports_search: true` is promoted (with a warning) so an
+    # existing file keeps working, but the provider block is the documented place.
+    # Note also: 'localization' in a search call is an IP address for geolocation,
+    # not a language - use the lang:zh / lang:en query operator for language.
     supports_search: true
     supports_fetch: true
     # Optional endpoint overrides (path relative to api_url, or a full URL):
