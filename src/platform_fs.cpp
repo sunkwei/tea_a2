@@ -11,6 +11,7 @@
 #include "util.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -597,6 +598,42 @@ bool read_file_tail(const std::string& path, size_t max_bytes, std::string* out)
   out->resize(got);
   return true;
 #endif
+}
+
+// Publisher id used to make temporary file names unique per process: two
+// instances sharing one tea home must not pick the same `<file>.tmp-...`.
+unsigned long atomic_write_pid() {
+#ifdef _WIN32
+  return static_cast<unsigned long>(GetCurrentProcessId());
+#else
+  return static_cast<unsigned long>(::getpid());
+#endif
+}
+
+bool write_file_atomic(const std::string& path, const std::string& data, std::string* err) {
+  if (path.empty()) {
+    if (err) *err = "empty path";
+    return false;
+  }
+  static std::atomic<unsigned> counter{0};
+  const unsigned long pid = atomic_write_pid();
+  const std::string tmp =
+      path + ".tmp-" + std::to_string(pid) + "-" + std::to_string(counter.fetch_add(1));
+
+  // The temporary file lives next to the target on purpose: rename is only
+  // atomic within one filesystem, and %TEMP% frequently is a different one.
+  if (!write_file(tmp, data, false, nullptr)) {
+    if (err) *err = "cannot write " + tmp;
+    return false;
+  }
+  // Replace-on-rename: a reader sees either the previous complete file or the new
+  // complete one, never a truncated half. That is what makes a concurrent reader
+  // (another turn, the HTTP layer, a human with an editor) safe without a lock.
+  if (!move_path(tmp, path, err)) {
+    remove_path(tmp, false, nullptr);
+    return false;
+  }
+  return true;
 }
 
 bool write_file(const std::string& path, const std::string& data, bool append, std::string* err) {

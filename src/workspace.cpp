@@ -1,8 +1,10 @@
 #include "workspace.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 
 #include "env.h"
 #include "log.h"
@@ -10,6 +12,34 @@
 
 namespace tea {
 namespace {
+
+/// Serialises every read-modify-write of the workspace state files.
+///
+/// The runtime runs one worker thread per in-flight turn, so two sessions of the
+/// same workspace can rewrite on-disk state at the same moment. memory.json,
+/// sessions/index.json, settings.yaml and agent.md are all "read the file, change
+/// one thing, write the whole thing back"; without a lock the last writer wins and
+/// the other turn's change disappears (measured before this existed: 20 concurrent
+/// memory adds were all answered 200 and left exactly 1 note on disk).
+///
+/// One process-wide mutex rather than one per Workspace: Workspace objects are
+/// cheap and created per request, and two of them legitimately point at the same
+/// directory, so a per-object lock would serialise nothing. The critical sections
+/// touch a few KB of JSON - irrelevant next to a model request - so sharing one
+/// lock costs nothing measurable.
+///
+/// Recursive because the public entry points compose: fork_session creates a child
+/// through save_session, rename_session loads then saves, append_agent_doc may seed
+/// the template before appending.
+///
+/// Deliberately leaked: a mutex destroyed during static teardown could be locked
+/// again by a worker that is still winding down.
+std::recursive_mutex& state_mutex() {
+  static std::recursive_mutex* mu = new std::recursive_mutex();
+  return *mu;
+}
+
+using StateLock = std::lock_guard<std::recursive_mutex>;
 
 const char* const kRunDirName = ".tea_agent_run";
 const char* const kMemoryFileName = "memory.json";
@@ -137,6 +167,7 @@ bool WorkspaceRegistry::load(const std::string& tea_home, std::string* err) {
 }
 
 bool WorkspaceRegistry::save(std::string* err) const {
+  StateLock lock(state_mutex());
   nlohmann::json root = nlohmann::json::object();
   root["version"] = 1;
   root["updated_at"] = now_iso8601();
@@ -145,7 +176,7 @@ bool WorkspaceRegistry::save(std::string* err) const {
   root["workspaces"] = list;
   const std::string parent = path_parent(index_path_);
   if (!parent.empty()) make_dirs(parent);
-  return write_file(index_path_, root.dump(2) + "\n", false, err);
+  return write_file_atomic(index_path_, root.dump(2) + "\n", err);
 }
 
 void WorkspaceRegistry::refresh_flags() {
@@ -278,6 +309,9 @@ std::string session_file_for(const std::string& dir, const std::string& id) {
 }  // namespace
 
 bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings, std::string* err) {
+  // Seeding the run directory is also a read-modify-write ("create it if missing");
+  // two threads opening the same workspace at once would otherwise race on it.
+  StateLock lock(state_mutex());
   entry_ = entry;
   settings_ = base_settings;
   root_ = path_canonical(entry.path);
@@ -313,19 +347,19 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
     meta["name"] = entry_.name;
     meta["path"] = root_;
     meta["created_at"] = entry_.created_at.empty() ? now_iso8601() : entry_.created_at;
-    write_file(meta_file(), meta.dump(2) + "\n", false, nullptr);
+    write_file_atomic(meta_file(), meta.dump(2) + "\n");
   }
   if (!path_exists(memory_file())) {
     nlohmann::json mem = nlohmann::json::object();
     mem["notes"] = nlohmann::json::array();
-    write_file(memory_file(), mem.dump(2) + "\n", false, nullptr);
+    write_file_atomic(memory_file(), mem.dump(2) + "\n");
   }
   // agent.md is the workspace's experience log (see load_agent_doc). Seeded so
   // the file is discoverable - by the model (it is injected into the prompt)
   // and by whoever opens .tea_agent_run/ - instead of appearing only after the
   // first append.
   if (!path_exists(agent_doc_file())) {
-    write_file(agent_doc_file(), kAgentDocTemplate, false, nullptr);
+    write_file_atomic(agent_doc_file(), kAgentDocTemplate);
   }
   // Per-workspace overrides land on top of the machine-level settings, so a
   // project can pin its own shell/timeouts/system prompt. Loaded once here and
@@ -387,6 +421,7 @@ std::string Workspace::load_system_prompt(bool* custom) const {
 }
 
 bool Workspace::save_system_prompt(const std::string& content, std::string* err) const {
+  StateLock lock(state_mutex());
   if (content.size() > kSystemPromptMaxBytes) {
     if (err) {
       *err = "system_prompt.md would be " + std::to_string(content.size()) + " bytes; the limit is " +
@@ -398,7 +433,7 @@ bool Workspace::save_system_prompt(const std::string& content, std::string* err)
   // input is normalised to an empty file rather than a file full of blanks.
   std::string body = trim(content);
   if (!body.empty()) body += "\n";
-  return write_file(system_prompt_file(), body, false, err);
+  return write_file_atomic(system_prompt_file(), body, err);
 }
 
 std::string Workspace::scripts_dir() const {
@@ -415,6 +450,7 @@ std::string Workspace::load_agent_doc(bool* truncated) const {
 }
 
 bool Workspace::save_agent_doc(const std::string& content, std::string* err) const {
+  StateLock lock(state_mutex());
   if (content.size() > kAgentDocMaxBytes) {
     if (err) {
       *err = "agent.md would be " + std::to_string(content.size()) + " bytes; the limit is " +
@@ -431,10 +467,12 @@ bool Workspace::save_agent_doc(const std::string& content, std::string* err) con
     body.pop_back();
   }
   if (!body.empty()) body += "\n";
-  return write_file(agent_doc_file(), body, false, err);
+  return write_file_atomic(agent_doc_file(), body, err);
 }
 
 bool Workspace::append_agent_doc(const std::string& text, std::string* err) const {
+  // Read-modify-write on a file the model appends to from several turns at once.
+  StateLock lock(state_mutex());
   const std::string body = trim(text);
   if (body.empty()) {
     if (err) *err = "text is empty";
@@ -462,7 +500,7 @@ bool Workspace::append_agent_doc(const std::string& text, std::string* err) cons
     }
     return false;
   }
-  return write_file(agent_doc_file(), current, false, err);
+  return write_file_atomic(agent_doc_file(), current, err);
 }
 
 std::string Workspace::resolve_path(const std::string& path_in, std::string* err) const {
@@ -624,6 +662,10 @@ bool Workspace::load_session(const std::string& id, Session* out, std::string* e
 }
 
 bool Workspace::save_session(const Session& session, std::string* err) const {
+  // The transcript write plus the index.json read-modify-write below have to be
+  // one critical section: two turns finishing at once would otherwise each build
+  // the index from their own snapshot and drop the other's entry.
+  StateLock lock(state_mutex());
   nlohmann::json j = nlohmann::json::object();
   j["id"] = session.info.id;
   j["title"] = session.info.title;
@@ -653,7 +695,7 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
     j["todos"] = todos;
   }
   const std::string dir = sessions_dir();
-  if (!write_file(session_file_for(dir, session.info.id), j.dump(2) + "\n", false, err)) {
+  if (!write_file_atomic(session_file_for(dir, session.info.id), j.dump(2) + "\n", err)) {
     return false;
   }
 
@@ -679,10 +721,11 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
     }
   }
   if (!replaced) list.push_back(info.to_json());
-  return write_file(index_path, list.dump(2) + "\n", false, err);
+  return write_file_atomic(index_path, list.dump(2) + "\n", err);
 }
 
 bool Workspace::create_session(const std::string& title, Session* out, std::string* err) const {
+  StateLock lock(state_mutex());
   Session s;
   s.info.id = make_id("s_");
   s.info.title = title.empty() ? "新会话" : title;
@@ -695,6 +738,7 @@ bool Workspace::create_session(const std::string& title, Session* out, std::stri
 }
 
 bool Workspace::delete_session(const std::string& id, std::string* err) const {
+  StateLock lock(state_mutex());
   const std::string dir = sessions_dir();
   const std::string path = session_file_for(dir, id);
   if (!path_exists(path)) {
@@ -713,13 +757,14 @@ bool Workspace::delete_session(const std::string& id, std::string* err) const {
       if (id_it != it->end() && id_it->is_string() && id_it->get<std::string>() == id) continue;
       list.push_back(*it);
     }
-    write_file(index_path, list.dump(2) + "\n", false, nullptr);
+    write_file_atomic(index_path, list.dump(2) + "\n");
   }
   return true;
 }
 
 bool Workspace::rename_session(const std::string& id, const std::string& title,
                                std::string* err) const {
+  StateLock lock(state_mutex());
   Session s;
   if (!load_session(id, &s, err)) return false;
   s.info.title = title;
@@ -729,6 +774,9 @@ bool Workspace::rename_session(const std::string& id, const std::string& title,
 
 bool Workspace::fork_session(const std::string& id, long long message_index,
                              const std::string& title, Session* out, std::string* err) const {
+  // Snapshot the parent and write the child as one step: a turn appending to the
+  // parent meanwhile would otherwise be half-copied or lost from the index.
+  StateLock lock(state_mutex());
   Session parent;
   if (!load_session(id, &parent, err)) return false;
   if (parent.messages.empty()) {
@@ -916,6 +964,9 @@ std::vector<nlohmann::json> Workspace::load_memory(std::string* err) const {
 }
 
 nlohmann::json Workspace::add_memory_note(const std::string& text, std::string* err) const {
+  // Read-load-append-write: the whole point of the lock. Two turns remembering
+  // something at the same time must both survive.
+  StateLock lock(state_mutex());
   const std::string trimmed = trim(text);
   if (trimmed.empty()) {
     if (err) *err = "memory text is empty";
@@ -933,11 +984,12 @@ nlohmann::json Workspace::add_memory_note(const std::string& text, std::string* 
   for (std::size_t i = 0; i < notes.size(); ++i) arr.push_back(notes[i]);
   mem["notes"] = arr;
   mem["updated_at"] = now_iso8601();
-  if (!write_file(memory_file(), mem.dump(2) + "\n", false, err)) return nlohmann::json();
+  if (!write_file_atomic(memory_file(), mem.dump(2) + "\n", err)) return nlohmann::json();
   return note;
 }
 
 bool Workspace::delete_memory_note(const std::string& note_id, std::string* err) const {
+  StateLock lock(state_mutex());
   std::vector<nlohmann::json> notes = load_memory(nullptr);
   nlohmann::json arr = nlohmann::json::array();
   bool removed = false;
@@ -956,7 +1008,7 @@ bool Workspace::delete_memory_note(const std::string& note_id, std::string* err)
   nlohmann::json mem = nlohmann::json::object();
   mem["notes"] = arr;
   mem["updated_at"] = now_iso8601();
-  return write_file(memory_file(), mem.dump(2) + "\n", false, err);
+  return write_file_atomic(memory_file(), mem.dump(2) + "\n", err);
 }
 
 std::vector<std::string> Workspace::tail_log(std::size_t max_lines) const {

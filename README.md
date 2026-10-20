@@ -991,6 +991,45 @@ macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell�
 └── artifacts/                # 预留产物目录
 ```
 
+### 并发：同一个工作区可以同时跑好几轮
+
+每个进行中的轮次都有自己的 worker 线程，`turns` 表按 session id 索引，所以在同一台设备上
+**不同会话可以真正并行**（实测三个会话同时对话，事件确实交错）。但上面这些状态文件几乎都是
+「读文件 → 改一处 → 整份写回」，两个轮次同时写就会互相覆盖。修法是两条：
+
+**1. 一个进程级的锁，护住所有 read-modify-write**
+
+```cpp
+// src/workspace.cpp
+std::recursive_mutex& state_mutex();      // 进程级；recursive 是因为入口互相调用
+using StateLock = std::lock_guard<std::recursive_mutex>;
+```
+
+`memory.json`、`sessions/index.json`、`settings.yaml`、`agent.md`、会话文件、workspaces.json
+的写入点全部进这把锁。为什么是一把全局锁而不是每个 `Workspace` 一把：`Workspace` 对象很便宜、
+每个请求都会新建，而且两个对象完全可能指向同一个目录——per-object 锁等于没锁。临界区只碰几 KB
+JSON，相对一次模型请求可以忽略。
+
+**2. 写入走「临时文件 + rename」**
+
+```cpp
+bool write_file_atomic(const std::string& path, const std::string& data, std::string* err);
+// 写 <path>.tmp-<pid>-<n>，然后 rename 覆盖 <path>
+```
+
+`write_file` 原来是 `CREATE_ALWAYS`（先截断再写），并发读者可能读到半个 JSON，进程在中间
+崩掉会整份丢失。rename 是原子的：读者要么看到旧的完整文件，要么看到新的完整文件。临时文件放在
+目标旁边（rename 只在同一文件系统内原子，`%TEMP%` 经常是另一个盘）。
+
+会话轨迹（`trajectories/*.jsonl`）另有一套：它是追加写的，为省 IO 会**原地刷新最后一行**，
+所以读函数也拿同一把文件锁，避免读到写了一半的行。
+
+**代价**：同一工作区的两轮在「落盘」这一刻会互相等几微秒，其余时间完全并行。
+
+**回归测试**：`python3 tests/smoke_concurrency.py`（13 项）。它同时发 24 个 memory 写入、
+16 个会话创建，中间还挂着一轮正在跑的对话，最后核对「每个 200 都在盘上」「index.json 与
+会话文件一一对应」「没有残留 `.tmp-*`」。用修复前的二进制跑会挂 4 项——24 个写入只剩 2 条。
+
 ### agent.md：工作区的「经验」，而不只是「事实」
 
 `memory.json` 记的是**事实与偏好**（「这个项目用 yarn，不用 npm」）；`agent.md` 记的是
@@ -1494,7 +1533,8 @@ src/
   prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
   tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image/todo）
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
-  workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆/产出文件、索引
+  workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆/产出文件、索引；
+                            并发写用进程级锁 + 原子替换（见「并发」一节）
   html_export.{h,cpp}       会话 → 自包含 HTML（内联 CSS/图片、可导入的 JSON 区块）
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源
   http.{h,cpp}              传输分派（socket+TLS / WinHTTP，自动回退）
@@ -1502,7 +1542,7 @@ src/
   http_winhttp.cpp          Windows WinHTTP 后端
   tls.{h,cpp}               mbedTLS 客户端封装
   net_compat.h              SIGPIPE / send 标志的平台差异
-  platform_fs.cpp           路径与文件 I/O（Win32 宽字符 / POSIX，全 UTF-8）
+  platform_fs.cpp           路径与文件 I/O（Win32 宽字符 / POSIX，全 UTF-8）+ write_file_atomic
   env.{h,cpp}               设备环境探测（OS/架构/时区/CPU/内存/磁盘/shell）
   output_filter.{h,cpp}     工具输出按内容属性削减（build/test/通用）
   util.{h,cpp} log.{h,cpp}  字符串、时间、编码、日志
@@ -1568,6 +1608,7 @@ node tests/ui_paste_image.mjs                             # 粘贴图片的浏�
 node tests/ui_metrics_layout.mjs                          # 指标栏始终单行且不截断（需 google-chrome）
 python3 tests/smoke_single_file.py                        # 内嵌证书 + 静态链接 + 静态下的 DNS
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
+python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建

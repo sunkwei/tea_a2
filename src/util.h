@@ -119,6 +119,13 @@ bool read_file(const std::string& path, std::string* out, size_t max_bytes = 0,
 bool read_file_tail(const std::string& path, size_t max_bytes, std::string* out);
 bool write_file(const std::string& path, const std::string& data, bool append = false,
                 std::string* err = nullptr);
+/// Write `data` to `path` so that a concurrent reader never sees a partial file:
+/// the bytes go to `<path>.tmp-<pid>-<n>` next to the target and are renamed over
+/// it. Use this for state a running process rewrites (session transcripts, the
+/// session index, memory.json, settings.yaml) - a truncate-then-write there can be
+/// observed half-written, and a crash in the middle loses the whole file.
+bool write_file_atomic(const std::string& path, const std::string& data,
+                       std::string* err = nullptr);
 /// Overwrite the file from `offset` with `data` and truncate whatever followed.
 /// Lets an append-only log refresh its newest line in place (the trajectory
 /// writer does exactly that) instead of rewriting the whole file every step.

@@ -86,6 +86,11 @@ bool trajectory_id_is_safe(const std::string& id) {
 
 bool load_trajectories(const std::string& path, std::vector<nlohmann::json>* out,
                        std::string* err) {
+  // Take the writer's lock: the recorder refreshes its newest line *in place* (to
+  // keep the file append-only instead of rewriting it every step), so a reader
+  // that raced it would see a half-written last record. Readers are HTTP requests
+  // and writers are turns, so the wait is a file read long.
+  std::lock_guard<std::mutex> lock(trajectory_file_mutex());
   out->clear();
   if (!path_is_file(path)) {
     if (err) *err = "trajectory file not found: " + path;
@@ -490,7 +495,10 @@ void TrajectoryRecorder::prune() {
   }
   {
     std::lock_guard<std::mutex> lock(trajectory_file_mutex());
-    if (!write_file(path_, out, false, nullptr)) {
+    // Atomic: the pruning rewrite is the one time the whole file is replaced, and
+    // a reader that is already holding the (previous) contents must not be able to
+    // open a truncated file in between.
+    if (!write_file_atomic(path_, out, nullptr)) {
       LOG_WARN("trajectory: cannot rewrite ", path_, " after pruning");
       return;
     }

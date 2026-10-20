@@ -101,6 +101,7 @@ class Workspace {
   /// reject an oversized edit with the real number.
   std::size_t system_prompt_max_bytes() const;
 
+
   /// Map a user/model supplied path to an absolute one, enforcing the
   /// workspace boundary unless allow_outside_workspace is set.
   std::string resolve_path(const std::string& path, std::string* err) const;
