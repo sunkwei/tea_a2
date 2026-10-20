@@ -1186,6 +1186,21 @@
       renderChat();
       return;
     }
+    if (ev.type === 'tool_images') {
+      // toolkit_load_image 把图片作为一条 follow-up user 消息附加进会话（wire 协议
+      // 只允许 user 消息带图片）。这里同步插进对话，图片走 /raw 显示；本轮结束时
+      // 回读会话还会再确认一次。
+      if (ev.content) {
+        freezeLiveBeforeQueued();
+        state.messages.push({
+          role: 'user', content: ev.content,
+          images: ev.images || [],
+          created_at: new Date().toISOString()
+        });
+        renderChat(); scrollMaybe(true);
+      }
+      return;
+    }
     if (ev.type === 'queue_adopted') {
       // 服务端在两次迭代之间采纳了队首消息：从排队条里移除，并把它作为一条普通
       // 用户消息插进对话（本轮结束后的会话回读会再确认一次）。

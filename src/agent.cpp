@@ -18,6 +18,17 @@ namespace {
 /// a smaller cap keeps the per-turn prompt cache stable and cheap.
 constexpr std::size_t kAgentDocPromptBytes = 6000;
 
+/// How many images toolkit_load_image may attach in one turn. Each one costs
+/// roughly a thousand tokens on every later request of the turn (and of every
+/// turn after it, since they stay in the history), so the cap exists to keep a
+/// curious model from filling the window with screenshots.
+constexpr std::size_t kMaxToolImagesPerTurn = 6;
+
+/// Base64 payload budget for the images re-sent with one request. A vision
+/// conversation accumulates pictures; without a cap a long session would
+/// re-upload everything on every iteration until the provider rejects it.
+constexpr std::size_t kMaxEncodedImageBytesPerTurn = 24u * 1024u * 1024u;
+
 void accumulate_usage(ChatUsage* total, const ChatUsage& part) {
   if (!part.present) return;
   total->present = true;
@@ -643,29 +654,55 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
   // --- persist the user message -------------------------------------------
   Message user_message = Message::make("user", user_text);
-  // Vision input is stored as file references, and encoded to data: URLs once
-  // per turn: every iteration re-sends the whole context, and re-encoding a
-  // few megabytes each time would be pure waste.
-  std::map<std::string, std::string> image_urls;
+  const bool is_vision_model = model_info && model_info->supports_vision;
   if (!images.empty()) {
-    if (!model_info || !model_info->supports_vision) {
+    if (!is_vision_model) {
       LOG_WARN("agent: ", images.size(), " image(s) dropped: model ", provider, "/", model,
                " does not declare supports_vision");
     } else {
-      for (std::size_t i = 0; i < images.size(); ++i) {
-        std::string bytes;
-        const std::string absolute = workspace.resolve_path(images[i].path, nullptr);
-        if (absolute.empty() || !read_file(absolute, &bytes)) {
-          LOG_WARN("agent: cannot read image attachment ", images[i].path, "; skipping");
-          continue;
-        }
-        user_message.images.push_back(images[i]);
-        image_urls[images[i].path] =
-            "data:" + images[i].mime + ";base64," + base64_encode(bytes);
-      }
+      user_message.images = images;
     }
   }
   session->messages.push_back(user_message);
+
+  // Vision input is stored as file references and encoded to data: URLs once
+  // per turn (every iteration re-sends the whole context; re-encoding a few
+  // megabytes each time would be pure waste).
+  //
+  // Every image still in the context is encoded, not just this turn's: the
+  // session keeps paths, so without this a picture from an earlier turn would
+  // silently degrade to a text-only message and a follow-up question about it
+  // ("what about the top-left corner?") would be answered blind. Images folded
+  // away by compaction are skipped, and the total is capped so one very long
+  // vision conversation cannot balloon each request.
+  std::map<std::string, std::string> image_urls;
+  if (is_vision_model) {
+    std::size_t encoded_bytes = 0;
+    bool over_budget = false;
+    for (std::size_t m = session->summary_upto; m < session->messages.size(); ++m) {
+      const std::vector<ImageAttachment>& atts = session->messages[m].images;
+      for (std::size_t i = 0; i < atts.size(); ++i) {
+        if (image_urls.find(atts[i].path) != image_urls.end()) continue;
+        if (encoded_bytes >= kMaxEncodedImageBytesPerTurn) {
+          over_budget = true;
+          continue;
+        }
+        std::string bytes;
+        const std::string absolute = workspace.resolve_path(atts[i].path, nullptr);
+        if (absolute.empty() || !read_file(absolute, &bytes)) {
+          LOG_WARN("agent: cannot read image attachment ", atts[i].path, "; skipping");
+          continue;
+        }
+        image_urls[atts[i].path] =
+            "data:" + atts[i].mime + ";base64," + base64_encode(bytes);
+        encoded_bytes += bytes.size();
+      }
+    }
+    if (over_budget) {
+      LOG_WARN("agent: more than ", kMaxEncodedImageBytesPerTurn,
+               " bytes of images in this context; the oldest ones are sent as text only");
+    }
+  }
   if (session->info.id.empty()) session->info.id = make_id("s_");
   if (session->info.title.empty() || session->info.title == "新会话") {
     session->info.title = Workspace::derive_title(user_text);
@@ -726,6 +763,16 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // declares them; the underlying protocol is provider-specific.
   nlohmann::json tools_json = tools_->openai_tools(provider_info);
   if (model_info && !model_info->supports_tools) tools_json = nlohmann::json::array();
+  // toolkit_load_image is only meaningful for a model that can see: advertising
+  // it to a text-only model would buy a tool call that can only fail.
+  if (model_info && !model_info->supports_vision) {
+    nlohmann::json kept = nlohmann::json::array();
+    for (std::size_t i = 0; i < tools_json.size(); ++i) {
+      if (tools_json[i]["function"]["name"].get<std::string>() == "toolkit_load_image") continue;
+      kept.push_back(tools_json[i]);
+    }
+    tools_json = kept;
+  }
 
   // Once the billed web-tool budget for this turn is spent, stop advertising
   // them: an error result alone invites the model to retry until
@@ -748,6 +795,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
   const int max_iterations = st.max_iterations;
   bool finished = false;
+  // Per-turn bookkeeping for toolkit_load_image: the collected attachments and
+  // the budget that keeps one turn from filling the context with pictures.
+  std::vector<ImageAttachment> tool_images;
+  std::size_t tool_images_attached = 0;
 
   // Take the oldest prompt the user queued while this turn was running and
   // append it as a normal user message. Doing it here (rather than in the HTTP
@@ -1041,10 +1092,41 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         ToolContext tool_ctx;
         tool_ctx.config = config_;
         tool_ctx.provider = provider_info;
+        tool_ctx.model = model_info;
         tool_ctx.workspace = &workspace;
         tool_ctx.cancel = cancel;
         tool_ctx.web_tool_calls = &web_tool_calls;
         tool_result = tools_->execute(call.name, parsed_arguments, tool_ctx);
+      }
+
+      // Images the tool produced: encode once, then hand them to the follow-up
+      // user message below. A model without vision keeps the text result but
+      // never gets an image it cannot read.
+      for (std::size_t k = 0; k < tool_result.images.size(); ++k) {
+        const ImageAttachment& att = tool_result.images[k];
+        if (tool_images_attached >= kMaxToolImagesPerTurn) {
+          tool_result.output +=
+              "\n(toolkit_load_image: per-turn image limit reached; this image was not attached. "
+              "Look at it in a later turn or downscale/combine the images.)";
+          LOG_WARN("agent: toolkit_load_image per-turn limit reached");
+          continue;
+        }
+        if (!model_info || !model_info->supports_vision) {
+          tool_result.output +=
+              "\n(the active model does not declare vision support, so the image was not "
+              "attached)";
+          continue;
+        }
+        std::string bytes;
+        const std::string absolute = workspace.resolve_path(att.path, nullptr);
+        if (absolute.empty() || !read_file(absolute, &bytes)) {
+          tool_result.output += "\n(cannot read the stored image back; not attached)";
+          LOG_WARN("agent: cannot read stored tool image ", att.path);
+          continue;
+        }
+        image_urls[att.path] = "data:" + att.mime + ";base64," + base64_encode(bytes);
+        tool_images.push_back(att);
+        ++tool_images_attached;
       }
 
       tool_message.content = tool_result.output;
@@ -1071,6 +1153,39 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
                              tool_result, tool_message.elapsed_ms);
 
       if (out.cancelled) break;
+    }
+
+    // Images a tool loaded (toolkit_load_image) cannot ride on the tool result:
+    // the wire format only carries images on user messages. Attach them as one
+    // follow-up user message, after every tool result of this iteration, so the
+    // next request sees "here is the picture you asked for" in the only place
+    // providers accept it. `image_urls` gets the data: URLs here (and only
+    // here) because the map is built from the user turn at the start of the run
+    // and each image is encoded exactly once.
+    if (!out.cancelled && !tool_images.empty()) {
+      std::string text = "Images loaded by toolkit_load_image (attached so you can see them):";
+      for (std::size_t i = 0; i < tool_images.size(); ++i) {
+        text += "\n- " + tool_images[i].path + " (" + tool_images[i].mime + ")";
+      }
+      Message attach = Message::make("user", text);
+      attach.created_at = now_iso8601();
+      attach.images = tool_images;
+      session->messages.push_back(attach);
+
+      nlohmann::json event = nlohmann::json::object();
+      event["type"] = "tool_images";
+      event["iteration"] = iteration;
+      event["content"] = attach.content;
+      nlohmann::json list = nlohmann::json::array();
+      for (std::size_t i = 0; i < tool_images.size(); ++i) {
+        list.push_back({{"path", tool_images[i].path}, {"mime", tool_images[i].mime}});
+      }
+      event["images"] = list;
+      emit(event);
+      LOG_INFO("agent: attached ", tool_images.size(), " tool image(s) to the conversation");
+      workspace.log("info", "toolkit_load_image: attached " + std::to_string(tool_images.size()) +
+                                " image(s)");
+      tool_images.clear();
     }
 
     session->info.updated_at = now_iso8601();

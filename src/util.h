@@ -48,6 +48,16 @@ std::string human_size(uint64_t bytes);
 std::string mask_secret(const std::string& secret);
 
 // --------------------------------------------------------------------------
+// images
+// --------------------------------------------------------------------------
+/// Identify an image by its magic bytes rather than by its name: the value ends
+/// up in a data: URL the provider parses, and the extension decides how /raw
+/// serves it back. Returns nullptr for anything that is not PNG/JPEG/GIF/WebP.
+const char* sniff_image_mime(const std::string& bytes);
+/// ".png" / ".jpg" / ".gif" / ".webp" for a sniffed MIME type.
+std::string image_extension_for(const std::string& mime);
+
+// --------------------------------------------------------------------------
 // base64 (used for data: URLs carrying pasted images)
 // --------------------------------------------------------------------------
 std::string base64_encode(const std::string& bytes);

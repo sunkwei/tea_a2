@@ -640,6 +640,7 @@ SSE 上的对应事件：
 | --- | --- |
 | `queue_adopted` | 已采纳：`id` / `content` / `iteration` / `pending`。该消息已落盘为 user 消息 |
 | `queue_unconsumed` | 轮次在采纳前结束（停止 / 报错 / 迭代上限），`items[]` 原样退回，客户端应放回输入框 |
+| `tool_images` | `toolkit_load_image` 把图片附加进了对话：`content` 是那条 user 消息的文本，`images[]` 是 `{path, mime}`。客户端应把它插进当前对话（图片走 `/raw`），与本轮结束时回读会话的结果一致 |
 
 几条刻意的约束：
 
@@ -784,9 +785,39 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 | `toolkit_file` | `read` `write` `append` `list` `mkdir` `delete` `move` `stat` |
 | `toolkit_memory` | 工作区长期记忆的增删查，自动注入 system prompt，跨会话保留偏好与项目事实 |
 | `toolkit_agent_doc` | `read` `append` `replace` `scripts`：维护 `.tea_agent_run/agent.md`（本工作区的经验：坑、可复用命令与脚本） |
+| `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
 
 相对路径基于工作区根目录；默认**禁止越出工作区**（`--allow-outside-workspace` 可放开），
 判定前会解析符号链接，所以工作区里的软链无法把工具带出去。
+
+### 图片：`toolkit_load_image`
+
+`toolkit_file` 只能把字节当文本返回，视觉模型读不了；在此之前，图片唯一的入口是人手动粘贴。
+`toolkit_load_image` 补上另一半：
+
+```jsonc
+// 模型调用
+{"path": "build/screenshot.png", "note": "看看这个弹窗为什么错位"}
+```
+
+它按**内容**（magic bytes，而不是扩展名）判定是不是 PNG/JPEG/GIF/WebP，把文件**复制**到
+`.tea_agent_run/artifacts/images/`（源文件之后被改、被删都不影响已存下的会话，`/raw` 也能把它
+送回界面），然后返回一段文本结果 —— 图片本身不能挂在工具结果上：OpenAI 的 wire 协议只允许
+**user** 消息带图片。所以 agent loop 在这一次迭代的所有工具结果之后追加一条 follow-up user
+消息（内容形如 `Images loaded by toolkit_load_image (attached so you can see them): - …`），
+下一轮请求就从这里读到图片。UI 通过 SSE 的 `tool_images` 事件立刻把这条消息和图片显示出来，
+刷新后从会话里恢复，位置不变。
+
+几条边界：
+
+- **只有视觉模型才看得到**：`supports_vision: false` 的模型根本不会被告知这个工具（免得它白调），
+  真被调到时也会明确说明「当前模型不支持视觉」，而不是静默丢掉图片；
+- **每轮最多 6 张**（`kMaxToolImagesPerTurn`）：每张图之后每次请求都要重新上传，占上下文也占带宽，
+  超出部分在工具结果里说明「未附加」，模型可以下一轮再看；
+- **单张 8 MB**：超了就让模型先缩放（工具结果里会说清楚）；
+- **历史图片会继续发送**：会话里存的是路径，每轮把上下文里所有图片重新编码成 data URL
+  （压缩掉的部分跳过），所以「上一轮看过的那张图还能不能接着问」的答案是能。为免无限增长，
+  一次请求的图片总量封顶 24 MB，超出时最旧的几张降级为纯文本并记一条 WARN。
 
 ---
 
@@ -1301,7 +1332,7 @@ src/
   llm.{h,cpp}               OpenAI 兼容客户端：SSE、tool_calls 聚合、重试
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
   prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
-  tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc）
+  tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image）
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆、索引
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源
@@ -1364,6 +1395,8 @@ pwsh -File tests/relink-while-running.ps1 -Exe build-gcc/bin/tea_agent.exe  # �
 
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
+python3 tests/smoke_tool_images.py                        # toolkit_load_image：磁盘图片进对话/上限/拒绝
+node tests/ui_tool_images.mjs                             # 加载的图片在对话里可见（含刷新后，需 google-chrome）
 python3 tests/smoke_console_level.py                      # 控制台只回声 WARN/ERROR、日志文件仍是 INFO
 python3 tests/smoke_bind_urls.py                          # --host 0.0.0.0 打印活跃地址，且该地址真能打开 UI
 node tests/ui_boot_probe.mjs                              # 不启浏览器也能跑：app.js 启动路径不抛异常
@@ -1400,6 +1433,16 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
 覆盖：工具按 provider 声明才出现在工具表、未声明时强制调用被拒且不外呼、端点卡住时按
 `web_tool_timeout_ms` 超时而不是拖住整轮、`/api/chat/stop` 能中断传输中的请求。
+
+`tests/smoke_tool_images.py` 覆盖 `toolkit_load_image`：视觉模型的工具表里有它、纯文本模型没有；
+工具结果本身是文本（不是几百 KB 的 base64），图片作为 follow-up user 消息进入**下一次请求**，
+data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/images/`，会话里存的是工作区相对路径、
+`/raw` 能取回，源文件删掉之后下一轮照样发送；不存在的文件、非图片、越出工作区分别给出可操作的
+报错且不附加图片；一轮最多附加 6 张，其余在工具结果里说明。
+
+`tests/ui_tool_images.mjs` 在浏览器里看效果：一轮中 `tool_images` 事件让那条消息连同图片出现，
+`<img>` 真的解码成功（`naturalWidth` 正确）、`src` 走 `/raw`；工具行展开后写着副本路径与 MIME；
+刷新后图片仍在原位且没有重复的气泡。
 
 `tests/smoke_vision.py` 覆盖图片通路：没有 `supports_vision` 的模型被拒且**不会**请求 provider、
 坏 base64 / 非图片字节 / 超过 4 张 / 空载荷分别报对应错误码、合法图片落盘且字节一致、

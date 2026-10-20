@@ -526,6 +526,105 @@ ToolResult tool_agent_doc(const nlohmann::json& args, const ToolContext& ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// toolkit_load_image
+//
+// The only way an image used to enter a conversation was a human pasting one:
+// toolkit_file returns bytes as text, which a vision model cannot read. This
+// tool takes a path, verifies the file really is an image (by magic bytes, not
+// by extension), copies it under .tea_agent_run/artifacts/images/ - so later
+// edits or deletions of the source cannot break the stored session, and /raw
+// can serve it back to the UI - and hands the attachment to the agent loop,
+// which appends it as a follow-up user message. Tool results themselves are
+// text-only in the OpenAI wire format, so that follow-up is the only place an
+// image can ride on.
+// ---------------------------------------------------------------------------
+constexpr std::size_t kMaxLoadedImageBytes = 8u * 1024u * 1024u;
+
+ToolResult tool_load_image(const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  if (!ctx.workspace) {
+    result.output = "error: no workspace is active";
+    return result;
+  }
+  if (ctx.model && !ctx.model->supports_vision) {
+    result.output =
+        "error: the active model does not declare vision support (supports_vision: false), so "
+        "an attached image would be dropped. Describe what you need in text, or switch to a "
+        "vision-capable model first.";
+    return result;
+  }
+  const std::string requested = arg_str(args, "path");
+  if (trim(requested).empty()) {
+    result.output = "error: 'path' is required";
+    return result;
+  }
+  std::string err;
+  const std::string path = ctx.workspace->resolve_path(requested, &err);
+  if (path.empty()) {
+    result.output = "error: " + err;
+    return result;
+  }
+  if (!path_is_file(path)) {
+    result.output = path_exists(path) ? "error: not a regular file: " + requested
+                                      : "error: file not found: " + requested;
+    return result;
+  }
+  std::string bytes;
+  bool too_big = false;
+  if (!read_file(path, &bytes, kMaxLoadedImageBytes + 1, &too_big) || too_big ||
+      bytes.size() > kMaxLoadedImageBytes) {
+    result.output = "error: " + requested + " is larger than " +
+                    human_size(kMaxLoadedImageBytes) +
+                    ", which is the per-image limit; downscale it first (e.g. with the "
+                    "`convert`/`magick` or `sips` command, or ffmpeg) and load that.";
+    return result;
+  }
+  if (bytes.empty()) {
+    result.output = "error: " + requested + " is empty";
+    return result;
+  }
+  const char* mime = sniff_image_mime(bytes);
+  if (!mime) {
+    result.output = "error: " + requested +
+                    " is not a PNG, JPEG, GIF or WebP image (checked by content, not by name). "
+                    "Use toolkit_file to read text files.";
+    return result;
+  }
+
+  // Copy, do not reference: the source is the user's file and it may be
+  // regenerated, moved or deleted while the session still refers to it.
+  const std::string dir = path_join(ctx.workspace->artifacts_dir(), "images");
+  if (!make_dirs(dir)) {
+    result.output = "error: cannot create " + dir;
+    return result;
+  }
+  const std::string file = path_join(dir, "img_" + random_hex(8) + image_extension_for(mime));
+  if (!write_file(file, bytes, false, &err)) {
+    result.output = "error: cannot store the image: " + err;
+    return result;
+  }
+
+  ImageAttachment att;
+  att.mime = mime;
+  // Workspace-relative: the session file stays portable and /raw can serve it.
+  att.path = ctx.workspace->display_path(file);
+
+  result.ok = true;
+  result.images.push_back(att);
+  result.meta = nlohmann::json::object();
+  result.meta["path"] = att.path;
+  result.meta["source"] = ctx.workspace->display_path(path);
+  result.meta["mime"] = att.mime;
+  result.meta["bytes"] = static_cast<long long>(bytes.size());
+  const std::string note = arg_str(args, "note");
+  result.output = "loaded image " + att.path + " (" + mime + ", " + human_size(bytes.size()) +
+                  ") from " + ctx.workspace->display_path(path) +
+                  "; it is attached to the conversation as an image you can see.";
+  if (!trim(note).empty()) result.output += " note: " + trim(note);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // toolkit_search / toolkit_fetch
 //
 // Provider-scoped web tools. The protocol (DeepSeek's /v1/tools/{search,
@@ -1006,7 +1105,9 @@ ToolRegistry::ToolRegistry() {
     def.description =
         "Read, write and manage files inside the workspace. Operations: read (return file "
         "content), write (create/overwrite), append, list (directory listing), mkdir, delete, move, "
-        "stat. Relative paths resolve against the workspace root. 文件读写与目录操作。";
+        "stat. Relative paths resolve against the workspace root. Binary files (images) come back "
+        "as bytes as text - use toolkit_load_image when you need to actually see a picture. "
+        "文件读写与目录操作。";
     def.parameters = nlohmann::json::parse(R"JSON({
       "type": "object",
       "properties": {
@@ -1055,6 +1156,33 @@ ToolRegistry::ToolRegistry() {
         "id": { "type": "string", "description": "Note id for op=delete." }
       },
       "required": ["op"]
+    })JSON");
+    defs_.push_back(def);
+  }
+  {
+    ToolDef def;
+    def.name = "toolkit_load_image";
+    def.description =
+        "Load an image file from disk (PNG, JPEG, GIF or WebP) and attach it to the conversation "
+        "so you can actually look at it. Use this whenever the answer depends on seeing a "
+        "picture: a screenshot, a UI mock, a chart, a photo, the output of an image-based test. "
+        "toolkit_file cannot do this - it returns bytes as text. The file is copied into "
+        ".tea_agent_run/artifacts/images/ (so later edits or deletions of the source do not "
+        "break the session) and appears in the next request as an image. Requires a model with "
+        "vision support. 从磁盘加载图片并附加到对话中，让模型真正“看到”它。";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Image file to load. Relative paths resolve against the workspace root."
+        },
+        "note": {
+          "type": "string",
+          "description": "Optional reason to show next to the image, e.g. what to look for."
+        }
+      },
+      "required": ["path"]
     })JSON");
     defs_.push_back(def);
   }
@@ -1175,6 +1303,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     if (name == "toolkit_exec") return tool_exec(arguments, ctx);
     if (name == "toolkit_file") return tool_file(arguments, ctx);
     if (name == "toolkit_memory") return tool_memory(arguments, ctx);
+    if (name == "toolkit_load_image") return tool_load_image(arguments, ctx);
     if (name == "toolkit_agent_doc") return tool_agent_doc(arguments, ctx);
     if (name == "toolkit_search") return tool_search(arguments, ctx);
     if (name == "toolkit_fetch") return tool_fetch(arguments, ctx);

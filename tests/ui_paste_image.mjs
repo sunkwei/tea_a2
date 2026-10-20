@@ -22,13 +22,24 @@ const CHROME = process.env.CHROME_BIN || '/usr/bin/google-chrome';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// zlib.crc32 only exists from Node 20.15; compute it here so the test also runs
+// on the Node 18 that many CI images still have.
+function crc32(buf) {
+  let c = ~0;
+  for (const b of buf) {
+    c ^= b;
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+  }
+  return (~c) >>> 0;
+}
+
 function makePng(width = 4, height = 4) {
   const chunk = (tag, data) => {
     const len = Buffer.alloc(4);
     len.writeUInt32BE(data.length);
     const body = Buffer.concat([Buffer.from(tag), data]);
     const crc = Buffer.alloc(4);
-    crc.writeUInt32BE(zlib.crc32(body) >>> 0);
+    crc.writeUInt32BE(crc32(body));
     return Buffer.concat([len, body, crc]);
   };
   const ihdr = Buffer.alloc(13);

@@ -96,29 +96,6 @@ const char* raw_mime_for(const std::string& file_path) {
 constexpr std::size_t kMaxImagesPerMessage = 4;
 constexpr std::size_t kMaxImageBytes = 8u * 1024u * 1024u;
 
-/// Identify the image by its magic bytes rather than trusting the client's
-/// declared MIME type: the value ends up in a data: URL that the provider
-/// parses, and the extension decides how /raw serves the file back.
-const char* sniff_image_mime(const std::string& bytes) {
-  const unsigned char* b = reinterpret_cast<const unsigned char*>(bytes.data());
-  const std::size_t n = bytes.size();
-  if (n >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return "image/png";
-  if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpeg";
-  if (n >= 6 && bytes.compare(0, 4, "GIF8") == 0) return "image/gif";
-  if (n >= 12 && bytes.compare(0, 4, "RIFF") == 0 && bytes.compare(8, 4, "WEBP") == 0) {
-    return "image/webp";
-  }
-  return nullptr;
-}
-
-std::string image_extension_for(const std::string& mime) {
-  if (mime == "image/png") return ".png";
-  if (mime == "image/jpeg") return ".jpg";
-  if (mime == "image/gif") return ".gif";
-  if (mime == "image/webp") return ".webp";
-  return ".bin";
-}
-
 /// Split a `data:<mime>;base64,<payload>` URL. Also accepts a bare base64
 /// payload (the UI always sends the full URL, but curl users often do not).
 bool decode_image_payload(const std::string& raw, std::string* bytes, std::string* err) {

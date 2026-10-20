@@ -32,6 +32,11 @@ struct ToolResult {
   std::string output;
   bool truncated = false;
   nlohmann::json meta = nlohmann::json::object();
+  /// Images this tool made part of the conversation (toolkit_load_image). The
+  /// wire format only allows images on *user* messages, so the agent loop turns
+  /// these into a follow-up user message; the text `output` alone is what
+  /// reaches the model as the tool result.
+  std::vector<ImageAttachment> images;
 };
 
 struct ToolContext {
@@ -39,6 +44,10 @@ struct ToolContext {
   /// The provider this turn resolved (TurnOptions may override the active one).
   /// Web tools need its base URL / API key / capability flags.
   const ProviderInfo* provider = nullptr;
+  /// The model this turn resolved. toolkit_load_image checks supports_vision
+  /// here so a stale/over-eager call explains the problem instead of silently
+  /// attaching an image the model cannot read.
+  const ModelInfo* model = nullptr;
   Workspace* workspace = nullptr;
   std::atomic<bool>* cancel = nullptr;
   /// Per-turn counter of billed web-tool calls (null => no budget enforced).
