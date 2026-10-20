@@ -20,6 +20,7 @@
 #include "agent.h"
 #include "archive.h"
 #include "env.h"
+#include "html_export.h"
 #include "http.h"
 #include "log.h"
 #include "trajectory.h"
@@ -1458,6 +1459,105 @@ void ApiServer::Impl::install_routes() {
             j["messages"] = messages;
             send_json(res, j);
           });
+
+  // ---- export / import a session -----------------------------------------
+  // Export is one self-contained HTML file: CSS inlined, images inlined as
+  // data: URLs, no network, no sidecar directory. Double-click it on any
+  // machine and the conversation is there. The same file carries the session as
+  // JSON, so it can be imported back (here or on another device) instead of
+  // only being read.
+  svr.Get(R"(/api/sessions/([^/]+)/export)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!find_session_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            Session session;
+            if (!ws.load_session(req.matches[1].str(), &session, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            std::map<std::string, std::string> image_data;
+            const std::string html =
+                export_session_html(ws, session, TEA_AGENT_VERSION_STRING, ExportLimits(),
+                                    &image_data);
+            const std::string name = export_file_name(session.info.title);
+            res.set_header("Content-Disposition",
+                           "attachment; filename=\"" + name + "\"; filename*=UTF-8''" +
+                               rfc5987_name(name));
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_header("X-Session-Messages",
+                           std::to_string(static_cast<long long>(session.messages.size())));
+            res.set_header("X-Export-Images", std::to_string(image_data.size()));
+            LOG_INFO("export: session ", session.info.id, " -> ", name, " (", html.size(),
+                     " B, ", image_data.size(), " image(s))");
+            res.set_content(html, "text/html; charset=utf-8");
+          });
+
+  // Import: the body may be an exported HTML file (raw, or {"html": "..."}) or
+  // the session JSON on its own ({"messages": [...]}). A new session is always
+  // created - importing twice must not overwrite the conversation it came from.
+  svr.Post(R"(/api/workspaces/([^/]+)/sessions/import)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             if (trim(req.body).empty()) {
+               send_error(res, 400, "bad_request",
+                          "send the exported .html file, {\"html\": \"...\"} or the session "
+                          "JSON");
+               return;
+             }
+             if (req.body.size() > 64u * 1024u * 1024u) {
+               send_error(res, 413, "too_large", "the export must be smaller than 64 MB");
+               return;
+             }
+             std::string source = req.body;
+             // A JSON wrapper ({"html": "..."} or the payload itself) is unwrapped
+             // here; anything else is treated as the HTML file itself.
+             if (trim(source)[0] == '{') {
+               nlohmann::json body = nlohmann::json::parse(source, nullptr, false);
+               if (body.is_object()) {
+                 const std::string wrapped = json_string(body, "html");
+                 if (!wrapped.empty()) {
+                   source = wrapped;
+                 } else if (body.contains("messages")) {
+                   Session session;
+                   if (!import_session_payload(ws, body, &session, &err)) {
+                     send_error(res, 400, "bad_request", err);
+                     return;
+                   }
+                   nlohmann::json j = session.info.to_json();
+                   j["imported"] = true;
+                   send_json(res, {{"ok", true}, {"session", j},
+                                   {"messages", session.messages.size()}});
+                   return;
+                 }
+               }
+             }
+             nlohmann::json payload;
+             if (!extract_session_json_from_html(source, &payload, &err)) {
+               send_error(res, 400, "bad_export", err);
+               return;
+             }
+             Session session;
+             if (!import_session_payload(ws, payload, &session, &err)) {
+               send_error(res, 400, "bad_export", err);
+               return;
+             }
+             nlohmann::json j = session.info.to_json();
+             j["imported"] = true;
+             LOG_INFO("import: created session ", session.info.id, " from an export (",
+                      session.messages.size(), " messages)");
+             send_json(res, {{"ok", true}, {"session", j},
+                             {"messages", session.messages.size()}});
+           });
 
   svr.Delete(R"(/api/sessions/([^/]+))",
              [this](const httplib::Request& req, httplib::Response& res) {

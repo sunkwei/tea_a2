@@ -62,6 +62,8 @@
     <div class="side-block sess-block">
       <div class="side-label">
         <span>会话</span>
+        <button id="session-import" class="mini-btn" type="button"
+                title="导入导出的 .html（或会话 JSON），恢复成一个新会话">⤒</button>
         <button id="new-session" class="mini-btn" type="button" title="新建会话">＋</button>
       </div>
       <div id="session-list" class="sess-list"></div>
@@ -84,6 +86,16 @@
         <div class="crumbs" id="crumbs"></div>
       </div>
       <div class="topbar-right">
+        <!-- 把当前会话导出成一个自带 CSS/图片的 HTML 文件：拷到别的机器上双击即可阅读 -->
+        <button id="session-export" class="icon-btn hidden" type="button"
+                title="导出当前会话为单个 HTML 文件（离线可读，含图片）"
+                aria-label="导出当前会话">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 2.4v7.2"/>
+            <path d="M5.2 7l2.8 3 2.8-3"/>
+            <path d="M2.8 12.4h10.4"/>
+          </svg>
+        </button>
         <div class="dd-wrap">
           <button id="model-chip" class="chip" type="button" aria-haspopup="true" aria-expanded="false">
             <span class="chip-text" id="model-chip-text">模型</span><span class="chev-sm">›</span>

@@ -2519,6 +2519,7 @@
   }
 
   function renderCrumbs() {
+    updateExportButton();
     var ws = state.workspace ? state.workspace.name : '无工作区';
     if (state.view === 'chat') setCrumbs([{ label: ws }, { label: state.session ? (state.session.title || state.session.id) : '新会话' }]);
     else setCrumbs([{ label: ws }, { label: VIEW_LABEL[state.view] || state.view }]);
@@ -2575,6 +2576,91 @@
     }, function (e) {
       toast('下载失败：' + (e && e.message ? e.message : String(e)));
     }).then(restore, restore);
+  }
+
+  /// 把一段 fetch 响应存成文件（导出的 HTML、归档 zip 都走这里）。用 blob 而不是让
+  /// 浏览器直接打开 URL：服务端报错时能就地说明原因，而不是存下一个 JSON 错误体。
+  function saveBlobResponse(r, fallbackName) {
+    var head = {
+      name: dispositionFilename(r.headers.get('Content-Disposition'), fallbackName),
+      entries: r.headers.get('X-Archive-Entries'),
+      skipped: r.headers.get('X-Archive-Skipped')
+    };
+    return r.blob().then(function (blob) {
+      var objUrl = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = objUrl; a.download = head.name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(objUrl); a.remove(); }, 4000);
+      return { blob: blob, head: head };
+    });
+  }
+  function httpError(r) {
+    return r.text().then(function (t) {
+      var msg = 'HTTP ' + r.status;
+      try {
+        var j = JSON.parse(t);
+        if (j && j.error && (j.error.message || j.error.code)) msg = j.error.message || j.error.code;
+      } catch (e) { if (t) msg = t.slice(0, 200); }
+      throw new Error(msg);
+    });
+  }
+
+  /* ---------- 导出 / 导入会话（单文件 HTML） ---------- */
+  // 导出的 HTML 自带 CSS 与图片（data: URL），拷到任何机器上双击即可离线阅读；
+  // 同一个文件里还带着整段会话 JSON，所以可以导入回来（甚至导入到另一个工作区）。
+  function updateExportButton() {
+    var b = $('session-export');
+    if (!b) return;
+    b.classList.toggle('hidden', !state.session);
+    b.disabled = !state.session || !state.workspace;
+    b.title = state.session
+      ? '导出「' + (state.session.title || state.session.id) + '」为单个 HTML 文件（离线可读，含图片）'
+      : '导出当前会话';
+  }
+  function exportSession() {
+    if (!state.session || !state.workspace) { toast('请先打开一个会话'); return; }
+    var b = $('session-export');
+    b.disabled = true;
+    fetch(apiUrl('api/sessions/' + encodeURIComponent(state.session.id) + '/export'))
+      .then(function (r) { return r.ok ? r : httpError(r); })
+      .then(function (r) { return saveBlobResponse(r, 'tea_agent-session.html'); })
+      .then(function (d) {
+        toast('已导出 ' + d.head.name + '（' + fmtBytes(d.blob.size) + '，' +
+          (d.head.entries || '含') + ' 条消息）');
+      }, function (e) {
+        toast('导出失败：' + (e && e.message ? e.message : String(e)));
+      }).then(function () { b.disabled = false; });
+  }
+  function importSessionFile(file) {
+    if (!file || !state.workspace) return;
+    var wsid = state.workspace.id;
+    toast('正在导入 ' + file.name + '…');
+    var reader = new FileReader();
+    reader.onload = function () {
+      fetch(apiUrl('api/workspaces/' + encodeURIComponent(wsid) + '/sessions/import'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        body: String(reader.result || '')
+      }).then(function (r) {
+        return r.text().then(function (t) {
+          var data = null;
+          try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
+          if (!r.ok) {
+            throw new Error((data && data.error && (data.error.message || data.error.code)) ||
+              ('HTTP ' + r.status));
+          }
+          return data;
+        });
+      }).then(function (d) {
+        toast('已导入 ' + (d && d.messages ? d.messages : '') + ' 条消息');
+        return loadSessions().then(function () {
+          if (d && d.session && d.session.id) return openSession(d.session.id);
+        });
+      }, function (e) { toast('导入失败：' + (e && e.message ? e.message : String(e))); });
+    };
+    reader.readAsText(file);
   }
 
   function loadTree(dir) {
@@ -3088,6 +3174,18 @@
     if (detachBtn) detachBtn.onclick = detachStream;
     $('sidebar-hide').onclick = function () { toggleSidebar(true); };
     $('sidebar-show').onclick = function () { toggleSidebar(false); };
+    $('session-export').onclick = exportSession;
+    $('session-import').onclick = function () {
+      if (!state.workspace) { toast('请先选择工作区'); return; }
+      var input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.html,.htm,.json,text/html,application/json';
+      input.onchange = function () {
+        var f = input.files && input.files[0];
+        if (f) importSessionFile(f);
+      };
+      input.click();
+    };
     $('new-session').onclick = function () {
       if (blockedWhileStreaming('新建会话')) return;
       newSessionDraft();

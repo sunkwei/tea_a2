@@ -499,6 +499,8 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.7.0
 | `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果） |
 | `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
 | `POST` | `/api/sessions/{sid}/fork` | 从某一轮分叉出新会话：`{"message_index":N}` 是父会话里某条**用户消息**的下标，复制到该轮结束（含回答与工具结果）；省略或负数 = 复制整个会话。返回 `session`（带 `forked_from` / `fork_turn`）与复制后的 `messages`；父会话不变 |
+| `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON） |
+| `POST` | `/api/workspaces/{id}/sessions/import` | 导入导出的 `.html`（原样或 `{"html":"…"}`）或会话 JSON，新建一个会话；重复导入不会覆盖 |
 | `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
@@ -1008,6 +1010,39 @@ curl -s -X POST http://127.0.0.1:8282/api/destroy   -H 'Content-Type: applicatio
 | `logs/tea_agent.log` | 全局日志（>8MB 自动轮转） |
 | `tea_agent.yaml` | 可选，C++ 版专属 settings 覆盖 |
 
+### 导出会话：一个能拷走的 HTML 文件
+
+对话页右上角的**导出**按钮（`GET /api/sessions/{sid}/export`）把当前会话写成一个
+**自包含的 HTML 文件**：CSS 内联、图片内联成 `data:` URL、没有任何外部引用。把它拷到
+U 盘或另一台电脑，双击即可在浏览器里离线阅读——那台机器上没装 tea_agent、也没有网络，
+照样能看。
+
+文件里有什么：
+
+- 每条消息（用户 / 助手 / 工具）；Markdown 渲染成标题、列表、代码块、表格、引用；
+- 模型的 `reasoning` 与每次工具调用的参数：折叠在 `<details>` 里，默认不占版面；
+- 工具输出（单条超过 8 KB 截断，并在原处注明原始字节数）；
+- 会话里所有图片：内联成 `data:` URL（单张上限 8 MB、总计 40 MB；超出的显示成说明文字，
+  而不是把文件撑到几个 GB）；
+- 页眉：工作区名与路径、会话 id、创建/更新时间、导出时的 tea_agent 版本。
+
+两个安全细节：模型回答里的 HTML 一律转义（`<script>` 只显示成文字），链接只保留
+`http(s)` / `mailto` / 锚点，`javascript:` 之类的退化成纯文本。
+
+文件末尾还有一个 `<script type="application/json" id="tea-session-data">` 区块，装着完整
+会话（含图片数据），所以同一个文件**还能导入回来**：会话列表旁的 **⤒** 按钮，或者
+
+```bash
+# 把导出的 .html 原样 POST 回去，恢复成一个新会话
+curl -s -X POST http://127.0.0.1:8282/api/workspaces/<ws_id>/sessions/import \
+  -H 'Content-Type: text/html' --data-binary @tea_agent-xxx.html
+# {"ok":true,"session":{"id":"s_...","title":"..."},"messages":7}
+```
+
+导入总是**新建**会话（重复导入不会覆盖原会话）；图片会写进目标工作区的
+`artifacts/images/` 并重写路径，所以在另一台机器上恢复出来的对话照样看得见图。也可以
+只发会话 JSON（`{"messages":[...]}`）。
+
 ---
 
 ## 配置
@@ -1335,6 +1370,7 @@ src/
   tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image）
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆、索引
+  html_export.{h,cpp}       会话 → 自包含 HTML（内联 CSS/图片、可导入的 JSON 区块）
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源
   http.{h,cpp}              传输分派（socket+TLS / WinHTTP，自动回退）
   http_socket.cpp           HTTP/1.1 over TCP（+ 可选 TLS）
@@ -1414,6 +1450,8 @@ node tests/smoke_turn_resume.mjs                          # 断线不取消轮�
 node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
 node tests/ui_second_client.mjs                           # 另一台机器/全新 profile 接回别人发起的轮次（需 google-chrome）
 node tests/ui_two_clients.mjs                             # 两个客户端同看一轮：插队 / 离开 / 停止（需 google-chrome）
+python3 tests/smoke_export_html.py                        # 导出会话为单文件 HTML：内联/转义/往返导入
+node tests/ui_session_export.mjs                          # 导出按钮 → 下载 → 离线打开 → 导入（需 google-chrome）
 python3 tests/smoke_run_archive.py                        # 工作区归档下载：真 zip / 沙箱 / 超限跳过
 node tests/ui_files_download.mjs                          # 文件页「下载」按钮真的产出 zip（需 google-chrome）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
@@ -1555,6 +1593,19 @@ data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/image
 **第二个**工作区里发起轮次、读到第 9 帧就断开，然后用一个全新的浏览器 profile（没有
 localStorage）打开页面——它必须落在 `proj_b`（而不是索引里的第一个 `proj_a`）、直接进入生成态、
 回放已经生成的内容、继续直播到结束，标签页标题也跟着工作区走。
+
+`tests/smoke_export_html.py` 把导出当成「要离开这台机器」的文件来验：HTML 完整、CSS 内联、
+没有任何 `<link>` 或外部 `src`；Markdown 各元素都渲染出来；模型回答里的 `<script>` 被转义、
+`javascript:` 链接不会变成活链接；图片内联后的字节与磁盘逐字节相同；工具输出按 8 KB 截断
+并注明；末尾的 JSON 能解析且条数一致；带着 `</script>` 的消息不会截断那个区块；把这份 HTML
+POST 到**另一个工作区**能新建会话（文本一致、图片写进新工作区并可按 `/raw` 取回），再导一次
+是第二个会话而不是覆盖，纯 JSON 也能导，乱发的 HTML / 空 payload 返回 400 且不产生会话。
+
+`tests/ui_session_export.mjs` 在真实浏览器里走完整链路：顶栏导出按钮在打开会话时出现（草稿时
+隐藏）、点击后拿到 `text/html` blob 且文件名是 `.html`、内容里有会话文本/内联样式/`data:` 图片、
+不含本机地址；随后把文件写到磁盘并用 **`file://`** 打开——这正是「拷到别的机器上双击」的场景，
+断言样式生效、消息气泡与图片都在（`naturalWidth > 0`）、没有任何网络请求；最后验证导入按钮
+弹出 `.html` 文件选择器，导入后侧栏多出一个会话。
 
 `tests/smoke_run_archive.py` 把归档当**真 zip** 验：`zipfile.testzip()` 通过、条目名全部以
 `.tea_agent_run/` 开头（那个点必须保住）、空目录也在、`note.txt` 解出来与磁盘逐字节相同且确实被

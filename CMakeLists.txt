@@ -389,6 +389,7 @@ set(TEA_SOURCES
   src/llm.cpp
   src/trajectory.cpp
   src/agent.cpp
+  src/html_export.cpp
   src/server.cpp
   ${TEA_WEB_ASSETS_CPP}
   ${TEA_CA_BUNDLE_CPP}

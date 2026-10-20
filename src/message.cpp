@@ -154,20 +154,41 @@ Message Message::from_store(const nlohmann::json& j) {
       ToolCall tc;
       auto id_it = it->find("id");
       if (id_it != it->end() && id_it->is_string()) tc.id = id_it->get<std::string>();
+      // Session files store the flat shape {id, name, arguments}; the OpenAI
+      // wire shape nests them under "function". Accept both: an imported export
+      // or a hand-written fixture may well be in wire form, and silently losing
+      // the call name renders the transcript as an empty "调用".
+      const nlohmann::json* fn = nullptr;
+      auto fn_it = it->find("function");
+      if (fn_it != it->end() && fn_it->is_object()) fn = &(*fn_it);
+
       auto name_it = it->find("name");
-      if (name_it != it->end() && name_it->is_string()) tc.name = name_it->get<std::string>();
+      if (name_it != it->end() && name_it->is_string()) {
+        tc.name = name_it->get<std::string>();
+      } else if (fn) {
+        auto n = fn->find("name");
+        if (n != fn->end() && n->is_string()) tc.name = n->get<std::string>();
+      }
+
+      const nlohmann::json* args = nullptr;
       auto args_it = it->find("arguments");
       if (args_it != it->end()) {
-        if (args_it->is_string()) {
-          tc.raw_arguments = args_it->get<std::string>();
+        args = &(*args_it);
+      } else if (fn) {
+        auto a = fn->find("arguments");
+        if (a != fn->end()) args = &(*a);
+      }
+      if (args) {
+        if (args->is_string()) {
+          tc.raw_arguments = args->get<std::string>();
           try {
             tc.arguments = nlohmann::json::parse(tc.raw_arguments);
           } catch (const std::exception&) {
             tc.arguments = nlohmann::json::object();
           }
         } else {
-          tc.arguments = *args_it;
-          tc.raw_arguments = args_it->dump();
+          tc.arguments = *args;
+          tc.raw_arguments = args->dump();
         }
       }
       auto raw_it = it->find("raw_arguments");
