@@ -29,6 +29,57 @@ endif()
 project(tea_agent VERSION ${TEA_AGENT_VERSION} LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
+# Toolchain sanity: pointing CMAKE_CXX_COMPILER at a mingw triplet is not a
+# cross build, and a "-win32" thread model has no std::mutex before GCC 13
+# ---------------------------------------------------------------------------
+# Both mistakes produce the same confusing symptom - a C++ error deep inside a
+# perfectly correct header ("'mutex' in namespace 'std' does not name a type" in
+# src/config.h, which *does* #include <mutex>) - so they are diagnosed here,
+# where the fix is a single command line.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  execute_process(COMMAND ${CMAKE_CXX_COMPILER} -dumpmachine
+                  OUTPUT_VARIABLE _tea_cxx_target
+                  OUTPUT_STRIP_TRAILING_WHITESPACE
+                  ERROR_QUIET)
+  if(_tea_cxx_target MATCHES "mingw" AND NOT CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR
+      "the C++ compiler (${CMAKE_CXX_COMPILER}) targets ${_tea_cxx_target}, but this "
+      "build directory is configured for the host (CMAKE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}).\n"
+      "Swapping the compiler alone does not make CMake cross-compile: WIN32 stays false, "
+      "the build-time tools stay target binaries, and the result is a host build with a "
+      "foreign compiler. Configure a separate directory with the toolchain file instead:\n"
+      "  cmake --preset win64-mingw-cross        # -> build-win64\n"
+      "  cmake --build --preset win64-mingw-cross")
+  endif()
+
+  if(_tea_cxx_target MATCHES "mingw")
+    # MinGW-w64 is shipped in two flavours. With -win32 threading, libstdc++
+    # leaves bits/std_mutex.h (and <thread>) empty until GCC 13, so std::mutex,
+    # std::thread, std::condition_variable are simply undeclared - the headers
+    # include fine and the error shows up at the first use.
+    execute_process(COMMAND ${CMAKE_CXX_COMPILER} -v
+                    OUTPUT_QUIET ERROR_VARIABLE _tea_cxx_v)
+    if(_tea_cxx_v MATCHES "Thread model: win32")
+      execute_process(COMMAND ${CMAKE_CXX_COMPILER} -dumpversion
+                      OUTPUT_VARIABLE _tea_gcc_version
+                      OUTPUT_STRIP_TRAILING_WHITESPACE)
+      if(_tea_gcc_version VERSION_LESS 13)
+        message(FATAL_ERROR
+          "${CMAKE_CXX_COMPILER} is GCC ${_tea_gcc_version} with the \"-win32\" thread model. "
+          "That libstdc++ has no std::mutex/std::thread/std::condition_variable (GCC 13 added "
+          "them for win32 threads), so any C++ program with threads fails to compile with "
+          "\"'mutex' in namespace 'std' does not name a type\" - including this one, which is "
+          "multi-threaded end to end.\n"
+          "Use the POSIX-thread variant instead:\n"
+          "  apt install mingw-w64\n"
+          "  cmake --preset win64-mingw-cross        # picks x86_64-w64-mingw32-g++-posix\n"
+          "or point CMAKE_CXX_COMPILER/CMAKE_C_COMPILER at x86_64-w64-mingw32-{gcc,g++}-posix.")
+      endif()
+    endif()
+  endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # MSVC: the /showIncludes prefix has to be ASCII, or nothing filters it
 # ---------------------------------------------------------------------------
 # cl.exe reports included files with a localized prefix (on a Chinese VS the
@@ -206,13 +257,14 @@ if(TEA_HAVE_MBEDTLS)
 endif()
 
 # ---------------------------------------------------------------------------
-# Web asset embedder: turns web/* into a C++ translation unit so that the
-# produced binary is fully self-contained.
+# Build-time embedders: turn web/* and 3rd/ca-bundle/cacert.pem into C++
+# translation units so that the produced binary is fully self-contained.
 # ---------------------------------------------------------------------------
-# The asset embedder is a *build-time* helper: it must run on the build host,
-# not on the target. When cross-compiling (ARM embedded boards and the like),
-# building it with the target toolchain would produce a binary the host cannot
-# execute, so it is built as a nested project with the host toolchain instead.
+# Both embedders are *build-time* helpers: they must run on the build host, not
+# on the target. When cross-compiling (ARM embedded boards and the like),
+# building them with the target toolchain would produce binaries the host
+# cannot execute, so they are built as a nested project with the host toolchain
+# instead (tools/host_embed builds BOTH tea_embed_assets and tea_embed_ca_bundle).
 #
 # TEA_AGENT_USE_HOST_ASSET_TOOL defaults to CMAKE_CROSSCOMPILING; set it to ON
 # for a native build as well if you want to exercise that path.
@@ -231,37 +283,59 @@ foreach(_rel ${TEA_WEB_RELPATHS})
 endforeach()
 
 if(TEA_AGENT_USE_HOST_ASSET_TOOL)
-  message(STATUS "tea_agent: building the asset embedder with the host toolchain")
+  message(STATUS "tea_agent: building the embedders with the host toolchain")
   set(TEA_HOST_TOOLS_DIR ${CMAKE_BINARY_DIR}/host-tools)
+  # Suffix of an executable on the *host*, not on the target: the nested project
+  # is compiled with the host toolchain, so cross-compiling to Windows from
+  # Linux must expect no ".exe" (CMAKE_EXECUTABLE_SUFFIX is the target's).
+  if(CMAKE_HOST_WIN32)
+    set(TEA_HOST_EXE_SUFFIX .exe)
+  else()
+    set(TEA_HOST_EXE_SUFFIX "")
+  endif()
   set(TEA_EMBED_EXE
-      ${TEA_HOST_TOOLS_DIR}/bin/tea_embed_assets${CMAKE_EXECUTABLE_SUFFIX})
+      ${TEA_HOST_TOOLS_DIR}/bin/tea_embed_assets${TEA_HOST_EXE_SUFFIX})
+  set(TEA_CA_BUNDLE_EXE
+      ${TEA_HOST_TOOLS_DIR}/bin/tea_embed_ca_bundle${TEA_HOST_EXE_SUFFIX})
+  # One nested configure+build produces both helpers; listing both as outputs
+  # keeps the dependency on the generated ca_bundle.cpp honest.
   add_custom_command(
-    OUTPUT ${TEA_EMBED_EXE}
+    OUTPUT ${TEA_EMBED_EXE} ${TEA_CA_BUNDLE_EXE}
     COMMAND ${CMAKE_COMMAND}
             -S ${CMAKE_CURRENT_SOURCE_DIR}/tools/host_embed
             -B ${TEA_HOST_TOOLS_DIR}
             -DCMAKE_BUILD_TYPE=Release
     COMMAND ${CMAKE_COMMAND} --build ${TEA_HOST_TOOLS_DIR} --config Release
-    COMMENT "Building host asset embedder"
+    DEPENDS tools/host_embed/CMakeLists.txt
+            tools/embed_assets.cpp tools/embed_ca_bundle.cpp
+    COMMENT "Building host embed tools"
     VERBATIM
   )
-  add_custom_target(tea_embed_assets_host DEPENDS ${TEA_EMBED_EXE})
+  add_custom_target(tea_embed_assets_host
+                    DEPENDS ${TEA_EMBED_EXE} ${TEA_CA_BUNDLE_EXE})
   set(TEA_EMBED_DEP tea_embed_assets_host)
+  set(TEA_CA_BUNDLE_DEP tea_embed_assets_host)
 else()
   add_executable(tea_embed_assets tools/embed_assets.cpp)
   set_target_properties(tea_embed_assets PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
   set(TEA_EMBED_EXE $<TARGET_FILE:tea_embed_assets>)
   set(TEA_EMBED_DEP tea_embed_assets)
+  set(TEA_CA_BUNDLE_EXE $<TARGET_FILE:tea_embed_ca_bundle>)
+  set(TEA_CA_BUNDLE_DEP tea_embed_ca_bundle)
 endif()
 
 # ---------------------------------------------------------------------------
 # CA bundle embedder: compiles 3rd/ca-bundle/cacert.pem into the binary so a
 # single-file deployment has working https:// without a sidecar PEM.
 # ---------------------------------------------------------------------------
-add_executable(tea_embed_ca_bundle tools/embed_ca_bundle.cpp)
-set_target_properties(tea_embed_ca_bundle PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# In the host-toolchain case (cross-compiling) tea_embed_ca_bundle already
+# exists as a host executable built above; only the native case defines it here.
+if(NOT TEA_AGENT_USE_HOST_ASSET_TOOL)
+  add_executable(tea_embed_ca_bundle tools/embed_ca_bundle.cpp)
+  set_target_properties(tea_embed_ca_bundle PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 
 set(TEA_CA_BUNDLE_PEM ${TEA_3RD}/ca-bundle/cacert.pem)
 set(TEA_CA_BUNDLE_CPP ${TEA_GEN_DIR}/ca_bundle.cpp)
@@ -273,10 +347,13 @@ else()
   set(TEA_CA_BUNDLE_DEPS "")
   message(STATUS "tea_agent: no ${TEA_CA_BUNDLE_PEM}; the binary will look for a PEM at runtime")
 endif()
+# The generator must be named by path, not by target: in the cross-compile case
+# it is a host executable that only exists as a file, and `COMMAND <target>`
+# would resolve to the (unrunnable) target-architecture binary.
 add_custom_command(
   OUTPUT ${TEA_CA_BUNDLE_CPP}
-  COMMAND tea_embed_ca_bundle ${TEA_GEN_DIR} ${TEA_CA_BUNDLE_PEM}
-  DEPENDS tea_embed_ca_bundle ${TEA_CA_BUNDLE_DEPS}
+  COMMAND ${TEA_CA_BUNDLE_EXE} ${TEA_GEN_DIR} ${TEA_CA_BUNDLE_PEM}
+  DEPENDS ${TEA_CA_BUNDLE_DEP} ${TEA_CA_BUNDLE_DEPS}
   COMMENT "Embedding the CA bundle into ca_bundle.cpp"
   VERBATIM
 )

@@ -564,7 +564,11 @@ void ApiServer::Impl::install_routes() {
       send_error(res, 500, "no_assets", "the embedded web UI is missing");
     }
   });
-  svr.Get(R"(/([A-Za-z0-9_\-\.]+))", [this](const httplib::Request& req, httplib::Response& res) {
+  // NOTE: inside a bracket expression write the '-' LAST and unescaped:
+  // libstdc++ up to GCC 6 throws std::regex_error("Invalid range in bracket
+  // expression") for "\\-", which aborted the agent at startup on the
+  // aarch64 target (Linaro GCC 6.5 runtime). The character set is identical.
+  svr.Get(R"(/([A-Za-z0-9_.-]+))", [this](const httplib::Request& req, httplib::Response& res) {
     const std::string name = req.matches[1].str();
     if (name == "favicon.ico") {
       res.status = 204;
@@ -1980,11 +1984,30 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
   options_ = options;
   impl_->web_dir = options.web_dir;
   impl_->started_ms = now_ms();
-  impl_->install_routes();
+  // Route registration builds std::regex objects; on an old libstdc++ (GCC <= 6)
+  // one of those used to throw and take the whole process down with no
+  // diagnostic. Report it as a start error instead.
+  try {
+    impl_->install_routes();
+  } catch (const std::exception& e) {
+    if (err) *err = std::string("installing the routes threw: ") + e.what();
+    return false;
+  }
 
   const std::string host = options.host.empty() ? "127.0.0.1" : options.host;
   impl_->listen_thread = std::thread([this, host]() {
-    impl_->listen_ok = impl_->server.listen(host, options_.port);
+    // An exception escaping this thread used to call std::terminate straight
+    // away ("terminate called without an active exception"), leaving nothing
+    // but a core dump to debug with. Turn it into a reported start failure.
+    try {
+      impl_->listen_ok = impl_->server.listen(host, options_.port);
+    } catch (const std::exception& e) {
+      LOG_ERROR("server: listen threw: ", e.what());
+      impl_->listen_ok = false;
+    } catch (...) {
+      LOG_ERROR("server: listen threw an unknown exception");
+      impl_->listen_ok = false;
+    }
     impl_->listen_returned.store(true);
   });
 

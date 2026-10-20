@@ -871,19 +871,56 @@ settings:
 
 ### 交叉编译
 
-构建期辅助工具（`tools/embed_assets.cpp`，负责把 Web UI 生成 C++ 源）必须**在构建机上运行**，
-所以交叉编译时它会用宿主编译器单独编译，不会出现「用 ARM 工具链编出一个宿主跑不起来的程序」。
+构建期辅助工具必须**在构建机上运行**：`tools/embed_assets.cpp`（把 Web UI 生成 C++ 源）与
+`tools/embed_ca_bundle.cpp`（把 `cacert.pem` 生成 C++ 源）。所以交叉编译时它们会用宿主编译器
+在 `tools/host_embed/` 子项目里单独编译，不会出现「用 ARM 工具链编出一个宿主跑不起来的程序」，
+构建也不会断在 `Embedding the CA bundle into ca_bundle.cpp` 这一步。
 该行为由 `TEA_AGENT_USE_HOST_ASSET_TOOL` 控制，交叉编译时自动为 `ON`。
 
+仓库自带两个 toolchain 文件（`cmake/toolchains/`），各对应一个 preset：
+
+| 目标 | 命令 | 说明 |
+| --- | --- | --- |
+| Linux aarch64 | `cmake --preset arm64-linux && cmake --build --preset arm64-linux -j"$(nproc)"` | 全静态 + 内嵌 CA；工具链位置用 `TEA_AARCH64_PREFIX=<前缀目录>` 覆盖 |
+| Windows x64（MinGW-w64） | `cmake --preset win64-mingw-cross && cmake --build --preset win64-mingw-cross -j"$(nproc)"` | 在 Linux/macOS 上直接产出 `tea_agent.exe`；Windows 自身请用 `mingw` preset |
+
+等价的手写形式（不走 preset 时）：
+
 ```bash
-# 以 aarch64 为例
 cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_SYSTEM_NAME=Linux \
-  -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-  -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-  -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-linux-gnu.cmake
 cmake --build build-arm64 -j"$(nproc)"
 ```
+
+五个坑（本仓库都在真机上踩过，toolchain 文件已替你绕开前四个；前两个现在会在 configure 阶段
+直接报错并给出修法，而不是在编译到一半时冒出看不懂的错误）：
+
+- **必须让 CMake 知道目标系统**：只换 `CMAKE_C_COMPILER` 而不设 `-DCMAKE_SYSTEM_NAME=Linux`
+  （Windows 则是 `=Windows`），`CMAKE_CROSSCOMPILING` 仍为假，宿主工具路径不启用，构建会在运行
+  embed 工具时报 `aarch64-binfmt-P: Could not open '/lib/ld-linux-aarch64.so.1'`；换到 MinGW 时
+  症状更迷惑：能编到一半，然后 `src/config.h` 里 `mutable std::mutex reasoning_mu_;` 报
+  `'mutex' in namespace 'std' does not name a type`。
+- **MinGW-w64 的 `-win32` 线程模型没有 `std::mutex`**：Debian/Ubuntu 的 mingw-w64 同时提供
+  `x86_64-w64-mingw32-g++`（GCC 12，win32 线程）与 `x86_64-w64-mingw32-g++-posix`。前者的
+  libstdc++ 在 GCC 13 之前把 `bits/std_mutex.h`／`<thread>` 的内容整体包在
+  `#ifdef _GLIBCXX_HAS_GTHREADS` 里，于是 `<mutex>` **包含成功但什么都没定义**，错误只在第一次
+  使用 `std::mutex` 的地方出现（本项目端到端都是多线程，必然撞上）。toolchain 文件优先选
+  `-posix`，CMakeLists.txt 也会在选中 win32 模型且 GCC < 13 时直接报错。
+- **宿主工具的可执行名按宿主编译**：从 Linux 交叉到 Windows 时产物没有 `.exe`，
+  期望路径不能用目标侧的 `CMAKE_EXECUTABLE_SUFFIX`（见 CMakeLists.txt 里的 `TEA_HOST_EXE_SUFFIX`）。
+- **别用 Linaro GCC 6.5 出全静态产物**：它内嵌的是 glibc 2.23，在 4.14 内核的 aarch64 设备上
+  `pthread_cond_wait()` 一进 `std::condition_variable::wait()`（noexcept）就抛错 → 进程启动 1 秒后
+  `terminate called without an active exception`（第一个受害者是 cpp-httplib 的线程池）。
+  20 行 mutex/condvar 复现程序在真机上的结论：Linaro 静态 ❌、Linaro 动态 ✅、
+  Arm GNU Toolchain 11.3（glibc 2.35）静态 ✅。所以 aarch64 toolchain 文件默认选 11.3；
+  非要用 Linaro 就 `-DTEA_AGENT_STATIC_LIBC=OFF`（C++ 运行库仍静态，只要求目标机有 glibc 2.23+）。
+- **老 libstdc++（GCC ≤ 6）的 `std::regex` 不认方括号里转义的 `\-`**：路由
+  `/([A-Za-z0-9_\-\.]+)` 会抛 `Invalid range in bracket expression`，进程启动即 abort。
+  方括号里把 `-` 放最后、不转义（`[A-Za-z0-9_.-]`）两边行为一致，且新老运行时都能解析。
+
+aarch64 的 toolchain 文件默认打开 `TEA_AGENT_STATIC_RUNTIME` 与 `TEA_AGENT_STATIC_LIBC`
+（目标设备的 glibc 版本无关紧要）；目标机与构建机环境一致时用 `-DTEA_AGENT_STATIC_LIBC=OFF`
+改回动态链接——静态 glibc 无法 dlopen NSS 模块，域名解析行为会变，详见下文单文件部署。
 
 ### 体积
 
@@ -1055,7 +1092,7 @@ src/
   output_filter.{h,cpp}     工具输出按内容属性削减（build/test/通用）
   util.{h,cpp} log.{h,cpp}  字符串、时间、编码、日志
 web/                        index.html / tokens.css / app.css / app.js（构建期嵌入）
-tools/                      embed_assets.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
+tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
 tests/e2e.ps1              端到端测试（69 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
@@ -1307,6 +1344,8 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 | **Linux 构建与运行** | ✅ 在 wsl2, ubuntu20.04 等环境测试 |
 | **macOS 构建与运行** | ✅ 在 Mac OS X 10.6 Snow Leopard 测试通过 |
 | **真实 ARM 交叉编译产物** | ✅ aarch64-linux-gnu-gcc (Linaro GCC 6.5-2018.12) 6.5.0 编译，到 horizon x3 执行正常 GLIBC 2.28 |
+| Linux→Windows MinGW-w64 交叉构建（`win64-mingw-cross` preset） | ✅ 产出 PE32+ `tea_agent.exe` 且内嵌 CA；运行需在 Windows 上验证 |
+| **ARM64 设备实跑**（x3sdbx3, kernel 4.14.74, glibc 2.28） | ✅ 全静态 11.3 产物：启动不崩，`/`、`/app.css`、`/app.js`、`/api/health`、`/api/workspaces` 全 200，`/favicon.ico` 204，驻留 15s+ |
 
 Linux / macOS 首次构建若报错，最可能集中在 `src/command.cpp`（`fork`/`setsid`/进程组）与
 `src/platform_fs.cpp`（POSIX `stat`/`dirent`），欢迎提 issue 附报错。

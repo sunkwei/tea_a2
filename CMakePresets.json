@@ -39,6 +39,32 @@
       "inherits": "base",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "arm64-linux",
+      "displayName": "Linux aarch64 (cross from x86_64 host)",
+      "description": "Uses cmake/toolchains/aarch64-linux-gnu.cmake; fully static binary with the CA bundle embedded. Override the toolchain with TEA_AARCH64_PREFIX.",
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+      "binaryDir": "${sourceDir}/build-arm64",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "win64-mingw-cross",
+      "displayName": "Windows x64 / MinGW-w64 (cross from a POSIX host)",
+      "description": "Uses cmake/toolchains/mingw-w64-x86_64.cmake. On Windows itself use the native mingw preset.",
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-w64-x86_64.cmake",
+      "binaryDir": "${sourceDir}/build-win64",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     }
   ],
   "buildPresets": [
@@ -46,9 +72,25 @@
       "name": "msvc",
       "configurePreset": "msvc",
       "description": "VSLANG is set here as well: the environment must be in place when cl.exe runs, not only while CMake configures.",
-      "environment": { "VSLANG": "1033" }
+      "environment": {
+        "VSLANG": "1033"
+      }
     },
-    { "name": "mingw", "configurePreset": "mingw" },
-    { "name": "posix", "configurePreset": "posix" }
+    {
+      "name": "mingw",
+      "configurePreset": "mingw"
+    },
+    {
+      "name": "posix",
+      "configurePreset": "posix"
+    },
+    {
+      "name": "arm64-linux",
+      "configurePreset": "arm64-linux"
+    },
+    {
+      "name": "win64-mingw-cross",
+      "configurePreset": "win64-mingw-cross"
+    }
   ]
 }
