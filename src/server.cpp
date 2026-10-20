@@ -473,6 +473,47 @@ struct ApiServer::Impl {
     return out->open(copy, config->settings, err);
   }
 
+  /// The persona a workspace falls back to when `system_prompt.md` is empty:
+  /// its own settings.yaml, else the machine-level default (tea_agent.yaml or
+  /// the built-in rules). Trimmed, so it compares and displays predictably.
+  std::string default_persona(const Workspace& ws) const {
+    const std::string& settings_prompt = ws.settings().system_prompt;
+    return trim(settings_prompt.empty() ? config->default_system_prompt() : settings_prompt);
+  }
+
+  /// Everything the settings page needs to show and edit the workspace's
+  /// system prompt: the override on disk (if any), the persona actually in
+  /// effect (`current_prompt` - the editor shows that, not an empty box), what
+  /// it falls back to, and the size/token cost of the prompt the next turn
+  /// will really send.
+  nlohmann::json system_prompt_info(const Workspace& ws) {
+    bool custom = false;
+    const std::string content = ws.load_system_prompt(&custom);
+    const std::string fallback = default_persona(ws);
+    const std::string current = custom ? trim(content) : fallback;
+
+    Agent agent(config, tools);
+    Session session;
+    session.info.created_at = now_iso8601();
+    const std::string effective = agent.build_system_prompt(ws, session);
+
+    nlohmann::json j = nlohmann::json::object();
+    j["content"] = content;              // raw override on disk ("" = none)
+    j["custom"] = custom;
+    j["current_prompt"] = current;       // what the model starts every turn with
+    j["source"] = custom ? "workspace"
+                         : (ws.settings().system_prompt.empty() ? "builtin" : "settings.yaml");
+    j["path"] = ws.system_prompt_file();
+    j["relative_path"] = ws.display_path(ws.system_prompt_file());
+    j["default_prompt"] = fallback;
+    j["default_source"] = ws.settings().system_prompt.empty() ? "builtin" : "settings.yaml";
+    j["bytes"] = static_cast<long long>(content.size());
+    j["max_bytes"] = static_cast<long long>(ws.system_prompt_max_bytes());
+    j["effective_bytes"] = static_cast<long long>(effective.size());
+    j["estimated_tokens"] = Agent::estimate_tokens(effective);
+    return j;
+  }
+
   bool find_session_workspace(const std::string& session_id, Workspace* out, std::string* err) {
     WorkspaceEntry copy;
     bool found = false;
@@ -1016,6 +1057,51 @@ void ApiServer::Impl::install_routes() {
             send_json(res, j);
           });
 
+  // ---- system prompt (per workspace) -------------------------------------
+  // The persona lives in `<run_dir>/system_prompt.md` and is re-read on every
+  // request, so a save here reaches the next turn - no restart, no session
+  // rewrite. An empty file means "use the default" (settings.yaml's
+  // system_prompt, then the built-in rules).
+  svr.Get(R"(/api/workspaces/([^/]+)/system-prompt)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            send_json(res, system_prompt_info(ws));
+          });
+
+  svr.Put(R"(/api/workspaces/([^/]+)/system-prompt)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            nlohmann::json body;
+            if (!parse_json_body(req, &body, res)) return;
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            std::string content = json_string(body, "content");
+            // The editor is seeded with the persona that is currently in effect,
+            // so "saved without touching it" arrives as a copy of the default.
+            // Storing that copy would silently pin the workspace to today's
+            // default (a later change to the machine-level prompt would no
+            // longer reach it), so it is normalised back to "no override".
+            if (trim(content) == default_persona(ws)) content.clear();
+            if (!ws.save_system_prompt(content, &err)) {
+              send_error(res, 400, "bad_request", err);
+              return;
+            }
+            LOG_INFO("system prompt: rewritten from the web UI (", content.size(),
+                     " bytes; ", trim(content).empty() ? "using the default" : "workspace override",
+                     ")");
+            nlohmann::json j = system_prompt_info(ws);
+            j["ok"] = true;
+            send_json(res, j);
+          });
+
   // ---- prompt preview ----------------------------------------------------
   // Shows exactly the system prompt this workspace produces, which is what
   // operators need in order to reason about device probing and cache stability.
@@ -1037,7 +1123,11 @@ void ApiServer::Impl::install_routes() {
             j["estimated_tokens"] = Agent::estimate_tokens(prompt);
             j["settings_file"] = ws.settings_file();
             j["instructions_file"] = ws.instructions_file();
+            j["system_prompt_file"] = ws.system_prompt_file();
             j["has_instructions"] = !ws.instructions().empty();
+            bool custom_prompt = false;
+            ws.load_system_prompt(&custom_prompt);
+            j["has_system_prompt"] = custom_prompt;
             send_json(res, j);
           });
   // ---- sessions ----------------------------------------------------------

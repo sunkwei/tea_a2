@@ -70,6 +70,14 @@ class Workspace {
   /// Contents of `<run_dir>/instructions.md` (empty when absent). Stable for the
   /// process lifetime, so it does not destabilise the prompt prefix.
   const std::string& instructions() const { return instructions_; }
+  /// Contents of `<run_dir>/system_prompt.md` (empty when absent): the
+  /// workspace's replacement for the built-in persona. Read fresh on every call
+  /// so an edit from the web UI applies to the next turn without a restart.
+  std::string load_system_prompt(bool* custom = nullptr) const;
+  /// Replace `<run_dir>/system_prompt.md`. Empty/whitespace-only content clears
+  /// the override (the file is truncated), which falls back to settings.yaml's
+  /// `system_prompt` and then to the built-in default.
+  bool save_system_prompt(const std::string& content, std::string* err) const;
   /// Contents of `<run_dir>/agent.md`: the workspace's accumulated experience,
   /// written by the agent itself (pitfalls, reusable commands/scripts, project
   /// conventions). Read fresh on every call - unlike instructions() it changes
@@ -80,6 +88,7 @@ class Workspace {
   uint64_t free_bytes() const { return free_bytes_; }
   std::string settings_file() const;
   std::string instructions_file() const;
+  std::string system_prompt_file() const;
   std::string agent_doc_file() const;
   std::string scripts_dir() const;
   std::string sessions_dir() const;
@@ -88,6 +97,9 @@ class Workspace {
   std::string tmp_dir() const;
   std::string meta_file() const;
   std::string artifacts_dir() const;
+  /// Hard cap for `<run_dir>/system_prompt.md`; exposed so the HTTP layer can
+  /// reject an oversized edit with the real number.
+  std::size_t system_prompt_max_bytes() const;
 
   /// Map a user/model supplied path to an absolute one, enforcing the
   /// workspace boundary unless allow_outside_workspace is set.

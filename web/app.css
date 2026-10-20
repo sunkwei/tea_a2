@@ -606,6 +606,14 @@ button{font-family:inherit}
 .dialog .form-error{min-height:18px;margin:-4px 0 10px;font-size:12px;line-height:18px;
   color:var(--dsw-alias-state-error-primary);white-space:pre-wrap;word-break:break-word}
 .dialog .actions{display:flex;justify-content:flex-end;gap:8px}
+/* 完整 system prompt 预览：只读，长提示词在弹窗内滚动 */
+.dialog:has(.prompt-preview){width:min(900px,94vw)}
+.prompt-preview{
+  margin:10px 0 0;padding:12px;max-height:62vh;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  background:var(--dsw-alias-markdown-code-block);border:.5px solid var(--dsw-alias-border-l1);
+  border-radius:var(--dsw-radius-md);font:12px/18px var(--ds-font-family-code);
+  color:var(--dsw-alias-label-secondary);
+}
 /* 首次运行：上传 provider.yaml */
 .dialog:has(.setup){width:min(560px,92vw)}
 .setup{display:flex;flex-direction:column;gap:12px}

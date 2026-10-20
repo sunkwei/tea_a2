@@ -690,6 +690,7 @@ macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell�
 │   └── <session_id>.json     # 完整会话（reasoning、工具调用与结果；分叉会话带 forked_from/fork_turn）
 ├── memory/memory.json        # 长期记忆（结构化条目）
 ├── agent.md                  # 本工作区的经验（注入 prompt，见下）
+├── system_prompt.md          # 工作区级 system prompt 覆盖（空 = 用默认，见下）
 ├── scripts/                  # 可复用脚本，跨会话保留
 ├── trajectories/<sid>.jsonl  # 每轮轨迹，一轮一行（见上文「轨迹」）
 ├── tmp/                      # toolkit_exec 的临时脚本
@@ -717,6 +718,35 @@ macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell�
 - **可人工维护**：内置 UI 的「记忆」页上方就是它的编辑框（带未保存提示与还原），
   `GET/PUT /api/workspaces/{id}/agent-doc` 也能直接读写；文件本身就是纯 Markdown，
   用编辑器改也行。
+
+### system prompt：工作区可编辑的人设
+
+`<workspace>/.tea_agent_run/system_prompt.md` 是该工作区的 system prompt 覆盖，和
+`instructions.md` 分开：instructions 是**追加**的硬规则，这个文件则**整体替换**默认人设
+（「You are tea_agent…」那一段）。环境探测、工作区指令、agent.md、记忆等小节仍然自动追加在
+后面，所以它只决定「你是谁、按什么风格工作」。
+
+优先级从具体到通用：
+
+1. `<workspace>/.tea_agent_run/system_prompt.md`（每次请求重新读取）；
+2. 该工作区 `settings.yaml` 的 `system_prompt`（打开工作区时加载）；
+3. 机器级默认（`tea_agent.yaml` 的 `system_prompt`，否则内置规则）。
+
+内置 UI 的「设置 → 系统提示词」提供编辑框、还原、恢复默认和「预览」（完整拼好的提示词），
+`GET/PUT /api/workspaces/{id}/system-prompt` 也能读写。因为第 1 项每轮重新读取，**保存后
+下一次模型请求就生效**，不用重启，也不用改会话。文件上限 64 KB，超限直接 400/报错，不会
+悄悄撑大每一轮请求。
+
+编辑框里显示的一直是**当前真正生效的人设**：有工作区覆盖就是覆盖内容，没有就是默认提示词
+（不是空的输入框）。接口里对应的字段是 `current_prompt` 与 `source`
+（`workspace` / `settings.yaml` / `builtin`），`content` 仍然是磁盘上那份覆盖（空 = 没有）。
+因此：
+
+- 打开面板就能看到模型此刻拿到的人设；改一个字保存即成为本工作区覆盖；
+- 「恢复默认」把编辑框换回默认文本，保存后服务端发现内容与默认一致，就删除覆盖
+  （`system_prompt.md` 变成空文件）——以后机器级默认改了，这里还会跟着变；
+- 保存空白（或与默认完全相同的文本）同样等于「没有覆盖」，不会把今天的默认值钉死在
+  工作区里。
 
 `$HOME/.tea_agent/`（可用 `--tea-home` 覆盖）只放三类东西，**不改动任何既有文件**，
 因此可以和别的 agent 实现共用同一个配置目录：
@@ -824,7 +854,9 @@ settings:
 
 另外有一个工作区指令文件 `<workspace>/.tea_agent_run/instructions.md`，内容会原样拼进
 system prompt 的「Workspace instructions」小节——用来放「这个项目怎么构建、怎么测、有哪些约定」，
-与机器级配置彻底分开。两者都在 workspace 打开时读取一次，保证提示词前缀稳定。
+与机器级配置彻底分开。它和 `settings.yaml` 一样在 workspace 打开时读取一次，保证提示词前缀稳定；
+需要「改完下一轮就生效」的 system prompt 覆盖请放到 `system_prompt.md`（见上文「工作区与运行时
+存储」），它每轮重新读取。
 
 ### 回传 `reasoning_content`（多轮工具调用的坑）
 
@@ -1148,6 +1180,7 @@ node tests/ui_metrics_layout.mjs                          # 指标栏始终单�
 python3 tests/smoke_single_file.py                        # 内嵌证书 + 静态链接 + 静态下的 DNS
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
+python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
 node tests/smoke_turn_resume.mjs                          # 断线不取消轮次：回放 / 续播 / stop 仍然有效
 node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
@@ -1159,6 +1192,7 @@ node tests/ui_stream_guard.mjs                            # 生成期间切换/�
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
 node tests/ui_agent_doc.mjs                               # 记忆页的 agent.md 编辑框（需 google-chrome）
+node tests/ui_system_prompt.mjs                           # 设置页的系统提示词编辑/预览/恢复默认（需 google-chrome）
 node tests/ui_render_perf.mjs                             # 流式渲染不重建气泡（需 google-chrome）
 node tests/ui_crumbs.mjs                                  # 顶栏显示工作区与会话标题（需 google-chrome）
 node tests/ui_turn_index.mjs                              # 对话跳转索引：64 字 tip / 点击定位（需 google-chrome）
@@ -1191,6 +1225,17 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的
 下一次请求里；`op=read/replace/scripts` 各自生效；超过 32 KB 的 append 报错并提示压缩且不
 改动文件；`GET/PUT /api/workspaces/{id}/agent-doc` 能读、能改、超限报 400。
+
+`tests/smoke_system_prompt.py` 覆盖工作区级 system prompt：默认回落到内置规则（或
+`settings.yaml` 的 `system_prompt`）；`GET/PUT /api/workspaces/{id}/system-prompt` 能读能写，
+`current_prompt`/`source` 反映真正生效的人设；保存后**下一次模型请求**就以新内容开头，且替换
+而非追加内置人设，环境块与 agent.md 仍在；把默认文本原样保存回去不会产生覆盖；
+空白内容恢复默认；超过 64 KB 报 400 且不改文件。
+
+`tests/ui_system_prompt.mjs` 在真实浏览器里钉住「设置 → 系统提示词」：打开面板编辑框里就是
+当前生效的人设（没有覆盖时是默认提示词，不是空框）且不算「未保存」、编辑后出现「未保存」、
+还原回到当前人设、保存落盘且 `/prompt` 反映新内容、预览弹窗展示完整提示词、切换工作区各自
+显示自己的提示词、恢复默认后保存会删掉覆盖。
 
 `tests/ui_status.mjs` 覆盖右上角状态灯：用 CDP 只屏蔽 `/api/health`（其它接口照常工作，正是
 报告里的情形）。断言单次失败**不会**翻成「未连接」（一次抖动不是掉线）、连续两次才翻且横幅

@@ -32,6 +32,14 @@
     agentDoc: {
       content: '', original: '', path: '', scriptsDir: '', scripts: [],
       loading: false, touched: false
+    },
+    // 工作区级 system prompt（.tea_agent_run/system_prompt.md）。custom=false
+    // 表示没有覆盖、实际用的是 defaultPrompt；编辑框始终显示 current（当前真正
+    // 在用的提示词），保存后下一轮请求就生效。
+    systemPrompt: {
+      content: '', current: '', custom: false, path: '',
+      defaultPrompt: '', defaultSource: 'builtin', maxBytes: 0,
+      effectiveBytes: 0, estimatedTokens: 0, loading: false, touched: false
     }
   };
 
@@ -2222,7 +2230,7 @@
       if (state.view === 'files') loadTree(state.files.dir);
       if (state.view === 'memory') loadMemory();
       if (state.view === 'logs') loadLogs();
-      if (state.view === 'settings') renderSettings();
+      if (state.view === 'settings') { renderSettings(); loadSystemPrompt(); }
       if (!silent) toast('已切换工作区：' + w.name);
     });
   }
@@ -2402,7 +2410,7 @@
     if (name === 'files') loadTree(state.files.dir);
     if (name === 'memory') loadMemory();
     if (name === 'logs') loadLogs();
-    if (name === 'settings') renderSettings();
+    if (name === 'settings') { renderSettings(); loadSystemPrompt(); }
   }
   /* ---------- 侧边栏收起 / 展开 ---------- */
   // 窄屏或专心读回答时，左侧 260px 一直是白占的。收起后由顶栏左侧的同一个图标
@@ -2684,6 +2692,104 @@
         toast('agent.md 已保存');
       }, function (e) { toast('保存失败：' + e.message); });
   }
+  /* ---------- 工作区 system prompt ---------- */
+  // 每轮请求都会重新拼 system prompt：这里保存的内容下一次（或本轮下一次
+  // 模型请求）就会生效，不需要重启，也不用改会话。
+  //
+  // 编辑框显示的是 `current`——服务端真正当作人设使用的那段文字：有工作区覆盖
+  // 就是覆盖内容，没有就是默认提示词。空编辑框什么也说明不了，所以绝不显示空。
+  // 改完保存，"与默认一致"会被服务端归一成「无覆盖（跟随默认）」。
+  function applySystemPrompt(d) {
+    var sp = state.systemPrompt;
+    sp.content = d.content || '';
+    sp.current = d.current_prompt != null ? d.current_prompt : (d.content || '');
+    sp.custom = !!d.custom;
+    sp.path = d.relative_path || d.path || sp.path;
+    sp.defaultPrompt = d.default_prompt || sp.defaultPrompt;
+    sp.defaultSource = d.default_source || sp.defaultSource;
+    sp.maxBytes = num(d.max_bytes);
+    sp.effectiveBytes = num(d.effective_bytes);
+    sp.estimatedTokens = num(d.estimated_tokens);
+    sp.loading = false;
+    sp.touched = false;
+  }
+  function loadSystemPrompt() {
+    if (!state.workspace) { renderSystemPrompt(); return Promise.resolve(); }
+    var wsid = state.workspace.id;
+    state.systemPrompt.loading = true;
+    renderSystemPrompt();
+    return api('api/workspaces/' + encodeURIComponent(wsid) + '/system-prompt').then(function (d) {
+      if (!state.workspace || state.workspace.id !== wsid) return;   // 期间切了工作区
+      applySystemPrompt(d);
+      renderSystemPrompt();
+    }, function (e) {
+      state.systemPrompt.loading = false;
+      renderSystemPrompt();
+      toast('读取 system prompt 失败：' + e.message);
+    });
+  }
+  /// 编辑框里是不是「当前生效的内容」。dirty 用 current 比，不用磁盘上的覆盖：
+  /// 没有覆盖时编辑框里是默认提示词，那不算用户改过。
+  function systemPromptDirty() {
+    return $('system-prompt-editor').value !== state.systemPrompt.current;
+  }
+  function renderSystemPrompt() {
+    var sp = state.systemPrompt;
+    var editor = $('system-prompt-editor');
+    if (!editor) return;
+    // touched 由输入事件置位：用户正在改就不要被服务端内容覆盖。
+    if (!sp.touched) editor.value = sp.current;
+    $('system-prompt-path').textContent = sp.path;
+    $('system-prompt-path').title = sp.path || '';
+    var dirty = systemPromptDirty();
+    var meta = dirty ? '未保存'
+      : (sp.loading ? '读取中…' : (sp.custom ? '自定义 · ' + fmtBytes(sp.content.length) : '默认'));
+    $('system-prompt-meta').textContent = meta;
+    $('system-prompt-meta').classList.toggle('dirty', dirty);
+    $('system-prompt-save').disabled = !dirty;
+    $('system-prompt-revert').disabled = !dirty;
+    var hint = $('system-prompt-hint');
+    clear(hint);
+    hint.appendChild(el('span', 's-nm',
+      sp.custom ? '当前：工作区自定义，整体替换默认人格' :
+        '当前：默认提示词（编辑框里就是它，改完保存即成为本工作区自定义）'));
+    if (sp.effectiveBytes) {
+      hint.appendChild(el('span', null, '整段提示词 ' + fmtBytes(sp.effectiveBytes) +
+        ' · ≈' + fmtTokens(sp.estimatedTokens) + ' tokens（含环境、agent.md 等，点「预览」）'));
+    }
+    hint.appendChild(el('span', null, '保存后从下一轮开始生效'));
+    if (sp.defaultSource === 'settings.yaml') {
+      hint.appendChild(el('span', null, '默认来自 settings.yaml 的 system_prompt'));
+    }
+  }
+  function saveSystemPrompt() {
+    if (!state.workspace) return;
+    var content = $('system-prompt-editor').value;
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/system-prompt',
+      { method: 'PUT', body: { content: content } }).then(function (d) {
+        applySystemPrompt(d);
+        renderSystemPrompt();
+        toast(d.custom ? 'system prompt 已保存，下一轮生效'
+                       : '已恢复默认提示词，下一轮生效');
+      }, function (e) { toast('保存失败：' + e.message); });
+  }
+  function previewSystemPrompt() {
+    if (!state.workspace) { toast('请先选择工作区'); return; }
+    var dirty = systemPromptDirty();
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/prompt').then(function (d) {
+      var body = el('div');
+      if (dirty) {
+        body.appendChild(el('div', 'hint',
+          '编辑框里有未保存的修改：下面是服务端当前生效的版本，保存后才会换成编辑框里的内容。'));
+      }
+      body.appendChild(el('div', 'hint', '下一轮实际发送的 system prompt · ' + fmtBytes(d.bytes) +
+        ' · ≈' + fmtTokens(d.estimated_tokens) + ' tokens · ' +
+        (d.has_system_prompt ? '工作区自定义' : '默认')));
+      var pre = el('pre', 'prompt-preview', d.system_prompt || '');
+      body.appendChild(pre);
+      openDialog('完整 system prompt', body, [{ label: '关闭', primary: true, onClick: closeDialog }]);
+    }, function (e) { toast('读取完整提示词失败：' + e.message); });
+  }
   function renderMemory() {
     var box = $('memory-list');
     clear(box);
@@ -2880,6 +2986,23 @@
     };
     $('memory-add').onclick = addMemory;
     $('memory-refresh').onclick = loadMemory;
+    $('system-prompt-save').onclick = saveSystemPrompt;
+    $('system-prompt-preview').onclick = previewSystemPrompt;
+    // 「恢复默认」：把编辑框换回默认提示词（不是清空）。保存时服务端看到内容与
+    // 默认一致，就会删掉工作区覆盖，于是后续默认变更仍然能影响到这里。
+    $('system-prompt-default').onclick = function () {
+      $('system-prompt-editor').value = state.systemPrompt.defaultPrompt;
+      state.systemPrompt.touched = true;
+      renderSystemPrompt();
+    };
+    $('system-prompt-revert').onclick = function () {
+      state.systemPrompt.touched = false;
+      renderSystemPrompt();
+    };
+    $('system-prompt-editor').addEventListener('input', function () {
+      state.systemPrompt.touched = true;
+      renderSystemPrompt();
+    });
     $('agent-doc-save').onclick = saveAgentDoc;
     $('agent-doc-revert').onclick = function () {
       state.agentDoc.touched = false;
@@ -2896,7 +3019,9 @@
       saveLS();
       if (state.logsAutoScroll) $('logs-pre').scrollTop = $('logs-pre').scrollHeight;
     };
-    $('settings-refresh').onclick = function () { loadProviders(); loadTools(); loadHealth(true).catch(function () {}); };
+    $('settings-refresh').onclick = function () {
+      loadProviders(); loadTools(); loadSystemPrompt(); loadHealth(true).catch(function () {});
+    };
     document.addEventListener('keydown', function (e) {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {   // Ctrl/Cmd+K 聚焦输入框
         e.preventDefault();

@@ -184,7 +184,20 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
   const EnvironmentInfo& env = machine_environment();
   const Settings& st = workspace.settings();
   std::ostringstream out;
-  out << config_->default_system_prompt() << "\n\n";
+  // Persona precedence, most specific first:
+  //   1. `<workspace>/.tea_agent_run/system_prompt.md`, read fresh on every call
+  //      so an edit in the UI reaches the *next* turn (or the next iteration of
+  //      a running one) without a restart;
+  //   2. the workspace's `settings.yaml: system_prompt` (loaded when opened);
+  //   3. the machine-level default (tea_agent.yaml or the built-in rules).
+  const std::string workspace_prompt = trim(workspace.load_system_prompt());
+  if (!workspace_prompt.empty()) {
+    out << workspace_prompt << "\n\n";
+  } else if (!st.system_prompt.empty()) {
+    out << st.system_prompt << "\n\n";
+  } else {
+    out << config_->default_system_prompt() << "\n\n";
+  }
 
   // Everything below is probed from the real device and kept byte-stable for the
   // process/session lifetime: a varying block at the head of the conversation

@@ -21,6 +21,12 @@ const char* const kMemoryFileName = "memory.json";
 /// compact the file with op=replace.
 constexpr std::size_t kAgentDocMaxBytes = 32u * 1024u;
 
+/// Hard ceiling for `<run_dir>/system_prompt.md`. The file replaces the built-in
+/// persona in every request, so a runaway paste would inflate every turn (and
+/// swallow the context budget) instead of failing once. 64 KB is far more than
+/// a real persona needs.
+constexpr std::size_t kSystemPromptMaxBytes = 64u * 1024u;
+
 /// What a brand-new agent.md starts as. The headings are a suggestion for both
 /// the model and the human editing it; the guidance block above them explains
 /// what belongs here (and what belongs in memory.json instead).
@@ -359,8 +365,40 @@ std::string Workspace::instructions_file() const {
   return path_join(run_dir_, "instructions.md");
 }
 
+std::string Workspace::system_prompt_file() const {
+  return path_join(run_dir_, "system_prompt.md");
+}
+
 std::string Workspace::agent_doc_file() const {
   return path_join(run_dir_, "agent.md");
+}
+
+std::size_t Workspace::system_prompt_max_bytes() const {
+  return kSystemPromptMaxBytes;
+}
+
+std::string Workspace::load_system_prompt(bool* custom) const {
+  if (custom) *custom = false;
+  if (!path_exists(system_prompt_file())) return std::string();
+  std::string text;
+  if (!read_file(system_prompt_file(), &text, kSystemPromptMaxBytes)) return std::string();
+  if (custom) *custom = !trim(text).empty();
+  return text;
+}
+
+bool Workspace::save_system_prompt(const std::string& content, std::string* err) const {
+  if (content.size() > kSystemPromptMaxBytes) {
+    if (err) {
+      *err = "system_prompt.md would be " + std::to_string(content.size()) + " bytes; the limit is " +
+             std::to_string(kSystemPromptMaxBytes) + ". Shorten it and write it again.";
+    }
+    return false;
+  }
+  // An empty file is the documented "use the default" state, so whitespace-only
+  // input is normalised to an empty file rather than a file full of blanks.
+  std::string body = trim(content);
+  if (!body.empty()) body += "\n";
+  return write_file(system_prompt_file(), body, false, err);
 }
 
 std::string Workspace::scripts_dir() const {

@@ -242,6 +242,32 @@
           <div class="page-head"><h2 class="page-title">设置</h2>
             <div class="page-actions"><button class="btn" id="settings-refresh" type="button">刷新</button></div>
           </div>
+          <!-- 工作区级 system prompt：编辑框里始终是**当前真正生效**的人设（没有
+               覆盖时就是默认提示词），一眼就能看出模型现在拿到的是什么。改动保存
+               后，下一轮请求就用新的；恢复默认会把编辑框换回默认文本，保存即删除
+               工作区覆盖。环境探测、工作区指令、agent.md、记忆等小节仍会自动追加
+               在后面（点「预览」看整段）。 -->
+          <h3 class="sec-title">系统提示词</h3>
+          <div class="doc-card">
+            <div class="doc-head">
+              <span class="doc-title">System prompt（当前工作区）</span>
+              <span class="doc-path" id="system-prompt-path"></span>
+              <span class="doc-actions">
+                <span class="doc-meta" id="system-prompt-meta"></span>
+                <button class="btn" id="system-prompt-preview" type="button"
+                        title="查看下一轮实际发送的完整 system prompt">预览</button>
+                <button class="btn" id="system-prompt-default" type="button"
+                        title="把编辑框换回默认提示词（保存后删除本工作区的覆盖，跟随默认）">恢复默认</button>
+                <button class="btn" id="system-prompt-revert" type="button"
+                        title="放弃未保存的修改">还原</button>
+                <button class="btn primary" id="system-prompt-save" type="button">保存</button>
+              </span>
+            </div>
+            <textarea class="ta doc-editor" id="system-prompt-editor" rows="12" spellcheck="false"
+                      placeholder="读取中…（这里是当前生效的 system prompt；保存后从下一轮开始生效）"></textarea>
+            <div class="doc-scripts" id="system-prompt-hint"></div>
+          </div>
+          <h3 class="sec-title">运行环境</h3>
           <div id="settings-paths" class="card"></div>
           <h3 class="sec-title">模型提供方</h3>
           <div id="settings-providers"></div>
