@@ -606,6 +606,18 @@ button{font-family:inherit}
 .dialog .form-error{min-height:18px;margin:-4px 0 10px;font-size:12px;line-height:18px;
   color:var(--dsw-alias-state-error-primary);white-space:pre-wrap;word-break:break-word}
 .dialog .actions{display:flex;justify-content:flex-end;gap:8px}
+/* 危险操作（销毁）：红色边框 + 红色主按钮，和普通卡片区分开 */
+.danger-card{border-color:var(--dsw-alias-state-error-primary)}
+.btn.danger{
+  color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary);
+}
+.btn.danger:hover{background:var(--dsw-alias-state-error-primary);color:#fff}
+.destroy-row{display:flex;gap:8px;align-items:baseline;font-size:12px;line-height:20px;margin:2px 0}
+.destroy-row .k{flex:0 0 auto;min-width:72px;color:var(--dsw-alias-label-caption)}
+.destroy-row .mono{word-break:break-all;color:var(--dsw-alias-label-secondary)}
+.destroy-row .gone{color:var(--dsw-alias-label-caption);font-size:11px}
+.destroy-sub{margin:10px 0 4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+
 /* 完整 system prompt 预览：只读，长提示词在弹窗内滚动 */
 .dialog:has(.prompt-preview){width:min(900px,94vw)}
 .prompt-preview{

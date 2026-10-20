@@ -149,6 +149,13 @@ void Logger::add_sink(const std::string& tag, const std::string& file_path) {
   sinks_.push_back(std::move(sink));
 }
 
+void Logger::close_files() {
+  std::lock_guard<std::mutex> lock(mu_);
+  global_file_.close();
+  global_path_.clear();
+  sinks_.clear();
+}
+
 void Logger::remove_sink(const std::string& tag) {
   std::lock_guard<std::mutex> lock(mu_);
   for (size_t i = 0; i < sinks_.size(); ++i) {

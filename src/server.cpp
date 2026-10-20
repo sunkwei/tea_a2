@@ -425,6 +425,23 @@ std::string rfc5987_name(const std::string& name) {
   return out;
 }
 
+/// Guard for the wipe (POST /api/destroy): never hand a filesystem root, an
+/// empty string or a relative path to a recursive delete. The list of targets is
+/// built by us, so this is the last line of defence rather than a policy.
+bool is_wipeable_path(const std::string& path) {
+  const std::string p = trim(path);
+  if (p.size() < 2) return false;                    // "", "/", "."
+  if (p == "/" || p == "\\") return false;
+#ifdef _WIN32
+  // "C:\", "C:/", "C:" - a drive root, not a directory inside it.
+  if (p.size() <= 3 && p[1] == ':') return false;
+  if (p.compare(0, 2, "\\\\") == 0 && p.find('\\', 2) == std::string::npos) return false;
+#else
+  if (p[0] != '/') return false;                     // relative: resolved against cwd
+#endif
+  return true;
+}
+
 const WebAsset* find_embedded_asset(const std::string& path) {
   for (std::size_t i = 0; i < kWebAssetCount; ++i) {
     if (path == kWebAssets[i].path) return &kWebAssets[i];
@@ -511,6 +528,102 @@ struct ApiServer::Impl {
     j["max_bytes"] = static_cast<long long>(ws.system_prompt_max_bytes());
     j["effective_bytes"] = static_cast<long long>(effective.size());
     j["estimated_tokens"] = Agent::estimate_tokens(effective);
+    return j;
+  }
+
+  /// What a wipe would delete, in the order it deletes them: the tea home
+  /// (provider.yaml, tea_agent.yaml, workspaces.json, the global log) and each
+  /// registered workspace's `.tea_agent_run` (sessions, trajectories, memory,
+  /// agent.md, per-workspace log). Project directories are never touched.
+  nlohmann::json destroy_targets() {
+    nlohmann::json list = nlohmann::json::array();
+    list.push_back({{"kind", "tea_home"},
+                    {"path", config->tea_home},
+                    {"exists", path_is_dir(config->tea_home)}});
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (std::size_t i = 0; i < registry->entries().size(); ++i) {
+        const WorkspaceEntry& e = registry->entries()[i];
+        const std::string run_dir = path_join(e.path, ".tea_agent_run");
+        list.push_back({{"kind", "workspace"},
+                        {"workspace_id", e.id},
+                        {"workspace", e.name},
+                        {"path", run_dir},
+                        {"exists", path_is_dir(run_dir)}});
+      }
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["tea_home"] = config->tea_home;
+    j["targets"] = list;
+    return j;
+  }
+
+  /// Delete one target, recording the outcome instead of stopping at the first
+  /// failure: a half-wiped tree is worse than a report that names what survived.
+  static void wipe_one(const std::string& path, nlohmann::json* removed,
+                       nlohmann::json* skipped, nlohmann::json* failed) {
+    if (!is_wipeable_path(path)) {
+      failed->push_back({{"path", path}, {"error", "refusing to delete this path"}});
+      return;
+    }
+    if (!path_exists(path)) {
+      skipped->push_back(path);
+      return;
+    }
+    std::string err;
+    if (remove_path(path, true, &err)) {
+      removed->push_back(path);
+    } else {
+      failed->push_back({{"path", path}, {"error", err}});
+    }
+  }
+
+  /// Irreversible: remove every trace this agent left on the machine and drop
+  /// the in-memory state, so the process behaves like a freshly started one
+  /// without a provider.yaml (the UI then shows its first-run setup gate).
+  nlohmann::json destroy_all() {
+    nlohmann::json removed = nlohmann::json::array();
+    nlohmann::json skipped = nlohmann::json::array();
+    nlohmann::json failed = nlohmann::json::array();
+
+    // Log files live inside the very directories being deleted. Close them
+    // first: Windows refuses to unlink an open file, and on POSIX the space
+    // would only come back when the process exits.
+    Logger::instance().close_files();
+
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (std::size_t i = 0; i < registry->entries().size(); ++i) {
+        wipe_one(path_join(registry->entries()[i].path, ".tea_agent_run"), &removed, &skipped,
+                 &failed);
+      }
+      // The index itself is gone with the tea home; keep the in-memory list in
+      // sync so the next request does not resurrect it by saving an entry.
+      registry->mutable_entries().clear();
+    }
+    wipe_one(config->tea_home, &removed, &skipped, &failed);
+
+    // Finished turns still replay from memory; there is nothing left to replay.
+    std::vector<std::shared_ptr<ChatTurn>> graveyard;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (auto it = turns.begin(); it != turns.end(); ++it) graveyard.push_back(it->second);
+      turns.clear();
+    }
+    graveyard.clear();  // ~ChatTurn joins its worker; never do that under `mu`
+
+    // Back to "no provider.yaml configured", exactly like a cold start.
+    config->load(config->path, config->tea_home);
+    config->active_provider.clear();
+    config->active_model.clear();
+    config->extra_path.clear();
+
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = failed.empty();
+    j["tea_home"] = config->tea_home;
+    j["removed"] = removed;
+    j["skipped"] = skipped;
+    j["failed"] = failed;
     return j;
   }
 
@@ -645,6 +758,9 @@ void ApiServer::Impl::install_routes() {
     // The UI blocks on this: without a config there is nothing to chat with.
     j["config_loaded"] = config->loaded;
     if (!config->loaded) j["config_error"] = config->error;
+    // Where the mutable state lives; the settings page shows it next to
+    // "销毁" so it is obvious what that button is about to delete.
+    j["tea_home"] = config->tea_home;
     send_json(res, j);
   });
 
@@ -1056,6 +1172,47 @@ void ApiServer::Impl::install_routes() {
             j["size"] = file_size(target);
             send_json(res, j);
           });
+
+  // ---- destroy: delete every trace ---------------------------------------
+  // Deletes the tea home (provider.yaml, tea_agent.yaml, workspaces.json, the
+  // global log) and every indexed workspace's `.tea_agent_run`. Irreversible, so
+  // GET only previews the list and POST requires an explicit confirmation in the
+  // body - a stray POST with no payload must not be able to do this.
+  svr.Get("/api/destroy", [this](const httplib::Request&, httplib::Response& res) {
+    send_json(res, destroy_targets());
+  });
+
+  svr.Post("/api/destroy", [this](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const bool confirmed = (body.contains("confirm") &&
+                            ((body["confirm"].is_boolean() && body["confirm"].get<bool>()) ||
+                             (body["confirm"].is_string() &&
+                              body["confirm"].get<std::string>() == "destroy")));
+    if (!confirmed) {
+      send_error(res, 400, "not_confirmed",
+                 "this deletes the tea home and every workspace's .tea_agent_run; "
+                 "send {\"confirm\": \"destroy\"} to proceed");
+      return;
+    }
+    // A running turn would keep writing sessions/trajectories into directories
+    // that no longer exist (and could recreate them).
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (auto it = turns.begin(); it != turns.end(); ++it) {
+        if (it->second && !it->second->finished()) {
+          send_error(res, 409, "turn_running",
+                     "a chat turn is still running; stop it before destroying the state");
+          return;
+        }
+      }
+    }
+    nlohmann::json result = destroy_all();
+    LOG_WARN("destroy: removed ", result["removed"].size(), " path(s), skipped ",
+             result["skipped"].size(), ", failed ", result["failed"].size(),
+             "; the agent is back to its unconfigured state");
+    send_json(res, result);
+  });
 
   // ---- system prompt (per workspace) -------------------------------------
   // The persona lives in `<run_dir>/system_prompt.md` and is re-read on every

@@ -34,6 +34,12 @@ class Logger {
   /// Register/replace a named extra log file. Safe to call repeatedly.
   void add_sink(const std::string& tag, const std::string& file_path);
   void remove_sink(const std::string& tag);
+  /// Close the global log file and every tagged sink, and forget their paths.
+  /// Needed before deleting the directories those files live in: Windows refuses
+  /// to delete a file that is still open (ERROR_ACCESS_DENIED), and on POSIX the
+  /// unlinked file would keep consuming space until the process exits. Logging
+  /// keeps working (console only); a later configure()/add_sink() reopens a file.
+  void close_files();
 
   void write(LogLevel level, const std::string& tag, const std::string& message);
 

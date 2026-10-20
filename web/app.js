@@ -33,6 +33,9 @@
       content: '', original: '', path: '', scriptsDir: '', scripts: [],
       loading: false, touched: false
     },
+    // 「销毁」的预览结果（GET /api/destroy）：tea home + 每个工作区的
+    // .tea_agent_run。只在打开确认框时取一次，不缓存。
+    destroy: null,
     // 工作区级 system prompt（.tea_agent_run/system_prompt.md）。custom=false
     // 表示没有覆盖、实际用的是 defaultPrompt；编辑框始终显示 current（当前真正
     // 在用的提示词），保存后下一轮请求就生效。
@@ -2790,6 +2793,80 @@
       openDialog('完整 system prompt', body, [{ label: '关闭', primary: true, onClick: closeDialog }]);
     }, function (e) { toast('读取完整提示词失败：' + e.message); });
   }
+  /* ---------- 销毁：删除 tea home 与所有工作区的 .tea_agent_run ---------- */
+  // 不可逆操作，所以先 GET 列出将删除的路径（用户能看到自己这台机器上究竟是
+  // 哪些目录），再在确认框里 POST。删除成功后本地保存的工作区/会话 id 也一并
+  // 清掉，随后刷新页面 —— 服务端已经回到「没有 provider.yaml」的首次运行状态。
+  function openDestroyDialog() {
+    var btn = $('destroy-run');
+    btn.disabled = true;
+    api('api/destroy').then(function (d) {
+      btn.disabled = false;
+      state.destroy = d;
+      var body = el('div');
+      body.appendChild(el('p', 'desc', '是否真的彻底删除痕迹？此操作不可恢复。'));
+      var home = el('div', 'destroy-row');
+      home.appendChild(el('span', 'k', 'tea home'));
+      home.appendChild(el('span', 'mono', d.tea_home || ''));
+      body.appendChild(home);
+      var targets = (d.targets || []).filter(function (t) { return t.kind === 'workspace'; });
+      if (targets.length) {
+        body.appendChild(el('div', 'destroy-sub', '以下工作区的 .tea_agent_run（' + targets.length + ' 个）：'));
+        targets.forEach(function (t) {
+          var row = el('div', 'destroy-row');
+          row.appendChild(el('span', 'k', t.workspace || t.workspace_id || ''));
+          row.appendChild(el('span', 'mono', t.path));
+          if (t.exists === false) row.appendChild(el('span', 'gone', '目录已不存在'));
+          body.appendChild(row);
+        });
+      } else {
+        body.appendChild(el('div', 'destroy-sub', '当前没有已索引的工作区。'));
+      }
+      body.appendChild(el('div', 'desc',
+        'provider.yaml、workspaces.json、日志、会话、轨迹、记忆、agent.md 都会被删除；' +
+        '项目目录本身不受影响。删除后回到首次运行状态，需要重新上传 provider.yaml。'));
+      var err = el('div', 'form-error');
+      body.appendChild(err);
+      var confirmBtn = null;
+      var actions = [
+        { label: '取消', onClick: closeDialog },
+        {
+          label: '彻底删除', primary: true, onClick: function () {
+            if (confirmBtn.disabled) return;
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = '正在删除…';
+            api('api/destroy', { method: 'POST', body: { confirm: 'destroy' } }).then(function (r) {
+              state.destroy = null;
+              // 本地记录的 workspace_id / session_id 指向已经不存在的东西。
+              try { localStorage.removeItem(LS_KEY); } catch (e) { /* 忽略 */ }
+              var failed = (r && r.failed) || [];
+              if (failed.length) {
+                err.textContent = '部分路径删除失败：' +
+                  failed.map(function (f) { return f.path + '（' + f.error + '）'; }).join('；');
+                confirmBtn.disabled = false;
+                confirmBtn.textContent = '彻底删除';
+                return;
+              }
+              closeDialog();
+              toast('已销毁：删除了 ' + ((r && r.removed) || []).length + ' 个目录');
+              setTimeout(function () { location.reload(); }, 600);
+            }, function (e) {
+              err.textContent = '删除失败：' + (e && e.message ? e.message : '未知错误');
+              confirmBtn.disabled = false;
+              confirmBtn.textContent = '彻底删除';
+            });
+          }
+        }
+      ];
+      openDialog('销毁', body, actions);
+      var btns = document.querySelectorAll('#dialog .actions .btn');
+      confirmBtn = btns[btns.length - 1];
+    }, function (e) {
+      btn.disabled = false;
+      toast('读取待删除路径失败：' + e.message);
+    });
+  }
+
   function renderMemory() {
     var box = $('memory-list');
     clear(box);
@@ -2832,6 +2909,8 @@
 
   /* ---------- 12) 设置视图（只展示是否已配置密钥，绝不回显任何密钥） ---------- */
   function renderSettings() {
+    var home = $('destroy-home');
+    if (home && state.health && state.health.tea_home) home.textContent = state.health.tea_home;
     var paths = $('settings-paths');
     clear(paths);
     var row = function (k, v) {
@@ -3019,6 +3098,7 @@
       saveLS();
       if (state.logsAutoScroll) $('logs-pre').scrollTop = $('logs-pre').scrollHeight;
     };
+    $('destroy-run').onclick = openDestroyDialog;
     $('settings-refresh').onclick = function () {
       loadProviders(); loadTools(); loadSystemPrompt(); loadHealth(true).catch(function () {});
     };

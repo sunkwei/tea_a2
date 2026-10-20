@@ -477,6 +477,9 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.5.0
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
+| `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
+| `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
+| `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
 | `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
 | **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）** |
@@ -906,6 +909,36 @@ macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell�
 - 保存空白（或与默认完全相同的文本）同样等于「没有覆盖」，不会把今天的默认值钉死在
   工作区里。
 
+### 销毁：把这个 agent 留下的痕迹全部删掉
+
+设置页最下方有「危险操作 → 销毁…」。确认框里会先列出**这台机器上具体要删哪些路径**，再问
+一句「是否真的彻底删除痕迹？」，确认后删除：
+
+- tea home（`$HOME/.tea_agent` 或 `--tea-home`）：`provider.yaml`、`tea_agent.yaml`、
+  `workspaces.json`、全局日志；
+- 索引里每个工作区的 `.tea_agent_run`：会话、轨迹、记忆、`agent.md`、`system_prompt.md`、
+  `scripts/`、该工作区日志。
+
+**项目目录本身不会被删**，只删其中的 `.tea_agent_run`。删除后进程回到「没有 provider.yaml」
+的首次运行状态：`/api/health` 的 `config_loaded=false`，页面刷新后弹出上传配置的对话框，
+内存里的工作区索引一并清空（不会因为一次 `last_used_at` 更新又把旧条目写回去）。
+
+```bash
+# 先看会删什么（不动文件）
+curl -s http://127.0.0.1:8282/api/destroy | jq
+# 再确认执行；不带 confirm 一律 400，有轮次在跑则 409
+curl -s -X POST http://127.0.0.1:8282/api/destroy   -H 'Content-Type: application/json' -d '{"confirm":"destroy"}'
+# {"ok":true,"tea_home":"/home/me/.tea_agent","removed":[…],"skipped":[…],"failed":[]}
+```
+
+两个实现细节值得一提：
+
+- **先关日志句柄再删目录**。全局日志就在 tea home 里，Windows 不允许删除仍被打开的文件
+  （`ERROR_ACCESS_DENIED`），POSIX 上删掉也只是「已 unlink」，空间要到进程退出才回来。所以
+  `Logger::close_files()` 先关掉全局与所有工作区 sink；之后日志只走终端。
+- **失败不中断，逐条报告**。某个目录删不掉（权限、占用）时其余目录照删，`failed[]` 里带上
+  路径与原因，UI 会把它们列出来，而不是笼统说一句「删除失败」。
+
 `$HOME/.tea_agent/`（可用 `--tea-home` 覆盖）只放三类东西，**不改动任何既有文件**，
 因此可以和别的 agent 实现共用同一个配置目录：
 
@@ -1324,6 +1357,8 @@ node tests/ui_queue.mjs                                   # 生成中 Enter 排�
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
 node tests/ui_agent_doc.mjs                               # 记忆页的 agent.md 编辑框（需 google-chrome）
 node tests/ui_system_prompt.mjs                           # 设置页的系统提示词编辑/预览/恢复默认（需 google-chrome）
+python3 tests/smoke_destroy.py                            # 销毁：预览/确认/删除 tea home 与各 .tea_agent_run
+node tests/ui_destroy.mjs                                 # 设置页「销毁」确认框与删除后回到首次运行（需 google-chrome）
 node tests/ui_render_perf.mjs                             # 流式渲染不重建气泡（需 google-chrome）
 node tests/ui_crumbs.mjs                                  # 顶栏显示工作区与会话标题（需 google-chrome）
 node tests/ui_turn_index.mjs                              # 对话跳转索引：64 字 tip / 点击定位（需 google-chrome）
@@ -1362,6 +1397,18 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 `current_prompt`/`source` 反映真正生效的人设；保存后**下一次模型请求**就以新内容开头，且替换
 而非追加内置人设，环境块与 agent.md 仍在；把默认文本原样保存回去不会产生覆盖；
 空白内容恢复默认；超过 64 KB 报 400 且不改文件。
+
+`tests/smoke_destroy.py` 覆盖「销毁」：`GET /api/destroy` 列出的正是 tea home 与各工作区的
+`.tea_agent_run`（目录已不存在的也照实标 `exists:false`）；不带 `confirm` 的 POST 返回 400 且
+一个文件都不动；有轮次在跑时返回 409；确认后 tea home（含 provider.yaml 与**正被打开的**全局
+日志）和各 `.tea_agent_run` 都消失，而项目目录与其中的文件还在；随后 `/api/health` 报
+`config_loaded=false`、`/api/config/status` 要求重新配置、`/api/workspaces` 为空；再删一次是
+幂等的；删除后重新添加同一工作区也正常。
+
+`tests/ui_destroy.mjs` 在真实浏览器里点一遍：设置页有红色「销毁…」按钮，确认框写着
+「是否真的彻底删除痕迹？」并逐条列出 tea home 与两个工作区的 `.tea_agent_run`；取消后什么都没
+删；确认后目录消失、页面自动刷新并回到上传 provider.yaml 的首次运行界面，localStorage 里
+指向已删工作区/会话的 id 也被清掉。
 
 `tests/ui_system_prompt.mjs` 在真实浏览器里钉住「设置 → 系统提示词」：打开面板编辑框里就是
 当前生效的人设（没有覆盖时是默认提示词，不是空框）且不算「未保存」、编辑后出现「未保存」、

@@ -273,6 +273,24 @@
           <div id="settings-providers"></div>
           <h3 class="sec-title">可用工具</h3>
           <div id="settings-tools"></div>
+
+          <!-- 危险操作放在最后：一眼能扫到，但不会误点。确认框里会逐条列出将被
+               删除的路径（tea home + 每个工作区的 .tea_agent_run）。 -->
+          <h3 class="sec-title">危险操作</h3>
+          <div class="doc-card danger-card">
+            <div class="doc-head">
+              <span class="doc-title">销毁</span>
+              <span class="doc-actions">
+                <span class="doc-meta" id="destroy-meta"></span>
+                <button class="btn danger" id="destroy-run" type="button">销毁…</button>
+              </span>
+            </div>
+            <div class="doc-scripts">
+              删除 tea home（<span class="mono" id="destroy-home">$HOME/.tea_agent</span>：provider.yaml、
+              workspaces.json、日志）以及所有已索引工作区的 <span class="mono">.tea_agent_run</span>
+              （会话、轨迹、记忆、agent.md）。项目目录本身不动，但删除后无法恢复。
+            </div>
+          </div>
         </div>
       </div>
     </section>
