@@ -87,6 +87,24 @@ nlohmann::json metrics_json(long long max_context_tokens, long long context_toke
   return j;
 }
 
+/// Does this error say "I do not know the field `stream_options`"? Gateways
+/// differ in wording, so look for the field name itself, plus the usual
+/// "unknown/unrecognized/unexpected field" phrasing.
+bool rejects_stream_options(const std::string& message) {
+  const std::string lowered = to_lower(message);
+  if (lowered.find("stream_options") == std::string::npos &&
+      lowered.find("include_usage") == std::string::npos) {
+    return false;
+  }
+  static const char* const kHints[] = {"unknown", "unrecognized", "unrecognised", "unexpected",
+                                       "not supported", "unsupported", "invalid", "not allowed",
+                                       "extra fields", "not permitted"};
+  for (std::size_t i = 0; i < sizeof(kHints) / sizeof(kHints[0]); ++i) {
+    if (lowered.find(kHints[i]) != std::string::npos) return true;
+  }
+  return false;
+}
+
 /// Providers word "your request does not fit" differently; recognise the family
 /// so one forced compaction can rescue the request (dsh's overflow trigger).
 bool looks_like_context_overflow(const std::string& lowered) {
@@ -918,7 +936,19 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
             std::make_pair(std::string("x-opencode-session"), session->info.id));
       }
     }
+    // Token usage in a streaming response is opt-in per gateway
+    // (`stream_options.include_usage`). The provider block may override the
+    // global setting, and a gateway that answered 400 to the field is
+    // remembered so we stop sending it.
     request.include_usage = st.stream_include_usage;
+    if (provider_info->stream_include_usage >= 0) {
+      request.include_usage = provider_info->stream_include_usage != 0;
+    }
+    bool usage_flag_supported = true;
+    if (config_->lookup_usage_flag_supported(provider, &usage_flag_supported) &&
+        !usage_flag_supported) {
+      request.include_usage = false;
+    }
     request.send_reasoning_effort = false;
     request.reasoning_effort =
         model_info ? model_info->reasoning_effort : st.reasoning_effort;
@@ -971,6 +1001,19 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       chat = llm_chat(request, options.stream ? on_delta : DeltaCallback(), cancel);
       LOG_DEBUG("agent: iteration ", iteration + 1, " chat done ok=", chat.ok ? 1 : 0,
                 " status=", chat.http_status);
+
+      // A gateway that does not know `stream_options` answers 400 and says so.
+      // Drop the field, remember that for this provider, and try again - one
+      // wasted round trip beats failing every turn.
+      if (chat.http_status == 400 && request.include_usage &&
+          rejects_stream_options(chat.error + " " + chat.detail)) {
+        request.include_usage = false;
+        config_->remember_usage_flag_supported(provider, false);
+        LOG_WARN("llm: provider '", provider,
+                 "' rejected stream_options.include_usage; not sending it again (no "
+                 "provider token usage, the metrics fall back to local estimates)");
+        continue;
+      }
 
       const bool produced_output =
           !chat.content.empty() || !chat.reasoning.empty() || !chat.tool_calls.empty();

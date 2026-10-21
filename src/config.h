@@ -61,6 +61,16 @@ struct ProviderInfo {
   /// How to treat assistant reasoning_content on the wire.
   ReasoningEcho reasoning_echo = ReasoningEcho::Auto;
 
+  /// Whether to ask for token usage in a streaming response
+  /// (`stream_options: {include_usage: true}`). -1 = not declared (inherit the
+  /// global `settings.stream_include_usage`), 0 = never, 1 = always.
+  ///
+  /// Why it matters: OpenAI-compatible gateways only report usage - and with it
+  /// the prefix-cache hit count - when that flag is set. MiniMax documents it
+  /// as "When streaming, set to true to include token usage in the stream"; with
+  /// the flag missing it answers with an empty `usage` object, and the metrics
+  /// strip then shows local estimates instead of the provider's numbers.
+  int stream_include_usage = -1;
   /// Provider-scoped web tools (DeepSeek-style /v1/tools/{search,fetch}).
   /// These endpoints are not OpenAI-standard, so their presence cannot be
   /// probed safely; the config declares them. Account-level, hence not a
@@ -110,7 +120,12 @@ struct Settings {
   /// asked for it to be lifted. The web UI reports it as `fixed_by_cli`.
   bool force_allow_outside_workspace = false;
   bool stream = true;
-  bool stream_include_usage = false;
+  /// Ask for token usage in streaming responses. On by default: without it most
+  /// OpenAI-compatible gateways return an empty `usage` object, and the UI has
+  /// to fall back to local estimates (no cache hit rate, no real token counts).
+  /// A provider that rejects the field is detected at runtime and remembered
+  /// (see AppConfig::remember_usage_flag_supported).
+  bool stream_include_usage = true;
   bool utf8_console = true;
   std::string shell;  // "cmd" | "powershell" | "bash" | "" => auto
   std::string system_prompt;
@@ -194,9 +209,16 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   bool lookup_reasoning_echo(const std::string& provider_name, bool* out) const;
   void remember_reasoning_echo(const std::string& provider_name, bool keep);
 
+  // Same idea for `stream_options.include_usage`: a gateway that does not know
+  // the field answers 400, and we then stop sending it (for that provider, for
+  // the rest of the process) instead of failing every turn.
+  bool lookup_usage_flag_supported(const std::string& provider_name, bool* out) const;
+  void remember_usage_flag_supported(const std::string& provider_name, bool supported);
+
  private:
   mutable std::mutex reasoning_mu_;
   std::map<std::string, bool> reasoning_echo_learned_;
+  std::map<std::string, bool> usage_flag_learned_;
 };
 
 }  // namespace tea

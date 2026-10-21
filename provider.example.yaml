@@ -31,6 +31,13 @@ providers:
     # Optional endpoint overrides (path relative to api_url, or a full URL):
     # search_path: /v1/tools/search
     # fetch_path: /v1/tools/fetch
+    #
+    # Token usage in a streaming response is opt-in for most OpenAI-compatible
+    # gateways (`stream_options: {include_usage: true}`), and without it there is
+    # no usage at all - no prompt/completion tokens, no prefix-cache hit count.
+    # tea_a2 asks for it by default (settings.stream_include_usage) and drops the
+    # field for a provider that answers 400. Uncomment to decide per provider.
+    # stream_include_usage: true
     models:
       deepseek-chat:
         max_context_tokens: 128000

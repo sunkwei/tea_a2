@@ -350,6 +350,19 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
       info.search_path = trim(ystr(pn, "search_path"));
       info.fetch_path = trim(ystr(pn, "fetch_path"));
 
+      // `stream_include_usage` is provider-scoped: whether a gateway reports
+      // token usage (and the prefix-cache hit count) in a streaming response is
+      // a property of that gateway, not of the whole installation. Unset means
+      // "inherit settings.stream_include_usage".
+      if (yhas(pn, "stream_include_usage")) {
+        const YAML::Node node = pn["stream_include_usage"];
+        if (node.IsNull() || (node.IsScalar() && node.Scalar() == "")) {
+          info.stream_include_usage = -1;
+        } else {
+          info.stream_include_usage = ybool(pn, "stream_include_usage", true) ? 1 : 0;
+        }
+      }
+
       if (info.api_url.empty()) {
         warnings.push_back("provider '" + name + "' has no api_url; skipped");
         continue;
@@ -501,6 +514,19 @@ bool AppConfig::lookup_reasoning_echo(const std::string& provider_name, bool* ou
 void AppConfig::remember_reasoning_echo(const std::string& provider_name, bool keep) {
   std::lock_guard<std::mutex> lock(reasoning_mu_);
   reasoning_echo_learned_[provider_name] = keep;
+}
+
+bool AppConfig::lookup_usage_flag_supported(const std::string& provider_name, bool* out) const {
+  std::lock_guard<std::mutex> lock(reasoning_mu_);
+  auto it = usage_flag_learned_.find(provider_name);
+  if (it == usage_flag_learned_.end()) return false;
+  if (out) *out = it->second;
+  return true;
+}
+
+void AppConfig::remember_usage_flag_supported(const std::string& provider_name, bool supported) {
+  std::lock_guard<std::mutex> lock(reasoning_mu_);
+  usage_flag_learned_[provider_name] = supported;
 }
 
 std::string AppConfig::default_system_prompt() const {

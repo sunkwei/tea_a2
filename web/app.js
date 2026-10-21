@@ -1364,7 +1364,8 @@
     var cachePct = s.cachePct;
     setMetric('metric-cache', cachePct == null ? '—' : cachePct + '%',
       cachePct == null
-        ? 'provider 未返回缓存字段（DeepSeek: prompt_cache_hit_tokens；OpenAI: prompt_tokens_details.cached_tokens）'
+        ? 'provider 未返回缓存字段（DeepSeek: prompt_cache_hit_tokens；OpenAI: prompt_tokens_details.cached_tokens）\n' +
+          '不少 OpenAI 兼容网关只有在请求带 stream_options.include_usage 时才报用量'
         : '前缀缓存命中 ' + fmtTokens(s.cached) + ' / ' + fmtTokens(s.prompt) + ' prompt tokens',
       { width: (cachePct == null ? 0 : Math.min(100, cachePct)) + '%' });
 
