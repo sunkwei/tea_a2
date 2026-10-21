@@ -1970,7 +1970,6 @@ tests/e2e.ps1              端到端测试（155 项）；tests/sse_probe.mjs �
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
 sched/task_runner.py        调度器：查 provider 额度，有余量就做排队中的任务
-                            install-autostart.ps1（+ .bat）= Windows 登录自启动
 CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
 cmake/toolchains/           aarch64-linux-gnu.cmake / mingw-w64-x86_64.cmake（交叉编译入口）
 cmake/version_git_hash.cmake 生成 tea_agent.buildinfo（写在二进制旁边，不动源码树）
