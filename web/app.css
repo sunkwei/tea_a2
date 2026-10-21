@@ -813,6 +813,18 @@ button{font-family:inherit}
 }
 .setup-error{font-size:12px;line-height:18px;color:var(--dsw-alias-label-error,#e5484d);white-space:pre-wrap}
 .setup-ok{font-size:12px;color:var(--dsw-alias-label-success,#30a46c)}
+.setup-warn{
+  padding:9px 11px;border-radius:var(--dsw-radius-md);
+  border:.5px solid var(--dsw-alias-state-warn-primary);
+  background:rgba(245,158,11,.10);
+}
+.setup-warn-title{font-size:12px;font-weight:600;color:var(--dsw-alias-state-warn-label)}
+.setup-warn-body{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);margin-top:3px}
+/* 设置页里的一行说明 + 一个动作按钮（重置 provider） */
+.sec-row{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-2px 0 10px;
+}
+.sec-row-text{font-size:12px;color:var(--dsw-alias-label-caption)}
 .toast{
   position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:80;
   background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l2);

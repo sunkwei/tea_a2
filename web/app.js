@@ -2583,13 +2583,28 @@
     return api('api/config/status').then(function (st) { return st; }, function () { return null; });
   }
 
-  function openSetupGate(status) {
-    setupGate.open = true;
+  function openSetupGate(status, opts) {
+    // reset 模式：从设置页主动重置 provider。它复用同一个对话框（只填 key 的快捷
+    // 通道 + 上传 + 粘贴），但**可以关闭**，而且先把风险摆在前面：现有
+    // provider.yaml 会被覆盖，旧配置找不回来。
+    var reset = !!(opts && opts.reset);
+    setupGate.open = !reset;
     var body = el('div', 'setup');
-    body.appendChild(el('p', 'setup-lead',
-      '服务已启动，但没有找到 provider.yaml。上传后即可开始对话，配置会立即生效。'));
+    body.appendChild(el('p', 'setup-lead', reset
+      ? '重置 provider：下面这份配置会覆盖当前的 provider.yaml。'
+      : '服务已启动，但没有找到 provider.yaml。上传后即可开始对话，配置会立即生效。'));
+    if (reset) {
+      var warn = el('div', 'setup-warn');
+      warn.appendChild(el('div', 'setup-warn-title', '⚠ 会覆盖现有配置，且无法撤销'));
+      warn.appendChild(el('div', 'setup-warn-body',
+        '当前 provider.yaml 里的 provider、模型和 API key 都会被替换掉。' +
+        '新配置会先校验再落盘（不合法就拒绝写入，不会留下半个文件），' +
+        '但一旦覆盖，旧的那份就没了——除非你另有备份。' +
+        '想保留多个 provider，请直接编辑那个文件，而不是重置。'));
+      body.appendChild(warn);
+    }
     var pathRow = el('div', 'setup-path');
-    pathRow.appendChild(el('span', 'k', '保存到'));
+    pathRow.appendChild(el('span', 'k', reset ? '覆盖' : '保存到'));
     pathRow.appendChild(el('span', 'mono', (status && status.path) || '~/.tea_agent/provider.yaml'));
     body.appendChild(pathRow);
 
@@ -2775,8 +2790,9 @@
     var ok = el('div', 'setup-ok hidden', '配置已应用，正在刷新…'); ok.id = 'setup-ok';
     body.appendChild(ok);
 
-    openDialog('需要配置 provider.yaml', body, [
-      { label: '重新检测', onClick: function () { location.reload(); } },
+    openDialog(reset ? '重置 provider 配置' : '需要配置 provider.yaml', body, [
+      reset ? { label: '取消', onClick: closeDialog }
+             : { label: '重新检测', onClick: function () { location.reload(); } },
       { label: '上传并应用', primary: true, onClick: function () { apply(ta.value); } }
     ]);
     // openDialog 会重建按钮，所以把禁用状态挂在真正的那个按钮上。
@@ -2789,8 +2805,9 @@
     keyInput.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); quickApply(); }
     });
-    // 挡住关闭：overlay 点击与 Esc 都不能关掉它。
-    $('overlay').classList.add('setup-locked');
+    // 挡住关闭：overlay 点击与 Esc 都不能关掉它。重置模式除外——那里是可以
+    // 取消的，不然「误点」就等于「覆盖配置」。
+    if (!reset) $('overlay').classList.add('setup-locked');
     // 打开就把光标放在最省事的那条路上：粘贴 key、回车。
     setTimeout(function () { keyInput.focus(); }, 0);
   }
@@ -4084,6 +4101,11 @@
     $('settings-refresh').onclick = function () {
       loadProviders(); loadTools(); loadSystemPrompt(); loadAccess();
       loadHealth(true).catch(function () {});
+    };
+    // 「重置 provider」：打开和首次运行同一个配置界面（快捷 key 通道 + 上传 + 粘贴），
+    // 区别是它先摆出覆盖的风险，而且可以取消。真正的覆盖发生在服务端校验通过之后。
+    $('provider-reset').onclick = function () {
+      loadConfigStatus().then(function (st) { openSetupGate(st || {}, { reset: true }); });
     };
     document.addEventListener('keydown', function (e) {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {   // Ctrl/Cmd+K 聚焦输入框

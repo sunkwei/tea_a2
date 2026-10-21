@@ -335,6 +335,14 @@
           <h3 class="sec-title">运行环境</h3>
           <div id="settings-paths" class="card"></div>
           <h3 class="sec-title">模型提供方</h3>
+          <!-- 「重置 provider」= 用一份新配置覆盖现在的 provider.yaml。按钮放在
+               提供方这一节的标题下，因为它动的就是这一节的东西；点开的是和
+               「无 provider 启动」同一个对话框，但先给出不可撤销的风险提示。 -->
+          <div class="sec-row">
+            <span class="sec-row-text">要换一整套 provider？重置会用新配置覆盖当前的 provider.yaml。</span>
+            <button class="btn" id="provider-reset" type="button"
+                    title="打开与首次运行相同的配置界面；确认后覆盖现有 provider.yaml">重置 provider…</button>
+          </div>
           <div id="settings-providers"></div>
           <h3 class="sec-title">可用工具</h3>
           <div id="settings-tools"></div>

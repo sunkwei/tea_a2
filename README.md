@@ -214,6 +214,12 @@ build/bin/tea_agent --workspace . --open
 2. **上传 / 粘贴完整配置**：点击（或拖入）`provider.yaml`，或直接把内容粘到文本框里，点
    「上传并应用」。
 
+已经配好之后想换一整套 provider，「设置」页的「模型提供方」一节里有 **重置 provider**：
+它打开的就是上面这个对话框（快捷 key 通道 + 上传 + 粘贴，一个都不少），但会先说明风险——
+现有的 `provider.yaml` 会被覆盖，**旧的 provider、模型和 API key 找不回来**——而且这个对话框
+**可以取消**（首次运行那个是不可关闭的：那时没有配置，不配就没法用）。新配置仍然先校验再落盘，
+不合法就拒绝写入，不会留下半个文件；有轮次正在跑时也会被拒绝（409）。
+
 两条路都是**先校验再落盘**（校验失败不会覆盖已有文件），成功后页面自动刷新，状态栏从
 「未配置」变成「已连接」，可以直接开始对话。快捷通道生成的配置就是普通的 `provider.yaml`，
 之后随时可以在「文件」页或编辑器里改（加 provider、换默认模型、打开 DeepSeek 的网页工具等）。
@@ -522,7 +528,7 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.9.1
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
-| `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件 |
+| `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件。设置页的「重置 provider」走的就是它 |
 | `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`）；key 不会出现在任何响应里 |
 | `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
 | `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
