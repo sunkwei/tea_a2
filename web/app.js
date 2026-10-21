@@ -15,6 +15,7 @@
     workspaces: [], workspace: null, sessions: [], session: null, messages: [],
     model: null, models: [], modelMenu: false,
     live: null, liveNode: null, liveView: null, liveFrame: 0, liveRenderFallback: 0,
+    liveMdAt: 0,        // 上一次重渲染「正在增长的段落」的时间（节流用）
     streaming: false, abort: null, stopTimer: null,
     attachments: [],
     queue: [], queueRestore: [], queueDone: {},
@@ -605,6 +606,45 @@
       }
     }
   }
+  /* ---------- 4a-1) 流式渲染的成本 ----------
+     一段回答在流式期间是「一个 md 块，text 一直在长」。以前每来一个 delta 就把
+     整块重新跑一遍 markdown 解析、再 innerHTML 换掉：单次成本随回答长度线性增长，
+     整轮下来就是 O(n²)——回答越长越卡，Firefox 尤其明显（它会直接提示
+     「此网页拖慢了您的 firefox」，鼠标也跟着卡）。三个改动：
+       * mdBlockHtml()：块级缓存。结构变化导致整块重建时，没变过的段落不用重解析。
+       * 纯文本快路径：只有一段普通文字时直接改文本节点，不重跑 markdown、不重建
+         DOM（光标动画也不会被重启）。
+       * 节流：带 markdown 的段落最多每 100ms 重渲染一次；本轮结束时一定补上最终
+         文本，所以不会少显示内容。
+  */
+  var MD_RENDER_MS = 100;
+  var MD_INLINE_MARKERS = /[*_`\[\]()!~]/;
+  /// 这段文字会不会被 markdown 改写？不会的话就能当成纯文本直接写进文本节点。
+  function isPlainText(t) {
+    if (!t) return true;
+    if (MD_INLINE_MARKERS.test(t)) return false;
+    if (t.indexOf('\n') >= 0) return false;
+    if (/^\s*(#|[-+>]\s|\d+[.)]\s)/.test(t)) return false;
+    return true;
+  }
+  /// 渲染结果里只有一个 <p>、且里面只有一个文本节点 => 可以直接改这个节点。
+  function plainTextNode(mdEl) {
+    if (!mdEl) return null;
+    var ps = mdEl.querySelectorAll('p');
+    if (ps.length !== 1) return null;
+    var p = ps[0];
+    if (p.childNodes.length !== 1) return null;
+    var n = p.firstChild;
+    return (n && n.nodeType === 3) ? n : null;
+  }
+  /// 段落渲染结果的缓存（挂在块对象上：流式期间块是同一个，只是 text 在长）。
+  function mdBlockHtml(b) {
+    if (b._mdText === b.text) return b._mdHtml;
+    var html = renderMarkdown(b.text || '');
+    b._mdText = b.text;
+    b._mdHtml = html;
+    return html;
+  }
   function assistantNode(msg, outputs, keyPrefix, isLive) {
     var wrap = el('div', 'msg assistant' + (isLive ? ' streaming' : ''));
     if (isLive) wrap.dataset.live = '1';
@@ -623,7 +663,7 @@
       if (b.type === 'md') {
         if (!b.text) return;
         var md = el('div', 'md');
-        md.innerHTML = renderMarkdown(b.text);
+        md.innerHTML = mdBlockHtml(b);
         if (isLive && !state.ended && idx === blocks.length - 1) md.appendChild(el('span', 'stream-caret'));
         wrap.appendChild(md);
       } else {
@@ -1158,15 +1198,18 @@
     state.liveNode = node;
     var mds = node.querySelectorAll('.md');
     var info = lastMdInfo(live);
+    var lastMd = mds.length ? mds[mds.length - 1] : null;
     state.liveView = {
       node: node,
       sig: liveStructure(live),
-      mdEl: mds.length ? mds[mds.length - 1] : null,
+      mdEl: lastMd,
       mdRendered: info.rendered,
       mdText: info.text,
+      mdPlain: plainTextNode(lastMd),
       reasonEl: node.querySelector('.reasoning .reason-panel'),
       reasonText: live.reasoning || ''
     };
+    state.liveMdAt = 0;      // 重建后下一帧就渲染一次
   }
   function renderLive() {
     var box = $('messages');
@@ -1192,9 +1235,25 @@
 
     // 结构没变：只有文字在增长。只碰最后一个段落与思考面板。
     if (info.text && info.text !== view.mdText) {
-      view.mdEl.innerHTML = renderMarkdown(info.text);
-      if (!state.ended && lastBlockIsMd(live)) view.mdEl.appendChild(el('span', 'stream-caret'));
-      view.mdText = info.text;
+      var now = Date.now();
+      var due = state.ended || !state.liveMdAt || (now - state.liveMdAt) >= MD_RENDER_MS;
+      if (view.mdPlain && isPlainText(info.text)) {
+        // 纯文本：直接改文本节点（不重跑 markdown、不重建 DOM、不重启光标动画）
+        view.mdPlain.data = info.text;
+        view.mdText = info.text;
+      } else if (due) {
+        view.mdEl.innerHTML = renderMarkdown(info.text);
+        if (!state.ended && lastBlockIsMd(live)) view.mdEl.appendChild(el('span', 'stream-caret'));
+        view.mdText = info.text;
+        view.mdPlain = plainTextNode(view.mdEl);
+        state.liveMdAt = now;
+      }
+    }
+    // 本轮结束：光标（闪烁的那个小块）该收掉了。快路径不会重建 DOM，所以这里
+    // 单独摘掉它。
+    if (state.ended && view.mdEl) {
+      var caret = view.mdEl.querySelector('.stream-caret');
+      if (caret && caret.parentNode) caret.parentNode.removeChild(caret);
     }
     var reasoning = live.reasoning || '';
     if (view.reasonEl && reasoning !== view.reasonText) {
@@ -1594,6 +1653,8 @@
       if (ev.trajectory_id) state.lastTrajectoryId = ev.trajectory_id;
       if (ev.type === 'done') applyMetrics(ev.metrics, ev.usage);
       renderMetrics();
+      // 节流可能把最后一段文字留在「该渲染但还没渲染」的状态：本轮结束，补一次。
+      scheduleLiveRender();
     }
   }
   function parseSseChunk(raw) {

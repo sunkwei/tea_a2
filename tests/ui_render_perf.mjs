@@ -265,6 +265,14 @@ providers:
   check('DOM mutations stay far below one-per-delta',
     counts.mutations < totalDeltas * 2,
     `mutations=${counts.mutations} for ${totalDeltas} deltas`);
+  // The growing paragraph is not re-rendered per delta either: a plain-text
+  // paragraph is updated by writing into its text node (no DOM rebuild at all),
+  // and a markdown one is re-rendered at most every 100ms. Before this, every
+  // delta re-ran the markdown parser over the whole answer - quadratic, and the
+  // reason Firefox kept saying "this page is slowing down your browser".
+  check('the growing paragraph is not rebuilt per delta',
+    counts.mutations <= 80,
+    `mutations=${counts.mutations} for ${totalDeltas} deltas`);
 
   const finalState = await evalJs(`(function(){
     var msgs = document.querySelectorAll('#messages .msg.assistant');

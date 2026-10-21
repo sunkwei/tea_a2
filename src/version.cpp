@@ -2,7 +2,7 @@
 
 // version.cpp -- single place for the version string.
 // cmake sets GIT_HASH to the current commit hash, or "unknown" if the source is not in a git repo.
-#define GIT_HASH "d43d1a256ce5-dirty"
+#define GIT_HASH "a79c2ddca68b-dirty"
 #define TEA_AGENT_VERSION_STRING "0.9.0"
 
 namespace tea {
