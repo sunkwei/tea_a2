@@ -301,7 +301,8 @@ providers:
         # ---- a file a command produced (and build noise that must not be) ---
         MockProvider.calls = [("c3", "toolkit_exec", {
             "command": "python3 -c \"open('chart.svg','w').write('<svg/>');"
-                       "open('noise.o','w').write('x');\"",
+                       "open('noise.o','w').write('x');"
+                       "open('main.c','w').write('int main(){}');\"",
             "timeout_ms": 60000})]
         events = run_turn(port, wid, sid, "生成图表")
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
@@ -311,8 +312,41 @@ providers:
         check("it is classified as an image", 
               any(a["kind"] == "image" for a in arts if a["path"] == "chart.svg"), arts)
         check("build noise is not listed", "noise.o" not in paths, paths)
+        check("source files count as output", "main.c" in paths, paths)
         check("the scan does not descend into .tea_agent_run",
               all(not p.startswith(".tea_agent_run") for p in paths), paths)
+
+        # ---- a command that produced a lot ---------------------------------
+        many = "".join("open('bulk%d.txt','w').write('x');" % i for i in range(12))
+        MockProvider.calls = [("c3b", "toolkit_exec", {
+            "command": "python3 -c \"%s\"" % many, "timeout_ms": 60000})]
+        events = run_turn(port, wid, sid, "批量生成")
+        _, detail = call(port, "GET", "/api/sessions/%s" % sid)
+        arts = detail.get("artifacts") or []
+        bulk = [a for a in arts if "bulk" in a["path"]]
+        check("every produced file is listed", len(bulk) == 12, len(bulk))
+        check("nothing was dropped below the cap, so no truncation is claimed",
+              "more files were produced" not in
+              (next((e for e in events if e.get("type") == "tool_result"), {}).get("output", "")),
+              next((e for e in events if e.get("type") == "tool_result"), {}).get("output", "")[:120])
+
+        # ---- past the cap the tool has to admit it ------------------------
+        # 260 files is over the 200-file cap of the scan, so the result must say
+        # so instead of presenting a truncated list as the whole truth.
+        flood = "".join("open('flood%d.txt','w').write('x');" % i for i in range(260))
+        MockProvider.calls = [("c3c", "toolkit_exec", {
+            "command": "python3 -c \"%s\"" % flood, "timeout_ms": 120000})]
+        events = run_turn(port, wid, sid, "洪水")
+        flood_out = next((e for e in events if e.get("type") == "tool_result"), {}).get("output", "")
+        check("past the cap the tool says the list is incomplete",
+              "more files were produced" in flood_out, flood_out[-160:])
+        _, detail = call(port, "GET", "/api/sessions/%s" % sid)
+        floods = [a for a in (detail.get("artifacts") or []) if "flood" in a["path"]]
+        # The cap is on the whole scan (older files from the same second take
+        # slots too), so the invariant is: fewer than produced, and never more
+        # than the cap.
+        check("the recorded list stops at the cap", 0 < len(floods) <= 200, len(floods))
+        check("the list is shorter than what was produced", len(floods) < 260, len(floods))
 
         # ---- dedupe --------------------------------------------------------
         MockProvider.calls = [("c4", "toolkit_file", {

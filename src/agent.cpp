@@ -1170,6 +1170,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       // files with an interesting extension (bounded, noise dirs skipped).
       {
         bool changed = false;
+        bool scan_truncated = false;
         const nlohmann::json& meta = tool_result.meta;
         if (tool_result.ok && meta.is_object()) {
           const std::string file_op =
@@ -1196,9 +1197,15 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
                   : std::string();
           if (!command.empty()) {
             const std::vector<std::string> touched =
-                workspace.recent_artifacts(tool_started);
+                workspace.recent_artifacts(tool_started, &scan_truncated);
             for (std::size_t k = 0; k < touched.size(); ++k) {
               changed |= workspace.record_artifact(session, touched[k], call.name, turn_number);
+            }
+            if (scan_truncated) {
+              // Say so: a silent cap would look like "that was all of them".
+              tool_result.output +=
+                  "\n(more files were produced than the list can show; the count above is "
+                  "capped)";
             }
           }
         }
@@ -1212,6 +1219,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
           art_event["iteration"] = iteration;
           art_event["turn"] = turn_number;
           art_event["items"] = arts;
+          art_event["truncated"] = scan_truncated;
           emit(art_event);
         }
       }

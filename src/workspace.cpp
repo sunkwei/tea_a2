@@ -1053,7 +1053,7 @@ bool Workspace::record_artifact(Session* session, const std::string& relative_pa
   // Internal state is not an output; listing sessions and trajectories would
   // bury the one report the user actually asked for.
   if (starts_with(rel, ".tea_agent_run/")) return false;
-  if (!artifact_extension_interesting(rel)) return false;
+  if (artifact_is_build_noise(rel)) return false;
 
   const std::string absolute = resolve_path(rel, nullptr);
   if (absolute.empty() || !path_is_file(absolute)) return false;
@@ -1081,13 +1081,18 @@ bool Workspace::record_artifact(Session* session, const std::string& relative_pa
   return true;
 }
 
-std::vector<std::string> Workspace::recent_artifacts(long long since_ms) const {
+std::vector<std::string> Workspace::recent_artifacts(long long since_ms,
+                                                    bool* truncated) const {
+  if (truncated) *truncated = false;
   // A command cannot report what it wrote, so after one runs we look for files
   // that appeared or changed. The walk is bounded and filters by extension, so
   // a build (thousands of .o/.a/.d) produces nothing here.
   constexpr int kMaxDepth = 8;
   constexpr std::size_t kMaxVisited = 20000;
-  constexpr std::size_t kMaxResults = 20;
+  // A command can produce far more than a handful of files (a render, an
+  // export, a test run). 20 was low enough to silently hide results, so the
+  // cap is higher; when it bites, the caller is told (see `truncated`).
+  constexpr std::size_t kMaxResults = 200;
   static const char* const kSkipDirs[] = {
       ".git",      ".tea_agent_run", "node_modules", ".venv",        "venv",
       "__pycache__", "target",       "dist",         ".cache",       ".idea",
@@ -1127,10 +1132,15 @@ std::vector<std::string> Workspace::recent_artifacts(long long since_ms) const {
         if (!skip) stack.push_back({e.path, frame.depth + 1});
         continue;
       }
-      if (!artifact_extension_interesting(e.name)) continue;
+      if (artifact_is_build_noise(e.name)) continue;
       if (!e.mtime.empty() && e.mtime < since_iso) continue;
       out.push_back(display_path(e.path));
-      if (out.size() >= kMaxResults) break;
+      if (out.size() >= kMaxResults) {
+        // More may be hiding: the caller must say "and more" rather than
+        // presenting a truncated list as the whole truth.
+        if (truncated) *truncated = true;
+        break;
+      }
     }
   }
   return out;

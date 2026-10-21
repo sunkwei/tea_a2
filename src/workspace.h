@@ -146,11 +146,13 @@ class Workspace {
   /// Returns true when the list changed.
   bool record_artifact(Session* session, const std::string& relative_path,
                        const std::string& tool, int turn) const;
-  /// Files under the workspace with an "interesting" extension whose mtime is at
-  /// or after `since_ms` (used after a command, which cannot know what it wrote).
+  /// Files under the workspace whose mtime is at or after `since_ms` (used after
+  /// a command, which cannot know what it wrote). Build noise is excluded.
   /// Bounded: depth, entries visited and results are all capped, and the usual
-  /// noise directories are skipped.
-  std::vector<std::string> recent_artifacts(long long since_ms) const;
+  /// noise directories are skipped. `truncated` (optional) is set when the
+  /// result cap hid files - the UI has to say so instead of pretending the
+  /// list is complete.
+  std::vector<std::string> recent_artifacts(long long since_ms, bool* truncated = nullptr) const;
 
   std::vector<nlohmann::json> load_memory(std::string* err) const;
   nlohmann::json add_memory_note(const std::string& text, std::string* err) const;

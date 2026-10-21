@@ -284,14 +284,22 @@ std::string artifact_kind_for(const std::string& path) {
   return "other";
 }
 
-bool artifact_extension_interesting(const std::string& path) {
-  const std::string kind = artifact_kind_for(path);
-  if (kind != "other") return true;
+bool artifact_is_build_noise(const std::string& path) {
   const std::string ext = path_extension(path);
-  // A few source-ish outputs are worth offering too (a generated script or
-  // patch), but build products explicitly are not.
-  return ext == ".sh" || ext == ".py" || ext == ".js" || ext == ".patch" || ext == ".diff" ||
-         ext == ".log";
+  // Compiler/linker output and dependency stamps: a build produces hundreds of
+  // these and none of them is a result the user wants to download.
+  static const char* const kNoise[] = {
+      ".o",   ".obj",  ".a",   ".lib",  ".so",   ".dylib", ".dll", ".exe", ".pdb",
+      ".d",   ".dep",  ".ilk",  ".exp",  ".map",  ".gcda",  ".gcno", ".pyc", ".pyo",
+      ".class", ".jar", ".war", ".ear", ".lo", ".la", ".lai", ".loi", ".slo",
+      ".cmake", ".moc", ".swp", ".swo", ".tmp", ".temp", ".bak", ".orig",
+      ".rej", ".lock", ".pid", ".seed", ".log",
+      // NB: ".ts" is NOT here - TypeScript sources are a real deliverable.
+  };
+  for (std::size_t i = 0; i < sizeof(kNoise) / sizeof(kNoise[0]); ++i) {
+    if (ext == kNoise[i]) return true;
+  }
+  return false;
 }
 
 void todo_counts(const std::vector<TodoItem>& todos, int* total, int* done) {

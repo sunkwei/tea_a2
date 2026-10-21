@@ -79,6 +79,16 @@ fs.writeFileSync(path.join(sessions, SID + '.json'), JSON.stringify({
       created_at: '2026-01-01T00:00:01Z', turn: 1 },
     { path: 'report.md', bytes: REPORT.length, kind: 'document', tool: 'toolkit_file',
       created_at: '2026-01-01T00:00:03Z', turn: 2 },
+    { path: 'chart.png', bytes: 68, kind: 'image', tool: 'toolkit_exec',
+      created_at: '2026-01-01T00:00:03Z', turn: 2 },
+    { path: 'demo.mp4', bytes: 2048, kind: 'video', tool: 'toolkit_exec',
+      created_at: '2026-01-01T00:00:03Z', turn: 2 },
+    { path: 'notes.txt', bytes: 12, kind: 'document', tool: 'toolkit_file',
+      created_at: '2026-01-01T00:00:03Z', turn: 2 },
+    { path: 'data.csv', bytes: 30, kind: 'data', tool: 'toolkit_file',
+      created_at: '2026-01-01T00:00:03Z', turn: 2 },
+    { path: 'main.c', bytes: 44, kind: 'other', tool: 'toolkit_file',
+      created_at: '2026-01-01T00:00:03Z', turn: 2 },
   ],
 }, null, 2));
 fs.writeFileSync(path.join(sessions, 'index.json'), JSON.stringify([{
@@ -229,8 +239,10 @@ providers:
   check('the strip sits right under the assistant message', q.afterAssistant === true,
     JSON.stringify(q.afterAssistant));
   check('it is titled 本轮产出', q.title === '本轮产出', q.title);
-  check('only this turn\'s file is listed (not last turn\'s)',
-    q.rows.length === 1 && q.rows[0].name === 'report.md',
+  check('every file of this turn is listed (not last turn\'s)',
+    q.rows.length === 6 && q.rows.some((r) => r.name === 'report.md')
+      && q.rows.some((r) => r.name === 'main.c')
+      && !q.rows.some((r) => r.name === 'old.csv'),
     JSON.stringify(q.rows.map((r) => r.name)));
   check('the row names the kind and the size',
     q.rows[0].meta.indexOf('文档') === 0 && q.rows[0].meta.indexOf('B') > 0, q.rows[0].meta);
@@ -239,9 +251,49 @@ providers:
   check('the link asks the browser to save it', q.rows[0].download === true);
   check('a document has no preview button', q.rows[0].ext === false);
 
+  // ---- a long list folds itself -----------------------------------------
+  const folding = await evalJs(`(function(){
+    var box = document.querySelector('.artifacts');
+    var rows = Array.prototype.map.call(document.querySelectorAll('.artifacts-list .artifact'),
+      function (li) { return getComputedStyle(li).display !== 'none'; });
+    var toggle = document.querySelector('.artifacts .a-toggle');
+    return {
+      folded: box.classList.contains('folded'),
+      visible: rows.filter(Boolean).length,
+      total: rows.length,
+      toggle: toggle ? toggle.textContent : ''
+    };
+  })()`);
+  check('a long list folds itself', folding.folded === true, JSON.stringify(folding));
+  check('only the first few files are shown', folding.visible === 5 && folding.total === 6,
+    JSON.stringify(folding));
+  check('the toggle says how many there are',
+    /展开全部 6 个/.test(folding.toggle), JSON.stringify(folding.toggle));
+  await evalJs(`document.querySelector('.artifacts .a-toggle').click(); true`);
+  await sleep(200);
+  const expanded = await evalJs(`(function(){
+    var rows = Array.prototype.map.call(document.querySelectorAll('.artifacts-list .artifact'),
+      function (li) { return getComputedStyle(li).display !== 'none'; });
+    var toggle = document.querySelector('.artifacts .a-toggle');
+    return { visible: rows.filter(Boolean).length, label: toggle.textContent };
+  })()`);
+  check('the toggle expands the list', expanded.visible === 6, JSON.stringify(expanded));
+  check('the toggle becomes 收起', expanded.label === '收起', JSON.stringify(expanded));
+  await evalJs(`document.querySelector('.artifacts .a-toggle').click(); true`);
+  await sleep(200);
+  const refolded = await evalJs(`(function(){
+    var rows = Array.prototype.map.call(document.querySelectorAll('.artifacts-list .artifact'),
+      function (li) { return getComputedStyle(li).display !== 'none'; });
+    return rows.filter(Boolean).length;
+  })()`);
+  check('and folds it again', refolded === 5, refolded);
+
   // ---- the link really downloads the file --------------------------------
   const downloaded = await evalJs(`(function(){
-    var href = document.querySelector('.artifact .a-dl').getAttribute('href');
+    var row = Array.prototype.filter.call(document.querySelectorAll('.artifact'), function (li) {
+      return li.querySelector('.a-name').textContent === 'report.md';
+    })[0];
+    var href = row.querySelector('.a-dl').getAttribute('href');
     return fetch(href).then(function (r) {
       return r.text().then(function (t) {
         return { status: r.status, body: t,

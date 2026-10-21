@@ -36,7 +36,7 @@
     /// 本会话产出的文件（工具写出的文档、生成的图表/视频等）。agent 每发现一个新
     /// 文件就发一个 artifacts 事件；这里按 turn 分组，只在这一轮的**最终回答**下面
     /// 列出下载链接。
-    artifacts: [],
+    artifacts: [], artifactsTruncated: false,
     agentDoc: {
       content: '', original: '', path: '', scriptsDir: '', scripts: [],
       loading: false, touched: false
@@ -622,12 +622,24 @@
     state.messages.forEach(function (m) { if (m.role === 'user') n++; });
     return n;
   }
-  function artifactStrip(items) {
+  /// How many rows are shown before the list folds itself away. A turn that
+  /// produced 40 screenshots should not push the conversation off the screen.
+  var ARTIFACT_PREVIEW = 5;
+  function artifactStrip(items, opts) {
     if (!items.length) return null;
+    opts = opts || {};
     var box = el('div', 'artifacts');
     var head = el('div', 'artifacts-head');
     head.appendChild(el('span', 'a-title', '本轮产出'));
     head.appendChild(el('span', 'a-count', items.length + ' 个文件'));
+    var toggle = null;
+    if (items.length > ARTIFACT_PREVIEW) {
+      toggle = btn('a-toggle', '展开全部 ' + items.length + ' 个', function () {
+        var open = box.classList.toggle('open');
+        toggle.textContent = open ? '收起' : '展开全部 ' + items.length + ' 个';
+      });
+      head.appendChild(toggle);
+    }
     box.appendChild(head);
     var list = el('ul', 'artifacts-list');
     items.forEach(function (a) {
@@ -658,6 +670,10 @@
       list.appendChild(li);
     });
     box.appendChild(list);
+    if (items.length > ARTIFACT_PREVIEW) box.classList.add('folded');
+    if (opts.truncated) {
+      box.appendChild(el('div', 'a-note', '文件太多，只列出了部分；完整清单见会话目录'));
+    }
     return box;
   }
 
@@ -739,8 +755,9 @@
   }
 
   /* ---------- 产出文件（artifacts） ---------- */
-  function setArtifacts(items) {
+  function setArtifacts(items, truncated) {
     state.artifacts = (items || []).filter(function (a) { return a && a.path; });
+    state.artifactsTruncated = !!truncated;
     renderChat();
   }
 
@@ -1028,7 +1045,8 @@
         if (i === lastAssistant && !state.live) {
           // Only once the turn is over (no live bubble): while it runs, files are
           // still being produced and the list would jump around.
-          var strip = artifactStrip(artifactsForTurn(currentTurnNumber()));
+          var strip = artifactStrip(artifactsForTurn(currentTurnNumber()),
+                                   { truncated: state.artifactsTruncated });
           if (strip) box.appendChild(strip);
         }
       }
@@ -1424,7 +1442,7 @@
     }
     if (ev.type === 'artifacts') {
       // agent 产出了文件：立刻把下载链接补到这一轮的回答下面。
-      setArtifacts(ev.items);
+      setArtifacts(ev.items, ev.truncated);
       return;
     }
     if (ev.type === 'todo') {

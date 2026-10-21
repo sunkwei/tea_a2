@@ -112,10 +112,13 @@ struct SessionArtifact {
 
 /// Map a file name to one of the kinds above (by extension).
 std::string artifact_kind_for(const std::string& path);
-/// True when the extension is one we track as a produced artifact. Build noise
-/// (.o, .a, .log, ...) is deliberately absent: an artifact list that contains
-/// object files is noise, not an answer.
-bool artifact_extension_interesting(const std::string& path);
+/// True when the file is build noise rather than a result: object files,
+/// dependency stamps, caches. Those are excluded from "本轮产出" because a list
+/// containing them is noise, not an answer.
+///
+/// Everything else counts - including a .c or .cpp the agent wrote, which an
+/// allow-list of "interesting" extensions would have dropped.
+bool artifact_is_build_noise(const std::string& path);
 
 struct Session {
   SessionInfo info;
