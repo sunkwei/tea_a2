@@ -1072,6 +1072,9 @@ void ApiServer::Impl::install_routes() {
     nlohmann::json j = nlohmann::json::object();
     j["ok"] = true;
     j["version"] = std::string(tea::version_string());
+    // Which commit this build came from, when the build info file is next to the
+    // binary. Empty means "no build info here" - a single-file copy.
+    j["git_hash"] = tea::version_git_hash();
     j["uptime_s"] = static_cast<double>(now_ms() - started_ms) / 1000.0;
     j["provider"] = config->active_provider;
     j["model"] = config->active_model;

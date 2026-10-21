@@ -1871,8 +1871,8 @@ src/
   env.{h,cpp}               设备环境探测（OS/架构/时区/CPU/内存/磁盘/shell）
   output_filter.{h,cpp}     工具输出按内容属性削减（build/test/通用）
   util.{h,cpp} log.{h,cpp}  字符串、时间、编码、日志
-  version.{h,cpp}           版本号（唯一手改的真相）；git hash 属于构建期元数据，
-                            由 cmake/version_git_hash.cmake 生成到构建目录里
+  version.{h,cpp}           版本号（唯一手改的真相）；commit 在二进制旁边的
+                            tea_agent.buildinfo 里，程序启动时读它
 web/                        index.html / tokens.css / app.css / app.js（构建期嵌入）
 tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
 tests/e2e.ps1              端到端测试（144 项）；tests/sse_probe.mjs 严格流客户端
@@ -1880,20 +1880,35 @@ scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
 CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
 cmake/toolchains/           aarch64-linux-gnu.cmake / mingw-w64-x86_64.cmake（交叉编译入口）
-cmake/version_git_hash.cmake 生成带 commit 的 version_git.cpp（写进构建目录，不动源码树）
+cmake/version_git_hash.cmake 生成 tea_agent.buildinfo（写在二进制旁边，不动源码树）
 cmake/free-running-exe.cmake   运行中也能链接：先把旧 exe 改名让位
 3rd/                        第三方依赖
 ```
 
 **版本号与 commit hash**：`src/version.h` 是唯一手改的版本真相（`TEA_AGENT_VERSION_STRING`），
 CMake 从它解析 `project(VERSION)`，所以「二进制报什么版本」和「构建日志写什么版本」不会各说各话。
-commit hash 则是**构建期元数据**：它由 `cmake/version_git_hash.cmake` 生成到构建目录里的
-`generated/version_git.cpp` 再编进二进制，**构建过程一个字节都不改源码树**。
 
-以前是把 hash 写回 `src/version.cpp` 的，代价是每次构建都把工作区弄脏——构建完立刻 `git status`
-什么也看不出来，而且源码树永远处于「-dirty」状态（连它自己那次改动也算脏），旧脚本只好特判自己
-写的那个文件。现在：构建完 `git status` 干净；`-dirty` 只反映**你**的改动；native 与交叉两个构建目录
-各写各的，不会互相覆盖；同一个 commit 重复构建得到同一个二进制。
+commit 则是**构建期元数据**，它既不在源码里、也不在二进制里：构建把它写进二进制旁边的
+`tea_agent.buildinfo`（`cmake/version_git_hash.cmake`），程序启动时读这个文件并在横幅和
+`/api/health` 里报出来。
+
+```
+# tea_agent.buildinfo（与二进制放在一起）
+version=0.9.1
+commit=678cd2c1f014        # 工作区有未提交改动时是 <hash>-dirty
+```
+
+好处有三层：
+
+- **构建不再改源码树**。以前是把 hash 写回 `src/version.cpp`，代价是每次构建都把工作区弄脏，
+  构建完立刻 `git status` 什么也看不出来；而且源码树永远处于「-dirty」（连它自己那次改动也算脏），
+  旧脚本只好特判自己写的那个文件；native 与交叉两个构建目录还会抢同一个文件。
+- **二进制可复现**。既然编译进去的构建数据已经没有了，再让链接器别把构建时间戳进 PE 头，
+  同一个 commit 两次构建就得到**逐字节相同**的二进制（MinGW 用
+  `-Wl,--no-insert-timestamp`，MSVC 用 `/Brepro`）。要核对发布件是不是某个 commit 构建的，
+  比对 `tea_agent.buildinfo` 即可。
+- **单文件部署不撒谎**。只把 `tea_agent.exe` 拷到设备上的话，旁边没有 buildinfo，于是没有
+  provenance 可显示——横幅就只印版本号，而不是假装自己来自某个 commit。
 
 **为什么不用 `std::filesystem`**：Windows 上它的窄字符转换走 ANSI 代码页，非 ASCII 路径会抛
 `Illegal byte sequence`（MinGW 下尤其明显）；同时 GCC 6.5 只有 `std::experimental::filesystem`。

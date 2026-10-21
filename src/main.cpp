@@ -406,7 +406,13 @@ int main(int argc, char** argv) {
   {
     std::string banner;
     banner += "\n";
-    banner += "  " TEA_AGENT_NAME " " + std::string(tea::version_string()) + ", git hash:" + std::string(tea::version_git_hash()) + "\n";
+    banner += "  " TEA_AGENT_NAME " " + std::string(tea::version_string());
+    // The commit comes from tea_agent.buildinfo next to the binary. A single-file
+    // copy has no such file, and then there is no provenance to show - the
+    // banner says so instead of embedding a hash in the binary.
+    const std::string git_hash = tea::version_git_hash();
+    if (!git_hash.empty()) banner += ", git hash: " + git_hash;
+    banner += "\n";
     banner += "  ------------------------------------------------------------\n";
     // `--host 0.0.0.0` binds every interface, so printing 127.0.0.1 there is
     // useless: the user is starting it precisely so another device can open it.

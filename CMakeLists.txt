@@ -377,17 +377,20 @@ add_custom_command(
 # ---------------------------------------------------------------------------
 # tea_agent
 # ---------------------------------------------------------------------------
-# The git hash: build metadata, generated into the build directory. It used to be
-# written back into src/version.cpp, which left the working tree dirty after every
-# build and made two build trees fight over one file. See cmake/version_git_hash.cmake.
-set(TEA_VERSION_GIT_CPP ${TEA_GEN_DIR}/version_git.cpp)
+# The build information (which commit this came from): build metadata, written
+# next to the binary as tea_agent.buildinfo. It used to be written back into
+# src/version.cpp, which left the working tree dirty after every build and made
+# two build trees fight over one file. Now the binary itself carries no
+# build-specific data at all, so it stays byte-for-byte reproducible.
+set(TEA_BUILD_INFO ${TEA_GEN_DIR}/tea_agent.buildinfo)
 file(MAKE_DIRECTORY ${TEA_GEN_DIR})
 find_package(Git QUIET)
 if(GIT_FOUND)
   execute_process(
     COMMAND ${CMAKE_COMMAND}
             -DREPO_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-            -DOUTPUT=${TEA_VERSION_GIT_CPP}
+            -DOUTPUT=${TEA_BUILD_INFO}
+            -DTEA_AGENT_VERSION=${TEA_AGENT_VERSION}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_git_hash.cmake
     RESULT_VARIABLE _tea_git_sync_rc
     OUTPUT_VARIABLE _tea_git_sync_out
@@ -435,7 +438,8 @@ else()
   execute_process(
     COMMAND ${CMAKE_COMMAND}
             -DREPO_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-            -DOUTPUT=${TEA_VERSION_GIT_CPP}
+            -DOUTPUT=${TEA_BUILD_INFO}
+            -DTEA_AGENT_VERSION=${TEA_AGENT_VERSION}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_git_hash.cmake
     RESULT_VARIABLE _tea_git_sync_rc
     OUTPUT_VARIABLE _tea_git_sync_out
@@ -465,7 +469,6 @@ set(TEA_SOURCES
   src/html_export.cpp
   src/server.cpp
   src/version.cpp
-  ${TEA_VERSION_GIT_CPP}
   ${TEA_WEB_ASSETS_CPP}
   ${TEA_CA_BUNDLE_CPP}
 )
@@ -505,6 +508,15 @@ if(MINGW)
   # Produce a self-contained .exe: without this the binary needs
   # libstdc++-6.dll / libgcc_s_seh-1.dll / libwinpthread-1.dll on PATH.
   target_link_options(tea_agent PRIVATE -static-libgcc -static-libstdc++ -static)
+  # Reproducible builds: by default the linker stamps the build time into the PE
+  # header, so two builds of the same commit differ. Nothing build-specific is
+  # compiled in any more (the commit lives in tea_agent.buildinfo next to the
+  # binary), so with this flag two builds produce the very same bytes.
+  target_link_options(tea_agent PRIVATE -Wl,--no-insert-timestamp)
+elseif(MSVC)
+  # The same for MSVC: /BREPRO makes the PE timestamp and the recorded PDB path
+  # deterministic, so the binary of a given commit is byte-for-byte stable.
+  target_link_options(tea_agent PRIVATE /Brepro)
 endif()
 
 find_package(Threads REQUIRED)
@@ -588,6 +600,16 @@ endif()
 
 add_custom_command(TARGET tea_agent POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${TEA_WEB_DIR} ${CMAKE_BINARY_DIR}/bin/web
+)
+
+# The build information travels with the binary: the file is written at
+# configure time (a new commit re-runs CMake) and copied next to the executable
+# after every link, so it is never stale. The binary reads it at startup.
+add_custom_command(TARGET tea_agent POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:tea_agent>
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${TEA_BUILD_INFO} $<TARGET_FILE_DIR:tea_agent>/tea_agent.buildinfo
+  VERBATIM
 )
 
 # Ship the CA bundle next to the binary so the mbedTLS backend works without
