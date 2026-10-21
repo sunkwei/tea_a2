@@ -256,6 +256,12 @@ build/bin/tea_agent --workspace . --open
 
 侧边栏的**会话索引**按更新时间倒序列出当前工作区的会话（标题、相对时间、消息条数），
 点击即切换，当前会话高亮，行内可**改名**、**删除**，右上角 ＋ 新建；一轮对话结束后自动刷新。
+服务端正在跑的会话（不管是哪个浏览器发起的）会标出「· 进行中（你已离开）」，点一下接上直播；
+进行中的会话不能改名/删除（worker 会把改动写回去）。
+
+**主题有地址**：地址栏跟着当前会话走（`/?s=<session_id>`），顶栏右侧的「复制链接」按钮把它
+放进剪贴板。贴到另一个浏览器/另一台机器打开就是同一个会话，正在跑的那一轮会直接接上；刷新
+也停在这个主题上。两个窗口各看各的主题时互不干扰（详见「多主题并行」一节）。
 会话很长时（比如已经聊了 30 轮）用右侧的**跳转索引**快速定位：每条用户消息对应一个编号，
 悬停（或键盘聚焦）在索引条左侧展开一张提示卡片，内容是那条输入的前 **64 个字符**（超出加
 省略号，换行折成空格，最多 4 行），点击直接滚到那一条；滚动时当前视口所在的轮次会高亮。
@@ -515,14 +521,51 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.8.2
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
 | `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
-| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）** |
-| `POST` | `/api/chat/stop` | 中断当前轮次 |
+| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}` |
+| `POST` | `/api/chat/stop` | 中断当前轮次（对所有人） |
 | `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
 | `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
 | `GET` | `/api/chat/queue?session_id=` | 查看当前排队消息 |
-| `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped`） |
-| `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id`），最近开始的在前 |
-| `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播 |
+| `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
+| `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
+| `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
+
+#### token 用量与「缓存命中率」：为什么有的提供方一开始拿不到
+
+指标栏的「缓存命中率」来自 provider 自己报的数字，不是本地估算。但**只有流式响应里带了
+`usage` 的请求才有这些数字**，而 OpenAI 兼容网关大多要你显式开口：
+
+```jsonc
+// 请求体里多这一段
+"stream_options": { "include_usage": true }
+```
+
+MiniMax 的文档写得很直白（`platform.minimax.cn/docs/api-reference/text-chat-openai`）：
+`stream_options.include_usage` 默认 **false**——「是否在流式响应中包含 token 用量」。不传这一句，
+流里的 `usage` 就是 `null`，于是 tea_a2 只能本地估算，指标栏显示「provider 未返回缓存字段」。
+传了之后，用量长这样（同一份文档的响应示例）：
+
+```json
+"usage": {
+  "total_tokens": 473,
+  "total_characters": 0,
+  "prompt_tokens": 170,
+  "completion_tokens": 303,
+  "prompt_tokens_details": { "cached_tokens": 157 }   // ← 前缀缓存命中
+}
+```
+
+`prompt_tokens_details.cached_tokens` 正是 OpenAI 的写法，tea_a2 认；DeepSeek 那种
+`prompt_cache_hit_tokens` 也认（见 `src/llm.cpp` 的 `parse_usage_into`）。
+
+**现在的行为**：
+
+- 默认**会**带 `stream_options.include_usage`（`settings.stream_include_usage`，默认 `true`）——
+  否则大多数网关的用量与缓存命中率都是拿不到的；
+- 某个网关不认这个字段、会回 400 时，tea_a2 记下“这个提供方不支持”，去掉字段重试一次，
+  这一轮照常完成，之后也不再发它（只有这一次多一个来回）；
+- 想按 provider 单独控制，在 provider 块里写 `stream_include_usage: true|false`（不写=跟随全局）；
+- 不用流式（`settings.stream: false`）时不会有这个字段，用量在响应体里，MiniMax 也会给。
 
 ### 一次完整的「远程操控」长这样
 
@@ -564,8 +607,8 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 ### 断线重连：关掉页面不会取消这一轮
 
 轮次的生命周期和那条 HTTP 连接是**分开**的。浏览器关掉、笔记本合盖、换台机器打开 UI，服务端
-那一轮照跑到底——断开只是少了一个订阅者。取消只有三条途径：`POST /api/chat/stop`、同一会话上
-发起新的一轮（顶掉旧的）、服务端进程退出。
+那一轮照跑到底——断开只是少了一个订阅者。取消只有三条途径：`POST /api/chat/stop`、
+`POST /api/chat {"interrupt": true}`（显式替换，且会等旧 worker 收尾）、服务端进程退出。
 
 为此每帧都带一个递增的 `seq`，服务端把这一轮发出的帧原样留在一个有上限的回放缓冲里（8 MB，
 超了丢最旧的，并让客户端 `resync`）。重新打开页面时 UI 做三件事：
@@ -592,18 +635,21 @@ curl -N -X POST http://device:8282/api/chat/attach \
 `GET /api/chat/queue?session_id=` 列出的条目仍然挂在服务端那一轮的队列里，等它采纳。
 
 **换一台机器接着看**也是同一条路：轮次属于服务端、按 session 归属，跟发起它的那个浏览器没有
-关系。冷启动的页面（另一台 PC、另一个浏览器 profile、清过 localStorage）不知道自己该看哪个
-工作区，所以开机先问 `GET /api/chat/turns`：有正在跑的轮次就直接切到它的 `workspace_id` +
-`session_id` 并 attach，而不是一头栽进索引里的第一个工作区、对着空对话发呆。多个轮次同时
-在跑时取最近开始的那个，并在 toast 里说明还有几个。
+关系。把主题链接（`/?s=<session_id>`，见下一节）贴到另一台机器上打开即可；不带链接的冷启动
+页面**不会**被"谁在跑就跳到谁"拽走，而是在侧栏把正在跑的会话标成「· 进行中」，点一下才接上。
 
 ```bash
 curl -s http://device:8282/api/chat/turns
 # {"ok":true,"turns":[{"running":true,"session_id":"s_xxx","workspace_id":"ws_xxx",
-#   "started_at":"...","last_seq":137,"oldest_seq":1,"buffered":137,"dropped":0,"pending":0}]}
+#   "started_at":"...","last_seq":137,"oldest_seq":1,"buffered":137,"dropped":0,
+#   "pending":0,"subscribers":2}]}
 ```
 
-**多个客户端同时看一轮**也是允许的、而且是鼓励的用法：每个连接有自己的回放游标，
+`subscribers` 是此刻有多少个浏览器正跟着这一轮（含发起它的那个）。它同时是一个上限：
+每个跟随者都占着一个 HTTP 线程，所以超过 `TEA_AGENT_MAX_SUBSCRIBERS`（默认 8）的 attach
+会被 `429 too_many_subscribers` 拒绝，而不是把整个服务拖死。
+
+**多个客户端同时看一轮**是允许的、而且是鼓励的用法：每个连接有自己的回放游标，
 所以在台式机上发起一个长任务、拿着笔记本走过去接着看，两边看到的是同一条流；任意一边都能
 插队（`queue_adopted` 会同时出现在两边）。
 
@@ -614,20 +660,85 @@ curl -s http://device:8282/api/chat/turns
 | **离开** | 只断开自己这条流：服务端照跑，别人也不受影响。侧栏里那个会话标出「· 进行中」，点一下重新接上 |
 | **停止** | 取消这一轮（对所有人）：在下一个模型/工具边界停住，已产生的内容照样落盘 |
 
-「离开」之后这个页面就不再被这一轮锁住，可以照常切工作区、开新会话；此时再往同一个会话发消息
-会把还在跑的那一轮顶掉（服务端语义如此），UI 会明确提示一句。
+这个页面从不被一轮"锁住"：跟随中切工作区、开新会话、点别的会话都会自动「离开」（服务端照跑），
+不需要先按停止。
 
 注意：默认只监听 `127.0.0.1`，另一台机器要连得上，得用 `--host 0.0.0.0`（或反向代理）启动。
+`--host 0.0.0.0` 意味着同一网段的任何人都能发消息、改配置、甚至销毁状态，所以只在内网使用，
+或者挡一层带鉴权的反向代理。
 
-### 插队：轮次进行中追加消息
+### 多主题并行：一个 server，几个浏览器
 
-一轮可能跑很久（长工具、多轮迭代、思考模型）。这段时间里再发一条 `POST /api/chat` 会把
-当前轮次顶掉，所以 `tea_a2` 提供了「排队」而不是「抢占」：消息进入**当前轮次自己的**队列，
-agent loop 在下一轮迭代开始前采纳最早的一条，把它作为普通 user 消息追加进会话，然后带着
-新的上下文继续请求模型。一轮只采纳一条，连发几条不会挤进同一个请求。
+一台设备、一个 `tea_a2`、两三个浏览器，各自看自己的主题——这是预期用法，不是"多个客户端抢一个
+会话"。**主题就是一个会话**；同时看一个主题的多个窗口则是同一轮次的多个订阅者，看到的内容完全
+一样。
+
+**主题有地址**：`/?s=<session_id>`。地址栏跟着当前会话走（打开 / 新建 / 分叉都会更新），顶栏
+右侧的「复制链接」把这条地址放进剪贴板，贴到另一个浏览器或另一台机器上打开就是同一个会话，
+带着正在跑的那一轮直接接上。刷新页面也仍然停在这个主题上，不会跳到"最近更新的那个会话"。
+
+启动时的落点顺序（`web/app.js`）：
+
+1. 地址栏的 `?s=`（最明确，跨机器/贴链接都靠它）；
+2. 本标签页上次看的会话（`sessionStorage`，两个窗口各记各的）；
+3. 上次的工作区（`localStorage`），再不行就是索引里的第一个工作区。
+
+**刻意不再做的事**：以前冷启动会问 `GET /api/chat/turns`，谁在跑就跳到谁的工作区和会话。多主题
+并行时这条规则很烦人——另开一个窗口想看点别的，一打开就被拽到别人正在跑的任务上。现在正在跑
+的会话只在侧栏标「· 进行中（你已离开）」，点一下才接上；工作区、会话、URL 都不会被它改掉。
+
+**跟随中也能走去别处**：切工作区、开新会话、点别的会话都会自动「离开」（断开本页那条 SSE，
+服务端照跑），不需要先按停止，也不会丢掉别人的任务。回到那个会话（点它的行，或用它的
+`?s=` 链接）就重新接上，回放从 `seq 1` 开始，屏幕上的内容和一直开着那边一样。
+
+**上限与保护**（都是环境变量，默认值适合两三台机器）：
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `TEA_AGENT_HTTP_THREADS_MAX` | 128 | HTTP 线程池上限（基础 16 个，按需增长、空闲回收）。每个跟随中的 SSE 都占一个线程，所以这个值同时决定了"同时能跟多少个窗口" |
+| `TEA_AGENT_MAX_SUBSCRIBERS` | 8 | 单个轮次的跟随者上限，超出 `429 too_many_subscribers` |
+| `TEA_AGENT_MAX_ACTIVE_TURNS` | 24 | 同时在跑的轮次上限，超出 `429 too_many_turns` |
+
+改造前线程池固定 32 个、且不回收：实测打开第 32 条 SSE 之后 `/api/health` 直接超时，整个页面
+（包括"停止"按钮）都失灵。现在池子上限可调，跟随者也有上限，被拒绝的只是一个多余的标签页。
+
+**两条写路径的规矩**：
+
+- 同一个会话：新消息默认排队（见下一节），要顶掉正在跑的那一轮必须显式 `interrupt`，而且
+  服务端会等旧 worker 收尾落盘后才开新一轮——否则旧的那份 `Session` 会把新消息覆盖掉。
+- 任务列表、改名、删除会话：轮次进行中一律 `409 turn_running`，因为 worker 会在下一次迭代把
+  改动写回去。等它结束再来。
+
+回归测试：`python3 tests/smoke_multi_session.py`（23 项：三个会话并行、晚到跟随者回放一致、
+默认排队与 `interrupt`、写操作 409、跟随者上限、三个主题各带一个跟随者）、
+`node tests/ui_two_clients.mjs`、`node tests/ui_second_client.mjs`（冷启动不被拽走）、
+`node tests/ui_topic_url.mjs`（同一浏览器的两个标签页各看各的主题，刷新仍在原主题）。
+
+### 插队：轮次进行中追加消息（同会话默认排队）
+
+一轮可能跑很久（长工具、多轮迭代、思考模型）。这段时间里**再发一条 `POST /api/chat` 不会
+顶掉它**：消息进入**当前轮次自己的**队列，agent loop 在下一轮迭代开始前采纳最早的一条，
+把它作为普通 user 消息追加进会话，然后带着新的上下文继续请求模型。一轮只采纳一条，连发几条
+不会挤进同一个请求。
+
+这是为"一个主题、多个窗口"服务的默认行为——另一个浏览器不能因为手快就把别人正在看的任务
+扔掉。响应因此有两种形状：
 
 ```bash
-# 轮次进行中（session_id 来自 start 事件）
+# 轮次进行中：200 + JSON，消息排队，没有新开轮次
+curl -s -X POST http://device:8282/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
+# {"ok":true,"session_id":"s_xxx","workspace_id":"ws_xxx","turn_running":true,
+#  "queued":{"id":"q_...","content":"..."},"pending":1}
+
+# 明确要求顶掉正在跑的那一轮（对所有人）：服务端先取消、等旧 worker 收尾并落盘，
+# 再重新读取会话、开始新一轮。15 秒内停不下来（比如卡在长工具里）返回 409 turn_still_running。
+curl -s -N -X POST http://device:8282/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"换个方向","interrupt":true}'
+
+# 只想排队，不需要 SSE 的客户端可以直接用这个接口
 curl -s -X POST http://device:8282/api/chat/queue \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
@@ -638,6 +749,10 @@ curl -s -X POST http://device:8282/api/chat/queue/cancel \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"s_xxx","id":"q_..."}'
 ```
+
+为什么 `interrupt` 要等旧 worker：那个 worker 手里攥着自己那份 `Session`，结束时会整份写回。
+在它停之前启动新一轮，新一轮写下的问题与回答会被旧的那份覆盖掉（修复前可稳定复现：新一轮
+的 SSE 明明 `done` 了，磁盘上却没有它的消息）。等待的代价只有一次轮次的收尾时间。
 
 SSE 上的对应事件：
 
@@ -655,8 +770,11 @@ SSE 上的对应事件：
 - **模型已经给完最终答案时也会采纳**：loop 发现队列非空就继续迭代，而不是把消息留成下一轮
   HTTP 请求；只有停止 / 报错 / 迭代上限才会退回。
 - **只收文本**。图片必须在请求时解码、校验并落到工作区，`/api/chat` 已经为「开始一轮」做了
-  这些；`/api/chat/queue` 带 `images` 会明确返回 `400 images_not_queued`，而不是静默丢掉。
-- 没有进行中的轮次时返回 `409 no_active_turn`：这时直接 `POST /api/chat` 就行。
+  这些；排队路径（包括 `/api/chat` 的默认排队）带 `images` 会明确返回 `400/409
+  images_not_queued`，而不是静默丢掉。
+- 没有进行中的轮次时 `/api/chat/queue` 返回 `409 no_active_turn`：这时直接 `POST /api/chat` 就行。
+- **任务列表 / 改名 / 删除在轮次进行中会被拒绝（`409 turn_running`）**：这些写操作也是
+  "读文件 → 改一处 → 整份写回"，正在跑的 worker 会在下一次迭代把改动覆盖回去。等它结束再来。
 
 内置 Web UI 把这条路径做成了输入框行为：生成中按 **Enter** 进入排队（输入框上方显示排队条，
 每条都能点 × 取消），`Shift+Enter` 仍是换行，右侧是「停止」，旁边还有一个「离开」（只停止
@@ -1076,6 +1194,14 @@ bool write_file_atomic(const std::string& path, const std::string& data, std::st
 
 **代价**：同一工作区的两轮在「落盘」这一刻会互相等几微秒，其余时间完全并行。
 
+**3. 传输层也要跟得上：SSE 占用的是 HTTP 线程**
+
+`cpp-httplib` 给每个请求分配一个线程，而一条 SSE 会一直占用它直到这一轮结束。线程池原来是写死的
+32 个，于是"同时跟 32 个窗口"就等于"服务器不接受任何新请求"（实测 `/api/health` 超时）。
+现在池子是 `ThreadPool(16, TEA_AGENT_HTTP_THREADS_MAX=128, 1024)`：基础 16 个常驻，按需增加，
+空闲 3 秒回收；单个轮次的跟随者上限 8，同时在跑的轮次上限 24。写超时也从 10 分钟收到 2 分钟，
+一条死连接不能扣着一个线程那么久。
+
 **回归测试**：`python3 tests/smoke_concurrency.py`（13 项）。它同时发 24 个 memory 写入、
 16 个会话创建，中间还挂着一轮正在跑的对话，最后核对「每个 200 都在盘上」「index.json 与
 会话文件一一对应」「没有残留 `.tmp-*`」。用修复前的二进制跑会挂 4 项——24 个写入只剩 2 条。
@@ -1234,6 +1360,8 @@ providers:
     supports_fetch: true                   # 网页抓取工具 toolkit_fetch
     # search_path: /v1/tools/search        # 可选：端点覆盖（相对 api_url 的路径或完整 URL）
     # fetch_path: /v1/tools/fetch
+    # stream_include_usage: true           # 可选：是否在流式响应里索取 token 用量
+                                           # （不写=跟随全局 settings.stream_include_usage）
     models:
       deepseek-chat:
         max_context_tokens: 128000
@@ -1665,8 +1793,10 @@ node tests/ui_workspace_add.mjs                           # 新增工作区：�
 node tests/ui_workspace_access.mjs                        # 文件访问范围开关：受限 / 全局 / 命令行锁死（需 google-chrome）
 node tests/smoke_turn_resume.mjs                          # 断线不取消轮次：回放 / 续播 / stop 仍然有效
 node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
-node tests/ui_second_client.mjs                           # 另一台机器/全新 profile 接回别人发起的轮次（需 google-chrome）
-node tests/ui_two_clients.mjs                             # 两个客户端同看一轮：插队 / 离开 / 停止（需 google-chrome）
+node tests/ui_second_client.mjs                           # 冷启动不被其它工作区的轮次拽走，点开才接上（需 google-chrome）
+node tests/ui_two_clients.mjs                             # 两个浏览器一个主题：?s= 接上 / 排队 / 离开 / 停止（需 google-chrome）
+node tests/ui_topic_url.mjs                               # 同浏览器两个标签页各看各的主题，刷新仍在原主题（需 google-chrome）
+python3 tests/smoke_multi_session.py                      # 多会话并发 + 默认排队 + interrupt + 跟随者上限
 python3 tests/smoke_todo.py                               # 任务列表：分解/进度/唯一的 active/落盘/导入
 python3 tests/smoke_artifacts.py                          # 产出文件与 /download：收录/去重/流式/超限
 node tests/ui_artifacts.mjs                               # 最终回答下方的下载链接（需 google-chrome）
@@ -1864,14 +1994,25 @@ POST 到**另一个工作区**能新建会话（文本一致、图片写进新�
 `application/zip`、magic 是 `PK\x03\x04`、大小合理；结束后按钮恢复、toast 报出文件名与条目数；
 最后再直接打一次接口，确认包里真的有这个工作区的标记文件。
 
-`tests/ui_two_clients.mjs` 开两个独立 profile 的浏览器看同一轮：B 冷启动直接落进 A 发起的轮次、
-两边收到的内容长度始终接近；B 插队一条消息，**两边**都看到它被采纳成第二个问题；B 点「离开」
-后自己不再跟随、侧栏标出「· 进行中」、可以自由开新会话，而服务端和 A 都不受影响；B 点会话
-又能接回去；最后 A 点「停止」，两边同时结束。
+`tests/ui_two_clients.mjs` 开两个独立 profile 的浏览器看同一个主题：A 发起一轮后拿到 `?s=` 链接，
+B **用这条链接**打开并接上（内容长度始终接近，B 的地址栏停在同一个主题）；B 插队一条消息，
+**两边**都看到它被采纳成第二个问题；B 点「离开」后自己不再跟随、侧栏标出「· 进行中」、
+可以自由开新会话，而服务端和 A 都不受影响；B 点会话又能接回同一个 `?s=`；最后 A 点「停止」，
+两边同时结束。
 
-`tests/ui_stream_guard.mjs` 起一轮慢速流式回答，在生成过程中点侧边栏：工作区按钮仍可点开菜单
-（不能变成死按钮），切换工作区 / 添加工作区 / 新建会话都被拒绝并给出原因，会话行显示为禁用；
-一轮结束后切换恢复正常。
+`tests/ui_second_client.mjs` 反过来钉"不该发生的事"：proj_b 里有一轮在跑，另一台机器的全新
+profile 打开服务器地址时**仍然落在 proj_a**（不再被"谁在跑就跳谁"拽走），标题也是 proj_a；
+切到 proj_b 后侧栏把那个会话标成「· 进行中」，点它才 attach 并回放；重新打开 `?s=` 直接回到
+这个主题；清空 localStorage + sessionStorage 再来一次，仍然落在 proj_a。
+
+`tests/ui_topic_url.mjs` 用同一个浏览器 profile 开两个标签页（`?s=A` / `?s=B`）：两边同时流式、
+各自只看到自己的问题与回答，两个会话文件互不串味；刷新 A 仍回到 A 并保有完整对话；「复制链接」
+复制的是 `…?s=A`；「新会话」只清掉本标签页的 `?s=`，另一个标签页不受影响；再开第三个标签页
+也不会动前两个。
+
+`tests/ui_stream_guard.mjs` 起一轮慢速流式回答，在生成过程中点侧边栏：工作区按钮仍可点开菜单，
+**切换工作区是允许的**——这一页自动「离开」那一轮（服务端照跑），「添加工作区」正常弹对话框，
+「新建会话」只清掉本页的主题（草稿），点回那个会话又能接上；最后「停止」把它结束。
 
 `tests/ui_queue.mjs` 在流式回答期间用真实的 Enter 按键入队：排队条按顺序出现、输入框清空、
 没有产生第二个会话；点 × 取消第一条；随后被采纳的一条从排队条消失并变成对话里的 user 气泡，
