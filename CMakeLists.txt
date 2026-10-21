@@ -463,6 +463,7 @@ set(TEA_SOURCES
   src/archive.cpp
   src/tools.cpp
   src/workspace.cpp
+  src/task.cpp
   src/llm.cpp
   src/trajectory.cpp
   src/agent.cpp

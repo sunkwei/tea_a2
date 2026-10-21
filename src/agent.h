@@ -24,6 +24,9 @@ struct TurnOptions {
   std::string provider;  // empty => config default
   std::string model;     // empty => config default
   bool stream = true;
+  /// The task this turn works on (empty => an ordinary chat). The agent reports
+  /// progress and intermediate state on it through toolkit_task.
+  std::string task_id;
   /// Prompts typed while this turn was already running. The loop adopts one per
   /// iteration (FIFO) before building that iteration's request; whatever is left
   /// when the loop stops is reported back as `queue_unconsumed`. May be null.

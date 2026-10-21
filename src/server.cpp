@@ -26,6 +26,7 @@
 #include "html_export.h"
 #include "http.h"
 #include "log.h"
+#include "task.h"
 #include "trajectory.h"
 #include "usage.h"
 #include "util.h"
@@ -678,6 +679,110 @@ struct ApiServer::Impl {
   /// joining under the lock would freeze every other request for as long as
   /// the old worker is still stuck (e.g. in a long tool call).
   std::vector<std::shared_ptr<ChatTurn>> retired;
+  /// Start a turn without an SSE subscriber.
+  ///
+  /// The chat route streams the turn to a browser; a task does not need a
+  /// stream - whoever queued it (the scheduler, a script) watches the task record
+  /// instead. The turn is registered like any other, so /api/chat/turn can still
+  /// attach to it and a browser can watch the work happen.
+  ///
+  /// `task_id` is empty for an ordinary turn. With one, the task record follows
+  /// the turn: running while it works, done (or waiting for the user) when it
+  /// ends.
+  std::shared_ptr<ChatTurn> launch_turn(const std::string& workspace_id,
+                                        const std::string& session_id,
+                                        const std::string& message,
+                                        const std::string& provider,
+                                        const std::string& model,
+                                        const std::string& task_id,
+                                        std::string* err) {
+    auto turn = std::make_shared<ChatTurn>();
+    turn->started_at = now_iso8601();
+    if (!open_workspace(workspace_id, &turn->workspace, err)) return nullptr;
+    turn->workspace_id = turn->workspace.id();
+    if (!session_id.empty()) {
+      turn->workspace.load_session(session_id, &turn->session, nullptr);
+    }
+    if (turn->session.info.id.empty()) {
+      Session created;
+      if (!turn->workspace.create_session("", &created, err)) return nullptr;
+      turn->session = created;
+    }
+    turn->session_id = turn->session.info.id;
+
+    std::vector<std::shared_ptr<ChatTurn>> graveyard;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      prune_turns_locked(&graveyard);
+      auto it = turns.find(turn->session_id);
+      if (it != turns.end() && it->second && !it->second->finished()) {
+        if (err) *err = "a turn is already running in session " + turn->session_id;
+        return nullptr;
+      }
+      turns[turn->session_id] = turn;
+    }
+    // Joining a finished worker is immediate; doing it here keeps `mu` free.
+    graveyard.clear();
+
+    AppConfig* cfg = config;
+    ToolRegistry* reg = tools;
+    turn->worker = std::thread([turn, cfg, reg, message, provider, model, task_id]() {
+      Agent agent(cfg, reg);
+      TurnOptions options;
+      options.provider = provider;
+      options.model = model;
+      options.stream = true;
+      options.inbox = &turn->inbox;
+      options.task_id = task_id;
+      EventEmitter emit = [turn, task_id](const nlohmann::json& event) {
+        turn->emit_event(event);
+        if (task_id.empty()) return;
+        // The task record follows the turn: the progress the agent reports with
+        // toolkit_task is the progress, and the end of the turn is the end of the
+        // task - unless the agent asked the user something, in which case the
+        // task waits for the answer instead of claiming to be done.
+        const std::string type = event.value("type", std::string());
+        if (type != "done" && type != "error" && type != "stopped") return;
+        Task t;
+        std::string err;
+        if (!TaskStore::load(turn->workspace, task_id, &t, &err)) return;
+        const std::string message_text = event.value("message", std::string());
+        TaskStore::update(
+            turn->workspace, task_id,
+            [&](Task* task) {
+              task->finished_at = now_iso8601();
+              if (type == "error") {
+                task->status = task_status::kFailed;
+                task->error = message_text;
+                return;
+              }
+              if (type == "stopped") {
+                task->status = task_status::kCancelled;
+                return;
+              }
+              if (task->needs_confirmation) {
+                task->status = task_status::kWaitingConfirmation;
+                return;
+              }
+              task->status = task_status::kDone;
+              task->progress = 100;
+            },
+            &t, &err);
+      };
+      try {
+        agent.run_turn(turn->workspace, &turn->session, message, {}, options, emit,
+                       &turn->cancel);
+      } catch (const std::exception& e) {
+        nlohmann::json event = nlohmann::json::object();
+        event["type"] = "error";
+        event["message"] = std::string("agent crashed: ") + e.what();
+        turn->emit_event(event);
+      }
+      turn->close();
+    });
+    return turn;
+  }
+
   // ---- helpers -----------------------------------------------------------
   void install_routes();
 
@@ -1134,6 +1239,274 @@ void ApiServer::Impl::install_routes() {
     j["active"] = { {"provider", config->active_provider}, {"model", config->active_model} };
     send_json(res, j);
   });
+
+  // ---- tasks: the queue a scheduler works through --------------------------
+  //
+  // A task is "do this later": a prompt plus the state of that work. The
+  // scheduler (sched/task_runner.py) lists the queued ones, starts them while the
+  // provider still has quota and watches their progress; a human can do the same
+  // over HTTP. The task record is one file per task under
+  // <workspace>/.tea_agent_run/tasks/, so it survives a restart.
+  svr.Post("/api/tasks", [this](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const std::string workspace_id = json_string(body, "workspace_id");
+    if (workspace_id.empty()) {
+      send_error(res, 400, "bad_request", "'workspace_id' is required");
+      return;
+    }
+    Workspace ws;
+    std::string err;
+    if (!open_workspace(workspace_id, &ws, &err)) {
+      send_error(res, 404, "not_found", err);
+      return;
+    }
+    const std::string prompt = trim(json_string(body, "prompt"));
+    if (prompt.empty()) {
+      send_error(res, 400, "bad_request", "'prompt' is required");
+      return;
+    }
+    Task task;
+    task.workspace_id = ws.id();
+    task.prompt = prompt;
+    task.title = trim(json_string(body, "title"));
+    if (task.title.empty()) task.title = Workspace::derive_title(prompt);
+    task.session_id = trim(json_string(body, "session_id"));
+    task.provider = trim(json_string(body, "provider"));
+    task.model = trim(json_string(body, "model"));
+    if (!TaskStore::create(ws, &task, &err)) {
+      send_error(res, 500, "io_error", err);
+      return;
+    }
+    LOG_INFO("task: created ", task.id, " (", task.title, ")");
+    nlohmann::json j = task.to_json();
+    j["ok"] = true;
+    send_json(res, j);
+  });
+
+  svr.Get("/api/tasks", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string workspace_id =
+        req.has_param("workspace_id") ? req.get_param_value("workspace_id") : std::string();
+    if (workspace_id.empty()) {
+      send_error(res, 400, "bad_request", "'workspace_id' is required");
+      return;
+    }
+    Workspace ws;
+    std::string err;
+    if (!open_workspace(workspace_id, &ws, &err)) {
+      send_error(res, 404, "not_found", err);
+      return;
+    }
+    const std::string status =
+        req.has_param("status") ? trim(req.get_param_value("status")) : std::string();
+    const std::vector<Task> tasks =
+        status.empty() ? TaskStore::list(ws) : TaskStore::list_by_status(ws, status);
+    nlohmann::json j = nlohmann::json::object();
+    j["tasks"] = nlohmann::json::array();
+    for (std::size_t i = 0; i < tasks.size(); ++i) j["tasks"].push_back(tasks[i].to_json());
+    // The counts are what a scheduler polls for: how much is waiting, how much is
+    // running, how much is blocked on a human.
+    nlohmann::json counts = nlohmann::json::object();
+    counts[task_status::kQueued] = 0;
+    counts[task_status::kRunning] = 0;
+    counts[task_status::kWaitingConfirmation] = 0;
+    counts[task_status::kDone] = 0;
+    counts[task_status::kFailed] = 0;
+    counts[task_status::kCancelled] = 0;
+    const std::vector<Task> all = TaskStore::list(ws);
+    for (std::size_t i = 0; i < all.size(); ++i) {
+      auto it = counts.find(all[i].status);
+      if (it != counts.end()) it.value() = it.value().get<int>() + 1;
+    }
+    j["counts"] = counts;
+    send_json(res, j);
+  });
+
+  svr.Get(R"(/api/tasks/([^/]+))",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             const std::string id = req.matches[1].str();
+             const std::string workspace_id =
+                 req.has_param("workspace_id") ? req.get_param_value("workspace_id") : std::string();
+             if (workspace_id.empty()) {
+               send_error(res, 400, "bad_request", "'workspace_id' is required");
+               return;
+             }
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(workspace_id, &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             Task task;
+             if (!TaskStore::load(ws, id, &task, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             send_json(res, task.to_json());
+           });
+
+  // Start a task now: the prompt goes to the model as a turn of its own.
+  svr.Post(R"(/api/tasks/([^/]+)/start)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             const std::string id = req.matches[1].str();
+             const std::string workspace_id =
+                 req.has_param("workspace_id") ? req.get_param_value("workspace_id") : std::string();
+             if (workspace_id.empty()) {
+               send_error(res, 400, "bad_request", "'workspace_id' is required");
+               return;
+             }
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(workspace_id, &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             Task task;
+             if (!TaskStore::load(ws, id, &task, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             if (task.status != task_status::kQueued && task.status != task_status::kWaitingConfirmation) {
+               send_error(res, 409, "task_not_queued",
+                          "task " + id + " is '" + task.status + "', not 'queued'");
+               return;
+             }
+             if (!config->loaded) {
+               send_error(res, 409, "config_missing",
+                          "no provider.yaml is configured yet; upload it in the web UI");
+               return;
+             }
+             // The body may name the provider: the scheduler gates the work on the
+             // quota of one provider, so the work must run on that one.
+             nlohmann::json body;
+             if (!req.body.empty() && req.body != "{}") {
+               if (!parse_json_body(req, &body, res)) return;
+             }
+             const std::string wanted_provider = trim(json_string(body, "provider"));
+             const std::string wanted_model = trim(json_string(body, "model"));
+             const std::string provider =
+                 !task.provider.empty() ? task.provider
+                                        : (!wanted_provider.empty() ? wanted_provider
+                                                                    : config->active_provider);
+             const std::string model = !task.model.empty()
+                                          ? task.model
+                                          : (!wanted_model.empty() ? wanted_model : config->active_model);
+             std::shared_ptr<ChatTurn> turn =
+                 launch_turn(ws.id(), task.session_id, task.prompt, provider, model, id, &err);
+             if (!turn) {
+               send_error(res, 409, "cannot_start", err);
+               return;
+             }
+             Task started;
+             TaskStore::update(ws, id,
+                               [&](Task* t) {
+                                 t->status = task_status::kRunning;
+                                 t->session_id = turn->session_id;
+                                 t->provider = provider;
+                                 t->model = model;
+                                 t->started_at = now_iso8601();
+                                 t->finished_at.clear();
+                                 t->error.clear();
+                                 t->needs_confirmation = false;
+                               },
+                               &started, &err);
+             LOG_INFO("task: started ", id, " in session ", turn->session_id);
+             nlohmann::json j = started.to_json();
+             j["ok"] = true;
+             send_json(res, j);
+           });
+
+  svr.Post(R"(/api/tasks/([^/]+)/cancel)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             const std::string id = req.matches[1].str();
+             const std::string workspace_id =
+                 req.has_param("workspace_id") ? req.get_param_value("workspace_id") : std::string();
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(workspace_id, &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             Task task;
+             if (!TaskStore::load(ws, id, &task, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             if (!task.session_id.empty()) {
+               std::shared_ptr<ChatTurn> turn = find_turn(task.session_id);
+               if (turn && !turn->finished()) {
+                 turn->cancel.store(true);
+                 LOG_INFO("task: cancel requested for ", id, " (session ", task.session_id, ")");
+               }
+             }
+             Task cancelled;
+             TaskStore::update(ws, id,
+                               [&](Task* t) {
+                                 if (t->status == task_status::kQueued ||
+                                     t->status == task_status::kWaitingConfirmation) {
+                                   t->status = task_status::kCancelled;
+                                   t->finished_at = now_iso8601();
+                                 }
+                               },
+                               &cancelled, &err);
+             nlohmann::json j = cancelled.to_json();
+             j["ok"] = true;
+             send_json(res, j);
+           });
+
+  // The user answers a task that is waiting for a confirmation: the answer
+  // becomes the next turn of the task's session.
+  svr.Post(R"(/api/tasks/([^/]+)/confirm)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             nlohmann::json body;
+             if (!parse_json_body(req, &body, res)) return;
+             const std::string id = req.matches[1].str();
+             const std::string workspace_id =
+                 req.has_param("workspace_id") ? req.get_param_value("workspace_id") : std::string();
+             if (workspace_id.empty()) {
+               send_error(res, 400, "bad_request", "'workspace_id' is required");
+               return;
+             }
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(workspace_id, &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             Task task;
+             if (!TaskStore::load(ws, id, &task, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             const std::string message = trim(json_string(body, "message"));
+             if (message.empty()) {
+               send_error(res, 400, "bad_request", "'message' is required");
+               return;
+             }
+             const std::string provider =
+                 task.provider.empty() ? config->active_provider : task.provider;
+             const std::string model = task.model.empty() ? config->active_model : task.model;
+             std::shared_ptr<ChatTurn> turn =
+                 launch_turn(ws.id(), task.session_id, message, provider, model, id, &err);
+             if (!turn) {
+               send_error(res, 409, "cannot_start", err);
+               return;
+             }
+             Task confirmed;
+             TaskStore::update(ws, id,
+                               [&](Task* t) {
+                                 t->status = task_status::kRunning;
+                                 t->session_id = turn->session_id;
+                                 t->needs_confirmation = false;
+                                 t->question.clear();
+                                 t->finished_at.clear();
+                                 t->note = "user confirmed: " + message;
+                               },
+                               &confirmed, &err);
+             nlohmann::json j = confirmed.to_json();
+             j["ok"] = true;
+             send_json(res, j);
+           });
 
   // ---- first-run quick setup: a key is the whole config -------------------
   // The upload gate normally asks for a complete provider.yaml, which is a lot

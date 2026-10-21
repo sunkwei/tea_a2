@@ -1175,6 +1175,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         tool_ctx.session = session;
         tool_ctx.cancel = cancel;
         tool_ctx.web_tool_calls = &web_tool_calls;
+        if (!options.task_id.empty()) tool_ctx.task_id = &options.task_id;
         tool_result = tools_->execute(call.name, parsed_arguments, tool_ctx);
       }
 

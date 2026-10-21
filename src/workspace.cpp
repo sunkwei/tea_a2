@@ -6,42 +6,14 @@
 #include <cstddef>
 #include <fstream>
 #include <iterator>
-#include <mutex>
 
 #include "env.h"
 #include "log.h"
+#include "state_lock.h"
 #include "util.h"
 
 namespace tea {
 namespace {
-
-/// Serialises every read-modify-write of the workspace state files.
-///
-/// The runtime runs one worker thread per in-flight turn, so two sessions of the
-/// same workspace can rewrite on-disk state at the same moment. memory.json,
-/// sessions/index.json, settings.yaml and agent.md are all "read the file, change
-/// one thing, write the whole thing back"; without a lock the last writer wins and
-/// the other turn's change disappears (measured before this existed: 20 concurrent
-/// memory adds were all answered 200 and left exactly 1 note on disk).
-///
-/// One process-wide mutex rather than one per Workspace: Workspace objects are
-/// cheap and created per request, and two of them legitimately point at the same
-/// directory, so a per-object lock would serialise nothing. The critical sections
-/// touch a few KB of JSON - irrelevant next to a model request - so sharing one
-/// lock costs nothing measurable.
-///
-/// Recursive because the public entry points compose: fork_session creates a child
-/// through save_session, rename_session loads then saves, append_agent_doc may seed
-/// the template before appending.
-///
-/// Deliberately leaked: a mutex destroyed during static teardown could be locked
-/// again by a worker that is still winding down.
-std::recursive_mutex& state_mutex() {
-  static std::recursive_mutex* mu = new std::recursive_mutex();
-  return *mu;
-}
-
-using StateLock = std::lock_guard<std::recursive_mutex>;
 
 const char* const kRunDirName = ".tea_agent_run";
 const char* const kMemoryFileName = "memory.json";

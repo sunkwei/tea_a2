@@ -59,6 +59,10 @@ struct ToolContext {
   std::atomic<bool>* cancel = nullptr;
   /// Per-turn counter of billed web-tool calls (null => no budget enforced).
   int* web_tool_calls = nullptr;
+  /// The task this turn belongs to (null => an ordinary chat, no task). The
+  /// toolkit_task tool writes the progress, the intermediate state and the
+  /// "the user has to confirm this" flag into it.
+  const std::string* task_id = nullptr;
 };
 
 class ToolRegistry {

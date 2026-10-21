@@ -310,6 +310,38 @@ try {
     Check "stream terminates cleanly for a strict client" ($probeCode -eq 0) `
         (($probeOut -join ' ').Trim())
 
+    # ---- the task queue (what a scheduler works through) --------------------
+    $taskBody = @{ workspace_id = $wsId; prompt = 'run the mock sequence as a task'; title = 'e2e task' } |
+        ConvertTo-Json -Compress
+    $task = Invoke-RestMethod -Method Post -Uri "$base/api/tasks" -ContentType 'application/json' -Body $taskBody
+    Check "POST /api/tasks creates a task" ($null -ne $task.id -and $task.status -eq 'queued') `
+        "id=$($task.id) status=$($task.status)"
+    Check "the task keeps its prompt" ($task.prompt -eq 'run the mock sequence as a task') $task.prompt
+    $taskFile = Join-Path $wsDir ".tea_agent_run\tasks\$($task.id).json"
+    Check "the task is persisted under .tea_agent_run/tasks" (Test-Path $taskFile) $taskFile
+
+    $taskList = Invoke-RestMethod "$base/api/tasks?workspace_id=$wsId"
+    Check "GET /api/tasks lists the task" (@($taskList.tasks).Count -ge 1) `
+        "count=$(@($taskList.tasks).Count)"
+    Check "the counts report the queued task" ($taskList.counts.queued -ge 1) `
+        ($taskList.counts | ConvertTo-Json -Compress)
+
+    $started = Invoke-RestMethod -Method Post -Uri "$base/api/tasks/$($task.id)/start?workspace_id=$wsId" `
+        -ContentType 'application/json' -Body '{}'
+    Check "POST /api/tasks/{id}/start runs it" ($started.status -eq 'running') "status=$($started.status)"
+    Check "the task got a session" (-not [string]::IsNullOrEmpty($started.session_id)) $started.session_id
+
+    $taskDone = $null
+    for ($i = 0; $i -lt 60; $i++) {
+        Start-Sleep -Milliseconds 500
+        $one = Invoke-RestMethod "$base/api/tasks/$($task.id)?workspace_id=$wsId"
+        if ($one.status -in @('done', 'failed', 'cancelled', 'waiting_confirmation')) { $taskDone = $one; break }
+    }
+    Check "the task ends up done" ($null -ne $taskDone -and $taskDone.status -eq 'done') `
+        "status=$($taskDone.status)"
+    Check "a finished task is at 100%" ($taskDone.progress -eq 100) "progress=$($taskDone.progress)"
+    Check "a finished task has no error" ([string]::IsNullOrEmpty($taskDone.error)) $taskDone.error
+
     Write-Host "`n== trajectory (per-turn audit record) ==" -ForegroundColor Cyan
     $startEvent = $events | Where-Object { $_.type -eq 'start' } | Select-Object -First 1
     $mainSession = $startEvent.session_id

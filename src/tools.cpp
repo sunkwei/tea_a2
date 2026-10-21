@@ -10,6 +10,7 @@
 #include "command.h"
 #include "http.h"
 #include "log.h"
+#include "task.h"
 #include "util.h"
 
 namespace tea {
@@ -770,6 +771,131 @@ ToolResult tool_todo(const nlohmann::json& args, const ToolContext& ctx) {
 // ---------------------------------------------------------------------------
 constexpr std::size_t kMaxLoadedImageBytes = 8u * 1024u * 1024u;
 
+// toolkit_task -- report on the task this turn belongs to.
+//
+// A task is work that was queued for later (see /api/tasks and sched/). The
+// agent owns three things about it: how far it has come, what it just did, and
+// whether a human has to confirm something before it goes on. The scheduler and
+// the task list read them from the task record.
+
+ToolResult tool_task(const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  if (!ctx.workspace) {
+    result.output = "error: no workspace is active";
+    return result;
+  }
+  const std::string op = to_lower(trim(arg_str(args, "op", "update")));
+
+  if (op == "list") {
+    const std::vector<Task> tasks = TaskStore::list(*ctx.workspace);
+    if (tasks.empty()) {
+      result.ok = true;
+      result.output = "no tasks in this workspace";
+      return result;
+    }
+    std::string out;
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+      const Task& t = tasks[i];
+      out += t.id + "  " + t.status + "  " + std::to_string(t.progress) + "%  " + t.title;
+      if (t.needs_confirmation) out += "  [needs confirmation]";
+      if (!t.note.empty()) out += "  - " + t.note;
+      out += "\n";
+    }
+    result.ok = true;
+    result.output = out;
+    return result;
+  }
+
+  std::string id = trim(arg_str(args, "task_id"));
+  if (id.empty() && ctx.task_id) id = *ctx.task_id;
+  if (id.empty()) {
+    result.output = "error: this turn is not part of a task, so there is nothing to report";
+    return result;
+  }
+
+  if (op == "get") {
+    Task t;
+    std::string err;
+    if (!TaskStore::load(*ctx.workspace, id, &t, &err)) {
+      result.output = "error: " + err;
+      return result;
+    }
+    result.ok = true;
+    result.output = t.id + ": " + t.status + " (" + std::to_string(t.progress) + "%) " + t.title;
+    if (!t.note.empty()) result.output += "\nlatest: " + t.note;
+    if (t.needs_confirmation) result.output += "\nwaiting for the user: " + t.question;
+    return result;
+  }
+
+  if (op != "update") {
+    result.output = "error: op must be update, get or list";
+    return result;
+  }
+
+  // ---- update -------------------------------------------------------------
+  const bool has_progress = args.is_object() && args.contains("progress");
+  int progress = 0;
+  if (has_progress) {
+    if (!args["progress"].is_number()) {
+      result.output = "error: 'progress' must be a number (0-100)";
+      return result;
+    }
+    progress = args["progress"].get<int>();
+    if (progress < 0 || progress > 100) {
+      result.output = "error: 'progress' must be between 0 and 100";
+      return result;
+    }
+  }
+  const std::string note = trim(arg_str(args, "note"));
+  bool wants_confirmation = false;
+  bool has_confirmation = false;
+  if (args.is_object() && args.contains("needs_confirmation")) {
+    if (!args["needs_confirmation"].is_boolean()) {
+      result.output = "error: 'needs_confirmation' must be true or false";
+      return result;
+    }
+    wants_confirmation = args["needs_confirmation"].get<bool>();
+    has_confirmation = true;
+  }
+  const std::string question = trim(arg_str(args, "question"));
+
+  Task updated;
+  std::string err;
+  const bool ok = TaskStore::update(
+      *ctx.workspace, id,
+      [&](Task* t) {
+        if (has_progress) t->progress = progress;
+        if (!note.empty()) t->note = note;
+        if (has_confirmation) t->needs_confirmation = wants_confirmation;
+        if (!question.empty()) t->question = question;
+        // The history of what happened, in order - this is the "intermediate
+        // state" the task list shows.
+        nlohmann::json step = nlohmann::json::object();
+        step["at"] = now_iso8601();
+        step["progress"] = t->progress;
+        if (!note.empty()) step["note"] = note;
+        if (has_confirmation) step["needs_confirmation"] = wants_confirmation;
+        if (!question.empty()) step["question"] = question;
+        t->steps.push_back(step);
+        // Keep the history bounded: a long task would otherwise grow the file
+        // without limit.
+        while (t->steps.size() > 100) t->steps.erase(t->steps.begin());
+      },
+      &updated, &err);
+  if (!ok) {
+    result.output = "error: " + err;
+    return result;
+  }
+  result.ok = true;
+  result.output = "task " + updated.id + ": " + updated.status + " (" +
+                  std::to_string(updated.progress) + "%)";
+  if (updated.needs_confirmation) {
+    result.output += " - waiting for the user";
+    if (!updated.question.empty()) result.output += ": " + updated.question;
+  }
+  return result;
+}
+
 ToolResult tool_load_image(const nlohmann::json& args, const ToolContext& ctx) {
   ToolResult result;
   if (!ctx.workspace) {
@@ -1491,6 +1617,51 @@ ToolRegistry::ToolRegistry() {
   }
   {
     ToolDef def;
+    def.name = "toolkit_task";
+    def.description =
+        "Report on the task this turn belongs to. A task is work that was queued for "
+        "later (POST /api/tasks): the scheduler starts it when the provider still has "
+        "quota, and the task list shows how far it got. Use op=update to report the "
+        "progress (0-100) and what you just did (note); use op=update with "
+        "needs_confirmation=true and a question when the work cannot go on without the "
+        "user - the task then waits for an answer instead of being marked done. op=get "
+        "reads the task, op=list shows all of them. Without a task_id it refers to the "
+        "task of this turn. 汇报任务进度、中间状态，或请求用户确认。";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": ["update", "get", "list"],
+          "description": "update: report progress; get: read the task; list: all tasks of this workspace."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Which task. Optional: it defaults to the task of this turn."
+        },
+        "progress": {
+          "type": "integer",
+          "description": "How far the task is, 0-100."
+        },
+        "note": {
+          "type": "string",
+          "description": "What you just did - the intermediate state, one line."
+        },
+        "needs_confirmation": {
+          "type": "boolean",
+          "description": "true when the work cannot go on without the user. The task then waits for an answer."
+        },
+        "question": {
+          "type": "string",
+          "description": "What the user has to answer, when needs_confirmation is true."
+        }
+      },
+      "required": ["op"]
+    })JSON");
+    defs_.push_back(def);
+  }
+  {
+    ToolDef def;
     def.name = "toolkit_load_image";
     def.description =
         "Load an image file from disk (PNG, JPEG, GIF or WebP) and attach it to the conversation "
@@ -1635,6 +1806,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     if (name == "toolkit_memory") return tool_memory(arguments, ctx);
     if (name == "toolkit_todo") return tool_todo(arguments, ctx);
     if (name == "toolkit_load_image") return tool_load_image(arguments, ctx);
+    if (name == "toolkit_task") return tool_task(arguments, ctx);
     if (name == "toolkit_agent_doc") return tool_agent_doc(arguments, ctx);
     if (name == "toolkit_search") return tool_search(arguments, ctx);
     if (name == "toolkit_fetch") return tool_fetch(arguments, ctx);
