@@ -838,7 +838,11 @@
   function renderTodos() {
     var panel = $('todo-panel');
     if (!panel) return;
-    panel.classList.toggle('hidden', !state.todos.length);
+    // 全部做完就不再占地方了：任务面板贴在输入框上方，一整列删除线既占地方又没有
+    // 下一步可看。做完就收起来，下一轮不再显示（侧栏的「6/6」和会话里的记录还在，
+    // 想看历史随时能翻会话）。
+    var allDone = state.todoTotal > 0 && state.todoDone === state.todoTotal;
+    panel.classList.toggle('hidden', !state.todos.length || allDone);
     panel.classList.toggle('collapsed', !!state.todoCollapsed);
     $('todo-head').setAttribute('aria-expanded', state.todoCollapsed ? 'false' : 'true');
     $('todo-count').textContent = state.todoDone + '/' + state.todoTotal;

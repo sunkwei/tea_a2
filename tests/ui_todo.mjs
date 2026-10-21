@@ -294,6 +294,39 @@ providers:
   check('the sidebar chip follows too', p.sidebarChips.some((c) => c.text === '1/4'),
     JSON.stringify(p.sidebarChips));
 
+  // ---- everything done => the panel gets out of the way ----------------
+  // A finished task list is dead weight above the composer: it stays in the
+  // session and in the sidebar chip, but the panel itself must not come back
+  // in the next round.
+  await sleep(2000);   // let the turn that just ran finish (todos are locked while it does)
+  for (const idx of [1, 2, 3]) {
+    await evalJs(`document.querySelectorAll('#todo-list .todo-item')[${idx}].click(); true`);
+    await sleep(700);
+  }
+  const finished = await waitFor(async () => {
+    const q = await panel();
+    return q.count === '4/4';
+  });
+  check('the last tick completes the list', finished, (await panel()).count);
+  p = await panel();
+  check('a finished list hides the panel', p.hidden === true, JSON.stringify(p.hidden));
+  check('the sidebar still shows the finished progress',
+    p.sidebarChips.some((c) => c.text === '4/4' && c.done === true),
+    JSON.stringify(p.sidebarChips));
+
+  // The next round must not bring the finished list back.
+  await evalJs(`(function(){
+    var i = document.getElementById('input');
+    i.value = '再来一轮';
+    i.dispatchEvent(new Event('input'));
+    document.getElementById('send').click();
+    return true;
+  })()`);
+  await sleep(3000);
+  p = await panel();
+  check('the next round does not show the finished list', p.hidden === true,
+    JSON.stringify([p.hidden, p.count]));
+
   // ---- a session without a list shows nothing ---------------------------
   await evalJs(`(function(){
     var rows = document.querySelectorAll('#session-list .sess-row');
