@@ -1,15 +1,18 @@
-// Browser test: two clients, one turn.
+// Browser test: two browsers, one topic, and what they may do to each other.
 //
-// A turn belongs to the server, not to the browser that started it, so more than
-// one client may watch it - and this is an encouraged setup, not an edge case:
-// start a long task from the desktop, walk over to the laptop and pick it up.
-//
+// A turn belongs to the server, keyed by session, so more than one client may
+// watch it - that is the intended setup, not an edge case: start a long task in
+// one window, open the topic link (`/?s=<session_id>`) in another, follow along.
 // What has to hold:
-//   * a second client (fresh profile, no localStorage) boots straight into the
-//     running turn and follows the same stream;
-//   * either client can queue a prompt, and both see it adopted;
-//   * a client can *leave* without cancelling: 离开 stops following, the server
-//     keeps going, the sidebar marks the session, and clicking it re-attaches;
+//
+//   * the topic URL is enough for the second browser: it opens that session
+//     (not "the most recently updated one") and attaches to the running turn;
+//   * both clients see the same stream, and a message typed in either one lands
+//     in the *same* turn's queue instead of replacing the turn;
+//   * "离开" only drops that one client: the server keeps going, the sidebar
+//     marks the session as 进行中, and clicking it re-attaches;
+//   * a client is free to open a new session while the turn runs (no more
+//     "stop it first"), and the running turn is unaffected;
 //   * 停止 still ends the turn for everybody.
 //
 //   node tests/ui_two_clients.mjs [path-to-tea_agent-binary]
@@ -27,7 +30,7 @@ import { wsConnect } from './mini_ws.mjs';
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent');
 const CHROME = process.env.CHROME_BIN || '/usr/bin/google-chrome';
-const CHUNKS = 40;                 // ~12s per model answer
+const LONG_CHUNKS = 120;           // 150 ms each: ~18 s, long enough to observe
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res) => {
@@ -43,14 +46,13 @@ const getJson = (port, p) => new Promise((res, rej) => {
 const results = [];
 const check = (name, ok, detail) => {
   results.push({ name, ok });
-  console.log((ok ? 'PASS ' : 'FAIL ') + name + (detail ? '  ' + detail : ''));
+  console.log((ok ? 'PASS ' : 'FAIL ') + name + (ok || !detail ? '' : '  ' + detail));
 };
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tea_two_'));
 fs.mkdirSync(path.join(tmp, 'home'), { recursive: true });
 fs.mkdirSync(path.join(tmp, 'proj'), { recursive: true });
 
-let modelRequests = 0;
 const frame = (delta, finish) => 'data: ' + JSON.stringify({
   id: 'c1', object: 'chat.completion.chunk',
   choices: [{ index: 0, delta, finish_reason: finish || null }],
@@ -59,19 +61,28 @@ const mock = http.createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
   req.on('end', () => {
-    modelRequests++;
+    let prompt = '';
+    try {
+      const j = JSON.parse(body);
+      const users = (j.messages || []).filter((m) => m.role === 'user');
+      prompt = users.length ? String(users[users.length - 1].content || '') : '';
+    } catch {}
+    // Every answer is long: the queued prompt starts a second iteration inside
+    // the same turn, and the test needs that turn to still be running after it.
+    const total = LONG_CHUNKS;
+    const tag = prompt.slice(0, 4) || 'ans';
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     let n = 0;
     const timer = setInterval(() => {
       n++;
-      res.write(frame({ content: '字' }));
-      if (n >= CHUNKS) {
+      res.write(frame({ content: tag + '#' + n + ' ' }));
+      if (n >= total) {
         clearInterval(timer);
         res.write(frame({}, 'stop'));
         res.write('data: [DONE]\n\n');
         res.end();
       }
-    }, 300);
+    }, 150);
     res.on('close', () => clearInterval(timer));
   });
 });
@@ -86,14 +97,15 @@ providers:
     models: {m: {supports_tools: true}}
 `);
 
-/// One browser with its own profile, driven over CDP.
+/// One browser with its own profile, driven over CDP. Everything the test
+/// asserts is read from the real DOM and the URL, so a "topic" is observable.
 async function openClient(name, url) {
   const cdpPort = await freePort();
   const proc = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox',
     `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, name)}`,
     'about:blank'], { stdio: 'ignore' });
   let target = null;
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 120; i++) {
     try {
       const list = JSON.parse((await getJson(cdpPort, '/json/list')).body);
       target = list.find((t) => t.type === 'page');
@@ -122,15 +134,11 @@ async function openClient(name, url) {
     }
     return r.result && r.result.result ? r.result.result.value : undefined;
   };
-  if (url) {
-    await send('Page.navigate', { url });
-    await sleep(2000);
-  }
+  if (url) await send('Page.navigate', { url });
   return {
-    name,
-    proc,
-    evalJs,
-    goto: async (u) => { await send('Page.navigate', { url: u }); await sleep(2000); },
+    name, proc, evalJs,
+    goto: async (u) => { await send('Page.navigate', { url: u }); await sleep(500); },
+    reload: async () => { await send('Page.reload', {}); await sleep(500); },
     close: () => { try { sock.close(); } catch {} proc.kill('SIGKILL'); },
   };
 }
@@ -140,13 +148,30 @@ const VIEW = `(function(){
   var a = document.querySelectorAll('#messages .msg.assistant');
   var last = a.length ? a[a.length - 1] : null;
   var q = document.getElementById('queue-strip');
+  var live = document.querySelector('#messages .msg.assistant.streaming');
   return { streaming: document.getElementById('send').className.indexOf('stop') >= 0,
            detachVisible: !document.getElementById('detach').classList.contains('hidden'),
            users: document.querySelectorAll('#messages .msg.user').length,
+           assistants: a.length,
            queued: q.classList.contains('hidden') ? 0 : q.querySelectorAll('.queue-item').length,
            running: document.querySelectorAll('.sess-running').length,
-           textLen: last ? last.textContent.length : 0 };
+           liveText: live ? live.textContent : '',
+           textLen: last ? last.textContent.length : 0,
+           search: location.search,
+           title: document.title };
 })()`;
+
+const waitFor = async (fn, timeout = 25000, step = 200) => {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const v = await fn();
+      if (v) return v;
+    } catch (e) { /* keep polling */ }
+    await sleep(step);
+  }
+  return false;
+};
 
 let agent, clientA, clientB;
 try {
@@ -158,119 +183,163 @@ try {
     try { if ((await getJson(agentPort, '/api/health')).status === 200) break; } catch {}
     await sleep(150);
   }
-  const url = `http://127.0.0.1:${agentPort}/`;
+  const base = `http://127.0.0.1:${agentPort}/`;
   const turnStatus = async (sid) =>
     JSON.parse((await getJson(agentPort, '/api/chat/turn?session_id=' + encodeURIComponent(sid))).body);
-  const sessionId = async () => {
-    const wsId = JSON.parse((await getJson(agentPort, '/api/workspaces')).body).workspaces[0].id;
-    const s = JSON.parse((await getJson(agentPort,
-      '/api/workspaces/' + encodeURIComponent(wsId) + '/sessions')).body).sessions;
-    return s.length ? s[0].id : null;
-  };
 
-  // ---- 1) client A starts the turn --------------------------------------
-  clientA = await openClient('pcA', url);
+  // ---- 1) client A starts a long turn -----------------------------------
+  clientA = await openClient('pcA', base);
+  // Wait for the app to finish booting: the composer silently refuses to send
+  // before a workspace is selected (`请先选择工作区`), and the workspace list is
+  // fetched after the page renders. `window.teaState` is the app's own state, so
+  // this does not race the DOM.
+  const appReady = (client) => client.evalJs(`(function(){
+    var t = window.teaState;
+    if (!t || !t.workspace) return null;
+    return { ws: t.workspace.name, sessions: t.sessions.length };
+  })()`);
+  const booted = await waitFor(() => appReady(clientA), 30000);
+  check('A boots the UI with a workspace selected', !!booted, JSON.stringify(booted));
+  // B is opened before the turn starts: a cold Chrome start can outlast a short
+  // mock stream, and this test is about the URL, not about boot speed.
+  clientB = await openClient('pcB', base);
+  const bBooted = await waitFor(() => appReady(clientB), 30000);
+  check('B boots the UI on the plain URL', !!bBooted, JSON.stringify(bBooted));
+  // Any JS error during the flow is otherwise invisible in headless Chrome; the
+  // diagnostics below are printed only when a check fails.
+  await clientA.evalJs(`(function(){
+    window.__errs = [];
+    window.addEventListener('error', function (e) { window.__errs.push('error: ' + e.message); });
+    window.addEventListener('unhandledrejection', function (e) {
+      window.__errs.push('rejection: ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason));
+    });
+    return true;
+  })()`);
   await clientA.evalJs(`(function(){
     var ta = document.getElementById('input');
-    ta.value = 'a long task from A';
+    ta.value = '长任务 from A';
     ta.dispatchEvent(new Event('input'));
     document.getElementById('send').click();
     return true;
   })()`);
-  await sleep(2500);
-  const a1 = await clientA.evalJs(VIEW);
-  check('A is streaming', a1.streaming === true && a1.detachVisible === true, JSON.stringify(a1));
-  const sid = await sessionId();
+  const aStreaming = await waitFor(async () => {
+    const v = await clientA.evalJs(VIEW);
+    return v.streaming && v.liveText.length > 10 ? v : null;
+  });
+  check('A is streaming and its live bubble has text', !!aStreaming, JSON.stringify(aStreaming));
+  if (!aStreaming) {
+    console.log('A diagnostics:', await clientA.evalJs(`JSON.stringify({
+      errs: window.__errs || [], toast: document.getElementById('toast').textContent,
+      send: document.getElementById('send').className,
+      textLen: document.getElementById('input').value.length })`));
+  }
+  const sid = await waitFor(async () => {
+    const d = JSON.parse((await getJson(agentPort, '/api/chat/turns')).body);
+    return d.turns && d.turns.length ? d.turns[0].session_id : null;
+  });
+  check('the topic has a URL in A', !!sid && aStreaming && aStreaming.search === '?s=' + sid,
+    aStreaming && aStreaming.search);
 
-  // ---- 2) client B boots into the same turn -----------------------------
-  clientB = await openClient('pcB', url);
-  await sleep(1500);
-  const b1 = await clientB.evalJs(VIEW);
-  check('B boots straight into the running turn', b1.streaming === true, JSON.stringify(b1));
-  check('B replayed what A had already received', b1.textLen >= a1.textLen,
-    'A=' + a1.textLen + ' B=' + b1.textLen);
-  check('B sees the same question', b1.users === 1, JSON.stringify(b1));
-  check('B can leave without cancelling', b1.detachVisible === true);
-
-  await sleep(2000);
-  const a2 = await clientA.evalJs(VIEW);
-  const b2 = await clientB.evalJs(VIEW);
-  check('both clients follow the same stream', a2.textLen > a1.textLen && b2.textLen > b1.textLen,
-    'A ' + a1.textLen + '->' + a2.textLen + ', B ' + b1.textLen + '->' + b2.textLen);
-  check('both are close to each other', Math.abs(a2.textLen - b2.textLen) <= 4,
-    'A=' + a2.textLen + ' B=' + b2.textLen);
+  // ---- 2) client B opens the topic URL ---------------------------------
+  await clientB.goto(base + '?s=' + sid);
+  const bAttached = await waitFor(async () => {
+    const v = await clientB.evalJs(VIEW);
+    return v.streaming && v.users === 1 ? v : null;
+  }, 30000);
+  check('B opens the topic URL and attaches to the running turn', !!bAttached,
+    JSON.stringify(bAttached));
+  check('B landed on the same session, not "the newest one"',
+    !!bAttached && bAttached.search === '?s=' + sid, bAttached && bAttached.search);
+  check('B sees the question A asked', !!bAttached && bAttached.users === 1,
+    JSON.stringify(bAttached));
+  const bGrew = await waitFor(async () => {
+    const v = await clientB.evalJs(VIEW);
+    return bAttached && v.liveText.length > bAttached.liveText.length + 20 ? v : null;
+  }, 15000);
+  check('B follows the same stream live', !!bGrew, JSON.stringify(bGrew));
 
   // ---- 3) B queues a prompt; both see it adopted ------------------------
   await clientB.evalJs(`(function(){
     var ta = document.getElementById('input');
-    ta.value = 'queued from B';
+    ta.value = '排队 from B';
     ta.dispatchEvent(new Event('input'));
     ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     return true;
   })()`);
-  await sleep(1200);
-  const bq = await clientB.evalJs(VIEW);
-  check('B queued the prompt', bq.queued === 1, JSON.stringify(bq));
-
-  // The turn adopts it at the next iteration boundary, i.e. after this answer.
-  let adopted = null;
-  for (let i = 0; i < 60; i++) {
-    await sleep(700);
+  const bQueued = await waitFor(async () => {
     const v = await clientB.evalJs(VIEW);
-    if (v.users >= 2) { adopted = v; break; }
-  }
-  check('the queued prompt was adopted as a second question', adopted && adopted.users === 2,
+    return v.queued === 1 ? v : null;
+  }, 8000);
+  check('B queued the prompt instead of starting a second turn', !!bQueued, JSON.stringify(bQueued));
+  const adopted = await waitFor(async () => {
+    const a = await clientA.evalJs(VIEW);
+    const b = await clientB.evalJs(VIEW);
+    return a.users === 2 && b.users === 2 ? { a, b } : null;
+  }, 40000);
+  check('both clients see the queued prompt adopted in the same turn', !!adopted,
     JSON.stringify(adopted));
-  const aAfter = await clientA.evalJs(VIEW);
-  check('A saw the adoption too', aAfter.users === 2, JSON.stringify(aAfter));
-  check('the turn is still running for both', adopted.streaming === true && aAfter.streaming === true,
-    'A=' + aAfter.streaming + ' B=' + adopted.streaming);
+  check('both are still following after the adoption',
+    !!adopted && adopted.a.streaming && adopted.b.streaming,
+    adopted && JSON.stringify({ a: adopted.a.streaming, b: adopted.b.streaming }));
 
   // ---- 4) B leaves; the turn keeps going --------------------------------
   await clientB.evalJs(`document.getElementById('detach').click(); true`);
-  await sleep(1200);
-  const b3 = await clientB.evalJs(VIEW);
-  check('B stopped following', b3.streaming === false && b3.detachVisible === false, JSON.stringify(b3));
-  check('B marks the session as still running', b3.running === 1, JSON.stringify(b3));
-  const st = await turnStatus(sid);
-  check('the server did not cancel the turn', st.running === true, JSON.stringify(st));
-  const a3 = await clientA.evalJs(VIEW);
-  check('A is unaffected by B leaving', a3.streaming === true, JSON.stringify(a3));
+  const bLeft = await waitFor(async () => {
+    const v = await clientB.evalJs(VIEW);
+    return !v.streaming && v.running === 1 ? v : null;
+  }, 8000);
+  check('B stopped following and the sidebar marks the session', !!bLeft, JSON.stringify(bLeft));
+  const stillRunning = await turnStatus(sid);
+  check('the server did not cancel the turn', stillRunning.running === true,
+    JSON.stringify(stillRunning));
+  const aStill = await clientA.evalJs(VIEW);
+  check('A is unaffected by B leaving', aStill.streaming === true, JSON.stringify(aStill));
 
-  // B is free to look elsewhere now (this was blocked while following).
+  // ---- 5) B is free to open another topic while the turn runs -----------
   const draft = await clientB.evalJs(`(function(){
     document.getElementById('new-session').click();
     return { empty: !!document.querySelector('#messages .chat-empty'),
-             toast: document.getElementById('toast').textContent };
+             search: location.search };
   })()`);
-  await sleep(400);
-  const stillRunning = await turnStatus(sid);
-  check('B can open a new session while the turn runs',
-    draft && draft.empty === true, JSON.stringify(draft));
-  check('B navigating away did not disturb the turn', stillRunning.running === true,
-    JSON.stringify(stillRunning));
+  await sleep(600);
+  const draftState = await clientB.evalJs(VIEW);
+  check('B can start a new topic while A keeps streaming',
+    draft && draft.empty === true && draftState.streaming === false,
+    JSON.stringify(draft) + ' / ' + JSON.stringify(draftState));
+  check('the new draft has no topic in the URL', draft && draft.search === '',
+    JSON.stringify(draft));
+  const stillRunning2 = await turnStatus(sid);
+  check('B navigating away did not disturb the turn', stillRunning2.running === true,
+    JSON.stringify(stillRunning2));
 
-  // ---- 5) B comes back to the session and re-attaches -------------------
+  // ---- 6) B comes back to the topic and re-attaches ---------------------
   await clientB.evalJs(`(function(){
     var rows = document.querySelectorAll('#session-list .sess-row');
     if (!rows.length) return false;
     rows[0].click();
     return true;
   })()`);
-  await sleep(2000);
-  const b4 = await clientB.evalJs(VIEW);
-  check('clicking the session re-attaches B', b4.streaming === true, JSON.stringify(b4));
-  check('the marker is gone once B follows again', b4.running === 0, JSON.stringify(b4));
+  const bBack = await waitFor(async () => {
+    const v = await clientB.evalJs(VIEW);
+    return v.streaming && v.users >= 1 ? v : null;
+  }, 15000);
+  check('clicking the session re-attaches B', !!bBack, JSON.stringify(bBack));
+  check('the marker is gone once B follows again', !!bBack && bBack.running === 0,
+    bBack && JSON.stringify(bBack));
+  check('B is on the topic URL again', !!bBack && bBack.search === '?s=' + sid,
+    bBack && bBack.search);
 
-  // ---- 6) A stops it for everybody --------------------------------------
+  // ---- 7) A stops it for everybody --------------------------------------
   await clientA.evalJs(`document.getElementById('send').click(); true`);
-  await sleep(2500);
-  const st2 = await turnStatus(sid);
-  check('stop cancels the turn on the server', st2.running === false, JSON.stringify(st2));
-  const a4 = await clientA.evalJs(VIEW);
-  const b5 = await clientB.evalJs(VIEW);
-  check('both clients stopped', a4.streaming === false && b5.streaming === false,
-    'A=' + a4.streaming + ' B=' + b5.streaming);
+  const stopped = await waitFor(async () => {
+    const st = await turnStatus(sid);
+    const a = await clientA.evalJs(VIEW);
+    const b = await clientB.evalJs(VIEW);
+    return st.running === false && !a.streaming && !b.streaming ? { st, a, b } : null;
+  }, 30000);
+  check('stop cancels the turn for every client', !!stopped,
+    JSON.stringify(stopped && { running: stopped.st.running, a: stopped.a.streaming,
+                                b: stopped.b.streaming }));
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });

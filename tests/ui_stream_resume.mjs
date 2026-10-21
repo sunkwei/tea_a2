@@ -132,6 +132,12 @@ const view = () => evalJs(`(function(){
            assistants: asss.length,
            toolRows: document.querySelectorAll('#messages .tool-row:not(.traj-row):not(.reasoning)').length,
            liveToolRows: last ? last.querySelectorAll('.tool-row').length : 0,
+           // Rows that belong to the one command this turn runs: the question is
+           // "is it rendered once", not "how many commands exist in the whole
+           // session" (earlier turns have their own).
+           probeRows: Array.prototype.filter.call(
+             document.querySelectorAll('#messages .msg > .tool-row'),
+             function (r) { return r.textContent.indexOf('resume-probe') >= 0; }).length,
            live: !!document.querySelector('#messages .msg.assistant.streaming'),
            text: last ? last.textContent : '' };
 })()`);
@@ -251,7 +257,7 @@ try {
   const resumedB = await view();
   check('B: streaming again after the reload', resumedB.streaming === true, JSON.stringify(resumedB));
   check('B: the rebuilt turn shows the tool call exactly once',
-    resumedB.liveToolRows === 1 && resumedB.toolRows === 1, JSON.stringify(resumedB));
+    resumedB.liveToolRows === 1 && resumedB.probeRows === 1, JSON.stringify(resumedB));
   check('B: no duplicated question bubbles', resumedB.users === 2,
     'users=' + resumedB.users + ' assistants=' + resumedB.assistants);
   check('B: the answer kept growing across the reload', resumedB.text.length > beforeB.text.length,
@@ -266,7 +272,7 @@ try {
   check('B: the tool turn completes after the re-attach', fin.streaming === false && upstreamFinished === 2,
     JSON.stringify(fin));
   check('B: one tool row and the full answer remain',
-    fin.toolRows === 1 && fin.text.length >= CHUNKS, JSON.stringify(fin));
+    fin.probeRows === 1 && fin.text.length >= CHUNKS, JSON.stringify(fin));
   check('B: the conversation has two questions and three answers',
     fin.users === 2 && fin.assistants === 3, JSON.stringify(fin));
 } catch (e) {

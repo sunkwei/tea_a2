@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -98,6 +99,55 @@ const char* raw_mime_for(const std::string& file_path) {
 /// one request cannot exhaust memory or fill the artifacts directory.
 constexpr std::size_t kMaxImagesPerMessage = 4;
 constexpr std::size_t kMaxImageBytes = 8u * 1024u * 1024u;
+
+/// ---- how many clients the process is willing to carry ----------------------
+///
+/// Every attached SSE response owns one HTTP worker thread for as long as it
+/// lives (cpp-httplib hands a streaming response the thread that started it), so
+/// these numbers are not abstract: with the old fixed pool of 32 threads, the
+/// 32nd open stream made GET /api/health time out, i.e. the UI could not even
+/// ask "are you alive?" or press stop. The pool now grows on demand, and the
+/// spectators of one turn are bounded so a forgotten tab that reconnects in a
+/// loop cannot take the whole server down with it.
+constexpr std::size_t kHttpThreadsBase = 16;
+constexpr std::size_t kHttpThreadsMaxDefault = 128;
+constexpr std::size_t kHttpQueuedRequests = 1024;
+
+/// Positive integer from the environment, or `fallback`. A malformed or too
+/// small value is reported once and ignored: a typo in an env var must not take
+/// the server down.
+int env_int_at_least(const char* name, int fallback, int minimum) {
+  const char* raw = std::getenv(name);
+  if (!raw || !*raw) return fallback;
+  char* end = nullptr;
+  const long parsed = std::strtol(raw, &end, 10);
+  if (end == raw || parsed < minimum || parsed > 100000) {
+    LOG_WARN("server: ignoring ", name, "=", raw, " (needs an integer >= ", minimum, ")");
+    return fallback;
+  }
+  LOG_INFO("server: ", name, "=", parsed);
+  return static_cast<int>(parsed);
+}
+
+/// How many browsers may follow one turn. 3 browsers is the intended setup; 8
+/// leaves room for a reload race or two. Every follower pins an HTTP worker
+/// thread, so this is the knob that protects the server from a tab that
+/// reconnects in a loop.
+int max_subscribers_per_turn() {
+  static const int value = env_int_at_least("TEA_AGENT_MAX_SUBSCRIBERS", 8, 1);
+  return value;
+}
+
+/// Turns are cheap to keep but every one of them streams into every subscriber;
+/// this is the "one server, several topics" ceiling.
+int max_active_turns() {
+  static const int value = env_int_at_least("TEA_AGENT_MAX_ACTIVE_TURNS", 24, 1);
+  return value;
+}
+/// How long an explicit `{"interrupt": true}` waits for the replaced worker to
+/// finish writing. Long enough for a tool call that is just returning, short
+/// enough that the browser is not left hanging.
+constexpr int kInterruptWaitMs = 15000;
 
 /// Split a `data:<mime>;base64,<payload>` URL. Also accepts a bare base64
 /// payload (the UI always sends the full URL, but curl users often do not).
@@ -218,6 +268,29 @@ struct ChatTurn {
     long long cursor = 1;
   };
 
+  /// Live attached responses. Bounded, because each one pins an HTTP worker
+  /// thread for its whole life (see max_subscribers_per_turn()): a page that
+  /// reconnects in a loop must be refused, not allowed to starve every other
+  /// request of the server.
+  int subscribers = 0;
+
+  bool add_subscriber() {
+    std::lock_guard<std::mutex> lock(mu);
+    if (closed || subscribers >= max_subscribers_per_turn()) return false;
+    ++subscribers;
+    return true;
+  }
+
+  void remove_subscriber() {
+    std::lock_guard<std::mutex> lock(mu);
+    if (subscribers > 0) --subscribers;
+  }
+
+  int subscriber_count() const {
+    std::lock_guard<std::mutex> lock(mu);
+    return subscribers;
+  }
+
   ~ChatTurn() {
     if (worker.joinable()) worker.join();
   }
@@ -272,6 +345,9 @@ struct ChatTurn {
     j["oldest_seq"] = log_base;
     j["buffered"] = static_cast<long long>(log.size());
     j["dropped"] = log_dropped;
+    // How many browsers are watching right now. The UI shows it so "someone
+    // else is following this turn" is visible instead of guessed.
+    j["subscribers"] = subscribers;
     return j;
   }
 
@@ -352,6 +428,17 @@ struct ChatTurn {
                                   static_cast<long long>(now_ms() / 1000));
       if (n <= 0 || !sink.write(heartbeat, static_cast<std::size_t>(n))) return false;
     }
+  }
+};
+
+/// Reserves one subscriber slot on a turn and releases it when the owning HTTP
+/// response is destroyed - which also happens when httplib gives up on a client
+/// that vanished without a FIN.
+struct SubscriberSlot {
+  std::shared_ptr<ChatTurn> turn;
+  explicit SubscriberSlot(std::shared_ptr<ChatTurn> t) : turn(std::move(t)) {}
+  ~SubscriberSlot() {
+    if (turn) turn->remove_subscriber();
   }
 };
 
@@ -550,6 +637,37 @@ struct ApiServer::Impl {
   std::vector<std::shared_ptr<ChatTurn>> retired;
   // ---- helpers -----------------------------------------------------------
   void install_routes();
+
+  /// The turn currently owning `session_id`, if any. Never prunes and never
+  /// joins: callers must not hold `mu` while a ChatTurn dies (its destructor
+  /// joins the worker, which may still be inside a long tool call).
+  std::shared_ptr<ChatTurn> find_turn(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = turns.find(session_id);
+    return it == turns.end() ? nullptr : it->second;
+  }
+
+  bool session_turn_running(const std::string& session_id) {
+    std::shared_ptr<ChatTurn> turn = find_turn(session_id);
+    return turn && !turn->finished();
+  }
+
+  /// Number of turns that are still working. Every one of them keeps a worker
+  /// thread and a replay buffer alive, so the total is capped.
+  int active_turn_count() {
+    std::vector<std::shared_ptr<ChatTurn>> live;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (auto it = turns.begin(); it != turns.end(); ++it) {
+        if (it->second) live.push_back(it->second);
+      }
+    }
+    int active = 0;
+    for (std::size_t i = 0; i < live.size(); ++i) {
+      if (!live[i]->finished()) ++active;
+    }
+    return active;
+  }
 
   bool open_workspace(const std::string& id, Workspace* out, std::string* err) {
     WorkspaceEntry copy;
@@ -848,11 +966,34 @@ void ApiServer::Impl::install_routes() {
 
   svr.set_payload_max_length(64ull * 1024ull * 1024ull);
   svr.set_read_timeout(60, 0);
-  svr.set_write_timeout(600, 0);
+  // A streaming response owns this thread until it ends, so a dead-but-not-closed
+  // socket must not be able to keep one for ten minutes. 20 minutes was the old
+  // value and it is longer than any turn needs to produce a frame (the loop sends
+  // a heartbeat every 15 s; a write that cannot complete in two minutes means the
+  // peer is gone).
+  svr.set_write_timeout(120, 0);
   svr.set_idle_interval(0, 200000);
   svr.set_keep_alive_max_count(1024);
   svr.set_tcp_nodelay(true);
-  svr.new_task_queue = [] { return new httplib::ThreadPool(32); };
+  // Base threads stay around; extra ones are spawned on demand (an attached SSE
+  // stream keeps one for its whole life) and retire after a few idle seconds, so
+  // a handful of tabs costs a handful of threads. `TEA_AGENT_HTTP_THREADS_MAX`
+  // lowers the ceiling on a memory-constrained board.
+  svr.new_task_queue = [] {
+    std::size_t max_threads = kHttpThreadsMaxDefault;
+    const char* env = std::getenv("TEA_AGENT_HTTP_THREADS_MAX");
+    if (env && *env) {
+      const long long parsed = std::atoll(env);
+      if (parsed >= static_cast<long long>(kHttpThreadsBase)) {
+        max_threads = static_cast<std::size_t>(parsed);
+      } else {
+        LOG_WARN("server: ignoring TEA_AGENT_HTTP_THREADS_MAX=", env, " (needs to be >= ",
+                 kHttpThreadsBase, ")");
+      }
+    }
+    LOG_INFO("server: http pool base=", kHttpThreadsBase, " max=", max_threads);
+    return new httplib::ThreadPool(kHttpThreadsBase, max_threads, kHttpQueuedRequests);
+  };
 
   // ---- static ------------------------------------------------------------
   svr.Get("/", [this](const httplib::Request&, httplib::Response& res) {
@@ -887,7 +1028,7 @@ void ApiServer::Impl::install_routes() {
   svr.Get("/api/health", [this](const httplib::Request&, httplib::Response& res) {
     nlohmann::json j = nlohmann::json::object();
     j["ok"] = true;
-    j["version"] = TEA_AGENT_VERSION_STRING;
+    j["version"] = std::string(tea::version_string());
     j["uptime_s"] = static_cast<double>(now_ms() - started_ms) / 1000.0;
     j["provider"] = config->active_provider;
     j["model"] = config->active_model;
@@ -1594,7 +1735,7 @@ void ApiServer::Impl::install_routes() {
             }
             std::map<std::string, std::string> image_data;
             const std::string html =
-                export_session_html(ws, session, TEA_AGENT_VERSION_STRING, ExportLimits(),
+                export_session_html(ws, session, std::string(tea::version_string()), ExportLimits(),
                                     &image_data);
             const std::string name = export_file_name(session.info.title);
             res.set_header("Content-Disposition",
@@ -1686,6 +1827,17 @@ void ApiServer::Impl::install_routes() {
               send_error(res, 404, "not_found", err);
               return;
             }
+            // A running turn owns its Session copy and writes it back wholesale,
+            // so an edit made here would be undone by the worker's next save -
+            // or, worse, the worker's save would be undone by this one. Refuse
+            // and say why instead of silently losing the click.
+            if (session_turn_running(req.matches[1].str())) {
+              send_error(res, 409, "turn_running",
+                         "this session's turn is still running and owns the task list; "
+                         "tick items off after it finishes (the agent updates the list itself "
+                         "while it works)");
+              return;
+            }
             Session session;
             if (!ws.load_session(req.matches[1].str(), &session, &err)) {
               send_error(res, 404, "not_found", err);
@@ -1762,6 +1914,14 @@ void ApiServer::Impl::install_routes() {
                  send_error(res, 404, "not_found", err);
                  return;
                }
+               // The worker would keep saving the transcript it holds and
+               // resurrect the file (with an index entry) after the delete.
+               if (session_turn_running(req.matches[1].str())) {
+                 send_error(res, 409, "turn_running",
+                            "this session's turn is still running; stop it before deleting the "
+                            "session, otherwise the worker would write it back");
+                 return;
+               }
                if (!ws.delete_session(req.matches[1].str(), &err)) {
                  send_error(res, 400, "session_error", err);
                  return;
@@ -1783,6 +1943,14 @@ void ApiServer::Impl::install_routes() {
               const std::string title = json_string(body, "title");
               if (trim(title).empty()) {
                 send_error(res, 400, "bad_request", "'title' is required");
+                return;
+              }
+              // The running turn saves the whole Session, title included, so a
+              // rename now would flicker back at its next iteration.
+              if (session_turn_running(req.matches[1].str())) {
+                send_error(res, 409, "turn_running",
+                           "this session's turn is still running and will write the old title "
+                           "back; rename it after the turn finishes");
                 return;
               }
               if (!ws.rename_session(req.matches[1].str(), title, &err)) {
@@ -2251,6 +2419,110 @@ void ApiServer::Impl::install_routes() {
       send_error(res, 400, "bad_request", "'workspace_id' is required");
       return;
     }
+    const std::string requested_session = json_string(body, "session_id");
+    bool interrupt = false;
+    if (body.contains("interrupt")) {
+      if (!body["interrupt"].is_boolean()) {
+        send_error(res, 400, "bad_request", "'interrupt' must be true or false");
+        return;
+      }
+      interrupt = body["interrupt"].get<bool>();
+    }
+
+    // ---- same-session policy: queue by default, replace only on request -----
+    //
+    // Two windows on one topic are a feature, so a second message must not
+    // silently throw away what the other window (or the other machine) is
+    // watching. Default: the message joins the running turn's inbox and the
+    // agent adopts it at the next iteration - that is exactly what
+    // POST /api/chat/queue does, so this route answers with the same shape and
+    // the UI shows the queue strip.
+    //
+    // Replacing the turn needs `{"interrupt": true}`, and even then the old
+    // worker is waited for: it owns its own Session copy and writes it wholesale,
+    // so starting the replacement before it finished used to wipe the new
+    // question and answer off disk (reproducible with
+    // .tea_agent_run/scripts/same_session_race.py). Waiting also means the
+    // replacement loads the session the old turn actually left behind.
+    if (!requested_session.empty()) {
+      std::shared_ptr<ChatTurn> running = find_turn(requested_session);
+      if (running && !running->finished()) {
+        if (!interrupt) {
+          if (images_json.is_array() && !images_json.empty()) {
+            send_error(res, 409, "images_not_queued",
+                       "this session's turn is still running, and a queued prompt cannot carry "
+                       "images; wait for it to finish, or send {\"interrupt\": true} to replace it");
+            return;
+          }
+          QueuedPrompt queued;
+          queued.id = make_id("q_");
+          queued.text = trim(message);
+          queued.created_at = now_iso8601();
+          if (!running->enqueue_prompt(queued)) {
+            // The turn closed between the check and the push: fall through and
+            // start a fresh turn instead of dropping the message.
+            LOG_INFO("chat: session ", requested_session,
+                     " finished just as the prompt was queued; starting a new turn");
+          } else {
+            LOG_INFO("chat: queued prompt ", queued.id, " for the running turn of session ",
+                     requested_session, " (", running->inbox.size(), " pending)");
+            nlohmann::json j = nlohmann::json::object();
+            j["ok"] = true;
+            j["queued"] = {{"id", queued.id},
+                           {"content", queued.text},
+                           {"created_at", queued.created_at}};
+            j["pending"] = static_cast<int>(running->inbox.size());
+            j["session_id"] = requested_session;
+            j["workspace_id"] = running->workspace_id;
+            // The client uses this to say "another window is answering; your
+            // message waits its turn" instead of pretending it started a turn.
+            j["turn_running"] = true;
+            send_json(res, j);
+            return;
+          }
+        } else {
+          running->cancel.store(true);
+          LOG_INFO("chat: interrupt requested for the running turn of session ",
+                   requested_session, "; waiting up to ", kInterruptWaitMs, " ms for it to stop");
+          const int64_t deadline = now_ms() + kInterruptWaitMs;
+          while (!running->finished() && now_ms() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+          }
+          if (!running->finished()) {
+            send_error(res, 409, "turn_still_running",
+                       "the running turn did not stop within " +
+                           std::to_string(kInterruptWaitMs / 1000) +
+                           " s (it may be inside a long tool call); it was asked to cancel - "
+                           "retry once it has stopped");
+            return;
+          }
+          // The worker is done, so dropping the entry joins immediately. Do it
+          // outside `mu`: the destructor joins, and joining under the lock would
+          // freeze every other request.
+          std::vector<std::shared_ptr<ChatTurn>> reaped;
+          {
+            std::lock_guard<std::mutex> lock(mu);
+            auto it = turns.find(requested_session);
+            if (it != turns.end() && it->second == running) {
+              reaped.push_back(it->second);
+              turns.erase(it);
+            }
+          }
+          reaped.clear();
+        }
+      }
+    }
+
+    {
+      const int active = active_turn_count();
+      if (active >= max_active_turns()) {
+        send_error(res, 429, "too_many_turns",
+                   "this server is already running " + std::to_string(active) +
+                       " turns (limit " + std::to_string(max_active_turns()) +
+                       "); wait for one to finish or stop it first");
+        return;
+      }
+    }
 
     auto turn = std::make_shared<ChatTurn>();
     turn->started_at = now_iso8601();
@@ -2261,7 +2533,6 @@ void ApiServer::Impl::install_routes() {
     }
     turn->workspace_id = turn->workspace.id();
 
-    const std::string requested_session = json_string(body, "session_id");
     if (!requested_session.empty()) {
       // Unknown session ids simply start a fresh conversation.
       turn->workspace.load_session(requested_session, &turn->session, nullptr);
@@ -2364,6 +2635,12 @@ void ApiServer::Impl::install_routes() {
       prune_turns_locked(&graveyard);
       auto it = turns.find(turn->session_id);
       if (it != turns.end() && it->second) {
+        // Should be unreachable: a turn still running on this id was either
+        // queued into (default) or interrupted and waited for above. Keep the
+        // guard anyway - replacing a live worker without the wait is exactly the
+        // race that silently dropped messages.
+        LOG_WARN("chat: replacing a still-running turn on session ", turn->session_id,
+                 " without an explicit interrupt");
         it->second->cancel.store(true);
         retired.push_back(it->second);  // destroyed after the lock is released
         turns.erase(it);
@@ -2421,12 +2698,23 @@ void ApiServer::Impl::install_routes() {
     res.set_header("Access-Control-Allow-Origin", "*");
     // No resource releaser here on purpose: the response ending (tab closed,
     // laptop asleep, network dropped) must not cancel the work. Only
-    // /api/chat/stop, a newer turn on the same session, or shutting the server
-    // down does that. Whoever comes back re-attaches below.
+    // /api/chat/stop, an explicit interrupt, or shutting the server down does
+    // that. Whoever comes back re-attaches below.
     auto sub = std::make_shared<ChatTurn::Subscriber>();
+    auto slot = std::make_shared<SubscriberSlot>(turn);
+    if (!turn->add_subscriber()) {
+      // Cannot happen for a turn created a few lines above, but do not write an
+      // SSE response without a slot if the cap ever moves.
+      send_error(res, 429, "too_many_subscribers",
+                 "too many windows are already following this turn (limit " +
+                     std::to_string(max_subscribers_per_turn()) + ")");
+      return;
+    }
     res.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
-        [turn, sub](std::size_t, httplib::DataSink& sink) { return turn->pump(sink, sub); });
+        [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
+          return turn->pump(sink, sub);
+        });
   });
 
   // ---- re-attaching to a turn that is still running -----------------------
@@ -2510,7 +2798,20 @@ void ApiServer::Impl::install_routes() {
       send_error(res, 404, "no_active_turn", "this session has no turn to attach to");
       return;
     }
+    if (turn->finished()) {
+      // It ended while this request was in flight; the persisted session is the
+      // final state, exactly like the 404 below.
+      send_error(res, 404, "no_active_turn", "this session's turn has already finished");
+      return;
+    }
+    if (!turn->add_subscriber()) {
+      send_error(res, 429, "too_many_subscribers",
+                 "already " + std::to_string(max_subscribers_per_turn()) +
+                     " windows are following this turn; close one of them and reload");
+      return;
+    }
     auto sub = std::make_shared<ChatTurn::Subscriber>();
+    auto slot = std::make_shared<SubscriberSlot>(turn);
     // `since` is the last seq the client saw. A seq older than the buffer (or no
     // seq at all) replays from the oldest frame still held; when frames were
     // dropped, pump() sends a `resync` event first so the client reloads the
@@ -2521,13 +2822,15 @@ void ApiServer::Impl::install_routes() {
       if (since > 0) sub->cursor = since + 1;
     }
     LOG_INFO("chat: re-attaching to the running turn of session ", session_id, " (replay from seq ",
-             sub->cursor, ")");
+             sub->cursor, ", ", turn->subscriber_count(), " subscriber(s))");
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
-        [turn, sub](std::size_t, httplib::DataSink& sink) { return turn->pump(sink, sub); });
+        [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
+          return turn->pump(sink, sub);
+        });
   });
 
   svr.Post("/api/chat/stop", [this](const httplib::Request& req, httplib::Response& res) {

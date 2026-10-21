@@ -86,6 +86,15 @@
         <div class="crumbs" id="crumbs"></div>
       </div>
       <div class="topbar-right">
+        <!-- 复制这个主题的地址（?s=<session_id>）：贴到另一个浏览器/标签页打开同一个会话 -->
+        <button id="session-link" class="icon-btn hidden" type="button"
+                title="复制主题链接（?s=…）：在另一个浏览器/标签页打开同一个会话"
+                aria-label="复制主题链接">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M6.4 9.6a2.6 2.6 0 0 0 3.7 0l2.1-2.1a2.6 2.6 0 0 0-3.7-3.7l-1 1"/>
+            <path d="M9.6 6.4a2.6 2.6 0 0 0-3.7 0L3.8 8.5a2.6 2.6 0 0 0 3.7 3.7l1-1"/>
+          </svg>
+        </button>
         <!-- 把当前会话导出成一个自带 CSS/图片的 HTML 文件：拷到别的机器上双击即可阅读 -->
         <button id="session-export" class="icon-btn hidden" type="button"
                 title="导出当前会话为单个 HTML 文件（离线可读，含图片）"

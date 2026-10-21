@@ -23,8 +23,20 @@
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
     turnStartAt: 0, turnSteps: 0, mdBase: '',
     turnSeq: 0, attachRetries: 0,
+    /// 每次 openSession 递增。开场会话的请求是异步的（而且 loadSessions 会自动打开
+    /// 最近一个），用户点的那一下可能和自动打开撞在一起：晚到的旧请求如果把
+    /// state.session/live 改回去，屏幕就会出现"刚接上的直播气泡又没了"。只有最后一次
+    /// openSession 的结果算数。
+    sessionEpoch: 0,
+    /// 用户按了「＋ 新建会话」：这个标签页要的是草稿，不是"最近更新的那个会话"。
+    /// loadSessions() 不能在后台把它替换成 sessions[0]（正在跑的那一轮结束后就会
+    /// 触发一次刷新）。
+    draft: false,
     // 你主动离开了哪个会话的轮次（它还在服务端跑）：别又把人拽回去
     detached: null,
+    /// 服务端正在跑的轮次，按 session id 索引（GET /api/chat/turns）。侧栏据此
+    /// 标出「进行中」，改名/删除也据此禁用——那些操作会被 worker 覆盖掉。
+    running: {},
     /// 选中的分叉点：{ sid, mid, ord, preview }。下一条消息先 POST /fork 建一个
     /// 从这条轮次分出去的新会话，再发进那个会话；当前会话不动。null = 未选。
     fork: null,
@@ -54,11 +66,18 @@
     }
   };
 
+  /// 本标签页正在看的主题。**sessionStorage** 而不是 localStorage：两个窗口各自
+  /// 记住自己的主题，另开一个窗口看别的主题不会被这一边覆盖掉。
+  var TAB_KEY = 'tea_agent_tab_v1';
+  var TOPIC_PARAM = 's';
+
   function saveLS() {
     try {
+      // 只存"跨标签页共享的偏好"。当前会话属于**这个标签页**（见 setTabSession），
+      // 写进 localStorage 会让最后关闭/最后刷新的窗口决定所有窗口看什么。
       localStorage.setItem(LS_KEY, JSON.stringify({
         view: state.view, workspace_id: state.workspace ? state.workspace.id : null,
-        session_id: state.session ? state.session.id : null, model: state.model,
+        model: state.model,
         logs_autoscroll: state.logsAutoScroll, sidebar_hidden: state.sidebarHidden
       }));
     } catch (e) { /* 隐私模式下忽略 */ }
@@ -66,6 +85,32 @@
   function loadLS() {
     try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}') || {}; } catch (e) { return {}; }
   }
+  function tabSession() {
+    try { return sessionStorage.getItem(TAB_KEY) || ''; } catch (e) { return ''; }
+  }
+  function setTabSession(sid) {
+    try {
+      if (sid) sessionStorage.setItem(TAB_KEY, sid); else sessionStorage.removeItem(TAB_KEY);
+    } catch (e) { /* 隐私模式下忽略 */ }
+  }
+  /// 主题的地址：`?s=<session_id>`。刷新、收藏、贴给另一个浏览器，打开的都是同一个
+  /// 会话——而不是"索引里最近更新的那个"。两个窗口各带各的 `?s=`，互不干扰。
+  function topicFromUrl() {
+    try {
+      var raw = new URLSearchParams(window.location.search).get(TOPIC_PARAM);
+      return raw ? String(raw).trim() : '';
+    } catch (e) { return ''; }
+  }
+  function setTopicUrl(sid) {
+    var base = window.location.pathname;
+    var next = base + (sid ? '?' + TOPIC_PARAM + '=' + encodeURIComponent(sid) : '');
+    if (next === base + window.location.search) return;
+    try { window.history.replaceState(null, '', next); } catch (e) { /* file:// 下忽略 */ }
+  }
+
+  // Debug handle for the browser tests: they assert on real state, not on a
+  // DOM that could lag behind. Harmless in production (same closure, no I/O).
+  try { window.teaState = state; } catch (e) { /* ignore */ }
 
   /* ---------- 2) 通用小工具 ---------- */
   function $(id) { return document.getElementById(id); }
@@ -1556,20 +1601,13 @@
       if (ev && typeof ev === 'object') handleEvent(ev);
     });
   }
-  /// A running turn owns the conversation: switching workspace or starting a new
-  /// session mid-stream would pull state out from under the SSE reader. The
-  /// controls stay enabled so the click can say *why* it is refused; a disabled
-  /// button gives no feedback at all, which reads as "the UI is broken".
-  function blockedWhileStreaming(what) {
-    if (!state.streaming) return false;
-    toast('正在生成回答：先点停止，或等这一轮结束再' + what);
-    return true;
-  }
-
   function setStreaming(on) {
     state.streaming = on;
     updatePlaceholder();
     updateComposer();
+    // 「进行中」标记只属于**没在跟随**的会话（见 renderSessions）：跟随状态一变，
+    // 侧栏那一行就得重画，否则接上之后标记还挂着。
+    renderSessions();
     if (on) {
       startMetricsTicker();
     } else {
@@ -1580,9 +1618,7 @@
     // The chip stays clickable: the menu is still useful (it shows what exists)
     // and the refusal is explained on selection. The tooltip states the reason
     // up front.
-    $('ws-chip').title = on ? '正在生成回答：结束后才能切换工作区'
-                            : '切换工作区，或添加一个新的项目目录';
-    Array.prototype.forEach.call(document.querySelectorAll('.sess-row'), function (b) { b.disabled = on; });
+    $('ws-chip').title = '切换工作区，或添加一个新的项目目录（正在进行的轮次会在服务端继续）';
   }
   function updatePlaceholder() {
     $('input').placeholder = state.streaming ? QUEUE_PLACEHOLDER
@@ -1909,12 +1945,12 @@
     // 队列属于上一轮：新一轮开始时不可能还有可被采纳的旧条目。
     state.queue = []; state.queueDone = {}; renderQueue();
     state.turnSeq = 0; state.attachRetries = 0;
-    // 你之前离开过这一轮（它还在服务端跑）：新消息会把它顶掉，
-    // 而且顶掉的可能是别人发起的任务，所以说清楚再发。
+    // 你之前离开过这一轮（它还在服务端跑）：这条消息会排进它的队列（不是顶掉），
+    // 之后跟着它一起直播，所以说清楚再发。
     if (state.detached && state.session && state.detached === state.session.id) {
       state.detached = null;
       renderSessions();
-      toast('上一轮仍在进行，已被这条消息顶掉');
+      toast('上一轮仍在进行：这条消息会排进它的队列，然后一起看直播');
     }
 
     // 分叉点只对「当前会话」有效：先把消息要去的会话建出来，再发进去。分叉
@@ -1928,6 +1964,7 @@
         .then(function (d) {
           if (!d || !d.session || !d.session.id) throw new Error('服务端没有返回新会话');
           state.session = d.session;
+          setTopicUrl(d.session.id); setTabSession(d.session.id);   // 分叉出来的是新主题
           state.messages = d.messages || [];
           state.live = null; state.liveNode = null; state.liveView = null;
           state.streamError = null; state.ended = false; state.stickBottom = true;
@@ -1952,7 +1989,12 @@
     } else {
       ready = api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions',
         { method: 'POST', body: { title: text.slice(0, 24) || '图片' } })
-        .then(function (s) { state.session = s; saveLS(); loadSessions(); return s; });
+        .then(function (s) {
+          state.session = s;
+          state.draft = false;                      // 草稿落地成了真正的会话
+          setTopicUrl(s.id); setTabSession(s.id);   // 第一条消息落地 = 这个主题有地址了
+          saveLS(); loadSessions(); return s;
+        });
     }
 
     // 缩略图条立刻清空；乐观消息自己带 data URL，回读会话时换成服务端路径。
@@ -1982,8 +2024,35 @@
           model: state.model ? state.model.model : undefined
         }),
         signal: ctrl.signal
-      }).then(readTurnStream);
-    }).then(finalizeStream, function (err) {
+      }).then(function (res) {
+        // 服务端只有在**新开**一轮时才回 SSE。回 JSON 说明这个会话已经有一轮在跑，
+        // 消息被排进了它的队列（两个窗口共用一个主题时的默认行为）。
+        var ctype = res.headers.get('Content-Type') || '';
+        if (res.ok && ctype.indexOf('text/event-stream') < 0) {
+          return res.json().then(function (d) { return { queued: d || {} }; });
+        }
+        return readTurnStream(res).then(function () { return { queued: null }; });
+      });
+    }).then(function (r) {
+      if (!r || !r.queued) { finalizeStream(); return; }
+      var d = r.queued;
+      var queuedSid = d.session_id || (state.session ? state.session.id : '');
+      var lastMsg = state.messages[state.messages.length - 1];
+      if (lastMsg && lastMsg.role === 'user' && lastMsg.content === text) state.messages.pop();
+      state.live = null; state.liveNode = null; state.liveView = null;
+      state.ended = false;
+      setStreaming(false);
+      if (d.queued && d.queued.id && !state.queueDone[d.queued.id]) {
+        state.queue.push({
+          id: d.queued.id, content: d.queued.content || text,
+          created_at: d.queued.created_at || ''
+        });
+      }
+      renderQueue(); renderChat();
+      toast('这个会话的一轮还在跑：消息已排队，agent 下一步采纳（两个窗口看同一份输出）');
+      // 接上那一轮：这个窗口从"只看历史"变成跟着别人正在跑的直播。
+      return maybeAttach(queuedSid);
+    }, function (err) {
       if (forkFailed) return;         // 分叉失败时输入已还回，别再报一次流错误
       if (!err || err.name !== 'AbortError') {
         state.streamError = '请求失败：' + (err && err.message ? err.message : String(err));
@@ -2171,7 +2240,7 @@
     state.workspaces.forEach(function (w) {
       var it = btn('dd-item' + (state.workspace && state.workspace.id === w.id ? ' active' : ''), w.name, function () {
         closeDropdowns();
-        if (blockedWhileStreaming('切换工作区')) return;
+        // 正在跟随一轮时切工作区：先离开（服务端照跑），别拦着人。
         if (!state.workspace || state.workspace.id !== w.id) selectWorkspace(w.id);
       });
       it.appendChild(el('span', 'sub', w.exists === false ? '路径不存在' : (w.sessions || 0) + ' 会话'));
@@ -2180,8 +2249,7 @@
     dd.appendChild(el('div', 'dd-sep'));
     dd.appendChild(btn('dd-item', '＋ 添加工作区…', function () {
       closeDropdowns();
-      if (blockedWhileStreaming('添加工作区')) return;
-      openAddWorkspace(false);
+      openAddWorkspace(false);   // 只是打开一个对话框，不影响正在跑的轮次
     }));
   }
   /* 会话索引：标题 + 相对时间 + 消息条数，当前会话高亮，行内改名/删除。
@@ -2196,9 +2264,13 @@
       var item = el('div', 'sess-item' + (active ? ' active' : ''));
       item.dataset.id = s.id;
 
+      // 「进行中」只标在**你没在跟随**的会话上：正跟着的那一轮已经在屏幕上直播了，
+      // 再挂一个标记只会让人以为有两处。
+      var running = !!state.running[s.id] && !(active && state.streaming);
       var row = el('button', 'sess-row' + (active ? ' active' : ''));
       row.type = 'button';
-      row.disabled = state.streaming;
+      // 不再因为"这一页正在生成"就禁用整个列表：多主题并行时你要能随时看别的
+      // 主题（服务端那一轮照跑，见 openSession 里的自动离开）。
       row.appendChild(el('span', 'sess-title', s.title || s.id));
       var meta = el('span', 'sess-meta');
       meta.appendChild(el('span', null, fmtRelTime(s.updated_at || s.created_at) || '—'));
@@ -2214,27 +2286,38 @@
         chip.title = '任务进度：' + s.todo_done + ' / ' + s.todo_total + ' 完成';
         meta.appendChild(chip);
       }
-      // 你已经离开、但服务端还在跑的那一轮：标出来，点一下就接回去。
-      if (state.detached === s.id) meta.appendChild(el('span', 'sess-running', '· 进行中'));
+      // 服务端还在跑的那一轮：任何浏览器发起的都标出来，点一下才接上（不会自动
+      // 把你从别的主题里拽走）。离开过的那一轮加一句"你已离开"。
+      if (running) {
+        meta.appendChild(el('span', 'sess-running',
+          state.detached === s.id ? '· 进行中（你已离开）' : '· 进行中'));
+      }
       row.appendChild(meta);
       row.title = (s.title || s.id) + '\n' + fmtTime(s.updated_at || s.created_at) +
-        ' · ' + (s.message_count || 0) + ' 条消息\n点击切换会话';
-      row.onclick = function () { if (!state.streaming) openSession(s.id); };
+        ' · ' + (s.message_count || 0) + ' 条消息\n' +
+        (running ? '这一轮正在进行，点击接上直播' : '点击切换会话');
+      row.onclick = function () {
+        // 已经在这个会话上跟随直播：再点一下等于刷新，不打断。
+        if (state.streaming && active) return;
+        openSession(s.id);
+      };
       item.appendChild(row);
 
       var tools = el('div', 'sess-tools');
       var ren = btn('sess-tool', '改名', function (e) {
         e.stopPropagation();
-        if (!state.streaming) renameSessionDialog(s);
+        if (!running) renameSessionDialog(s);
       });
-      ren.title = '重命名会话';
-      ren.disabled = state.streaming;
+      // 服务端会拒绝（409 turn_running）：worker 手里那份 Session 会把改名/删除
+      // 覆盖掉。这里直接禁用，省掉一次"点了没反应"。
+      ren.title = running ? '这一轮还在跑：结束或停止后再改名' : '重命名会话';
+      ren.disabled = running;
       var del = btn('sess-tool danger', '删除', function (e) {
         e.stopPropagation();
-        if (!state.streaming) deleteSessionDialog(s);
+        if (!running) deleteSessionDialog(s);
       });
-      del.title = '删除会话';
-      del.disabled = state.streaming;
+      del.title = running ? '这一轮还在跑：结束或停止后再删除' : '删除会话';
+      del.disabled = running;
       tools.appendChild(ren);
       tools.appendChild(del);
       item.appendChild(tools);
@@ -2547,35 +2630,73 @@
         openAddWorkspace(true);
         return;
       }
-      // 冷启动（换台机器、换个浏览器、清过 localStorage）时，页面并不知道该看哪个
-      // 工作区。先问服务端有没有正在跑的轮次：有就直接切到那个工作区和会话、接回
-      // 直播，而不是落在索引里的第一个工作区、对着一个空对话发呆。这就是「A 机器
-      // 发起的任务，B 机器打开页面能不能接上」的答案。
-      return runningTurns().then(function (running) {
-        var run = running.length ? running[0] : null;
-        var saved = loadLS().workspace_id;
-        var w = (run && state.workspaces.filter(function (x) { return x.id === run.workspace_id; })[0]) ||
-          state.workspaces.filter(function (x) { return x.id === saved; })[0] || state.workspaces[0];
-        return selectWorkspace(w.id, true).then(function () {
-          if (!run || !state.workspace || state.workspace.id !== run.workspace_id) return;
-          // selectWorkspace 已经打开了这个会话（它就是最近更新的那个）：别重复加载，
-          // openSession 里的 maybeAttach 会负责接回直播。
-          if (state.session && state.session.id === run.session_id) return;
-          return openSession(run.session_id).then(function () {
-            toast('已接回正在进行的任务' +
-              (running.length > 1 ? '（另有 ' + (running.length - 1) + ' 个轮次在跑）' : ''));
-          });
-        });
-      });
+      // 页面落在哪个主题？地址栏的 ?s= 说了算（刷新/收藏/贴给另一个浏览器都靠它），
+      // 其次是这个标签页上次看的那个会话（sessionStorage），最后才是上次的工作区。
+      //
+      // 刻意**不**再"谁在跑就跳到谁"：多主题并行时，另开一个窗口/标签页想看点别的，
+      // 一打开就被拽到别人正在跑的那个主题上，正是"多个浏览器本质是一个 session"
+      // 的来源。正在跑的会话在侧栏标「进行中」，点一下才接上。
+      var wanted = topicFromUrl();
+      if (!wanted) wanted = tabSession();
+      if (!wanted) wanted = loadLS().session_id || '';   // 旧版本留在 localStorage 里的
+      return selectHomeTopic(wanted);
     });
+  }
+
+  /// 冷启动落点：先记下"服务器上谁在跑"（侧栏标记用），再按 wanted 找主题。
+  /// wanted 失效（会话被删、来自另一台机器）时清掉地址，正常落回默认工作区。
+  function selectHomeTopic(wanted) {
+    var savedWs = loadLS().workspace_id;
+    var home = function () {
+      if (state.session && wanted && state.session.id === wanted) return Promise.resolve();
+      var w = state.workspaces.filter(function (x) { return x.id === savedWs; })[0] || state.workspaces[0];
+      return selectWorkspace(w.id, true);
+    };
+    var refresh = refreshRunning();
+    if (!wanted) return refresh.then(home);
+    return refresh.then(function () {
+      return api('api/sessions/' + encodeURIComponent(wanted)).then(function (d) {
+        var wid = d && d.workspace_id;
+        var w = state.workspaces.filter(function (x) { return x.id === wid; })[0];
+        if (!w || (d && d.session && d.session.id !== wanted)) {
+          // 这个地址在本机打不开（工作区没登记 / 会话已被删）：别留着它，否则每次
+          // 刷新都要先白试一次。
+          setTopicUrl(null); setTabSession(null);
+          return home();
+        }
+        return selectWorkspace(w.id, true).then(function () {
+          if (state.session && state.session.id === wanted) return null;
+          return openSession(wanted, { quiet: true });
+        });
+      }, function () {
+        setTopicUrl(null); setTabSession(null);
+        return null;
+      }).then(home);
+    });
+  }
+
+  /// 服务端正在跑的轮次 → state.running（按 session id）。侧栏据此标「进行中」，
+  /// 会话行的改名/删除也因此禁用：worker 手里那份 Session 会把改动覆盖掉。
+  function refreshRunning() {
+    return runningTurns().then(function (list) {
+      var map = {};
+      list.forEach(function (t) { if (t && t.session_id) map[t.session_id] = t; });
+      state.running = map;
+      renderSessions();
+      return list;
+    }, function () { return []; });
   }
   function selectWorkspace(id, silent) {
     var w = state.workspaces.filter(function (x) { return x.id === id; })[0];
     if (!w) return Promise.resolve();
     var changed = !state.workspace || state.workspace.id !== w.id;
+    // 跟随中的轮次属于别的工作区：先离开（服务端照跑），别再拒绝这一下。
+    if (changed && state.streaming) detachStream();
     state.workspace = w;
     if (changed) {
       clearForkPoint(true);
+      state.draft = false;
+      state.sessionEpoch++;                   // 上一个工作区的 openSession 结果作废
       state.session = null; state.messages = []; state.live = null; state.streamError = null;
       clearQueue();
       state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
@@ -2603,16 +2724,26 @@
         if (still) state.session = still;
       }
       renderSessions();
-      if (!state.session && state.sessions.length) return openSession(state.sessions[0].id);
+      // 自动打开"最近更新的会话"是便利，但不能覆盖用户明确的草稿。
+      if (!state.session && !state.draft && state.sessions.length) return openSession(state.sessions[0].id);
       if (!state.session) renderChat();
+      return refreshRunning();       // 侧栏的「进行中」标记跟着列表一起刷新
     }, function () { renderSessions(); });
   }
   function openSession(sid) {
+    if (!sid) return Promise.resolve();
+    // 正在跟随另一轮：先离开（服务端照跑），而不是拒绝点这一下。多主题并行时
+    // "必须先按停止/离开才能看别的会话"是最别扭的地方，这里改成自动离开。
+    if (state.streaming && (!state.session || state.session.id !== sid)) detachStream();
     // 主动点开会话 = 想重新跟上它：清掉「已离开」标记，下面的 maybeAttach 才会接回去。
     if (state.detached === sid) state.detached = null;
     clearForkPoint(true);
+    var epoch = ++state.sessionEpoch;
     return api('api/sessions/' + encodeURIComponent(sid)).then(function (d) {
+      // 更新的 openSession 已经开始：这次的结果已经过期，别去改 state。
+      if (epoch !== state.sessionEpoch) return null;
       state.session = d.session || { id: sid };
+      state.draft = false;
       state.messages = d.messages || [];
       setTodos(d.todos || []);
       state.artifacts = d.artifacts || [];
@@ -2625,8 +2756,12 @@
       state.turnStartAt = 0;
       state.liveTokens = 0; state.liveStartAt = 0;
       state.lastTrajectoryId = null;
+      // 这个会话现在就是这个标签页的主题：地址栏与 sessionStorage 一起记住它。
+      setTopicUrl(sid);
+      setTabSession(sid);
       // 轨迹按需单独取：摘要用于折叠行，展开时再按 turn_id 拉完整记录。
       return loadTrajectories().then(function () {
+        if (epoch !== state.sessionEpoch) return null;
         attachTrajectories();
         saveLS(); renderSessions(); renderChat(); renderMetrics(); scrollMaybe(true);
         // 这一轮可能还在服务端跑着（页面刚重新打开、或从别的标签页切回来）：接回去。
@@ -2635,7 +2770,12 @@
     }, function (e) { toast('加载会话失败：' + e.message); });
   }
   function newSessionDraft() {
+    if (state.streaming) detachStream();      // 新会话不该被"先停止"挡住
     clearForkPoint(true);
+    setTopicUrl(null); setTabSession(null);   // 草稿没有主题地址，发出第一条才生成会话
+    state.draft = true;
+    state.sessionEpoch++;                     // 在途的 openSession 结果作废，别把草稿顶掉
+
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
     setTodos([]);
     state.artifacts = [];
@@ -2889,12 +3029,50 @@
   // 同一个文件里还带着整段会话 JSON，所以可以导入回来（甚至导入到另一个工作区）。
   function updateExportButton() {
     var b = $('session-export');
-    if (!b) return;
-    b.classList.toggle('hidden', !state.session);
-    b.disabled = !state.session || !state.workspace;
-    b.title = state.session
-      ? '导出「' + (state.session.title || state.session.id) + '」为单个 HTML 文件（离线可读，含图片）'
-      : '导出当前会话';
+    if (b) {
+      b.classList.toggle('hidden', !state.session);
+      b.disabled = !state.session || !state.workspace;
+      b.title = state.session
+        ? '导出「' + (state.session.title || state.session.id) + '」为单个 HTML 文件（离线可读，含图片）'
+        : '导出当前会话';
+    }
+    var link = $('session-link');
+    if (link) {
+      link.classList.toggle('hidden', !state.session);
+      link.disabled = !state.session;
+      link.title = state.session
+        ? '复制主题链接（?s=…）：「' + (state.session.title || state.session.id) +
+          '」可以在另一个浏览器/标签页打开同一个会话'
+        : '复制主题链接';
+    }
+  }
+
+  /// 主题链接：地址栏本来就跟着当前会话走（openSession → setTopicUrl），所以直接
+  /// 取 location.href。贴到另一个浏览器打开，落在同一个会话上，两边看同一份输出。
+  function copyTopicLink() {
+    if (!state.session) { toast('请先打开一个会话'); return; }
+    setTopicUrl(state.session.id);
+    var url = window.location.href;
+    var fallback = function () {
+      var ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      if (ok) toast('已复制主题链接：' + url);
+      else window.prompt('复制这个主题的链接：', url);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () {
+        toast('已复制主题链接：' + url);
+      }, fallback);
+    } else {
+      fallback();
+    }
   }
   function exportSession() {
     if (!state.session || !state.workspace) { toast('请先打开一个会话'); return; }
@@ -3546,6 +3724,7 @@
       renderTodos();
     };
     $('session-export').onclick = exportSession;
+    $('session-link').onclick = copyTopicLink;
     $('session-import').onclick = function () {
       if (!state.workspace) { toast('请先选择工作区'); return; }
       var input = document.createElement('input');
@@ -3558,8 +3737,7 @@
       input.click();
     };
     $('new-session').onclick = function () {
-      if (blockedWhileStreaming('新建会话')) return;
-      newSessionDraft();
+      newSessionDraft();          // 会先离开正在跟随的轮次（服务端照跑）
     };
     $('banner-retry').onclick = recheckNow;
     $('status').onclick = recheckNow;

@@ -97,6 +97,8 @@ void print_usage() {
                   "  --port <n>                 listen port (default 8282)\n"
                   "  --web-dir <path>           serve the UI from disk instead of the embedded copy\n"
                   "  --open                     open the web UI in the default browser\n"
+                  "                             (each SSE stream keeps one HTTP thread; the pool grows\n"
+                  "                              on demand - see the environment variables below)\n"
                   "\n"
                   "Model\n"
                   "  --config <path>            provider config (default $HOME/.tea_agent/provider.yaml)\n"
@@ -127,7 +129,10 @@ void print_usage() {
                   "\n"
                   "Environment\n"
                   "  TEA_AGENT_HOME             overrides the agent home directory\n"
-                  "  HTTP_PROXY / HTTPS_PROXY   used by the WinHTTP backend\n"));
+                  "  HTTP_PROXY / HTTPS_PROXY   used by the WinHTTP backend\n"
+                  "  TEA_AGENT_HTTP_THREADS_MAX HTTP worker threads ceiling (default 128, min 16)\n"
+                  "  TEA_AGENT_MAX_SUBSCRIBERS  how many browsers may follow one turn (default 8)\n"
+                  "  TEA_AGENT_MAX_ACTIVE_TURNS turns that may run at once (default 24)\n"));
 }
 
 void open_browser(const std::string& url) {

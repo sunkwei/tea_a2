@@ -1,18 +1,20 @@
-// Regression test: what happens when you touch the sidebar during a running turn.
+// Regression test: what the sidebar may do while a turn is running.
 //
-// A streaming turn owns the conversation, so switching workspace or starting a
-// new session has to be refused. The original implementation set `disabled` on
-// the workspace chip, which produced *no* feedback at all: the button simply
-// stopped responding, and "＋ 添加工作区…" was unreachable, so it looked like
-// the feature was missing rather than temporarily unavailable.
+// The old contract was "a streaming turn owns the conversation": switching
+// workspace, adding one, or opening a new session were all refused (with a toast,
+// because a `disabled` button explains nothing). That is exactly what makes
+// several topics on one server unusable - to look at another topic you had to
+// stop the work first, and "stop" cancels it for every window.
 //
-// The contract pinned here:
-//   * the chip stays clickable and the menu still opens (not a dead end);
-//   * selecting another workspace is refused with an explanation;
-//   * adding a workspace is refused the same way (no dialog);
-//   * creating a session is refused the same way;
-//   * session rows are visibly disabled;
-//   * once the turn ends, switching works again.
+// The new contract, pinned here:
+//   * the workspace chip stays clickable and the menu still opens;
+//   * selecting another workspace is allowed: the page stops *following* the
+//     turn (server keeps running, the session row stays marked 进行中);
+//   * "＋ 添加工作区…" opens its dialog (nothing about it touches the turn);
+//   * 新建会话 is a draft in this tab: it detaches, and the running turn survives;
+//   * session rows are never disabled;
+//   * coming back to the running session re-attaches;
+//   * 停止 still ends the turn for everybody.
 //
 //   node tests/ui_stream_guard.mjs [path-to-tea_agent-binary]
 //
@@ -29,6 +31,7 @@ import { wsConnect } from './mini_ws.mjs';
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent');
 const CHROME = process.env.CHROME_BIN || '/usr/bin/google-chrome';
+const CHUNKS = 200;                // 200 ms each: ~40 s, the turn outlives the test
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res) => {
@@ -44,7 +47,18 @@ const getJson = (port, p) => new Promise((res, rej) => {
 const results = [];
 const check = (name, ok, detail) => {
   results.push({ name, ok });
-  console.log((ok ? 'PASS ' : 'FAIL ') + name + (detail ? '  ' + detail : ''));
+  console.log((ok ? 'PASS ' : 'FAIL ') + name + (ok || !detail ? '' : '  ' + detail));
+};
+const waitFor = async (fn, timeout = 12000, step = 150) => {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const v = await fn();
+      if (v) return v;
+    } catch (e) { /* keep polling */ }
+    await sleep(step);
+  }
+  return false;
 };
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tea_guard_'));
@@ -53,7 +67,6 @@ for (const d of ['proj_a', 'proj_b']) fs.mkdirSync(path.join(tmp, d), { recursiv
 
 let agent, chrome, ws, mockServer;
 try {
-  // A deliberately slow stream: ~4s, long enough to interact with the UI.
   mockServer = http.createServer((req, res) => {
     let body = '';
     req.on('data', (d) => (body += d));
@@ -63,13 +76,13 @@ try {
       const timer = setInterval(() => {
         n++;
         res.write('data: ' + JSON.stringify({ id: 'c', choices: [{ index: 0, delta: { content: '字' }, finish_reason: null }] }) + '\n\n');
-        if (n >= 8) {
+        if (n >= CHUNKS) {
           clearInterval(timer);
           res.write('data: ' + JSON.stringify({ id: 'c', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + '\n\n');
           res.write('data: [DONE]\n\n');
           res.end();
         }
-      }, 400);
+      }, 200);
       res.on('close', () => clearInterval(timer));
     });
   });
@@ -90,7 +103,7 @@ providers:
     '--port', String(agentPort), '--no-console', '--log-file', path.join(tmp, 'agent.log'),
     '--workspace', path.join(tmp, 'proj_a'), '--workspace', path.join(tmp, 'proj_b')], { stdio: 'ignore' });
 
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 120; i++) {
     try { if ((await getJson(agentPort, '/api/health')).status === 200) break; } catch {}
     await sleep(150);
   }
@@ -100,7 +113,7 @@ providers:
     'about:blank'], { stdio: 'ignore' });
 
   let target = null;
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 120; i++) {
     try {
       const list = JSON.parse((await getJson(cdpPort, '/json/list')).body);
       target = list.find((t) => t.type === 'page');
@@ -133,7 +146,13 @@ providers:
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Page.navigate', { url: `http://127.0.0.1:${agentPort}/` });
-  await sleep(1800);
+  const ready = () => evalJs(`(function(){
+    var t = window.teaState;
+    if (!t || !t.workspace) return null;
+    return { ws: t.workspace.name, session: t.session ? t.session.id : null };
+  })()`);
+  const boot = await waitFor(ready, 30000);
+  check('the UI boots on proj_a', !!boot && boot.ws === 'proj_a', JSON.stringify(boot));
 
   const chip = () => evalJs(`document.getElementById('ws-chip-text').textContent`);
   const toast = () => evalJs(`document.getElementById('toast').textContent`);
@@ -149,70 +168,132 @@ providers:
     b.click();
     return true;
   })()`);
+  const runningTurn = async () => {
+    const d = JSON.parse((await getJson(agentPort, '/api/chat/turns')).body);
+    return (d.turns || [])[0] || null;
+  };
 
-  const startTurn = `(function(){
+  await evalJs(`(function(){
     var ta = document.getElementById('input');
     ta.value = 'hello';
     ta.dispatchEvent(new Event('input'));
     document.getElementById('send').click();
     return true;
-  })()`;
-  await evalJs(startTurn);
-  await sleep(1000);
-
-  // ---- while streaming ---------------------------------------------------
-  const state = await evalJs(`(function(){
-    return { chipDisabled: document.getElementById('ws-chip').disabled,
-             chipTitle: document.getElementById('ws-chip').title,
-             sending: document.getElementById('send').className.indexOf('stop') >= 0,
-             ws: document.getElementById('ws-chip-text').textContent };
   })()`);
-  check('turn is streaming', state && state.sending === true, JSON.stringify(state && state.sending));
-  check('workspace chip stays clickable', state && state.chipDisabled === false);
-  check('chip tooltip explains the block',
-    state && state.chipTitle.indexOf('正在生成回答') >= 0, state && state.chipTitle);
+  const streaming = await waitFor(async () => {
+    const v = await evalJs(`(function(){
+      var t = window.teaState;
+      return { streaming: t.streaming, session: t.session ? t.session.id : null,
+               chipDisabled: document.getElementById('ws-chip').disabled,
+               chipTitle: document.getElementById('ws-chip').title };
+    })()`);
+    return v.streaming && v.session ? v : null;
+  }, 15000);
+  check('the turn is streaming', !!streaming, JSON.stringify(streaming));
+  const sid = streaming && streaming.session;
+  check('the workspace chip stays clickable', streaming && streaming.chipDisabled === false,
+    JSON.stringify(streaming));
+  check('the chip tooltip no longer says switching is blocked',
+    streaming && streaming.chipTitle.indexOf('正在生成回答') < 0, streaming && streaming.chipTitle);
 
-  check('menu still opens (not a dead end)', (await evalJs(openMenu)) === true);
+  // ---- switching workspace keeps the turn, drops the follow -------------
+  check('the menu still opens', (await evalJs(openMenu)) === true);
   await evalJs(clickItem('proj_b'));
-  await sleep(400);
-  const refused = await toast();
-  check('switching is refused with a reason',
-    refused && refused.indexOf('正在生成回答') >= 0 && refused.indexOf('切换工作区') >= 0, refused);
-  check('workspace did not change', (await chip()) === 'proj_a', await chip());
+  const switched = await waitFor(async () => {
+    const v = await evalJs(`(function(){
+      var t = window.teaState;
+      return { ws: t.workspace ? t.workspace.name : null, streaming: t.streaming };
+    })()`);
+    return v.ws === 'proj_b' ? v : null;
+  }, 15000);
+  check('switching workspace is allowed while a turn runs', !!switched, JSON.stringify(switched));
+  check('this tab stopped following that turn', switched && switched.streaming === false,
+    JSON.stringify(switched));
+  const detached = await waitFor(async () => {
+    const d = await evalJs(`window.teaState.detached`);
+    return d === sid ? d : null;
+  }, 5000);
+  check('the page remembers it left that turn (so it is not pulled back)', !!detached,
+    String(detached));
+  const afterSwitch = await runningTurn();
+  check('the server turn is still running', !!afterSwitch && afterSwitch.running === true,
+    JSON.stringify(afterSwitch));
 
+  // ---- adding a workspace opens its dialog ------------------------------
   await evalJs(openMenu);
   await sleep(200);
   await evalJs(clickItem('添加工作区'));
-  await sleep(400);
-  const addRefused = await toast();
-  check('adding a workspace is refused with a reason',
-    addRefused && addRefused.indexOf('添加工作区') >= 0, addRefused);
-  check('no dialog was opened',
-    (await evalJs(`document.getElementById('overlay').classList.contains('hidden')`)) === true);
+  const dialog = await waitFor(async () =>
+    (await evalJs(`document.getElementById('overlay').classList.contains('hidden')`)) === false, 5000);
+  check('adding a workspace opens its dialog', !!dialog);
+  await evalJs(`(function(){
+    var b = Array.from(document.querySelectorAll('#overlay button'))
+      .filter(function (x) { return x.textContent.indexOf('取消') >= 0; })[0];
+    if (b) b.click(); else document.getElementById('overlay').classList.add('hidden');
+    return true;
+  })()`);
+  await sleep(200);
+  check('the running turn survived the dialog',
+    !!(await runningTurn()), JSON.stringify(await runningTurn()));
 
-  await evalJs(`document.getElementById('new-session').click(); true`);
-  await sleep(300);
-  const newRefused = await toast();
-  check('new session is refused with a reason',
-    newRefused && newRefused.indexOf('新建会话') >= 0, newRefused);
-
-  check('session rows look disabled',
-    (await evalJs(`(function(){ var r = document.querySelector('.sess-row'); return r ? r.disabled : null; })()`)) === true);
-
-  // ---- after the turn ends ----------------------------------------------
-  for (let i = 0; i < 60; i++) {
-    const sending = await evalJs(`document.getElementById('send').className.indexOf('stop') >= 0`);
-    if (!sending) break;
-    await sleep(250);
-  }
-  check('composer returns to send after the turn',
-    (await evalJs(`document.getElementById('send').className.indexOf('stop') < 0`)) === true);
-
+  // Back to proj_a, where the turn lives. Opening the workspace auto-opens its
+  // newest session, i.e. the running one, so this tab follows it again.
   await evalJs(openMenu);
   await sleep(200);
-  await evalJs(clickItem('proj_b'));
-  await sleep(1200);
-  check('switching works once the turn is over', (await chip()) === 'proj_b', await chip());
+  await evalJs(clickItem('proj_a'));
+  const backToA = await waitFor(async () => {
+    const v = await evalJs(`(function(){
+      var t = window.teaState;
+      return { ws: t.workspace ? t.workspace.name : null, streaming: t.streaming };
+    })()`);
+    return v.ws === 'proj_a' ? v : null;
+  }, 15000);
+  check('switching back re-opens proj_a', !!backToA, JSON.stringify(backToA));
+
+  // ---- a new session is just a draft in this tab ------------------------
+  await evalJs(`document.getElementById('new-session').click(); true`);
+  const draft = await waitFor(async () => {
+    const v = await evalJs(`(function(){
+      var t = window.teaState;
+      return { session: t.session, streaming: t.streaming, search: location.search,
+               empty: !!document.querySelector('#messages .chat-empty') };
+    })()`);
+    return v.session === null && v.empty ? v : null;
+  }, 10000);
+  check('新建会话 opens a draft without stopping anything', !!draft, JSON.stringify(draft));
+  check('the draft has no topic in the URL', draft && draft.search === '',
+    draft && draft.search);
+  check('the server turn is still running', !!(await runningTurn()));
+
+  // ---- the running session is marked, clicking it re-attaches -----------
+  const marked = await waitFor(async () => {
+    const n = await evalJs(`document.querySelectorAll('.sess-running').length`);
+    return n >= 1 ? n : null;
+  }, 10000);
+  check('the sidebar marks the running session 进行中', !!marked, String(marked));
+  check('session rows are not disabled',
+    (await evalJs(`(function(){ var r = document.querySelector('.sess-row'); return r ? r.disabled : null; })()`)) === false);
+
+  await evalJs(`(function(){ var r = document.querySelector('#session-list .sess-row'); if (r) r.click(); return true; })()`);
+  const back = await waitFor(async () => {
+    const v = await evalJs(`(function(){
+      var t = window.teaState;
+      return { streaming: t.streaming, session: t.session ? t.session.id : null,
+               search: location.search };
+    })()`);
+    return v.streaming && v.session === sid ? v : null;
+  }, 20000);
+  check('clicking the session re-attaches this tab', !!back, JSON.stringify(back));
+  check('the topic URL points at it', back && back.search === '?s=' + sid, back && back.search);
+
+  // ---- 停止 still ends it for everybody ---------------------------------
+  await evalJs(`document.getElementById('send').click(); true`);
+  const stopped = await waitFor(async () => {
+    const t = await runningTurn();
+    const streamingNow = await evalJs(`window.teaState.streaming`);
+    return !t && streamingNow === false ? true : null;
+  }, 20000);
+  check('stop cancels the turn on the server and in the page', !!stopped);
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });

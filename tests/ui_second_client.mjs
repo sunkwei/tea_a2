@@ -1,12 +1,20 @@
-// Browser test: a second machine picks up the turn the first one started.
+// Browser test: a cold browser must NOT be dragged into somebody else's topic.
 //
-// The turn lives on the server, keyed by session, so "resume" must not depend on
-// the browser that started it. This opens a *fresh* profile - no localStorage, no
-// history, nothing in common with the client that sent the message - against a
-// server that has two workspaces, with the running turn in the second one. A cold
-// boot used to land on the first workspace in the index and show an empty chat;
-// now it asks GET /api/chat/turns, switches to the workspace that has work in
-// progress, opens that session and re-attaches.
+// The turn lives on the server, keyed by session, so any browser can follow it -
+// but *only when asked to*. The old behaviour made a fresh page switch to
+// whichever workspace had a running turn, which is exactly what breaks "two
+// windows, two topics": open a new window to look at something else and it
+// yanks you away.
+//
+// What has to hold now:
+//   * a cold browser with no topic in the URL lands on the first workspace and
+//     does not switch away, even though another workspace has a turn running;
+//   * that other workspace's session is marked "进行中" in the sidebar once you
+//     switch there, without having to open it;
+//   * clicking it attaches and replays what the other client produced;
+//   * opening the topic URL (`/?s=<session_id>`) goes straight there, and a
+//     reload keeps the same topic;
+//   * going back to the plain URL still does not hijack.
 //
 //   node tests/ui_second_client.mjs [path-to-tea_agent-binary]
 //
@@ -23,7 +31,7 @@ import { wsConnect } from './mini_ws.mjs';
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent');
 const CHROME = process.env.CHROME_BIN || '/usr/bin/google-chrome';
-const CHUNKS = 40;                 // ~12s per answer
+const CHUNKS = 400;                // 250 ms each: ~100 s, the turn outlives every reload
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res) => {
@@ -39,7 +47,18 @@ const getJson = (port, p) => new Promise((res, rej) => {
 const results = [];
 const check = (name, ok, detail) => {
   results.push({ name, ok });
-  console.log((ok ? 'PASS ' : 'FAIL ') + name + (detail ? '  ' + detail : ''));
+  console.log((ok ? 'PASS ' : 'FAIL ') + name + (ok || !detail ? '' : '  ' + detail));
+};
+const waitFor = async (fn, timeout = 20000, step = 200) => {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const v = await fn();
+      if (v) return v;
+    } catch (e) { /* keep polling */ }
+    await sleep(step);
+  }
+  return false;
 };
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tea_pcB_'));
@@ -65,7 +84,7 @@ const mock = http.createServer((req, res) => {
         res.write('data: [DONE]\n\n');
         res.end();
       }
-    }, 300);
+    }, 250);
     res.on('close', () => clearInterval(timer));
   });
 });
@@ -97,18 +116,32 @@ const evalJs = async (expr) => {
 const view = () => evalJs(`(function(){
   var a = document.querySelectorAll('#messages .msg.assistant');
   var last = a.length ? a[a.length - 1] : null;
+  var t = window.teaState || {};
   return { workspace: document.getElementById('ws-chip-text').textContent,
+           workspaceName: t.workspace ? t.workspace.name : null,
+           sessionId: t.session ? t.session.id : null,
            title: document.title,
            streaming: document.getElementById('send').className.indexOf('stop') >= 0,
            users: document.querySelectorAll('#messages .msg.user').length,
            assistants: a.length,
+           running: document.querySelectorAll('.sess-running').length,
+           search: location.search,
            textLen: last ? last.textContent.length : 0,
            empty: !!document.querySelector('#messages .chat-empty') };
 })()`);
 
+async function turnStatus(port, sessionId) {
+  try {
+    return JSON.parse((await getJson(port,
+      '/api/chat/turn?session_id=' + encodeURIComponent(sessionId))).body);
+  } catch (e) {
+    return null;
+  }
+}
+
 try {
   const agentPort = await freePort();
-  // proj_a is registered first: a cold boot that ignores running turns lands there.
+  // proj_a is registered first: a cold boot with nothing to go on lands there.
   agent = spawn(BIN, ['--config', path.join(tmp, 'provider.yaml'), '--tea-home', path.join(tmp, 'home'),
     '--port', String(agentPort), '--no-console', '--log-file', path.join(tmp, 'agent.log'),
     '--workspace', path.join(tmp, 'proj_a'), '--workspace', path.join(tmp, 'proj_b')],
@@ -117,12 +150,13 @@ try {
     try { if ((await getJson(agentPort, '/api/health')).status === 200) break; } catch {}
     await sleep(150);
   }
+  const base = `http://127.0.0.1:${agentPort}/`;
   const list = JSON.parse((await getJson(agentPort, '/api/workspaces')).body).workspaces;
   check('two workspaces, proj_a first', list.length === 2 && list[0].name === 'proj_a',
     list.map((w) => w.name).join(','));
   const wsB = list[1].id;
 
-  // ---- PC A: a plain HTTP client starts a turn, then goes away -----------
+  // ---- PC A: a plain HTTP client starts a turn in proj_b, then goes away --
   let sid = null;
   let frames = 0;
   const a = http.request({ host: '127.0.0.1', port: agentPort, path: '/api/chat', method: 'POST',
@@ -138,9 +172,9 @@ try {
   a.end(JSON.stringify({ workspace_id: wsB, message: 'long task from PC A' }));
   await sleep(2500);
   a.destroy();
-  check('PC A started a turn in proj_b and left', !!sid && frames > 1, 'frames=' + frames + ' session=' + sid);
+  check('PC A started a turn in proj_b and left', !!sid && frames > 1,
+    'frames=' + frames + ' session=' + sid);
 
-  // ---- the server can say what is running, and where --------------------
   const turns = JSON.parse((await getJson(agentPort, '/api/chat/turns')).body);
   const mine = (turns.turns || []).filter((t) => t.session_id === sid)[0];
   check('GET /api/chat/turns lists the running turn', !!mine && mine.running === true,
@@ -154,7 +188,7 @@ try {
     `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, 'pcB')}`,
     'about:blank'], { stdio: 'ignore' });
   let target = null;
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 120; i++) {
     try {
       const l = JSON.parse((await getJson(cdpPort, '/json/list')).body);
       target = l.find((t) => t.type === 'page');
@@ -171,40 +205,102 @@ try {
   });
   await send('Page.enable');
   await send('Runtime.enable');
-  await send('Page.navigate', { url: `http://127.0.0.1:${agentPort}/` });
-  await sleep(3000);
+  const ready = () => evalJs(`(function(){
+    var t = window.teaState;
+    if (!t || !t.workspace) return null;
+    return { ws: t.workspace.name, sessions: t.sessions.length };
+  })()`);
+  const goto = async (u) => { await send('Page.navigate', { url: u }); await sleep(600); };
 
-  const boot = await view();
-  check('PC B lands on the workspace that has work in progress', boot.workspace === 'proj_b',
-    JSON.stringify(boot));
-  check('PC B is streaming the turn it did not start', boot.streaming === true, JSON.stringify(boot));
-  check('PC B sees the question PC A asked', boot.users === 1, JSON.stringify(boot));
-  check('PC B replayed what had been generated so far', boot.textLen > 0, 'len=' + boot.textLen);
-  check('the tab title follows the workspace', boot.title === 'proj_b · TEA AGENT', boot.title);
+  await goto(base);
+  const boot = await waitFor(ready, 30000);
+  check('PC B boots without a topic', !!boot, JSON.stringify(boot));
 
-  await sleep(3000);
-  const later = await view();
-  check('PC B keeps following live', later.textLen > boot.textLen,
-    boot.textLen + ' -> ' + later.textLen);
+  // The whole point: proj_b's running turn must not pull this page over.
+  const bHome = await waitFor(async () => {
+    const v = await view();
+    return v.workspaceName === 'proj_a' ? v : null;
+  }, 15000);
+  check('PC B stays on the first workspace, no hijack', !!bHome, JSON.stringify(bHome));
+  check('PC B is not streaming a turn it did not ask for',
+    bHome && bHome.streaming === false, bHome && JSON.stringify(bHome));
+  check('PC B tab title follows that workspace', bHome && bHome.title === 'proj_a · TEA AGENT',
+    bHome && bHome.title);
 
-  // ---- and it runs to the end on PC B -----------------------------------
-  let fin = later;
-  for (let i = 0; i < 60; i++) {
-    fin = await view();
-    if (!fin.streaming) break;
-    await sleep(500);
-  }
-  check('the turn completes while PC B watches', fin.streaming === false, JSON.stringify(fin));
-  check('the full answer is rendered on PC B', fin.textLen >= CHUNKS, 'len=' + fin.textLen);
-  check('one question, one answer', fin.users === 1 && fin.assistants === 1, JSON.stringify(fin));
+  // ---- switching there shows the running session, marked, not opened -----
+  await evalJs(`(function(){ document.getElementById('ws-chip').click(); return true; })()`);
+  const picked = await evalJs(`(function(){
+    var items = document.querySelectorAll('#ws-dropdown .dd-item');
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].textContent.indexOf('proj_b') === 0) { items[i].click(); return items[i].textContent; }
+    }
+    return null;
+  })()`);
+  check('the workspace menu lists proj_b', picked && picked.indexOf('proj_b') === 0, String(picked));
+  const bList = await waitFor(async () => {
+    const v = await view();
+    return v.workspaceName === 'proj_b' ? v : null;
+  }, 15000);
+  check('switching to proj_b opens the workspace', !!bList, JSON.stringify(bList));
+  // Opening a workspace auto-opens its newest session, which here is the running
+  // one - so B may already be following it. Step off it (a draft) to see the row
+  // marked in the sidebar: following a turn is never implicit for another topic.
+  await evalJs(`(function(){ document.getElementById('new-session').click(); return true; })()`);
+  const marked = await waitFor(async () => {
+    const v = await view();
+    return v.running >= 1 && v.streaming === false ? v : null;
+  }, 15000);
+  check('the running session is marked 进行中 in the sidebar', !!marked, JSON.stringify(marked));
 
-  const after = JSON.parse((await getJson(agentPort, '/api/chat/turns')).body);
-  check('nothing is reported as running afterwards', (after.turns || []).length === 0,
-    JSON.stringify(after.turns));
-  const sess = JSON.parse((await getJson(agentPort, '/api/sessions/' + sid)).body);
-  check('the session belongs to proj_b and holds the answer',
-    sess.workspace_id === wsB && sess.messages.some((m) => m.role === 'assistant' && m.content.length === CHUNKS),
-    sess.messages.map((m) => m.role + ':' + (m.content || '').length).join(','));
+  const before = await turnStatus(agentPort, sid);
+  const clicked = await evalJs(`(function(){
+    var row = document.querySelector('#session-list .sess-row');
+    if (!row) return null;
+    row.click();
+    return row.textContent;
+  })()`);
+  check('the session row can be clicked', !!clicked, String(clicked));
+  const attached = await waitFor(async () => {
+    const v = await view();
+    return v.streaming && v.sessionId === sid ? v : null;
+  }, 20000);
+  check('clicking it attaches to the running turn', !!attached, JSON.stringify(attached));
+  check('the topic URL follows the session', attached && attached.search === '?s=' + sid,
+    attached && attached.search);
+  const grew = await waitFor(async () => {
+    const v = await view();
+    return attached && v.textLen > attached.textLen + 10 ? v : null;
+  }, 20000);
+  check('B replays and then follows what A produced', !!grew, JSON.stringify(grew));
+  check('the server did not cancel the turn for B', !!before && before.running === true,
+    JSON.stringify(before));
+
+  // ---- reloading keeps the topic (the URL is the identity) --------------
+  await goto(base + '?s=' + sid);
+  const reloaded = await waitFor(async () => {
+    const v = await view();
+    return v.sessionId === sid && v.streaming ? v : null;
+  }, 30000);
+  check('reloading ?s=… comes back to the same topic and re-attaches', !!reloaded,
+    JSON.stringify(reloaded));
+
+  // ---- a genuinely new browser still does not get hijacked --------------
+  // Clearing both stores is what a fresh profile looks like. The turn in proj_b
+  // is still running, so if anything ever brings the auto-jump back, this fails.
+  await evalJs(`(function(){ localStorage.clear(); sessionStorage.clear(); return true; })()`);
+  await goto(base);
+  const plain = await waitFor(async () => {
+    const v = await view();
+    return v.workspaceName === 'proj_a' ? v : null;
+  }, 30000);
+  check('a fresh profile lands on the first workspace while proj_b runs',
+    !!plain, JSON.stringify(plain));
+  check('and it is not following that turn', plain && plain.streaming === false,
+    plain && JSON.stringify(plain));
+
+  await evalJs(`fetch('/api/chat/stop', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({session_id: ${JSON.stringify(sid)}})}).then(r=>r.status)`).catch(() => {});
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });
