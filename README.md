@@ -199,10 +199,18 @@ build/bin/tea_agent --workspace . --open
 **首次运行**：如果 `$HOME/.tea_agent/provider.yaml` 不存在，服务不会退出，而是以「配置模式」
 启动——浏览器打开页面后会被一个不可跳过的对话框挡住。对话框里有两条路：
 
-1. **快捷开始：只填 API key**（最省事，光标已经在这个输入框里）。选 DeepSeek、粘贴 key、
-   回车即可：服务端据此生成一份只含该 provider 的 `provider.yaml`（默认模型
-   `deepseek-flash`，另附 `deepseek-chat` / `deepseek-reasoner` 备用），按与上传完全相同的
-   流程校验、落盘（POSIX 上权限 `0600`，因为它含密钥）、热加载。
+1. **快捷开始：只填 API key**（最省事，光标已经在这个输入框里）。下拉里选 provider、
+   粘贴 key、回车即可：服务端据此生成一份只含该 provider 的 `provider.yaml`，按与上传
+   完全相同的流程校验、落盘（POSIX 上权限 `0600`，因为它含密钥）、热加载。
+
+   | provider | 粘贴的 key | 默认模型 | 生成的配置里还有什么 |
+   | --- | --- | --- | --- |
+   | **DeepSeek** | `sk-…` | `deepseek-flash` | 另附 `deepseek-chat` / `deepseek-reasoner` 备用 |
+   | **MiniMax** | M Plan 的 `sk-cp-…` | `MiniMax-M3.1-Flash`（1M 上下文） | 额度徽章（`supports_usage` + `minimax_token_plan`），顶栏直接显示还剩多少 |
+
+   MiniMax 走 `https://api.minimax.cn/v1`（全球站 `https://api.minimax.io/v1` 同样可用，
+   改 `api_url` 一行即可）；key 形状和说明会随下拉一起变，不用猜。
+
 2. **上传 / 粘贴完整配置**：点击（或拖入）`provider.yaml`，或直接把内容粘到文本框里，点
    「上传并应用」。
 
@@ -515,7 +523,7 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.9.1
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
 | `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件 |
-| `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"api_key":"sk-…"}` → 生成并应用只含 DeepSeek 的配置（默认模型 `deepseek-flash`）；key 不会出现在任何响应里 |
+| `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`）；key 不会出现在任何响应里 |
 | `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
 | `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
@@ -2176,9 +2184,13 @@ JSON。任何同步异常或未处理的 Promise rejection 都算失败，状态
 `roles:`），进程无需重启即可用；key 不出现在
 任何响应里；POSIX 下文件权限是 `0600`；带引号/反斜杠的 key 以单引号标量落盘且仍能解析；缺 key、
 空白 key、控制字符、未知 provider 一律 400 且不写文件；再调一次是替换而不是一次性。
+`provider: minimax` 走同一条路：写出 minimax 单 provider 的配置，默认模型 `MiniMax-M3.1-Flash`、
+1M 上下文，并打开额度徽章（`supports_usage` + `minimax_token_plan`）；显式传的 `api_url`
+仍然优先于默认端点。
 
-`tests/ui_setup_quickstart.mjs` 在浏览器里走这条快捷通道：首次运行对话框里有 DeepSeek 下拉、
-`password` 类型的 key 输入框和「用 key 创建配置」按钮，光标已在输入框里，完整上传路径也还在；
+`tests/ui_setup_quickstart.mjs` 在浏览器里走这条快捷通道：首次运行对话框里有 provider 下拉
+（DeepSeek / MiniMax）、`password` 类型的 key 输入框和「用 key 创建配置」按钮，光标已在输入框里，
+完整上传路径也还在；切到 MiniMax 时提示文字和 key 占位符一起变（`sk-cp-…`）；
 空 key 就地报错且不写文件；粘贴 key 按回车后 `provider.yaml` 出现、页面自动刷新、配置对话框
 消失、状态栏变「已连接」、模型按钮显示 `deepseek-flash`。
 

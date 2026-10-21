@@ -2,9 +2,11 @@
 //
 // The contract pinned here:
 //   * a fresh install (no provider.yaml) opens the upload gate, and that gate
-//     offers the quick channel: a DeepSeek provider select, a password field for
-//     the key, and a "用 key 创建配置" button, with the cursor already in the key
-//     field;
+//     offers the quick channel: a provider select (DeepSeek or MiniMax), a
+//     password field for the key, and a "用 key 创建配置" button, with the cursor
+//     already in the key field;
+//   * picking the other provider changes the hint and the key placeholder, so the
+//     dialog says which key shape it wants (sk-... vs sk-cp-...);
 //   * the full-upload path (drop zone + paste box) is still there;
 //   * an empty key is refused in place and nothing is written;
 //   * pasting a key and pressing Enter writes provider.yaml (DeepSeek,
@@ -131,9 +133,11 @@ try {
     JSON.stringify(gate && gate.text.slice(0, 80)));
   check('the quick channel is offered', gate && gate.text.indexOf('快捷开始：只填 API key') >= 0,
     JSON.stringify(gate && gate.text.slice(0, 200)));
-  check('it names DeepSeek and deepseek-flash',
-    gate && gate.options.length === 1 && gate.options[0].indexOf('DeepSeek') >= 0
-      && gate.options[0].indexOf('deepseek-flash') >= 0, JSON.stringify(gate && gate.options));
+  check('it offers DeepSeek and MiniMax',
+    gate && gate.options.length === 2
+      && gate.options[0].indexOf('DeepSeek') >= 0 && gate.options[0].indexOf('deepseek-flash') >= 0
+      && gate.options[1].indexOf('MiniMax') >= 0
+      && gate.options[1].indexOf('MiniMax-M3.1-Flash') >= 0, JSON.stringify(gate && gate.options));
   check('the key field is a password field with a sk- placeholder',
     gate && gate.keyType === 'password' && gate.keyPlaceholder.indexOf('sk-') === 0,
     JSON.stringify(gate && [gate.keyType, gate.keyPlaceholder]));
@@ -144,6 +148,36 @@ try {
     gate && gate.focused === 'setup-key', JSON.stringify(gate && gate.focused));
   check('the full upload path is still available',
     gate && gate.hasDropZone === true && gate.hasPasteBox === true, JSON.stringify(gate));
+
+  // The other quick channel says what it wants: MiniMax uses an M Plan key
+  // (sk-cp-...), and the hint names its default model.
+  const switched = await evalJs(`(function(){
+    var sel = document.getElementById('setup-provider');
+    sel.value = 'minimax';
+    sel.dispatchEvent(new Event('change'));
+    var key = document.getElementById('setup-key');
+    var hint = document.getElementById('setup-quick-hint');
+    return { hint: hint ? hint.textContent : '', placeholder: key ? key.placeholder : '' };
+  })()`);
+  check('picking MiniMax explains its key and its default model',
+    switched && switched.hint.indexOf('MiniMax') >= 0
+      && switched.hint.indexOf('MiniMax-M3.1-Flash') >= 0, JSON.stringify(switched));
+  check('the key placeholder follows the provider',
+    switched && switched.placeholder.indexOf('sk-cp-') === 0, JSON.stringify(switched));
+  await evalJs(`(function(){
+    var sel = document.getElementById('setup-provider');
+    sel.value = 'deepseek';
+    sel.dispatchEvent(new Event('change'));
+    return true;
+  })()`);
+  const back = await evalJs(`(function(){
+    var key = document.getElementById('setup-key');
+    var hint = document.getElementById('setup-quick-hint');
+    return { hint: hint ? hint.textContent : '', placeholder: key ? key.placeholder : '' };
+  })()`);
+  check('switching back restores the DeepSeek hint',
+    back && back.hint.indexOf('DeepSeek') >= 0 && back.placeholder.indexOf('sk-') === 0,
+    JSON.stringify(back));
 
   // An empty key must be refused in place, without writing anything.
   await evalJs(`document.getElementById('setup-quick-apply').click(); true`);

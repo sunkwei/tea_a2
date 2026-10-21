@@ -2595,27 +2595,46 @@
 
     // ---- 快捷通道：只填一个 API key ----
     // 完整 provider.yaml 有几行到几十行，在手机或没有编辑器的板子上手敲很痛苦。
-    // 这里只问 key：服务端 /api/config/quickstart 生成一份 DeepSeek 配置（默认模型
-    // deepseek-flash）并按上传同样的流程校验、落盘、热加载。
+    // 这里只问 key：服务端 /api/config/quickstart 生成一份配置（DeepSeek 默认模型
+    // deepseek-flash，MiniMax 默认模型 MiniMax-M3.1-Flash）并按上传同样的流程
+    // 校验、落盘、热加载。
+    var QUICK = {
+      deepseek: {
+        label: 'DeepSeek（deepseek-flash）',
+        hint: '选择 DeepSeek，粘贴 key，回车即可。会生成一份只含该 provider 的 provider.yaml' +
+              '（默认模型 deepseek-flash），之后随时可以手工修改。',
+        placeholder: 'sk-…'
+      },
+      minimax: {
+        label: 'MiniMax（MiniMax-M3.1-Flash）',
+        hint: '选择 MiniMax，粘贴 M Plan 的 key（sk-cp-…），回车即可。会生成一份只含该 provider 的' +
+              'provider.yaml（默认模型 MiniMax-M3.1-Flash，1M 上下文），顺带打开顶栏的额度徽章。',
+        placeholder: 'sk-cp-…'
+      }
+    };
     var quick = el('div', 'setup-quick');
     quick.appendChild(el('div', 'setup-quick-title', '快捷开始：只填 API key'));
-    quick.appendChild(el('div', 'setup-quick-hint',
-      '选择 DeepSeek，粘贴 key，回车即可。会生成一份只含该 provider 的 provider.yaml' +
-      '（默认模型 deepseek-flash），之后随时可以手工修改。'));
+    var quickHint = el('div', 'setup-quick-hint', QUICK.deepseek.hint);
+    quickHint.id = 'setup-quick-hint';
+    quick.appendChild(quickHint);
     var quickRow = el('div', 'setup-quick-row');
     var providerSel = document.createElement('select');
     providerSel.className = 'ta setup-provider';
     providerSel.id = 'setup-provider';
     var opt = document.createElement('option');
     opt.value = 'deepseek';
-    opt.textContent = 'DeepSeek（deepseek-flash）';
+    opt.textContent = QUICK.deepseek.label;
     providerSel.appendChild(opt);
+    var optMm = document.createElement('option');
+    optMm.value = 'minimax';
+    optMm.textContent = QUICK.minimax.label;
+    providerSel.appendChild(optMm);
     quickRow.appendChild(providerSel);
     var keyInput = document.createElement('input');
     keyInput.type = 'password';
     keyInput.className = 'ta setup-key';
     keyInput.id = 'setup-key';
-    keyInput.placeholder = 'sk-…';
+    keyInput.placeholder = QUICK.deepseek.placeholder;
     keyInput.autocomplete = 'off';
     keyInput.spellcheck = false;
     quickRow.appendChild(keyInput);
@@ -2626,6 +2645,12 @@
     quickRow.appendChild(quickBtn);
     quick.appendChild(quickRow);
     body.appendChild(quick);
+    // 换 provider 时提示文字和 key 的形状一起变：MiniMax 的 M Plan key 是 sk-cp-…
+    providerSel.onchange = function () {
+      var q = QUICK[providerSel.value] || QUICK.deepseek;
+      quickHint.textContent = q.hint;
+      keyInput.placeholder = q.placeholder;
+    };
     body.appendChild(el('div', 'setup-or', '—— 或者上传 / 粘贴完整配置 ——'));
 
     // 文件选择 + 拖放
@@ -2694,7 +2719,7 @@
       if (setupGate.busy) return;
       var key = String(keyInput.value || '').trim();
       if (!key) {
-        showError('请先粘贴 API key（DeepSeek 的 key 形如 sk-…）');
+        showError('请先粘贴 API key（DeepSeek 形如 sk-…，MiniMax M Plan 形如 sk-cp-…）');
         keyInput.focus();
         return;
       }
@@ -2705,8 +2730,11 @@
         body: { provider: providerSel.value || 'deepseek', api_key: key }
       }).then(function (d) {
         $('setup-ok').classList.remove('hidden');
-        $('setup-ok').textContent = '已用 DeepSeek 创建配置（' +
-          ((d && d.model) || 'deepseek-flash') + '），正在刷新…';
+        // 用服务端回报的 provider/model，而不是这里写死的名字：换了快捷通道
+        // 也不会显示成别的 provider。
+        $('setup-ok').textContent = '已用 ' +
+          ((d && d.provider) || (providerSel.value || 'deepseek')) + ' 创建配置（' +
+          ((d && d.model) || '') + '），正在刷新…';
         setTimeout(function () { location.reload(); }, 400);
       }, function (e) {
         setBusy(false);

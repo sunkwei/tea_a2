@@ -129,6 +129,9 @@ def main():
         check("an unsupported provider is refused",
               status == 400
               and (err.get("error") or {}).get("code") == "unsupported_provider", (status, err))
+        check("the refusal names the providers that are supported",
+              "deepseek" in ((err.get("error") or {}).get("message") or "")
+              and "minimax" in ((err.get("error") or {}).get("message") or ""), err)
         status, err, _ = call(port, "POST", "/api/config/quickstart",
                               {"api_key": "sk-abc\ndef"})
         check("a key with a control character is refused",
@@ -252,6 +255,38 @@ providers:
         check("the old key is gone", "sk-quickstart-1234567890" not in text, text[:300])
         _, health, _ = call(port, "GET", "/api/health")
         check("the replacement is live", health.get("config_loaded") is True, health)
+
+        # ---- MiniMax: the same one-key path, M Plan flavour ---------------
+        mm_key = "sk-cp-test-0123456789"
+        status, done, body_text = call(port, "POST", "/api/config/quickstart",
+                                       {"provider": "minimax", "api_key": mm_key})
+        check("quickstart accepts minimax", status == 200 and done.get("ok") is True, (status, done))
+        check("it reports the minimax provider", done.get("provider") == "minimax", done)
+        check("the default model is MiniMax-M3.1-Flash",
+              done.get("model") == "MiniMax-M3.1-Flash", done)
+        text = open(config_path, encoding="utf-8").read()
+        check("the file points at the minimax endpoint",
+              "https://api.minimax.cn/v1" in text, text[:300])
+        check("the key is in the file", mm_key in text, text[:200])
+        check("the quota badge is enabled for the M Plan key",
+              ("supports_usage: true" in text and "minimax_token_plan" in text), text[:400])
+        check("the model carries the 1M window", "max_context_tokens: 1000000" in text, text)
+        check("the minimax key is not echoed back", mm_key not in body_text, body_text[:200])
+        _, prov, _ = call(port, "GET", "/api/providers")
+        names = [p.get("name") for p in prov.get("providers") or []]
+        check("the provider list has exactly minimax", names == ["minimax"], names)
+        mm_provider = (prov.get("providers") or [{}])[0]
+        check("the model catalogue is exposed",
+              "MiniMax-M3.1-Flash" in (mm_provider.get("models") or []), mm_provider.get("models"))
+        check("the minimax key is never returned by /api/providers",
+              mm_key not in json.dumps(prov), "leaked")
+        # an explicit endpoint still wins over the default one
+        status, done, _ = call(port, "POST", "/api/config/quickstart",
+                               {"provider": "minimax", "api_key": mm_key,
+                                "api_url": "https://api.minimax.io/v1"})
+        text = open(config_path, encoding="utf-8").read()
+        check("an explicit api_url wins over the default",
+              status == 200 and "https://api.minimax.io/v1" in text, (status, text[:200]))
     finally:
         try:
             proc.terminate()
