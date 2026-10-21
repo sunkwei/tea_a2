@@ -282,9 +282,22 @@ try {
         "got $($doneEvent.metrics.output_tokens)"
     Check "done reports elapsed and generation timing" `
         (($doneEvent.metrics.elapsed_ms -gt 0) -and ($doneEvent.metrics.generation_ms -ge 0))
-    Check "metrics are flagged as estimates without provider usage" `
-        ($doneEvent.metrics.estimated -eq $true)
-    Check "no provider usage means no cache figure" ($doneEvent.usage.prompt_tokens -eq 0)
+    # The agent asks for usage by default (settings.stream_include_usage defaults
+    # to true) and the mock answers it, so these are the provider's numbers and
+    # not local estimates. The estimate fallback has its own section below, with
+    # the mock_nousage provider.
+    Check "provider-reported usage is not flagged as an estimate" `
+        ($doneEvent.metrics.estimated -eq $false) "estimated=$($doneEvent.metrics.estimated)"
+    # `usage.prompt_tokens` is the sum over the turn's requests; the context usage
+    # is the size of the largest single one - that is what "how full is the window"
+    # means - so it is compared with the last request, not with the sum.
+    $lastIterUsage = ($events | Where-Object { $_.type -eq 'iteration_end' } |
+        Select-Object -Last 1).usage.prompt_tokens
+    Check "the context usage is the provider's prompt token count" `
+        (($lastIterUsage -gt 0) -and ($doneEvent.metrics.context_tokens -eq $lastIterUsage)) `
+        "last=$lastIterUsage metrics=$($doneEvent.metrics.context_tokens)"
+    Check "no cache hits are invented when the provider reports none" `
+        ($doneEvent.usage.cached_tokens -eq 0)
     $iterMetrics = @($events | Where-Object { $_.type -eq 'iteration_end' -and $null -ne $_.metrics })
     Check "every iteration_end carries a metrics block" ($iterMetrics.Count -eq $iterations) `
         "metrics=$($iterMetrics.Count) iterations=$iterations"
