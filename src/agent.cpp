@@ -210,7 +210,8 @@ long long Agent::estimate_tokens(const std::vector<Message>& messages) {
 }
 
 std::string Agent::build_system_prompt(const Workspace& workspace, const Session& session,
-                                           const std::string& persona_override) const {
+                                           const std::string& persona_override,
+                                           const std::string& task_context) const {
   const EnvironmentInfo& env = machine_environment();
   const Settings& st = workspace.settings();
   std::ostringstream out;
@@ -353,6 +354,24 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
            "finished (exactly one active at a time). Do not restate the list in your answer - "
            "the user already sees it.";
   }
+
+  // A turn that works on a queued task. The model has to know: without this it
+  // treats the work as an ordinary question, never reports progress, and never
+  // asks the user when it is stuck - the task record then says "0%" for the
+  // whole run and the scheduler has nothing to watch.
+  if (!task_context.empty()) {
+    out << "\nThis turn works on a QUEUED TASK: " << task_context << "\n";
+    out << "The work was put in a queue to be done later; a scheduler started it when the "
+           "provider had quota left. Two things follow from that:\n";
+    out << "  * Report on the task with toolkit_task (op=update): progress=0-100 and a one-line "
+           "note of what you just did. The task record is the only place that progress becomes "
+           "visible - the user watches it there, and the scheduler waits for it.\n";
+    out << "  * If the work cannot go on without the user, report it with "
+           "needs_confirmation=true and your question. The task then waits for an answer instead "
+           "of being marked done - say what you need and stop there.\n";
+    out << "Do the work as if the user had asked for it right now: the queue says when it "
+           "starts, not what it is.\n";
+  }
   return out.str();
 }
 namespace {
@@ -391,12 +410,13 @@ std::string truncate_middle(const std::string& text, std::size_t keep_bytes) {
 
 void Agent::build_context(const Workspace& workspace, const Session& session,
                           const ModelInfo* model, std::vector<Message>* out,
-                          ContextStats* stats, const std::string& persona_override) const {
+                          ContextStats* stats, const std::string& persona_override,
+                          const std::string& task_context) const {
   const Settings& st = workspace.settings();
   out->clear();
   Message system;
   system.role = "system";
-  system.content = build_system_prompt(workspace, session, persona_override);
+  system.content = build_system_prompt(workspace, session, persona_override, task_context);
   system.created_at = now_iso8601();
   out->push_back(system);
 
@@ -925,7 +945,8 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
     std::vector<Message> context;
     ContextStats ctx_stats;
-    build_context(workspace, *session, model_info, &context, &ctx_stats, options.system_prompt);
+    build_context(workspace, *session, model_info, &context, &ctx_stats, options.system_prompt,
+                  options.task_context);
 
     ChatRequest request;
     request.provider = provider;
@@ -1052,7 +1073,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         LOG_WARN("llm: provider reported a context overflow; compacting and retrying");
         if (maybe_compact(workspace, session, provider, model, model_info, cancel, emit_all, true)) {
           build_context(workspace, *session, model_info, &context, &ctx_stats,
-                      options.system_prompt);
+                      options.system_prompt, options.task_context);
           continue;
         }
         break;

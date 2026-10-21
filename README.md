@@ -531,7 +531,7 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.9.1
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `POST` | `/api/tasks` | 排一个任务：`{workspace_id, prompt, title?, session_id?, provider?}` → 任务记录（status=queued） |
 | `GET` | `/api/tasks?workspace_id=&status=` | 任务列表：排队中 / 进行中 / 等待确认 / 已完成，含进度、中间状态与 `counts` 汇总 |
-| `GET` | `/api/events?workspace_id=` | 生命周期事件流（SSE）：任务被创建/开始/更新/取消 |
+| `GET` | `/api/events?workspace_id=` | 生命周期事件流（SSE）：任务被创建/开始/更新/确认/完成/失败/等确认/取消 |
 | `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
 | `PATCH` | `/api/tasks/{id}` | 改任务记录的任意字段（含 `meta`、`step`）；见下面的「原语层」 |
 | `GET` | `/api/tasks/{id}?workspace_id=` | 单个任务 |
@@ -1722,6 +1722,19 @@ toolkit_task op=get / op=list
 不带 `task_id` 时指的是**当前这一轮所属的任务**。`needs_confirmation=true` 会让任务停在
 `waiting_confirmation`——这是「任务需要用户确认」在状态里的样子。
 
+模型怎么知道这一轮属于某个任务？**system prompt 里会写清楚**（任务 id、标题、要做的事），
+并告诉它用 `toolkit_task` 汇报进度与中间状态、遇到需要人确认的就停下来问。没有这一段，
+模型只会把任务当成普通提问：进度永远是 0，`needs_confirmation` 也永远用不上——这正是
+「进度条不动」和「等确认」两件事曾经只在测试里成立的原因。
+
+### 崩在「运行中」的任务
+
+agent 进程死掉时，任务记录会停在 `running`。这样它就卡住了：调度器只做排队的任务，
+`POST /api/tasks/{id}/start` 也只接受 `queued` / `waiting_confirmation`。所以**服务端启动时
+会回收这类僵尸任务**：把它们标成 `failed`，并写明「agent 在这个任务运行时停掉了（服务端重启过）」，
+需要的话再 `PATCH` 一次 `{"status":"queued"}` 重新排队。回收只动**一分钟内没有更新过**的任务，
+免得把另一个进程正在做的任务抢走。
+
 ### 原语层：给脚本用的 API
 
 产品是「聊天」和「任务队列」；**原语**是「一次模型调用」「一条记录」「一个事件」。
@@ -1732,7 +1745,7 @@ toolkit_task op=get / op=list
 | `POST /api/llm/chat` | **一次模型调用**：没有 agent loop，不执行任何工具。`{prompt\|messages, system, provider, model, tools, temperature, max_tokens, stream}`。不流式时返回 `{content, reasoning, tool_calls[], usage, elapsed_ms}`；流式时是 SSE（`content_delta` / `reasoning_delta`，最后一条 `done` 带全部结果）。`tools` 原样透传——协议归调用方，服务端只负责把请求送出去。 |
 | `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id`（这一轮属于哪个任务）。 |
 | `PATCH /api/tasks/{id}` | 改任务记录的**任意**字段：`status`、`progress`、`note`、`question`、`needs_confirmation`、`meta`（自己的那套账记在这儿，不用服务端加字段）、`step`（追加一条中间状态）。 |
-| `GET /api/events` | 生命周期事件流（SSE）：`task_created` / `task_started` / `task_updated` / `task_cancelled` …；`?workspace_id=` 可过滤。内置 UI 就靠它知道「后台的任务跑完了」。 |
+| `GET /api/events` | 生命周期事件流（SSE）：`task_created` / `task_started` / `task_updated` / `task_confirmed` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled`；`?workspace_id=` 可过滤。内置 UI 就靠它知道「后台的任务跑完了」。 |
 
 `sched/tea_api.py` 是这层的客户端（纯标准库，设备上跑得起来）：
 

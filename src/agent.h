@@ -27,6 +27,11 @@ struct TurnOptions {
   /// The task this turn works on (empty => an ordinary chat). The agent reports
   /// progress and intermediate state on it through toolkit_task.
   std::string task_id;
+  /// One line about that task: the id, the title and the request. It goes into
+  /// the system prompt, so the model knows that this turn is work on a queued
+  /// task (and that it is expected to report on it) instead of an ordinary
+  /// question.
+  std::string task_context;
   /// Replaces the persona (the system prompt's first block). The device facts,
   /// the workspace instructions and agent.md stay: they are what makes the agent
   /// work *here* rather than in a vacuum.
@@ -104,13 +109,17 @@ class Agent {
 
   /// Exposed so the HTTP layer can show exactly what the model receives.
   /// `persona_override` replaces the persona block when it is not empty.
+  /// `task_context` describes the queued task this turn works on; when it is
+  /// empty the turn is an ordinary conversation.
   std::string build_system_prompt(const Workspace& workspace, const Session& session,
-                               const std::string& persona_override = std::string()) const;
+                               const std::string& persona_override = std::string(),
+                               const std::string& task_context = std::string()) const;
 
  private:
   void build_context(const Workspace& workspace, const Session& session, const ModelInfo* model,
                      std::vector<Message>* out, ContextStats* stats = nullptr,
-                     const std::string& persona_override = std::string()) const;
+                     const std::string& persona_override = std::string(),
+                     const std::string& task_context = std::string()) const;
   bool compact_history(Workspace& workspace, Session* session, const std::string& provider,
                        const std::string& model, const ModelInfo* model_info,
                        std::atomic<bool>* cancel, long long retain_tokens);

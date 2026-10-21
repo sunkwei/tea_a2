@@ -175,6 +175,21 @@ bool decode_image_payload(const std::string& raw, std::string* bytes, std::strin
   return true;
 }
 
+/// What the system prompt says about the task this turn works on. Without it
+/// the model has no idea a task exists, so it never reports progress and never
+/// asks the user for a confirmation - the task record then stays at 0% for the
+/// whole run.
+std::string task_context_for(const Workspace& ws, const std::string& task_id) {
+  if (task_id.empty()) return std::string();
+  Task t;
+  std::string err;
+  if (!TaskStore::load(ws, task_id, &t, &err)) return std::string();
+  std::string out = t.id;
+  if (!t.title.empty()) out += " (" + t.title + ")";
+  if (!t.prompt.empty()) out += ": " + t.prompt;
+  return out;
+}
+
 void send_json(httplib::Response& res, const nlohmann::json& body, int status = 200) {
   res.status = status;
   res.set_header("Access-Control-Allow-Origin", "*");
@@ -726,7 +741,10 @@ struct ApiServer::Impl {
 
     AppConfig* cfg = config;
     ToolRegistry* reg = tools;
-    turn->worker = std::thread([turn, cfg, reg, message, provider, model, task_id]() {
+    // The bus is captured by value: the worker may publish the last event of
+    // the turn after the server object is gone.
+    std::shared_ptr<EventBus> bus_ref = bus;
+    turn->worker = std::thread([turn, cfg, reg, message, provider, model, task_id, bus_ref]() {
       Agent agent(cfg, reg);
       TurnOptions options;
       options.provider = provider;
@@ -734,7 +752,8 @@ struct ApiServer::Impl {
       options.stream = true;
       options.inbox = &turn->inbox;
       options.task_id = task_id;
-      EventEmitter emit = [turn, task_id](const nlohmann::json& event) {
+      options.task_context = task_context_for(turn->workspace, task_id);
+      EventEmitter emit = [turn, task_id, bus_ref](const nlohmann::json& event) {
         turn->emit_event(event);
         if (task_id.empty()) return;
         // The task record follows the turn: the progress the agent reports with
@@ -768,6 +787,14 @@ struct ApiServer::Impl {
               task->progress = 100;
             },
             &t, &err);
+        // The event the watchers are waiting for. Without it a task that
+        // finishes on its own is silent: the browser never learns that the
+        // work is done, and a script that waits for "task_done" waits forever.
+        const char* what = "task_done";
+        if (type == "error") what = "task_failed";
+        else if (type == "stopped") what = "task_cancelled";
+        else if (t.status == task_status::kWaitingConfirmation) what = "task_waiting_confirmation";
+        publish_task_to(bus_ref, t, what);
       };
       try {
         agent.run_turn(turn->workspace, &turn->session, message, {}, options, emit,
@@ -795,22 +822,29 @@ struct ApiServer::Impl {
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
     EventListener listener;
   };
-  std::mutex event_mu;
-  std::vector<std::shared_ptr<Subscriber>> event_subscribers;
+  /// The bus lives in a shared_ptr on purpose: the last event of a turn is
+  /// published from the worker thread, and that thread may still be running
+  /// when the server object is destroyed. The bus has to outlive the server for
+  /// that to be safe.
+  struct EventBus {
+    std::mutex mu;
+    std::vector<std::shared_ptr<Subscriber>> subscribers;
+  };
+  std::shared_ptr<EventBus> bus = std::make_shared<EventBus>();
 
   void subscribe(const EventListener& listener) {
     auto sub = std::make_shared<Subscriber>();
     sub->listener = listener;
-    std::lock_guard<std::mutex> lock(event_mu);
-    event_subscribers.push_back(sub);
+    std::lock_guard<std::mutex> lock(bus->mu);
+    bus->subscribers.push_back(sub);
   }
 
   void unsubscribe(const std::shared_ptr<std::atomic<bool>>& alive) {
     alive->store(false);
-    std::lock_guard<std::mutex> lock(event_mu);
-    for (std::size_t i = 0; i < event_subscribers.size();) {
-      if (!event_subscribers[i]->alive->load()) {
-        event_subscribers.erase(event_subscribers.begin() + static_cast<std::ptrdiff_t>(i));
+    std::lock_guard<std::mutex> lock(bus->mu);
+    for (std::size_t i = 0; i < bus->subscribers.size();) {
+      if (!bus->subscribers[i]->alive->load()) {
+        bus->subscribers.erase(bus->subscribers.begin() + static_cast<std::ptrdiff_t>(i));
       } else {
         ++i;
       }
@@ -820,15 +854,16 @@ struct ApiServer::Impl {
   /// Publish an event to every live subscriber. A subscriber that throws (or is
   /// gone) must not take the publisher down with it: the events are best effort
   /// notifications, not the source of truth.
-  void publish(const nlohmann::json& event) {
+  static void publish_to(const std::shared_ptr<EventBus>& bus, const nlohmann::json& event) {
+    if (!bus) return;
     std::vector<std::shared_ptr<Subscriber>> subs;
     {
-      std::lock_guard<std::mutex> lock(event_mu);
-      for (std::size_t i = 0; i < event_subscribers.size();) {
-        if (!event_subscribers[i]->alive->load()) {
-          event_subscribers.erase(event_subscribers.begin() + static_cast<std::ptrdiff_t>(i));
+      std::lock_guard<std::mutex> lock(bus->mu);
+      for (std::size_t i = 0; i < bus->subscribers.size();) {
+        if (!bus->subscribers[i]->alive->load()) {
+          bus->subscribers.erase(bus->subscribers.begin() + static_cast<std::ptrdiff_t>(i));
         } else {
-          subs.push_back(event_subscribers[i]);
+          subs.push_back(bus->subscribers[i]);
           ++i;
         }
       }
@@ -842,13 +877,62 @@ struct ApiServer::Impl {
     }
   }
 
+  void publish(const nlohmann::json& event) { publish_to(bus, event); }
+
+  /// A task that was running when the agent died is not running any more. Left
+  /// as "running" it would sit in the queue forever: the scheduler only starts
+  /// queued tasks, and POST .../start refuses anything else. So the tasks that
+  /// were in flight when this process started are marked failed - with a
+  /// reason that says what happened - and can be queued again with one PATCH.
+  ///
+  /// Only tasks that have not been touched for a minute are recovered: another
+  /// agent process working on the same workspace would otherwise have its task
+  /// pulled out from under it.
+  void recover_stale_tasks() {
+    if (!registry) return;
+    const int64_t now = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    const std::string cutoff = iso8601_from_unix(now - 60);
+    const std::vector<WorkspaceEntry>& entries = registry->entries();
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      Workspace ws;
+      std::string err;
+      if (!open_workspace(entries[i].id, &ws, &err)) continue;
+      std::vector<Task> tasks = TaskStore::list(ws);
+      for (std::size_t k = 0; k < tasks.size(); ++k) {
+        if (tasks[k].status != task_status::kRunning) continue;
+        if (!tasks[k].updated_at.empty() && tasks[k].updated_at >= cutoff) continue;
+        Task out;
+        TaskStore::update(ws, tasks[k].id,
+                          [&](Task* t) {
+                            t->status = task_status::kFailed;
+                            t->finished_at = now_iso8601();
+                            t->error =
+                                "the agent stopped while this task was running (the server was "
+                                "restarted); queue it again if the work still has to be done";
+                          },
+                          &out, &err);
+        if (err.empty()) {
+          LOG_WARN("task: ", tasks[k].id,
+                   " was running when the server started - marked failed (", out.error, ")");
+          publish_task(out, "task_failed");
+        }
+      }
+    }
+  }
+
   /// A task event, published wherever a task changes state.
-  void publish_task(const Task& task, const char* what) {
+  static void publish_task_to(const std::shared_ptr<EventBus>& bus, const Task& task,
+                              const char* what) {
+    if (!bus) return;
     nlohmann::json e = nlohmann::json::object();
     e["type"] = what;
     e["task"] = task.to_json();
-    publish(e);
+    publish_to(bus, e);
   }
+
+  void publish_task(const Task& task, const char* what) { publish_task_to(bus, task, what); }
 
   // ---- helpers -----------------------------------------------------------
   void install_routes();
@@ -1780,9 +1864,17 @@ void ApiServer::Impl::install_routes() {
                  !task.provider.empty() ? task.provider
                                         : (!wanted_provider.empty() ? wanted_provider
                                                                     : config->active_provider);
+             // The model has to belong to the provider that runs the work: the
+             // active model belongs to the *active* provider, which is a
+             // different one as soon as the scheduler gates on another
+             // provider's quota.
+             const ProviderInfo* pinfo = config->provider(provider);
+             const std::string provider_model =
+                 (pinfo && !pinfo->primary_model().empty()) ? pinfo->primary_model()
+                                                            : config->active_model;
              const std::string model = !task.model.empty()
                                           ? task.model
-                                          : (!wanted_model.empty() ? wanted_model : config->active_model);
+                                          : (!wanted_model.empty() ? wanted_model : provider_model);
              std::shared_ptr<ChatTurn> turn =
                  launch_turn(ws.id(), task.session_id, task.prompt, provider, model, id, &err);
              if (!turn) {
@@ -1879,7 +1971,11 @@ void ApiServer::Impl::install_routes() {
              }
              const std::string provider =
                  task.provider.empty() ? config->active_provider : task.provider;
-             const std::string model = task.model.empty() ? config->active_model : task.model;
+             const ProviderInfo* pinfo = config->provider(provider);
+             const std::string provider_model =
+                 (pinfo && !pinfo->primary_model().empty()) ? pinfo->primary_model()
+                                                            : config->active_model;
+             const std::string model = task.model.empty() ? provider_model : task.model;
              std::shared_ptr<ChatTurn> turn =
                  launch_turn(ws.id(), task.session_id, message, provider, model, id, &err);
              if (!turn) {
@@ -3900,6 +3996,15 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
   } catch (const std::exception& e) {
     if (err) *err = std::string("installing the routes threw: ") + e.what();
     return false;
+  }
+
+  // Tasks that were in flight when the agent died are not running any more.
+  // Recover them before anything else: a task stuck in "running" is invisible
+  // to the scheduler and can never be started again.
+  try {
+    impl_->recover_stale_tasks();
+  } catch (const std::exception& e) {
+    LOG_WARN("recovering stale tasks failed: ", e.what());
   }
 
   const std::string host = options.host.empty() ? "127.0.0.1" : options.host;

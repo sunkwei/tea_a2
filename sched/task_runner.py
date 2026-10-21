@@ -233,7 +233,18 @@ def run_round(api, args, workspace_id):
     queued = listing.get("tasks") or []
     if not queued:
         log("nothing queued")
-        return 0
+    # A task that is still marked "running" is either being worked on right now
+    # or was left behind by a crash. The second case used to be invisible: the
+    # scheduler only looks at queued tasks, so such a task sat in the queue
+    # forever. The agent now recovers those at startup (they come back as
+    # failed, with a reason), and this line makes it visible either way.
+    try:
+        counts = (api.tasks(workspace_id) or {}).get("counts") or {}
+    except ApiError:
+        counts = {}
+    if counts.get("running"):
+        log("%s task(s) are marked running (worked on right now, or left behind by a "
+            "crash - the agent marks those failed when it starts)" % counts["running"])
 
     started = 0
     for task in queued:
