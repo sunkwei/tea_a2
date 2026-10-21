@@ -209,7 +209,8 @@ long long Agent::estimate_tokens(const std::vector<Message>& messages) {
   return total;
 }
 
-std::string Agent::build_system_prompt(const Workspace& workspace, const Session& session) const {
+std::string Agent::build_system_prompt(const Workspace& workspace, const Session& session,
+                                           const std::string& persona_override) const {
   const EnvironmentInfo& env = machine_environment();
   const Settings& st = workspace.settings();
   std::ostringstream out;
@@ -219,8 +220,13 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
   //      a running one) without a restart;
   //   2. the workspace's `settings.yaml: system_prompt` (loaded when opened);
   //   3. the machine-level default (tea_agent.yaml or the built-in rules).
+  // A caller that drives its own policy may hand in the persona it wants;
+  // it wins over the workspace file, which in turn wins over the machine default.
+  const std::string override_prompt = trim(persona_override);
   const std::string workspace_prompt = trim(workspace.load_system_prompt());
-  if (!workspace_prompt.empty()) {
+  if (!override_prompt.empty()) {
+    out << override_prompt << "\n\n";
+  } else if (!workspace_prompt.empty()) {
     out << workspace_prompt << "\n\n";
   } else if (!st.system_prompt.empty()) {
     out << st.system_prompt << "\n\n";
@@ -385,12 +391,12 @@ std::string truncate_middle(const std::string& text, std::size_t keep_bytes) {
 
 void Agent::build_context(const Workspace& workspace, const Session& session,
                           const ModelInfo* model, std::vector<Message>* out,
-                          ContextStats* stats) const {
+                          ContextStats* stats, const std::string& persona_override) const {
   const Settings& st = workspace.settings();
   out->clear();
   Message system;
   system.role = "system";
-  system.content = build_system_prompt(workspace, session);
+  system.content = build_system_prompt(workspace, session, persona_override);
   system.created_at = now_iso8601();
   out->push_back(system);
 
@@ -815,6 +821,21 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // toolkit_search/toolkit_fetch only appear when this turn's provider
   // declares them; the underlying protocol is provider-specific.
   nlohmann::json tools_json = tools_->openai_tools(provider_info);
+  // A caller that drives its own policy can hand the agent exactly the tools it
+  // wants - or none at all (an empty list turns the turn into a plain
+  // conversation with the model).
+  if (!options.tools.empty()) {
+    nlohmann::json kept = nlohmann::json::array();
+    for (std::size_t i = 0; i < tools_json.size(); ++i) {
+      const std::string name = tools_json[i]["function"]["name"].get<std::string>();
+      bool wanted = false;
+      for (std::size_t k = 0; k < options.tools.size(); ++k) {
+        if (options.tools[k] == name) { wanted = true; break; }
+      }
+      if (wanted) kept.push_back(tools_json[i]);
+    }
+    tools_json = kept;
+  }
   if (model_info && !model_info->supports_tools) tools_json = nlohmann::json::array();
   // toolkit_load_image is only meaningful for a model that can see: advertising
   // it to a text-only model would buy a tool call that can only fail.
@@ -904,7 +925,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
     std::vector<Message> context;
     ContextStats ctx_stats;
-    build_context(workspace, *session, model_info, &context, &ctx_stats);
+    build_context(workspace, *session, model_info, &context, &ctx_stats, options.system_prompt);
 
     ChatRequest request;
     request.provider = provider;
@@ -1030,7 +1051,8 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         overflow_recovered = true;
         LOG_WARN("llm: provider reported a context overflow; compacting and retrying");
         if (maybe_compact(workspace, session, provider, model, model_info, cancel, emit_all, true)) {
-          build_context(workspace, *session, model_info, &context, &ctx_stats);
+          build_context(workspace, *session, model_info, &context, &ctx_stats,
+                      options.system_prompt);
           continue;
         }
         break;

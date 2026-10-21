@@ -298,11 +298,18 @@ providers:
         check("the user's own input is not claimed as output",
               all(a["path"] != "input.png" for a in arts), [a["path"] for a in arts])
 
-        # ---- a file a command produced (and build noise that must not be) ---
-        MockProvider.calls = [("c3", "toolkit_exec", {
-            "command": "python3 -c \"open('chart.svg','w').write('<svg/>');"
-                       "open('noise.o','w').write('x');"
-                       "open('main.c','w').write('int main(){}');\"",
+        # ---- a file a command produced (and build noise that must not be) ---
+        # python3 first, python as the fallback: on Windows the `python3` name can
+        # be the Microsoft Store alias, which prints an install hint and exits 9009
+        # without running anything - the file would then never be created and the
+        # test would fail for a reason that has nothing to do with the artifacts
+        # list.
+        _write = ("open('chart.svg','w').write('<svg/>');"
+                   "open('noise.o','w').write('x');"
+                   "open('main.c','w').write('int main(){}');")
+        _py = 'python3 -c "%s" || python -c "%s"' % (_write, _write)
+        MockProvider.calls = [("c3", "toolkit_exec", {
+            "command": _py,
             "timeout_ms": 60000})]
         events = run_turn(port, wid, sid, "生成图表")
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
@@ -317,9 +324,12 @@ providers:
               all(not p.startswith(".tea_agent_run") for p in paths), paths)
 
         # ---- a command that produced a lot ---------------------------------
-        many = "".join("open('bulk%d.txt','w').write('x');" % i for i in range(12))
+        # A loop, not a long list of statements: 12 open() calls make the command
+        # line long enough to hit the 8191-character limit cmd.exe has, and the
+        # truncated command dies with a syntax error instead of writing anything.
+        many = "for i in range(12): open('bulk' + str(i) + '.txt', 'w').write('x')"
         MockProvider.calls = [("c3b", "toolkit_exec", {
-            "command": "python3 -c \"%s\"" % many, "timeout_ms": 60000})]
+            "command": "python3 -c \"%s\" || python -c \"%s\"" % (many, many), "timeout_ms": 60000})]
         events = run_turn(port, wid, sid, "批量生成")
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
         arts = detail.get("artifacts") or []
@@ -333,9 +343,9 @@ providers:
         # ---- past the cap the tool has to admit it ------------------------
         # 260 files is over the 200-file cap of the scan, so the result must say
         # so instead of presenting a truncated list as the whole truth.
-        flood = "".join("open('flood%d.txt','w').write('x');" % i for i in range(260))
+        flood = "for i in range(260): open('flood' + str(i) + '.txt', 'w').write('x')"
         MockProvider.calls = [("c3c", "toolkit_exec", {
-            "command": "python3 -c \"%s\"" % flood, "timeout_ms": 120000})]
+            "command": "python3 -c \"%s\" || python -c \"%s\"" % (flood, flood), "timeout_ms": 120000})]
         events = run_turn(port, wid, sid, "洪水")
         flood_out = next((e for e in events if e.get("type") == "tool_result"), {}).get("output", "")
         check("past the cap the tool says the list is incomplete",

@@ -122,7 +122,16 @@ try {
                 function: {
                   name: 'toolkit_exec',
                   arguments: JSON.stringify({
+                    // python3 first, python as the fallback: on Windows the
+                    // `python3` name can be the Microsoft Store alias, which
+                    // prints an install hint and exits 9009 without doing
+                    // anything - the file would then never be created and the
+                    // test would fail for a reason that has nothing to do with
+                    // the artifacts strip.
                     command: "python3 -c \"import base64;" +
+                      "open('chart.png','wb').write(base64.b64decode(" +
+                      "'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))\"" +
+                      " || python -c \"import base64;" +
                       "open('chart.png','wb').write(base64.b64decode(" +
                       "'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))\"",
                     timeout_ms: 30000,

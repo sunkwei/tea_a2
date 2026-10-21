@@ -59,6 +59,10 @@ struct Task {
   std::string finished_at;
   /// Why it failed, if it did.
   std::string error;
+  /// Free-form data for whoever owns the task. A script that keeps its own
+  /// bookkeeping (a ticket id, a retry count, a deadline) puts it here instead of
+  /// asking the server for a new field.
+  nlohmann::json meta = nlohmann::json::object();
 
   nlohmann::json to_json() const;
   static Task from_json(const nlohmann::json& j);

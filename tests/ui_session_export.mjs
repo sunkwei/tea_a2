@@ -340,6 +340,13 @@ providers:
     return out;
   })()`);
 
+  // Pin the scheme instead of relying on the browser's default: headless
+  // Chrome reports prefers-color-scheme: dark, so the "light" measurements were
+  // taken from the dark palette and failed for a reason that had nothing to do
+  // with the exported file.
+  await send('Emulation.setEmulatedMedia',
+    { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
+  await sleep(400);
   const light = await palette();
   check('light scheme: the page is light', light && light.bodyLum > 0.7, JSON.stringify(light));
   check('light scheme: cards are light too (not an inverted page)',

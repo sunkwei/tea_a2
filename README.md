@@ -229,6 +229,8 @@ build/bin/tea_agent --workspace . --open
 那种情况下静默启动只会把问题藏起来。
 
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
+**标签页会闪**：一轮跑完（或后台的任务跑完）而这个标签页不在前台时，标题会一闪一闪地
+提醒你——那是唯一一种不需要通知权限的提醒方式；回到这个标签页它就停下。
 「设置」页分成三块：工作区级 **system prompt**（编辑框里就是当前生效的人设，保存后下一轮生效）、
 运行环境与模型提供方 / 工具清单，以及最下方的 **危险操作 → 销毁**（删除 tea home 与所有工作区的
 `.tea_agent_run`，见「工作区与运行时存储」）。
@@ -529,6 +531,9 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.9.1
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `POST` | `/api/tasks` | 排一个任务：`{workspace_id, prompt, title?, session_id?, provider?}` → 任务记录（status=queued） |
 | `GET` | `/api/tasks?workspace_id=&status=` | 任务列表：排队中 / 进行中 / 等待确认 / 已完成，含进度、中间状态与 `counts` 汇总 |
+| `GET` | `/api/events?workspace_id=` | 生命周期事件流（SSE）：任务被创建/开始/更新/取消 |
+| `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
+| `PATCH` | `/api/tasks/{id}` | 改任务记录的任意字段（含 `meta`、`step`）；见下面的「原语层」 |
 | `GET` | `/api/tasks/{id}?workspace_id=` | 单个任务 |
 | `POST` | `/api/tasks/{id}/start?workspace_id=` | 现在就做这件事（body 可带 `provider`/`model` 覆盖） |
 | `POST` | `/api/tasks/{id}/cancel?workspace_id=` | 停掉正在跑的那个 |
@@ -1716,6 +1721,32 @@ toolkit_task op=get / op=list
 
 不带 `task_id` 时指的是**当前这一轮所属的任务**。`needs_confirmation=true` 会让任务停在
 `waiting_confirmation`——这是「任务需要用户确认」在状态里的样子。
+
+### 原语层：给脚本用的 API
+
+产品是「聊天」和「任务队列」；**原语**是「一次模型调用」「一条记录」「一个事件」。
+策略——什么时候开工、做什么、什么时候停、通知谁——应该写在脚本里，而不是长在服务端里。
+
+| 接口 | 干什么 |
+| --- | --- |
+| `POST /api/llm/chat` | **一次模型调用**：没有 agent loop，不执行任何工具。`{prompt\|messages, system, provider, model, tools, temperature, max_tokens, stream}`。不流式时返回 `{content, reasoning, tool_calls[], usage, elapsed_ms}`；流式时是 SSE（`content_delta` / `reasoning_delta`，最后一条 `done` 带全部结果）。`tools` 原样透传——协议归调用方，服务端只负责把请求送出去。 |
+| `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id`（这一轮属于哪个任务）。 |
+| `PATCH /api/tasks/{id}` | 改任务记录的**任意**字段：`status`、`progress`、`note`、`question`、`needs_confirmation`、`meta`（自己的那套账记在这儿，不用服务端加字段）、`step`（追加一条中间状态）。 |
+| `GET /api/events` | 生命周期事件流（SSE）：`task_created` / `task_started` / `task_updated` / `task_cancelled` …；`?workspace_id=` 可过滤。内置 UI 就靠它知道「后台的任务跑完了」。 |
+
+`sched/tea_api.py` 是这层的客户端（纯标准库，设备上跑得起来）：
+
+```python
+from tea_api import Tea
+tea = Tea("http://127.0.0.1:8282")
+
+quota = tea.usage("minimax")              # 额度
+task = tea.create_task(ws, "把 README 跑一遍")   # 排队
+tea.start_task(ws, task["id"])             # 现在就做
+for event in tea.events(workspace_id=ws):    # 订阅，而不是轮询
+    if event["type"] == "task_done":
+        notify(event["task"])               # 通知怎么发，是你的事
+```
 
 ### 调度器：`sched/task_runner.py`
 

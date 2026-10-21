@@ -1653,6 +1653,7 @@
       if (ev.trajectory_id) state.lastTrajectoryId = ev.trajectory_id;
       if (ev.type === 'done') applyMetrics(ev.metrics, ev.usage);
       renderMetrics();
+      notifyFinished();                         // 后台跑完：让标签页闪一下
       // 节流可能把最后一段文字留在「该渲染但还没渲染」的状态：本轮结束，补一次。
       scheduleLiveRender();
     }
@@ -2234,12 +2235,16 @@
 
   function startHealthTimer() {
     if (healthTimer) return;
+    // Clicking back into the window is as good as switching to the tab: the hint
+    // has been seen, so it may stop blinking.
+    window.addEventListener('focus', function () { stopTabBlink(); });
     healthTimer = setInterval(function () {
       if (document.hidden) return;              // 后台标签页不需要轮询
       loadHealth(false).catch(function () {});
     }, 10000);
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) return;
+      stopTabBlink();                           // 回到这个标签页就不闪了
       loadHealth(false).catch(function () {});
       // 标签页回来时连接可能已经断了（合盖、断网、被系统挂起）：那一轮如果还在
       // 服务端跑着，就接回去继续直播，而不是让用户以为它停了。
@@ -2413,9 +2418,71 @@
   /// 浏览器标签页 / 窗口标题：带上当前工作区，同时在开着的多个页面之间一眼区分。
   /// 工作区名放在最前面，标签页被截断时先保住最能区分的那一段。
   var APP_NAME = 'TEA AGENT';
+
+  /* ---------- 标签页闪烁：后台跑完了要让人知道 ---------- */
+  // A turn that finishes while the tab is in the background is invisible: the
+  // answer is there, the status pill says nothing, and the user only finds out
+  // when they happen to look at the tab again. A blinking title is the oldest
+  // trick there is and the only one that needs no notification permission.
+  var TAB_BLINK_MS = 1000;
+  var tabBlinkTimer = null;
+  var tabBlinkMarked = false;
+  var tabBaseTitle = APP_NAME;
+
+  function applyTitle() {
+    document.title = tabBlinkMarked ? ('\u25cf ' + tabBaseTitle) : tabBaseTitle;
+  }
+  function startTabBlink() {
+    if (tabBlinkTimer) return;
+    tabBlinkTimer = setInterval(function () {
+      tabBlinkMarked = !tabBlinkMarked;
+      applyTitle();
+    }, TAB_BLINK_MS);
+  }
+  function stopTabBlink() {
+    if (!tabBlinkTimer) return;
+    clearInterval(tabBlinkTimer);
+    tabBlinkTimer = null;
+    tabBlinkMarked = false;
+    applyTitle();
+  }
+  /// Call it when something finished that the user asked for.
+  function notifyFinished() {
+    // Only while the page is not in front of the user: a blinking title under
+    // the eyes is noise, not a hint.
+    if (!document.hidden && document.hasFocus()) return;
+    startTabBlink();
+  }
+
+  // A task that finished *elsewhere* - the scheduler picked it up while this tab
+  // was in the background - has to reach the tab too, otherwise the work is done
+  // and nobody knows. The event stream is the one place that knows.
+  var taskEventsSource = null;
+  function subscribeTaskEvents() {
+    if (taskEventsSource) return;
+    try {
+      taskEventsSource = new EventSource(apiUrl('api/events'));
+    } catch (e) { return; }
+    taskEventsSource.onmessage = function (ev) {
+      var data = null;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      if (!data || !data.type) return;
+      if (data.type === 'task_done' || data.type === 'task_failed' ||
+          data.type === 'task_waiting_confirmation' || data.type === 'task_cancelled') {
+        notifyFinished();
+      }
+    };
+    taskEventsSource.onerror = function () {
+      // The server restarted or the network hiccuped: close, wait, try again.
+      if (taskEventsSource) { taskEventsSource.close(); taskEventsSource = null; }
+      setTimeout(subscribeTaskEvents, 5000);
+    };
+  }
+
   function updateTitle() {
     var name = state.workspace ? state.workspace.name : '';
-    document.title = name ? (name + ' · ' + APP_NAME) : APP_NAME;
+    tabBaseTitle = name ? (name + ' \u00b7 ' + APP_NAME) : APP_NAME;
+    applyTitle();
   }
   function renderWorkspaceChip() {
     $('ws-chip-text').textContent = state.workspace ? state.workspace.name : '选择工作区';
@@ -4141,6 +4208,7 @@
     renderMetrics();
     renderWorkspaceChip(); renderModelChip(); renderSessions(); renderChat();
     showView(state.view);
+    subscribeTaskEvents();     // 后台跑完的任务也要能闪一下标签页
     var boot = function () { return Promise.all([loadProviders(), loadTools(), loadWorkspaces()]); };
     loadHealth().then(function (h) {
       if (h && h.config_loaded === false) {

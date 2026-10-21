@@ -46,6 +46,7 @@ nlohmann::json Task::to_json() const {
   j["started_at"] = started_at;
   j["finished_at"] = finished_at;
   j["error"] = error;
+  j["meta"] = meta;
   return j;
 }
 
@@ -77,6 +78,8 @@ Task Task::from_json(const nlohmann::json& j) {
   t.started_at = str("started_at");
   t.finished_at = str("finished_at");
   t.error = str("error");
+  auto mit = j.find("meta");
+  if (mit != j.end() && mit->is_object()) t.meta = *mit;
   return t;
 }
 

@@ -783,6 +783,73 @@ struct ApiServer::Impl {
     return turn;
   }
 
+  // ---- the event bus -------------------------------------------------------
+  //
+  // A policy written in a script needs to *react* to things, not to poll for
+  // them: "notify the user when the task is done" should not mean "ask every two
+  // seconds". The bus is the server-side half of that: anything that happens
+  // (a task was created, started, finished, is waiting for a human) is published
+  // here, and GET /api/events streams it to whoever subscribed.
+  using EventListener = std::function<void(const nlohmann::json&)>;
+  struct Subscriber {
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
+    EventListener listener;
+  };
+  std::mutex event_mu;
+  std::vector<std::shared_ptr<Subscriber>> event_subscribers;
+
+  void subscribe(const EventListener& listener) {
+    auto sub = std::make_shared<Subscriber>();
+    sub->listener = listener;
+    std::lock_guard<std::mutex> lock(event_mu);
+    event_subscribers.push_back(sub);
+  }
+
+  void unsubscribe(const std::shared_ptr<std::atomic<bool>>& alive) {
+    alive->store(false);
+    std::lock_guard<std::mutex> lock(event_mu);
+    for (std::size_t i = 0; i < event_subscribers.size();) {
+      if (!event_subscribers[i]->alive->load()) {
+        event_subscribers.erase(event_subscribers.begin() + static_cast<std::ptrdiff_t>(i));
+      } else {
+        ++i;
+      }
+    }
+  }
+
+  /// Publish an event to every live subscriber. A subscriber that throws (or is
+  /// gone) must not take the publisher down with it: the events are best effort
+  /// notifications, not the source of truth.
+  void publish(const nlohmann::json& event) {
+    std::vector<std::shared_ptr<Subscriber>> subs;
+    {
+      std::lock_guard<std::mutex> lock(event_mu);
+      for (std::size_t i = 0; i < event_subscribers.size();) {
+        if (!event_subscribers[i]->alive->load()) {
+          event_subscribers.erase(event_subscribers.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+          subs.push_back(event_subscribers[i]);
+          ++i;
+        }
+      }
+    }
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+      try {
+        subs[i]->listener(event);
+      } catch (...) {
+        subs[i]->alive->store(false);
+      }
+    }
+  }
+
+  /// A task event, published wherever a task changes state.
+  void publish_task(const Task& task, const char* what) {
+    nlohmann::json e = nlohmann::json::object();
+    e["type"] = what;
+    e["task"] = task.to_json();
+    publish(e);
+  }
+
   // ---- helpers -----------------------------------------------------------
   void install_routes();
 
@@ -1240,6 +1307,330 @@ void ApiServer::Impl::install_routes() {
     send_json(res, j);
   });
 
+  // ---- the primitives -----------------------------------------------------
+  //
+  // Everything above this line is a *product*: a chat that runs an agent loop, a
+  // task queue with a fixed lifecycle, a UI. Everything below is a *primitive*:
+  // one model call, one tool call, one record, one event. A policy - "check the
+  // quota, then work the queue, then tell the user" - is a script that composes
+  // them, not a mode the server has to grow.
+  //
+  //   POST /api/llm/chat    one model call: no agent loop, no tools executed
+  //   PATCH /api/tasks/{id} write any field of a task record
+  //   GET  /api/events      the lifecycle events, as they happen
+
+  // One model call. The messages go in, the assistant message comes out; no
+  // agent loop is run and no tool is executed - the caller decides what to do
+  // with the answer, which is what makes it usable as a building block.
+  svr.Post("/api/llm/chat", [this](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    if (!config->loaded) {
+      send_error(res, 409, "config_missing",
+                 "no provider.yaml is configured yet; upload it in the web UI");
+      return;
+    }
+    const std::string provider_name =
+        trim(json_string(body, "provider", config->active_provider));
+    const ProviderInfo* provider = config->provider(provider_name);
+    if (!provider) {
+      send_error(res, 400, "unknown_provider", "no provider named '" + provider_name + "'");
+      return;
+    }
+    if (!provider->has_key()) {
+      send_error(res, 409, "no_api_key",
+                 "provider '" + provider->name + "' has no api_key configured");
+      return;
+    }
+    // An unknown model name falls back to the provider's primary model, the same
+    // way the agent does it, so a stale id is not a hard error.
+    std::string model_name = trim(json_string(body, "model"));
+    if (model_name.empty()) model_name = provider->primary_model();
+    const ModelInfo* model_info = provider->find_model(model_name);
+    if (!model_info && !provider->models.empty()) {
+      model_name = provider->primary_model();
+      model_info = provider->find_model(model_name);
+    }
+
+    // ---- messages --------------------------------------------------------
+    std::vector<Message> messages;
+    auto it = body.find("messages");
+    if (it != body.end() && it->is_array()) {
+      for (std::size_t i = 0; i < it->size(); ++i) {
+        const nlohmann::json& m = (*it)[i];
+        if (!m.is_object()) continue;
+        Message msg;
+        msg.role = json_string(m, "role");
+        msg.content = json_string(m, "content");
+        if (msg.role.empty()) continue;
+        messages.push_back(msg);
+      }
+    }
+    const std::string system = trim(json_string(body, "system"));
+    if (!system.empty()) {
+      Message sys = Message::make("system", system);
+      messages.insert(messages.begin(), sys);
+    }
+    const std::string prompt = trim(json_string(body, "prompt"));
+    if (!prompt.empty()) {
+      messages.push_back(Message::make("user", prompt));
+    }
+    if (messages.empty()) {
+      send_error(res, 400, "bad_request", "'messages' or 'prompt' is required");
+      return;
+    }
+
+    // ---- request ---------------------------------------------------------
+    ChatRequest request;
+    request.provider = provider->name;
+    request.model = model_name;
+    request.api_url = provider->api_url;
+    request.api_key = provider->api_key;
+    request.headers = provider->headers;
+    for (std::size_t i = 0; i < request.headers.size(); ++i) {
+      request.headers[i].second =
+          replace_all(request.headers[i].second, "${session_id}", "");
+    }
+    request.stream = body.value("stream", false);
+    // The caller asked for the numbers: without usage there is no way to bill or
+    // to budget what just happened.
+    request.include_usage = body.value("include_usage", true);
+    if (body.contains("temperature") && body["temperature"].is_number()) {
+      request.has_temperature = true;
+      request.temperature = body["temperature"].get<double>();
+    }
+    if (body.contains("top_p") && body["top_p"].is_number()) {
+      request.has_top_p = true;
+      request.top_p = body["top_p"].get<double>();
+    }
+    if (body.contains("max_tokens") && body["max_tokens"].is_number()) {
+      request.max_tokens = body["max_tokens"].get<long long>();
+    }
+    if (request.max_tokens <= 0 && model_info && model_info->max_output_tokens > 0) {
+      request.max_tokens = model_info->max_output_tokens;
+    }
+    // Tool schemas are passed through untouched: the caller owns the protocol,
+    // the server only carries it. Nothing is executed here.
+    auto tools_it = body.find("tools");
+    if (tools_it != body.end() && tools_it->is_array()) request.tools = *tools_it;
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+      request.messages.push_back(messages[i].to_wire(false));
+    }
+    request.connect_timeout_ms = config->settings.http_connect_timeout_ms;
+    request.read_timeout_ms = config->settings.http_read_timeout_ms;
+
+    // ---- the call --------------------------------------------------------
+    if (!request.stream) {
+      ChatResult result = llm_chat(request, DeltaCallback(), nullptr);
+      if (!result.ok) {
+        std::string message = result.error.empty() ? "the model call failed" : result.error;
+        if (!result.detail.empty()) message += ": " + result.detail;
+        send_error(res, 502, "upstream_error", message);
+        return;
+      }
+      nlohmann::json j = nlohmann::json::object();
+      j["ok"] = true;
+      j["provider"] = request.provider;
+      j["model"] = request.model;
+      j["content"] = result.content;
+      j["reasoning"] = result.reasoning;
+      j["finish_reason"] = result.finish_reason;
+      j["elapsed_ms"] = result.elapsed_ms;
+      j["usage"] = result.usage.to_json();
+      nlohmann::json calls = nlohmann::json::array();
+      for (std::size_t i = 0; i < result.tool_calls.size(); ++i) {
+        const ToolCall& call = result.tool_calls[i];
+        nlohmann::json c = nlohmann::json::object();
+        c["id"] = call.id;
+        c["name"] = call.name;
+        c["arguments"] = call.raw_arguments;
+        calls.push_back(c);
+      }
+      j["tool_calls"] = calls;
+      send_json(res, j);
+      return;
+    }
+
+    // Streaming: the deltas as they come, then one done event with the whole
+    // answer (content, tool calls, usage) - the same shape the chat route uses.
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+    res.set_chunked_content_provider(
+        "text/event-stream; charset=utf-8",
+        [this, request](std::size_t, httplib::DataSink& sink) {
+          ChatResult result;
+          DeltaCallback on_delta = [&sink, &result](DeltaKind kind, const std::string& text) {
+            nlohmann::json e = nlohmann::json::object();
+            e["type"] = (kind == DeltaKind::Reasoning) ? "reasoning_delta" : "content_delta";
+            e["text"] = text;
+            const std::string frame = "data: " + e.dump() + "\n\n";
+            if (!sink.write(frame.data(), frame.size())) return;
+          };
+          result = llm_chat(request, on_delta, nullptr);
+          nlohmann::json done = nlohmann::json::object();
+          done["type"] = "done";
+          done["ok"] = result.ok;
+          done["provider"] = request.provider;
+          done["model"] = request.model;
+          done["content"] = result.content;
+          done["reasoning"] = result.reasoning;
+          done["finish_reason"] = result.finish_reason;
+          done["elapsed_ms"] = result.elapsed_ms;
+          done["usage"] = result.usage.to_json();
+          nlohmann::json calls = nlohmann::json::array();
+          for (std::size_t i = 0; i < result.tool_calls.size(); ++i) {
+            const ToolCall& call = result.tool_calls[i];
+            nlohmann::json c = nlohmann::json::object();
+            c["id"] = call.id;
+            c["name"] = call.name;
+            c["arguments"] = call.raw_arguments;
+            calls.push_back(c);
+          }
+          done["tool_calls"] = calls;
+          if (!result.ok) {
+            done["error"] = result.error;
+            done["detail"] = result.detail;
+          }
+          const std::string frame = "data: " + done.dump() + "\n\n";
+          sink.write(frame.data(), frame.size());
+          return true;
+        });
+  });
+
+  // Write any field of a task. The lifecycle the server drives (start, done,
+  // waiting for a human) is still the server's business; this is the escape
+  // hatch for a script that keeps its own state machine on top of the same
+  // records - it can set the status, the progress, the note, its own `meta`.
+  svr.Patch(R"(/api/tasks/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+              nlohmann::json body;
+              if (!parse_json_body(req, &body, res)) return;
+              const std::string id = req.matches[1].str();
+              const std::string workspace_id =
+                  req.has_param("workspace_id") ? req.get_param_value("workspace_id") : std::string();
+              if (workspace_id.empty()) {
+                send_error(res, 400, "bad_request", "'workspace_id' is required");
+                return;
+              }
+              Workspace ws;
+              std::string err;
+              if (!open_workspace(workspace_id, &ws, &err)) {
+                send_error(res, 404, "not_found", err);
+                return;
+              }
+              Task task;
+              if (!TaskStore::load(ws, id, &task, &err)) {
+                send_error(res, 404, "not_found", err);
+                return;
+              }
+              const std::string before = task.status;
+              Task updated;
+              const bool ok = TaskStore::update(
+                  ws, id,
+                  [&](Task* t) {
+                    auto set_str = [&](const char* key, std::string* target) {
+                      auto it = body.find(key);
+                      if (it != body.end() && it->is_string()) *target = it->get<std::string>();
+                    };
+                    set_str("status", &t->status);
+                    set_str("title", &t->title);
+                    set_str("note", &t->note);
+                    set_str("question", &t->question);
+                    set_str("provider", &t->provider);
+                    set_str("model", &t->model);
+                    auto it = body.find("progress");
+                    if (it != body.end() && it->is_number()) {
+                      const int progress = it->get<int>();
+                      if (progress < 0 || progress > 100) {
+                        t->error = "progress must be between 0 and 100";
+                        return;
+                      }
+                      t->progress = progress;
+                    }
+                    auto cit = body.find("needs_confirmation");
+                    if (cit != body.end() && cit->is_boolean()) {
+                      t->needs_confirmation = cit->get<bool>();
+                    }
+                    auto mit = body.find("meta");
+                    if (mit != body.end() && mit->is_object()) t->meta = *mit;
+                    // The intermediate-state history grows the same way the agent's
+                    // own reports do, so both show up in one list.
+                    auto sit = body.find("step");
+                    if (sit != body.end() && sit->is_string()) {
+                      nlohmann::json step = nlohmann::json::object();
+                      step["at"] = now_iso8601();
+                      step["note"] = sit->get<std::string>();
+                      step["progress"] = t->progress;
+                      t->steps.push_back(step);
+                      while (t->steps.size() > 100) t->steps.erase(t->steps.begin());
+                    }
+                  },
+                  &updated, &err);
+              if (!ok) {
+                send_error(res, 400, "bad_request", err);
+                return;
+              }
+              publish_task(updated, "task_updated");
+              nlohmann::json j = updated.to_json();
+              j["ok"] = true;
+              j["previous_status"] = before;
+              send_json(res, j);
+            });
+
+  // The lifecycle events, as they happen. A script that has to *notify* someone
+  // subscribes here instead of polling the task list every few seconds.
+  svr.Get("/api/events", [this](const httplib::Request& req, httplib::Response& res) {
+    auto queue = std::make_shared<std::deque<std::string>>();
+    auto mutex = std::make_shared<std::mutex>();
+    auto alive = std::make_shared<std::atomic<bool>>(true);
+    const std::string workspace_filter =
+        req.has_param("workspace_id") ? req.get_param_value("workspace_id") : std::string();
+
+    subscribe([queue, mutex, alive, workspace_filter](const nlohmann::json& event) {
+      if (!workspace_filter.empty()) {
+        const nlohmann::json& task = event.contains("task") ? event["task"] : nlohmann::json();
+        if (task.value("workspace_id", std::string()) != workspace_filter) return;
+      }
+      const std::string frame = "data: " + event.dump() + "\n\n";
+      std::lock_guard<std::mutex> lock(*mutex);
+      queue->push_back(frame);
+    });
+
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+    res.set_chunked_content_provider(
+        "text/event-stream; charset=utf-8",
+        [this, queue, mutex, alive](std::size_t, httplib::DataSink& sink) {
+          for (;;) {
+            std::deque<std::string> batch;
+            {
+              std::lock_guard<std::mutex> lock(*mutex);
+              batch.swap(*queue);
+            }
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+              if (!sink.write(batch[i].data(), batch[i].size())) {
+                alive->store(false);
+                unsubscribe(alive);
+                return true;
+              }
+            }
+            if (batch.empty()) {
+              if (!sink.is_writable()) {
+                alive->store(false);
+                unsubscribe(alive);
+                return true;
+              }
+              std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+          }
+          return true;
+        },
+        [this, alive](bool) {
+          alive->store(false);
+          unsubscribe(alive);
+        });
+  });
+
   // ---- tasks: the queue a scheduler works through --------------------------
   //
   // A task is "do this later": a prompt plus the state of that work. The
@@ -1279,6 +1670,7 @@ void ApiServer::Impl::install_routes() {
       return;
     }
     LOG_INFO("task: created ", task.id, " (", task.title, ")");
+    publish_task(task, "task_created");
     nlohmann::json j = task.to_json();
     j["ok"] = true;
     send_json(res, j);
@@ -1411,6 +1803,7 @@ void ApiServer::Impl::install_routes() {
                                },
                                &started, &err);
              LOG_INFO("task: started ", id, " in session ", turn->session_id);
+             publish_task(started, "task_started");
              nlohmann::json j = started.to_json();
              j["ok"] = true;
              send_json(res, j);
@@ -1449,6 +1842,7 @@ void ApiServer::Impl::install_routes() {
                                  }
                                },
                                &cancelled, &err);
+             publish_task(cancelled, "task_cancelled");
              nlohmann::json j = cancelled.to_json();
              j["ok"] = true;
              send_json(res, j);
@@ -1503,6 +1897,7 @@ void ApiServer::Impl::install_routes() {
                                  t->note = "user confirmed: " + message;
                                },
                                &confirmed, &err);
+             publish_task(confirmed, "task_confirmed");
              nlohmann::json j = confirmed.to_json();
              j["ok"] = true;
              send_json(res, j);
@@ -3008,6 +3403,17 @@ void ApiServer::Impl::install_routes() {
 
     const std::string provider = json_string(body, "provider");
     const std::string model = json_string(body, "model");
+    // The agent loop as a primitive: a caller that keeps its own policy may hand
+    // in the persona it wants and the tools it is willing to let the model use.
+    const std::string system_prompt = trim(json_string(body, "system_prompt"));
+    std::vector<std::string> allowed_tools;
+    auto tools_it = body.find("tools");
+    if (tools_it != body.end() && tools_it->is_array()) {
+      for (std::size_t i = 0; i < tools_it->size(); ++i) {
+        if ((*tools_it)[i].is_string()) allowed_tools.push_back((*tools_it)[i].get<std::string>());
+      }
+    }
+    const std::string task_id = trim(json_string(body, "task_id"));
 
     // ---- image attachments ------------------------------------------------
     std::vector<ImageAttachment> images;
@@ -3111,13 +3517,17 @@ void ApiServer::Impl::install_routes() {
 
     AppConfig* cfg = config;
     ToolRegistry* reg = tools;
-    turn->worker = std::thread([turn, cfg, reg, message, images, provider, model]() {
+    turn->worker = std::thread([turn, cfg, reg, message, images, provider, model, system_prompt,
+                             allowed_tools, task_id]() {
       Agent agent(cfg, reg);
       TurnOptions options;
       options.provider = provider;
       options.model = model;
       options.stream = true;
       options.inbox = &turn->inbox;
+      options.system_prompt = system_prompt;
+      options.tools = allowed_tools;
+      options.task_id = task_id;
       EventEmitter emit = [turn](const nlohmann::json& event) { turn->emit_event(event); };
       try {
         agent.run_turn(turn->workspace, &turn->session, message, images, options, emit,

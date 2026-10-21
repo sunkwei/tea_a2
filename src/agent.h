@@ -27,6 +27,14 @@ struct TurnOptions {
   /// The task this turn works on (empty => an ordinary chat). The agent reports
   /// progress and intermediate state on it through toolkit_task.
   std::string task_id;
+  /// Replaces the persona (the system prompt's first block). The device facts,
+  /// the workspace instructions and agent.md stay: they are what makes the agent
+  /// work *here* rather than in a vacuum.
+  std::string system_prompt;
+  /// The tools this turn may use. Empty => the usual set (whatever the provider
+  /// supports). A caller that drives its own policy can hand the agent exactly the
+  /// tools it wants - or none at all.
+  std::vector<std::string> tools;
   /// Prompts typed while this turn was already running. The loop adopts one per
   /// iteration (FIFO) before building that iteration's request; whatever is left
   /// when the loop stops is reported back as `queue_unconsumed`. May be null.
@@ -95,11 +103,14 @@ class Agent {
                      std::atomic<bool>* cancel, const EventEmitter& emit, bool force = false);
 
   /// Exposed so the HTTP layer can show exactly what the model receives.
-  std::string build_system_prompt(const Workspace& workspace, const Session& session) const;
+  /// `persona_override` replaces the persona block when it is not empty.
+  std::string build_system_prompt(const Workspace& workspace, const Session& session,
+                               const std::string& persona_override = std::string()) const;
 
  private:
   void build_context(const Workspace& workspace, const Session& session, const ModelInfo* model,
-                     std::vector<Message>* out, ContextStats* stats = nullptr) const;
+                     std::vector<Message>* out, ContextStats* stats = nullptr,
+                     const std::string& persona_override = std::string()) const;
   bool compact_history(Workspace& workspace, Session* session, const std::string& provider,
                        const std::string& model, const ModelInfo* model_info,
                        std::atomic<bool>* cancel, long long retain_tokens);
