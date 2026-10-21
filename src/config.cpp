@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "log.h"
+#include "usage.h"
 #include "util.h"
 
 namespace tea {
@@ -360,6 +361,108 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
           info.stream_include_usage = -1;
         } else {
           info.stream_include_usage = ybool(pn, "stream_include_usage", true) ? 1 : 0;
+        }
+      }
+
+      // A quota endpoint ("how much of my subscription is left"). Provider
+      // scoped and NOT OpenAI-standard, so it is declared, not probed.
+      //
+      // The flag lives next to `stream_include_usage`, which means something
+      // else entirely (asking for token counts *in a chat response*). The
+      // difference is spelled out in the README, because mixing the two up
+      // would either hide the quota or send a field the gateway rejects.
+      info.supports_usage = ybool(pn, "supports_usage", false);
+      info.usage_type = trim(ystr(pn, "usage_type"));
+      info.usage_url = trim(ystr(pn, "usage_url"));
+
+      // The details imply the flag: writing `usage_type:` alone is the natural
+      // thing to do, and silently doing nothing would be a bad afternoon.
+      if (!info.supports_usage && (!info.usage_type.empty() || !info.usage_url.empty())) {
+        info.supports_usage = true;
+        warnings.push_back("provider '" + name +
+                           "': usage_type/usage_url were set but supports_usage is missing; "
+                           "the quota query was enabled. Add 'supports_usage: true' to make it explicit.");
+      }
+      // Declared on a model? The quota belongs to the account, not to a model.
+      if (!info.supports_usage) {
+        const YAML::Node models_node = pn["models"];
+        if (models_node && models_node.IsMap()) {
+          for (auto mit = models_node.begin(); mit != models_node.end(); ++mit) {
+            const YAML::Node mn = mit->second;
+            if (!mn || !mn.IsMap()) continue;
+            if (ybool(mn, "supports_usage", false) || yhas(mn, "usage_type") || yhas(mn, "usage_url")) {
+              info.supports_usage = true;
+              if (info.usage_type.empty()) info.usage_type = trim(ystr(mn, "usage_type"));
+              if (info.usage_url.empty()) info.usage_url = trim(ystr(mn, "usage_url"));
+              warnings.push_back("provider '" + name +
+                                 "': supports_usage/usage_type are declared on a model; the quota is "
+                                 "account wide, so they were promoted. Move them up to the provider block.");
+              break;
+            }
+          }
+        }
+      }
+      // How the key reaches the usage endpoint, and any extra headers it needs
+      // (a session cookie, a custom auth header, ...).
+      info.usage_auth = to_lower(trim(ystr(pn, "usage_auth", "bearer")));
+      if (info.usage_auth.empty()) info.usage_auth = "bearer";
+      if (info.usage_auth != "bearer" && info.usage_auth != "api-key" &&
+          info.usage_auth != "none") {
+        warnings.push_back("provider '" + name + "': unknown usage_auth '" + info.usage_auth +
+                           "' (use bearer|api-key|none); falling back to bearer");
+        info.usage_auth = "bearer";
+      }
+      {
+        const YAML::Node uh = pn["usage_headers"];
+        if (uh && uh.IsMap()) {
+          for (auto hit = uh.begin(); hit != uh.end(); ++hit) {
+            std::string name_h, value_h;
+            try {
+              name_h = trim(hit->first.as<std::string>());
+              value_h = hit->second.IsScalar() ? hit->second.as<std::string>() : std::string();
+            } catch (const std::exception&) {
+              continue;
+            }
+            if (name_h.empty()) continue;
+            info.usage_headers.push_back(std::make_pair(name_h, value_h));
+          }
+        }
+      }
+      {
+        const YAML::Node uf = pn["usage_fields"];
+        if (uf && uf.IsMap()) {
+          for (auto hit = uf.begin(); hit != uf.end(); ++hit) {
+            std::string k, v;
+            try {
+              k = trim(hit->first.as<std::string>());
+              v = hit->second.IsScalar() ? trim(hit->second.as<std::string>()) : std::string();
+            } catch (const std::exception&) {
+              continue;
+            }
+            if (k.empty() || v.empty()) continue;
+            info.usage_fields[k] = v;
+          }
+        }
+      }
+      // The console page a human opens to see the quota. It stands on its own:
+      // a provider with no quota API at all can still point at its dashboard.
+      info.usage_console_url = trim(ystr(pn, "usage_console_url"));
+      if (!info.usage_console_url.empty()) {
+        const std::string u = to_lower(info.usage_console_url);
+        if (u.rfind("http://", 0) != 0 && u.rfind("https://", 0) != 0) {
+          warnings.push_back("provider '" + name + "': usage_console_url must be an http(s) URL, got '" +
+                             info.usage_console_url + "'; the link was dropped");
+          info.usage_console_url.clear();
+        }
+      }
+      if (info.supports_usage) {
+        if (info.usage_type.empty()) info.usage_type = "minimax_token_plan";
+        if (!usage_type_known(info.usage_type)) {
+          warnings.push_back("provider '" + name + "': unknown usage_type '" + info.usage_type +
+                             "' (known: " + usage_type_list() + "); the quota query stays off");
+          info.supports_usage = false;
+          info.usage_type.clear();
+          info.usage_url.clear();
         }
       }
 

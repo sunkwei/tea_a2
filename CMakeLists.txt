@@ -382,6 +382,7 @@ set(TEA_SOURCES
   src/output_filter.cpp
   src/log.cpp
   src/config.cpp
+  src/usage.cpp
   src/message.cpp
   src/http.cpp
   src/http_socket.cpp

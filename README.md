@@ -521,6 +521,8 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.9.0
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
 | `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
+| `GET` | `/api/providers` | provider 清单与能力标记（`supports_search` / `supports_fetch` / `supports_usage`），**不含 key** |
+| `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
 | **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}` |
 | `POST` | `/api/chat/stop` | 中断当前轮次（对所有人） |
 | `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
@@ -1017,7 +1019,7 @@ Web UI 里它在输入框上方：
 - 每条前面是 `✓ / ● / ○`，进行中那条加粗、已完成的划掉并压暗；
 - **点一下即可勾选完成**（`PUT /api/sessions/{id}/todos`），不需要等模型自己更新；
 - 点标题行可以折叠，省出屏幕空间；
-- 侧栏的会话行也带一个「3/7」小徽章，不用点进去就能看出哪个会话还没做完。
+- 侧栏的会话行也带一个「3/7」小徽章，不用点进去就能看出哪个会话还没做完；
 
 导出的 HTML 同样带这块进度（见下文「导出会话」），导入回来连进度一起恢复。
 
@@ -1362,6 +1364,9 @@ providers:
     # fetch_path: /v1/tools/fetch
     # stream_include_usage: true           # 可选：是否在流式响应里索取 token 用量
                                            # （不写=跟随全局 settings.stream_include_usage）
+    # supports_usage: true                 # 可选：provider 有「额度查询」接口（见下）
+    # usage_type: minimax_token_plan       # 解析器名（目前内置这一个）
+    # usage_url: https://www.minimax.cn/v1/token_plan/remains   # 可选端点覆盖
     models:
       deepseek-chat:
         max_context_tokens: 128000
@@ -1456,6 +1461,137 @@ settings:
 响应要用），一次卡住的搜索会让整轮对话停十分钟，而且中途无法取消。现在 web 工具用独立的
 有界超时，用户点停止会立即中断传输（返回 `cancelled by user`）。预算用尽后这两个工具会从
 工具表里消失，模型不会继续空转重试——否则它会把 `max_iterations` 全部耗在重试上，既慢又费钱。
+
+### 订阅额度（provider 级可选能力）
+
+有些 provider 除了对话接口，还有一个**账号级**接口能回答「我的订阅还剩多少」。目前内置的
+解析器是 MiniMax M Plan（5 小时窗口 + 周窗口）：
+
+```bash
+curl --location 'https://www.minimax.cn/v1/token_plan/remains' \
+  --header 'Authorization: Bearer <M Plan 订阅 Key>'
+```
+
+```json
+{"model_remains":[{"model_name":"general",
+  "start_time":1792561091281,"end_time":1792579091281,"remains_time":9681772,
+  "current_interval_remaining_percent":69,"current_interval_status":1,
+  "weekly_start_time":1792561091281,"weekly_end_time":1793165891281,
+  "weekly_remains_time":596129838,"current_weekly_remaining_percent":96}],
+ "base_resp":{"status_code":0,"status_msg":"success"}}
+```
+
+官方文档在 [M Plan 常见问题](https://platform.minimax.cn/docs/m-plan/faq)（「如何查看 M Plan 用量」
+方式三）与 [用量说明](https://platform.minimax.cn/docs/m-plan/usage-rules)——注意它**不在**
+`api-reference/api-overview` 里，那一页只是多模态能力概览。
+
+这不是 OpenAI 标准协议，探测不了，所以按 provider 声明：
+
+```yaml
+providers:
+  minimax:
+    api_url: https://api.minimax.cn/v1
+    api_key: sk-cp-…            # M Plan 订阅 Key（按量计费的普通 Key 没有套餐额度）
+    supports_usage: true        # 这个 provider 有额度查询接口
+    usage_type: minimax_token_plan   # 用哪个解析器读答案
+    # usage_url: …              # 可选：端点覆盖（默认按 usage_type 取）
+    models: {MiniMax-M3.1-Flash: {…}}
+```
+
+### 额度查询的通用配置
+
+MiniMax 之外还有别的形状，所以这几个键是通用的（`usage_type` 决定用哪个解析器）：
+
+| 键 | 取值 | 作用 |
+| --- | --- | --- |
+| `supports_usage` | `true` / `false` | 这个 provider 有没有额度接口。默认关（关着就完全不查） |
+| `usage_type` | `minimax_token_plan` / `json_fields` | 用哪个解析器读答案。`json_fields` 是通用取值 |
+| `usage_url` | 完整 URL | 端点。留空则按 `usage_type` 取默认值（`json_fields` 必须写） |
+| `usage_auth` | `bearer`（默认）/ `api-key` / `none` | key 怎么送出去：`Authorization: Bearer <key>`、`api-key: <key>`（MiMo Token Plan 的写法）、或者不带（端点靠会话 cookie） |
+| `usage_headers` | 键值对 | 额度请求**额外**的头，例如 `Cookie: …`。provider 的 `headers:` 只用于对话，不会带到这里 |
+| `usage_fields` | 键值对 | 只有 `usage_type: json_fields` 时用：每个键对应答案 JSON 里的一条路径 |
+| `usage_console_url` | 完整 URL | **人**去看额度的页面（控制台）。与 `supports_usage` 相互独立：查不了的 provider 至少能给出这个入口，UI 的徽标会变成「额度 ↗」，点开就是控制台（新标签页），需要自己登录 |
+
+`json_fields` 的路径是点号路径，数字段是数组下标（`data.quota.remaining`、`list.0.used`）。可用的键：
+
+- 窗口：`remaining_percent`（0–100）、`used` + `total`（不给百分比时用这两个算）、`reset_at_ms`（重置时刻，epoch 毫秒）、`reset_in_ms`（还剩多少毫秒）、`label`（窗口名字）
+- 周窗口：`weekly_remaining_percent`、`weekly_used` + `weekly_total`、`weekly_reset_at_ms`、`weekly_reset_in_ms`
+
+```yaml
+providers:
+  someconsole:
+    api_url: https://example.com/v1
+    api_key: sk-…
+    supports_usage: true
+    usage_type: json_fields
+    usage_url: https://example.com/api/v1/quota
+    usage_auth: none                 # 端点靠会话，不带 key
+    usage_headers:
+      Cookie: 'session=…'            # 会话 cookie（会过期，得自己换）
+    usage_fields:
+      remaining_percent: data.quota.remainingPercent
+      used: data.quota.used
+      total: data.quota.total
+      reset_at_ms: data.quota.resetAt
+```
+
+**查不到就给链接**：只写 `usage_console_url`（不写 `supports_usage`）也行——UI 顶栏会出现一个
+「额度 ↗」徽标，点开就是该提供方的控制台（新标签页），登录后自己看。设置页里同一个 provider
+也会多一个「打开控制台」按钮。这样「额度只存在于网页控制台」的 provider 也能在顶栏有个入口，
+而不是默默消失。
+
+
+### 各家现状（实测）
+
+| Provider | 有额度接口吗 | 怎么查 |
+| --- | --- | --- |
+| **MiniMax M Plan** | ✅ | `GET https://www.minimax.cn/v1/token_plan/remains`，`Authorization: Bearer <订阅 Key>`；5 小时窗口 + 周窗口 |
+| **小米 MiMo Token Plan** | ❌（**没有能用 API Key 查的接口**） | 额度（Credits）只在网页控制台看：<https://platform.xiaomimimo.com/#/console/plan-manage>。实测：Token Plan 网关 `token-plan-cn.xiaomimimo.com` 只有 OpenAI 兼容接口（`/v1/models`、`/v1/chat/completions`），20 多种猜测的额度路径全是 404；控制台自己的数据接口 `GET /api/v1/tokenPlan/usage` 要**小米账号网页登录态**（`Authorization: Bearer tp-…`、`X-Api-Key`、`api-key`、query 参数一律 401 + `loginUrl` 指向 account.xiaomi.com）；响应头里也没有额度信息。官方文档的 API Reference 一节也没有这个接口 |
+
+所以 provider.yaml 里 **MiMo 不要写 `supports_usage`**——写了只会每次 401，UI 变成「额度 ?」。
+它该写的是控制台链接：
+
+```yaml
+providers:
+  mimo:
+    api_url: https://token-plan-cn.xiaomimimo.com/v1
+    api_key: tp-…
+    usage_console_url: https://platform.xiaomimimo.com/#/console/plan-manage
+```
+
+顶栏徽标会变成「额度 ↗」，点开就是控制台（登录后自己看额度）。
+真要把它**接进程序里**，只能用 `usage_auth: none` + `usage_headers: {Cookie: …}` 走控制台那条路，
+代价是 cookie 会过期、字段名要自己对着控制台的返回填。
+
+要点：
+
+- **和 `stream_include_usage` 完全是两回事**。后者是「在对话响应里附带 token 用量」，
+  前者是「另外的账号接口，问还剩多少额度」。两个名字挨得近，所以这里特意分开写。
+- 额度查询用 **provider 自己的 key**，由服务端去查；key 不会出现在任何 HTTP 响应里
+  （`/api/providers` 只报 `supports_usage` / `usage_type` 这个能力标记）。
+- 声明写在 model 下面也会被提升到 provider（并给一条 WARN）——额度是账号级的，不是模型级的。
+- 写了 `usage_type:` / `usage_url:` 却忘了 `supports_usage: true` 时会自动打开并提示；
+  `usage_type` 写错（不认识）则保持关闭并给一条 WARN，不会拿 key 去乱试。
+- 未声明的 provider 完全没有这个接口：UI 不显示徽标，`GET /api/providers/{name}/usage`
+  返回 400。
+
+查询接口与 UI：
+
+```bash
+curl -s http://127.0.0.1:8282/api/providers/minimax/usage
+```
+
+```json
+{"ok":true,"provider":"minimax","type":"minimax_token_plan","model_name":"general",
+ "window":{"present":true,"name":"5h","remaining_percent":69,
+           "start_ms":1792561091281,"end_ms":1792579091281,"remains_ms":9329838,"status":1},
+ "weekly":{"present":true,"name":"weekly","remaining_percent":96,
+           "start_ms":1792561091281,"end_ms":1793165891281,"remains_ms":596129838,"status":1}}
+```
+
+Web UI 顶栏会出现一个「额度 NN%」徽标：鼠标悬停看窗口还剩多久、什么时候重置、周窗口剩多少；
+点一下立刻重查；每分钟自动刷新一次。设置页里每个 provider 都能单独点「查询」看额度（不只
+当前 provider）。上游报错（500、key 没有订阅等）只会显示成一行提示，不会拖垮服务。
 
 ### 按工作区覆盖设置
 
@@ -1707,6 +1843,7 @@ src/
   config.{h,cpp}            provider.yaml / default / headers 解析
   message.{h,cpp}           消息模型（wire 格式 + 存储格式）
   llm.{h,cpp}               OpenAI 兼容客户端：SSE、tool_calls 聚合、重试
+  usage.{h,cpp}             订阅额度查询：provider 专用端点 + 解析器（minimax_token_plan）
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
   prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
   tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image/todo）
@@ -1773,6 +1910,8 @@ pwsh -File tests/autostart.ps1                            # 登录自启动：la
 pwsh -File tests/relink-while-running.ps1 -Exe build-gcc/bin/tea_agent.exe  # 运行中也能构建（改名让位）
 
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
+python3 tests/smoke_provider_usage.py                      # 订阅额度查询：声明/归一化/错误处理
+node tests/ui_usage.mjs                                   # 顶栏额度徽标 + 设置页按 provider 查询（需 google-chrome）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
 python3 tests/smoke_tool_images.py                        # toolkit_load_image：磁盘图片进对话/上限/拒绝
 node tests/ui_tool_images.mjs                             # 加载的图片在对话里可见（含刷新后，需 google-chrome）
@@ -2083,6 +2222,7 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 | Windows x64 + MSVC | ✅ 构建 0 error，E2E 144/144 |
 | C++14 语言模式（GCC 6.5 兼容性） | ✅ 全量编译通过 |
 | 真实 `api.deepseek.com` / `opencode.ai` | ✅ 含多轮工具调用 |
+| 真实 `www.minimax.cn` 额度接口 | ✅ M Plan 订阅 Key 实查：5 小时窗口与周窗口的剩余百分比、重置时间都对得上 |
 | 交叉编译宿主工具机制（`TEA_AGENT_USE_HOST_ASSET_TOOL=ON`） | ✅ 在本机以原生方式验证该路径 |
 | **Linux 构建与运行** | ✅ 在 wsl2, ubuntu20.04 等环境测试 |
 | **macOS 构建与运行** | ✅ 在 Mac OS X 10.6 Snow Leopard 测试通过 |

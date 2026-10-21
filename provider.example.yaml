@@ -54,6 +54,79 @@ providers:
     api_keys:
       - sk-REPLACE-ME
 
+  # A provider with a QUOTA endpoint - "how much of my subscription is left".
+  # Today that is MiniMax M Plan: a 5-hour window plus a weekly window.
+  #
+  #   GET https://www.minimax.cn/v1/token_plan/remains
+  #   Authorization: Bearer <M Plan subscription key>
+  #
+  # (Documented in the M Plan FAQ, not in the API overview:
+  #  https://platform.minimax.cn/docs/m-plan/faq)
+  #
+  # The endpoint is not OpenAI-standard, so it is declared, not probed. The
+  # server queries it with the provider's own key (the browser never sees it)
+  # and shows the result as a badge in the top bar.
+  #
+  # This is NOT the same as `stream_include_usage` above: that one asks for
+  # token counts inside a chat response, this one is a separate account
+  # endpoint about the remaining subscription quota.
+  minimax:
+    api_url: https://api.minimax.cn/v1
+    api_key: sk-cp-REPLACE-ME       # the M Plan SUBSCRIPTION key (sk-cp-...)
+    supports_usage: true
+    usage_type: minimax_token_plan  # which parser understands the answer
+    # usage_url: https://www.minimax.cn/v1/token_plan/remains   # optional
+    # The page a HUMAN opens to see the quota (the console). It stands on its
+    # own: a provider whose quota cannot be queried with a key at all can still
+    # point at its dashboard, and the top bar badge becomes "额度 ↗" - click it
+    # and the console opens in a new tab (you log in yourself).
+    # usage_console_url: https://platform.minimax.cn/console/usage
+    # usage_auth: bearer             # bearer (default) | api-key | none
+    # usage_headers:                 # extra headers for the usage request only
+    #   Cookie: 'session=...'
+    # usage_fields:                  # only for usage_type: json_fields
+    #   remaining_percent: data.quota.remainingPercent
+    #   used: data.quota.used
+    #   total: data.quota.total
+    #   reset_at_ms: data.quota.resetAt
+    #   label: data.quota.name
+    models:
+      MiniMax-M3.1-Flash:
+        max_context_tokens: 1000000
+        max_output_tokens: 128000
+        supports_tools: true
+        supports_reasoning: true
+        supports_vision: true
+
+  # Xiaomi MiMo Token Plan: there is NO endpoint that answers with your quota
+  # for an API key. The gateway (token-plan-cn.xiaomimimo.com) only speaks the
+  # OpenAI-compatible API, and the console's own endpoint
+  # (platform.xiaomimimo.com/api/v1/tokenPlan/usage) needs a logged-in Xiaomi
+  # account session - an API key gets 401 there. The credits are visible in the
+  # console only: https://platform.xiaomimimo.com/#/console/plan-manage
+  #
+  # So `supports_usage` is deliberately NOT set for it. If you want the console
+  # numbers anyway, use the generic form below (the cookie expires, and you
+  # have to fill in the field paths yourself):
+  #
+  # mimo:
+  #   api_url: https://token-plan-cn.xiaomimimo.com/v1
+  #   api_key: tp-...
+  #   supports_usage: true
+  #   usage_type: json_fields
+  #   usage_url: https://platform.xiaomimimo.com/api/v1/tokenPlan/usage
+  #   usage_auth: none
+  #   usage_headers:
+  #     Cookie: 'session=...'
+  #   usage_fields:
+  #     remaining_percent: data.remainingPercent
+  #
+  # ...or just the console link, no API at all:
+  # mimo:
+  #   api_url: https://token-plan-cn.xiaomimimo.com/v1
+  #   api_key: tp-...
+  #   usage_console_url: https://platform.xiaomimimo.com/#/console/plan-manage
+
   # A local OpenAI-compatible server (llama.cpp, vLLM, Ollama, LM Studio, ...).
   local:
     api_url: http://127.0.0.1:11434/v1

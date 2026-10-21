@@ -10,6 +10,8 @@
 
   var state = {
     view: 'chat', health: null, providers: null, tools: null, indexPath: '',
+    // 订阅额度（provider 声明 supports_usage 时才有）
+    usage: null, usageError: '', usageAt: 0,
     workspaces: [], workspace: null, sessions: [], session: null, messages: [],
     model: null, models: [], modelMenu: false,
     live: null, liveNode: null, liveView: null, liveFrame: 0, liveRenderFallback: 0,
@@ -2202,6 +2204,128 @@
     $('model-chip-text').textContent = state.model ? state.model.model : '模型';
     $('model-chip').title = state.model ? (state.model.provider + ' · ' + state.model.model) : '选择模型';
   }
+
+  // ---- 订阅额度 ------------------------------------------------------------
+  // provider.yaml 里写了 `supports_usage: true` 的 provider 才有额度接口
+  // （MiniMax M Plan：一个 5 小时窗口 + 一个周窗口）。服务端拿着 provider 自己的
+  // key 去查，浏览器永远看不到 key。
+  var USAGE_REFRESH_MS = 60000;
+  function usageProvider() {
+    var ps = (state.providers && state.providers.providers) || [];
+    var name = state.model && state.model.provider;
+    for (var i = 0; i < ps.length; i++) if (ps[i].name === name) return ps[i];
+    return null;
+  }
+  function fmtRemain(ms) {
+    if (ms == null || ms < 0) return '';
+    var s = Math.floor(ms / 1000);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h >= 24) return Math.floor(h / 24) + ' 天 ' + (h % 24) + ' 小时';
+    if (h > 0) return h + ' 小时 ' + m + ' 分';
+    return m + ' 分';
+  }
+  function fmtClock(ms) {
+    if (!ms) return '';
+    var d = new Date(ms);
+    if (isNaN(d.getTime())) return '';
+    var p = function (x) { return (x < 10 ? '0' : '') + x; };
+    return p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  /// 窗口还剩多久：provider 给的是「查询那一刻」的剩余量，这里按时间差扣掉。
+  function windowRemain(w) {
+    if (!w || !w.remains_ms) return 0;
+    var left = w.remains_ms - (Date.now() - (state.usageAt || Date.now()));
+    return left > 0 ? left : 0;
+  }
+  /// 打开提供方的额度控制台（需要人登录），新标签页。
+  function openConsole(url) {
+    if (!url) return;
+    var w = window.open(url, '_blank', 'noopener');
+    if (!w) window.location.href = url;   // 弹窗被拦了就直接跳
+  }
+  function loadUsage() {
+    var p = usageProvider();
+    var chip = $('usage-chip');
+    if (!p || (!p.supports_usage && !p.usage_console_url)) {
+      state.usage = null; state.usageError = ''; state.usageAt = 0;
+      if (chip) chip.classList.add('hidden');
+      renderUsage();
+      return Promise.resolve();
+    }
+    if (!p.supports_usage) {
+      // 这个提供方的额度用 key 查不到（要登录控制台）：只给链接，不发请求。
+      state.usage = null; state.usageError = ''; state.usageAt = 0;
+      renderUsage();
+      return Promise.resolve();
+    }
+    if (chip) { chip.classList.remove('hidden'); chip.classList.add('loading'); }
+    return api('api/providers/' + encodeURIComponent(p.name) + '/usage').then(function (d) {
+      state.usage = d; state.usageError = ''; state.usageAt = Date.now();
+    }, function (e) {
+      state.usage = null;
+      state.usageError = (e && e.message) || '查询失败';
+    }).then(function () {
+      if (chip) chip.classList.remove('loading');
+      renderUsage();
+    });
+  }
+  function renderUsage() {
+    var chip = $('usage-chip'), text = $('usage-chip-text');
+    if (!chip || !text) return;
+    var p = usageProvider();
+    chip.classList.remove('low', 'err');
+    chip.classList.toggle('link', !!(p && !p.supports_usage && p.usage_console_url));
+    if (!p || (!p.supports_usage && !p.usage_console_url)) {
+      chip.classList.add('hidden');
+      return;
+    }
+    if (!p.supports_usage) {
+      // 只有控制台链接：徽标变成「去控制台看」，不假装能报数字。
+      chip.classList.remove('hidden');
+      text.textContent = '额度 ↗';
+      chip.title = '这个提供方的额度用 key 查不到（要登录控制台），点开自己看';
+      return;
+    }
+    if (state.usageError) {
+      text.textContent = '额度 ?';
+      chip.classList.add('err');
+      chip.title = '额度查询失败：' + state.usageError;
+      return;
+    }
+    var u = state.usage, w = u && u.window;
+    if (!w || !w.present) {
+      text.textContent = '额度 —';
+      chip.title = '该提供方没有返回额度信息';
+      return;
+    }
+    var pct = (w.remaining_percent == null || w.remaining_percent < 0) ? -1 : Math.round(w.remaining_percent);
+    text.textContent = '额度 ' + (pct >= 0 ? pct + '%' : '—');
+    if (pct >= 0 && pct <= 20) chip.classList.add('low');
+    var lines = ['5 小时窗口剩余 ' + (pct >= 0 ? pct + '%' : '未知')];
+    if (w.remains_ms) {
+      lines.push('窗口 ' + fmtRemain(windowRemain(w)) + '后重置（' + fmtClock(w.end_ms) + '）');
+    }
+    if (u.weekly && u.weekly.present && u.weekly.remaining_percent >= 0) {
+      lines.push('周窗口剩余 ' + Math.round(u.weekly.remaining_percent) + '%');
+    }
+    if (state.usageAt) lines.push('查询于 ' + new Date(state.usageAt).toLocaleTimeString());
+    chip.title = lines.join('\n');
+  }
+  /// 设置页里按 provider 单独查一次（不只当前 provider）。
+  function queryUsageFor(p, out) {
+    out.textContent = '查询中…';
+    return api('api/providers/' + encodeURIComponent(p.name) + '/usage').then(function (d) {
+      var w = (d && d.window) || {};
+      var parts = [];
+      if (w.present && w.remaining_percent >= 0) parts.push('5 小时窗口剩余 ' + Math.round(w.remaining_percent) + '%');
+      if (d && d.weekly && d.weekly.present && d.weekly.remaining_percent >= 0) {
+        parts.push('周窗口剩余 ' + Math.round(d.weekly.remaining_percent) + '%');
+      }
+      out.textContent = parts.join(' · ') || '该 key 没有订阅额度';
+    }, function (e) {
+      out.textContent = '查询失败：' + ((e && e.message) || '未知错误');
+    });
+  }
   function renderModelMenu() {
     var dd = $('model-dropdown');
     clear(dd);
@@ -2214,6 +2338,7 @@
         var it = btn('dd-item' + (active ? ' active' : ''), m, function () {
           state.model = { provider: p.name, model: m };
           saveLS(); renderModelChip(); renderModelMenu(); closeDropdowns(); toast('已切换模型：' + m);
+          loadUsage();
         });
         if (active) it.appendChild(el('span', 'check', '✓'));
         dd.appendChild(it);
@@ -2608,6 +2733,7 @@
       buildModels();
       if (saved && state.models.some(function (m) { return m.provider === saved.provider && m.model === saved.model; })) state.model = saved;
       renderModelChip(); renderModelMenu(); renderSettings(); renderMetrics();
+      loadUsage();
       // Providers carry max_context_tokens, so the metrics strip can resolve the
       // context window here; without this it stays "模型未配置" until a stream or a
       // session switch happens to re-render it.
@@ -3649,6 +3775,23 @@
         r.appendChild(el('span', 'mono', pair[1] || '—'));
         card.appendChild(r);
       });
+      if (p.supports_usage || p.usage_console_url) {
+        var out = el('div', 'usage-result', '');
+        var r2 = el('div', 'row');
+        r2.appendChild(el('span', 'k', '额度查询'));
+        if (p.supports_usage) {
+          r2.appendChild(el('span', 'mono', p.usage_type || 'minimax_token_plan'));
+          r2.appendChild(btn('btn', '查询', function () { queryUsageFor(p, out); }));
+        } else {
+          // 查不了的 provider：至少给一个「自己去看」的入口。
+          r2.appendChild(el('span', 'mono', '该提供方只能用控制台查看'));
+        }
+        if (p.usage_console_url) {
+          r2.appendChild(btn('btn', '打开控制台', function () { openConsole(p.usage_console_url); }));
+        }
+        card.appendChild(r2);
+        card.appendChild(out);
+      }
       pv.appendChild(card);
     });
     var tl = $('settings-tools');
@@ -3831,6 +3974,19 @@
       saveLS();
       if (state.logsAutoScroll) $('logs-pre').scrollTop = $('logs-pre').scrollHeight;
     };
+    $('usage-chip').onclick = function () {
+      var p = usageProvider();
+      if (p && !p.supports_usage && p.usage_console_url) { openConsole(p.usage_console_url); return; }
+      loadUsage();
+    };
+    // 额度会随时间自己恢复，所以徽标上的倒计时要自己走，过期了再重新查一次。
+    setInterval(function () {
+      var p = usageProvider();
+      if (!p || !p.supports_usage) return;
+      if (!state.usageAt || Date.now() - state.usageAt > USAGE_REFRESH_MS) loadUsage();
+      else renderUsage();
+    }, 30000);
+
     $('destroy-run').onclick = openDestroyDialog;
     $('settings-refresh').onclick = function () {
       loadProviders(); loadTools(); loadSystemPrompt(); loadAccess();

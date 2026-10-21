@@ -105,6 +105,11 @@
             <path d="M2.8 12.4h10.4"/>
           </svg>
         </button>
+        <!-- 订阅额度：当前 provider 声明了 supports_usage 才出现（点一下重新查） -->
+        <button id="usage-chip" class="chip usage hidden" type="button"
+                title="订阅额度（点击刷新）" aria-label="订阅额度">
+          <span class="chip-text" id="usage-chip-text">额度</span>
+        </button>
         <div class="dd-wrap">
           <button id="model-chip" class="chip" type="button" aria-haspopup="true" aria-expanded="false">
             <span class="chip-text" id="model-chip-text">模型</span><span class="chev-sm">›</span>

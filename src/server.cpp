@@ -27,6 +27,7 @@
 #include "http.h"
 #include "log.h"
 #include "trajectory.h"
+#include "usage.h"
 #include "util.h"
 #include "version.h"
 #include "web_assets.h"
@@ -1182,6 +1183,12 @@ void ApiServer::Impl::install_routes() {
       pj["has_key"] = p->has_key();  // never expose the key itself
       pj["supports_search"] = p->supports_search;
       pj["supports_fetch"] = p->supports_fetch;
+      // A provider with a quota endpoint: the UI shows a badge for it, so it
+      // needs to know *before* asking.
+      pj["supports_usage"] = p->supports_usage;
+      if (!p->usage_type.empty()) pj["usage_type"] = p->usage_type;
+      // The page a human opens when the key alone cannot answer the question.
+      if (!p->usage_console_url.empty()) pj["usage_console_url"] = p->usage_console_url;
       if (!p->description.empty()) pj["description"] = p->description;
       list.push_back(pj);
     }
@@ -1195,6 +1202,32 @@ void ApiServer::Impl::install_routes() {
     j["settings"] = settings;
     j["warnings"] = config->warnings;
     send_json(res, j);
+  });
+
+  // How much of a provider's subscription is left. The endpoint is provider
+  // specific (MiniMax M Plan: a 5-hour window and a weekly window), so the
+  // server makes the call with the provider's own key - the browser never
+  // sees it.
+  svr.Get(R"(/api/providers/([^/]+)/usage)", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string name = req.matches[1];
+    const ProviderInfo* p = config->provider(name);
+    if (!p) {
+      send_error(res, 404, "not_found", "no provider named '" + name + "'");
+      return;
+    }
+    if (!p->supports_usage) {
+      send_error(res, 400, "usage_not_supported",
+                 "provider '" + name +
+                     "' does not declare supports_usage (set it in provider.yaml to query a quota)");
+      return;
+    }
+    UsageQuota quota;
+    query_usage(*p, &quota);
+    if (!quota.ok) {
+      send_error(res, 502, "usage_failed", quota.error);
+      return;
+    }
+    send_json(res, quota.to_json());
   });
 
   svr.Get("/api/tools", [this](const httplib::Request&, httplib::Response& res) {

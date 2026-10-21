@@ -82,6 +82,45 @@ struct ProviderInfo {
   std::string search_path;
   std::string fetch_path;
 
+  /// The provider exposes a *quota* endpoint: "how much of my subscription is
+  /// left" (MiniMax M Plan: a 5-hour window and a weekly window).
+  ///
+  /// NOT the same thing as `stream_include_usage` above, which asks the
+  /// provider to include token counts in a chat response. The two are easy to
+  /// confuse, so the names are kept apart on purpose: one is about the
+  /// *response*, this one is about a *separate account endpoint*.
+  ///
+  /// The endpoint is not OpenAI-standard, so support is declared, not probed.
+  /// Off by default - a wrong flag would send the key to an endpoint that does
+  /// not exist.
+  bool supports_usage = false;
+  /// Which parser understands the response ("minimax_token_plan"). Empty when
+  /// `supports_usage` is off.
+  std::string usage_type;
+  /// Full URL of the usage endpoint. Empty => the default of `usage_type`
+  /// (the M Plan endpoint lives on another host than the chat API, so it cannot
+  /// be derived from `api_url`).
+  std::string usage_url;
+  /// How the key is presented to the usage endpoint:
+  ///   "bearer"  (default) Authorization: Bearer <key>
+  ///   "api-key" api-key: <key>            (MiMo's Token Plan style)
+  ///   "none"    no auth header at all      (endpoints behind a session cookie)
+  std::string usage_auth = "bearer";
+  /// Extra headers for the usage request only (a session cookie, a routing id,
+  /// ...). The provider's own `headers:` are for the chat call and are NOT
+  /// replayed here - a usage endpoint is a different service.
+  std::vector<std::pair<std::string, std::string> > usage_headers;
+  /// For `usage_type: json_fields`: dotted paths into the JSON answer
+  /// ("data.remainingPercent", "list.0.used", ...). See src/usage.cpp.
+  std::map<std::string, std::string> usage_fields;
+  /// The page a HUMAN opens to see the quota - the provider's console, which
+  /// usually needs a login the API key cannot stand in for (MiMo's Token Plan
+  /// is the example: its credits live in the web console only).
+  ///
+  /// Independent of `supports_usage`: a provider can have this link without an
+  /// API at all, and the UI then offers "open the console" instead of a number.
+  std::string usage_console_url;
+
   bool has_key() const { return !api_key.empty(); }
   const ModelInfo* find_model(const std::string& name) const;
 };

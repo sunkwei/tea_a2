@@ -126,6 +126,16 @@ button{font-family:inherit}
 .chip-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chip:disabled{opacity:.5;cursor:not-allowed}
 .chev-sm{color:var(--dsw-alias-label-caption);font-size:11px}
+/* 订阅额度徽标：剩余不多时变黄，查不到时变红 */
+.chip.usage{font-variant-numeric:tabular-nums}
+.chip.usage.low{color:var(--dsw-alias-state-warn-primary);border-color:var(--dsw-alias-state-warn-primary)}
+.chip.usage.err{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
+.chip.usage.loading{opacity:.6;cursor:progress}
+/* 查不到额度的 provider：徽标变成「去控制台看」的链接 */
+.chip.usage.link{color:var(--dsw-alias-label-caption)}
+.chip.usage.link:hover{color:var(--dsw-alias-label-primary)}
+/* 设置页里每个 provider 的额度查询结果 */
+.usage-result{font-size:12px;color:var(--dsw-alias-label-caption);padding:2px 0 4px;word-break:break-word}
 .btn{
   height:28px;border-radius:8px;background:var(--dsw-alias-bg-layer-3);
   border:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);
