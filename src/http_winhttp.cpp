@@ -80,8 +80,11 @@ HttpResponse http_perform_winhttp(const HttpRequest& req, const HttpChunkCallbac
   LPCWSTR proxy_name = proxy_host.empty() ? nullptr : proxy_host.c_str();
   LPCWSTR proxy_bypass = nullptr;
 
-  WinHttpHandle session(WinHttpOpen(L"tea_agent/" TEA_AGENT_VERSION_STRING, access_type,
-                                    proxy_name, proxy_bypass, 0));
+  // The User-Agent carries the version; WinHttpOpen wants a LPCWSTR, so keep the
+  // wide string alive in a named variable (a temporary std::wstring does not
+  // convert to a pointer).
+  const std::wstring agent_name = L"tea_agent/" + utf8_to_wide(std::string(tea::version_string()));
+  WinHttpHandle session(WinHttpOpen(agent_name.c_str(), access_type, proxy_name, proxy_bypass, 0));
   if (!session) {
     res.error = last_error_text("WinHttpOpen");
     return res;
@@ -134,7 +137,7 @@ HttpResponse http_perform_winhttp(const HttpRequest& req, const HttpChunkCallbac
     // Gateways such as opencode.ai ask clients to identify themselves rather
     // than look like a generic HTTP library, so never fall back to the WinHTTP
     // default.
-    headers = utf8_to_wide(std::string("User-Agent: tea_agent/") + TEA_AGENT_VERSION_STRING +
+    headers = utf8_to_wide(std::string("User-Agent: tea_agent/") + std::string(tea::version_string()) +
                            "\r\n") +
               headers;
   }

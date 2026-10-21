@@ -1,5 +1,9 @@
 // version.h -- single place for the version string.
 #pragma once
 
-#define TEA_AGENT_VERSION_STRING "0.8.2"
 #define TEA_AGENT_NAME "tea_agent"
+
+namespace tea {
+    const char *version_string();
+    const char *version_git_hash();
+} // namespace tea

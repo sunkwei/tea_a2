@@ -401,7 +401,7 @@ HttpResponse perform_once(const HttpRequest& req, const HttpChunkCallback& on_ch
   head += url.request_target();
   head += " HTTP/1.1\r\nHost: ";
   head += url.host_header();
-  head += "\r\nUser-Agent: tea_agent/" TEA_AGENT_VERSION_STRING "\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n";
+  head += "\r\nUser-Agent: tea_agent/" + std::string(tea::version_string()) + "\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n";
   bool has_content_type = false;
   bool has_content_length = false;
   for (const auto& h : req.headers) {

@@ -87,7 +87,7 @@ bool is_boolean_flag(const std::string& name) {
 
 void print_usage() {
   console_write_line(
-      std::string(TEA_AGENT_NAME " " TEA_AGENT_VERSION_STRING
+      std::string(TEA_AGENT_NAME " " + std::string(tea::version_string()) + "\n"
                   " -- a minimal C++ LLM agent with tools, workspaces and a web UI.\n"
                   "\n"
                   "Usage: tea_agent [options]\n"
@@ -208,7 +208,7 @@ int main(int argc, char** argv) {
   }
 
   if (args.has("version")) {
-    console_write_line(TEA_AGENT_NAME " " TEA_AGENT_VERSION_STRING);
+    console_write_line(TEA_AGENT_NAME " " + std::string(tea::version_string()));
     return 0;
   }
 
@@ -244,7 +244,7 @@ int main(int argc, char** argv) {
   Logger::instance().configure(log_file, level, console);
   Logger::instance().set_console_level(console_level);
 
-  LOG_INFO("=== ", TEA_AGENT_NAME, " ", TEA_AGENT_VERSION_STRING, " starting ===");
+  LOG_INFO("=== ", TEA_AGENT_NAME, " ", std::string(tea::version_string()), " starting ===");
   LOG_INFO("console: ", console ? log_level_name(console_level) : "off", " (log file: ",
            log_level_name(level), ")");
   LOG_INFO("tea home: ", tea_home);
@@ -406,7 +406,7 @@ int main(int argc, char** argv) {
   {
     std::string banner;
     banner += "\n";
-    banner += "  " TEA_AGENT_NAME " " TEA_AGENT_VERSION_STRING "\n";
+    banner += "  " TEA_AGENT_NAME " " + std::string(tea::version_string()) + ", git hash:" + std::string(tea::version_git_hash()) + "\n";
     banner += "  ------------------------------------------------------------\n";
     // `--host 0.0.0.0` binds every interface, so printing 127.0.0.1 there is
     // useless: the user is starting it precisely so another device can open it.

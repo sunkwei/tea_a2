@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.20)
 # line `tea_agent 0.1.0: compiler=...` a lie and left the bump to be done twice
 # (and forgotten once). Splitting on the first two dots keeps the build working
 # if the string ever gains a pre-release suffix (0.8.2-rc1 -> version 0.8.2).
-set(TEA_VERSION_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/src/version.h)
+set(TEA_VERSION_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/src/version.cpp)
 if(NOT EXISTS ${TEA_VERSION_HEADER})
   message(FATAL_ERROR "missing ${TEA_VERSION_HEADER}; it defines TEA_AGENT_VERSION_STRING")
 endif()
@@ -395,6 +395,7 @@ set(TEA_SOURCES
   src/agent.cpp
   src/html_export.cpp
   src/server.cpp
+  src/version.cpp
   ${TEA_WEB_ASSETS_CPP}
   ${TEA_CA_BUNDLE_CPP}
 )
@@ -415,6 +416,68 @@ if(MSVC)
 endif()
 
 add_executable(tea_agent ${TEA_SOURCES})
+
+# --- keep the git hash in src/version.cpp honest ----------------------------
+# The binary prints the commit it was built from (startup banner, --version).
+# A hand-written hash goes stale at the next commit and then lies, so the
+# build syncs it: read HEAD, compare with the GIT_HASH in version.cpp, and
+# rewrite the file when they differ.
+#
+# The sync runs at CONFIGURE time - that is the only point that is guaranteed
+# to be before any compilation, so "update, then compile" really holds (a
+# TARGET/PRE_BUILD hook runs *after* the objects are built with the Makefile
+# generator, which would leave the binary one build behind). The files that
+# carry the commit are registered as configure dependencies, so a new commit
+# makes CMake re-run this step - and therefore re-sync the hash - before the
+# next build compiles anything.
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS ${TEA_VERSION_HEADER})
+  execute_process(
+    COMMAND ${CMAKE_COMMAND}
+            -DVERSION_SOURCE=${TEA_VERSION_HEADER}
+            -DREPO_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/sync_git_hash.cmake
+    RESULT_VARIABLE _tea_git_sync_rc
+    OUTPUT_VARIABLE _tea_git_sync_out
+    ERROR_VARIABLE _tea_git_sync_err)
+  if(NOT _tea_git_sync_out STREQUAL "")
+    string(STRIP "${_tea_git_sync_out}" _tea_git_sync_out)
+    # The script prints with message(STATUS ...), which already prefixes "-- ".
+    string(REGEX REPLACE "^--[ 	]+" "" _tea_git_sync_out "${_tea_git_sync_out}")
+    message(STATUS "${_tea_git_sync_out}")
+  endif()
+  if(NOT _tea_git_sync_rc EQUAL 0)
+    message(WARNING "could not sync the git hash: ${_tea_git_sync_err}")
+  endif()
+
+  # Watch the refs: HEAD plus the branch it points at (or packed-refs, when the
+  # branch is packed). A commit touches one of them, which re-runs CMake.
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --absolute-git-dir
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE _tea_git_dir
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(_tea_git_dir)
+    set(_tea_git_watch "${_tea_git_dir}/HEAD")
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} symbolic-ref HEAD
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+      OUTPUT_VARIABLE _tea_git_ref
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_tea_git_ref AND EXISTS "${_tea_git_dir}/${_tea_git_ref}")
+      list(APPEND _tea_git_watch "${_tea_git_dir}/${_tea_git_ref}")
+    elseif(EXISTS "${_tea_git_dir}/packed-refs")
+      list(APPEND _tea_git_watch "${_tea_git_dir}/packed-refs")
+    endif()
+    foreach(_f IN LISTS _tea_git_watch)
+      if(EXISTS "${_f}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_f}")
+      endif()
+    endforeach()
+  endif()
+endif()
 # NOTE: src/ is deliberately NOT on the include path. It would make the
 # compiler resolve system headers such as <process.h> (pulled in by <thread>)
 # to our own src/process.h. All intra-project includes are quoted and resolve
