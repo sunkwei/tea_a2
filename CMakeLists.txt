@@ -5,11 +5,14 @@ cmake_minimum_required(VERSION 3.20)
 # ---------------------------------------------------------------------------
 # `src/version.h` is what the binary actually reports (--version, the User-Agent
 # header, /api/health), so this file parses it instead of carrying a second copy.
+# It is the only hand-edited source of truth: the git commit is build metadata and
+# is generated into the build directory (see below), so a build never modifies a
+# tracked file.
 # It used to say 0.1.0 while the binary said 0.4.1, which made the configure-time
 # line `tea_agent 0.1.0: compiler=...` a lie and left the bump to be done twice
 # (and forgotten once). Splitting on the first two dots keeps the build working
 # if the string ever gains a pre-release suffix (0.8.2-rc1 -> version 0.8.2).
-set(TEA_VERSION_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/src/version.cpp)
+set(TEA_VERSION_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/src/version.h)
 if(NOT EXISTS ${TEA_VERSION_HEADER})
   message(FATAL_ERROR "missing ${TEA_VERSION_HEADER}; it defines TEA_AGENT_VERSION_STRING")
 endif()
@@ -374,70 +377,18 @@ add_custom_command(
 # ---------------------------------------------------------------------------
 # tea_agent
 # ---------------------------------------------------------------------------
-set(TEA_SOURCES
-  src/main.cpp
-  src/util.cpp
-  src/platform_fs.cpp
-  src/env.cpp
-  src/output_filter.cpp
-  src/log.cpp
-  src/config.cpp
-  src/usage.cpp
-  src/message.cpp
-  src/http.cpp
-  src/http_socket.cpp
-  src/tls.cpp
-  src/command.cpp
-  src/archive.cpp
-  src/tools.cpp
-  src/workspace.cpp
-  src/llm.cpp
-  src/trajectory.cpp
-  src/agent.cpp
-  src/html_export.cpp
-  src/server.cpp
-  src/version.cpp
-  ${TEA_WEB_ASSETS_CPP}
-  ${TEA_CA_BUNDLE_CPP}
-)
-
-if(WIN32)
-  list(APPEND TEA_SOURCES src/http_winhttp.cpp)
-endif()
-
-# Header dependencies are declared explicitly instead of relying on the
-# compiler-generated ones (see the /showIncludes note at the top of this file).
-# With ~10 TUs it only costs a full recompile of our sources when a header
-# actually changes, and it keeps incremental builds correct even on a machine
-# whose localized /showIncludes output CMake cannot parse.
-if(MSVC)
-  file(GLOB_RECURSE TEA_PROJECT_HEADERS CONFIGURE_DEPENDS
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
-  set_property(SOURCE ${TEA_SOURCES} APPEND PROPERTY OBJECT_DEPENDS ${TEA_PROJECT_HEADERS})
-endif()
-
-add_executable(tea_agent ${TEA_SOURCES})
-
-# --- keep the git hash in src/version.cpp honest ----------------------------
-# The binary prints the commit it was built from (startup banner, --version).
-# A hand-written hash goes stale at the next commit and then lies, so the
-# build syncs it: read HEAD, compare with the GIT_HASH in version.cpp, and
-# rewrite the file when they differ.
-#
-# The sync runs at CONFIGURE time - that is the only point that is guaranteed
-# to be before any compilation, so "update, then compile" really holds (a
-# TARGET/PRE_BUILD hook runs *after* the objects are built with the Makefile
-# generator, which would leave the binary one build behind). The files that
-# carry the commit are registered as configure dependencies, so a new commit
-# makes CMake re-run this step - and therefore re-sync the hash - before the
-# next build compiles anything.
+# The git hash: build metadata, generated into the build directory. It used to be
+# written back into src/version.cpp, which left the working tree dirty after every
+# build and made two build trees fight over one file. See cmake/version_git_hash.cmake.
+set(TEA_VERSION_GIT_CPP ${TEA_GEN_DIR}/version_git.cpp)
+file(MAKE_DIRECTORY ${TEA_GEN_DIR})
 find_package(Git QUIET)
-if(GIT_FOUND AND EXISTS ${TEA_VERSION_HEADER})
+if(GIT_FOUND)
   execute_process(
     COMMAND ${CMAKE_COMMAND}
-            -DVERSION_SOURCE=${TEA_VERSION_HEADER}
             -DREPO_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/sync_git_hash.cmake
+            -DOUTPUT=${TEA_VERSION_GIT_CPP}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_git_hash.cmake
     RESULT_VARIABLE _tea_git_sync_rc
     OUTPUT_VARIABLE _tea_git_sync_out
     ERROR_VARIABLE _tea_git_sync_err)
@@ -448,11 +399,12 @@ if(GIT_FOUND AND EXISTS ${TEA_VERSION_HEADER})
     message(STATUS "${_tea_git_sync_out}")
   endif()
   if(NOT _tea_git_sync_rc EQUAL 0)
-    message(WARNING "could not sync the git hash: ${_tea_git_sync_err}")
+    message(WARNING "could not generate the git hash: ${_tea_git_sync_err}")
   endif()
 
   # Watch the refs: HEAD plus the branch it points at (or packed-refs, when the
-  # branch is packed). A commit touches one of them, which re-runs CMake.
+  # branch is packed). A commit touches one of them, which re-runs CMake - and
+  # therefore regenerates the hash - before the next build compiles anything.
   execute_process(
     COMMAND ${GIT_EXECUTABLE} rev-parse --absolute-git-dir
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -478,7 +430,63 @@ if(GIT_FOUND AND EXISTS ${TEA_VERSION_HEADER})
       endif()
     endforeach()
   endif()
+else()
+  # No git (a release tarball): still produce the file, with "unknown".
+  execute_process(
+    COMMAND ${CMAKE_COMMAND}
+            -DREPO_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DOUTPUT=${TEA_VERSION_GIT_CPP}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_git_hash.cmake
+    RESULT_VARIABLE _tea_git_sync_rc
+    OUTPUT_VARIABLE _tea_git_sync_out
+    ERROR_VARIABLE _tea_git_sync_err)
 endif()
+
+set(TEA_SOURCES
+  src/main.cpp
+  src/util.cpp
+  src/platform_fs.cpp
+  src/env.cpp
+  src/output_filter.cpp
+  src/log.cpp
+  src/config.cpp
+  src/usage.cpp
+  src/message.cpp
+  src/http.cpp
+  src/http_socket.cpp
+  src/tls.cpp
+  src/command.cpp
+  src/archive.cpp
+  src/tools.cpp
+  src/workspace.cpp
+  src/llm.cpp
+  src/trajectory.cpp
+  src/agent.cpp
+  src/html_export.cpp
+  src/server.cpp
+  src/version.cpp
+  ${TEA_VERSION_GIT_CPP}
+  ${TEA_WEB_ASSETS_CPP}
+  ${TEA_CA_BUNDLE_CPP}
+)
+
+if(WIN32)
+  list(APPEND TEA_SOURCES src/http_winhttp.cpp)
+endif()
+
+# Header dependencies are declared explicitly instead of relying on the
+# compiler-generated ones (see the /showIncludes note at the top of this file).
+# With ~10 TUs it only costs a full recompile of our sources when a header
+# actually changes, and it keeps incremental builds correct even on a machine
+# whose localized /showIncludes output CMake cannot parse.
+if(MSVC)
+  file(GLOB_RECURSE TEA_PROJECT_HEADERS CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
+  set_property(SOURCE ${TEA_SOURCES} APPEND PROPERTY OBJECT_DEPENDS ${TEA_PROJECT_HEADERS})
+endif()
+
+add_executable(tea_agent ${TEA_SOURCES})
+
 # NOTE: src/ is deliberately NOT on the include path. It would make the
 # compiler resolve system headers such as <process.h> (pulled in by <thread>)
 # to our own src/process.h. All intra-project includes are quoted and resolve
