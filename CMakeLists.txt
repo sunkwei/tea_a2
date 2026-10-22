@@ -604,11 +604,17 @@ add_custom_command(TARGET tea_agent POST_BUILD
 
 # The build information travels with the binary: the file is written at
 # configure time (a new commit re-runs CMake) and copied next to the executable
-# after every link, so it is never stale. The binary reads it at startup.
-add_custom_command(TARGET tea_agent POST_BUILD
+# on every build, so it is never stale. The binary reads it at startup.
+#
+# The copy is its own always-run target, not a POST_BUILD step of the link:
+# a commit that touches no source leaves the binary untouched (no relink, so
+# no POST_BUILD), and the file next to the executable would then still name the
+# previous commit - /api/health would report a commit this binary is not from.
+add_custom_target(tea_build_info ALL
   COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:tea_agent>
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${TEA_BUILD_INFO} $<TARGET_FILE_DIR:tea_agent>/tea_agent.buildinfo
+  COMMENT "build info next to the binary"
   VERBATIM
 )
 
