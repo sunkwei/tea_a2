@@ -2088,6 +2088,28 @@ miniz 只取上游 release 里的**合并版两个文件**（`miniz.c` + `miniz.
 
 ## 测试
 
+### 跑得快：并行 + 共用一个浏览器
+
+```bash
+bash scripts/test-all.sh              # 全部：20 个 python + 29 个浏览器测试
+bash scripts/test-all.sh ui           # 只跑浏览器测试
+bash scripts/test-all.sh smoke_todo   # 只跑名字里含 smoke_todo 的
+JOBS=4 bash scripts/test-all.sh       # 少几个并行任务
+```
+
+两件事让它从「十几分钟」变成「约 100 秒」：
+
+- **一个浏览器给所有浏览器测试**（`tests/chrome_pool.mjs`）。新起的 Chrome 在某些 Linux
+  容器（WSL2）里**第一次打开页面要等 25 秒**——渲染进程得从冷缓存里拉起来。29 个测试各起
+  一个浏览器，就是 29 次 25 秒。改成共用一个（`TEA_TEST_CDP`），每个测试开自己的标签页，
+  那 25 秒只付一次。单独跑某个测试时行为不变（它自己起浏览器）。
+- **并行跑**（`xargs -P`）。测试之间互不相干（各自临时目录、随机端口）。
+
+有个测试在机器忙的时候会飘（它用固定 sleep 等一个界面状态），所以并行跑完失败的会**再单独跑
+一次**：还是不过才算失败。日志在输出里给的那次运行目录下。
+
+Windows 上是 `pwsh -File scripts\test-all.ps1`（同样的思路，自己起浏览器）。
+
 ```bash
 pwsh -File tests/e2e.ps1                                  # 默认构建产物
 pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
@@ -2112,6 +2134,7 @@ python3 tests/smoke_single_file.py                        # 内嵌证书 + 静�
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
 python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果
+bash scripts/test-all.sh                                  # 整套测试：并行 + 共用一个浏览器（~100 s）
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建

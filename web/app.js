@@ -4,9 +4,15 @@
 
   /* ---------- 1) 状态与本地持久化 ---------- */
   var LS_KEY = 'tea_agent_ui_v1';
+  /// The optional task server (sched/task_server.py). It keeps the task queue;
+  /// this server does not know about it. Empty => no task events, and the page
+  /// works exactly as before.
+  var DEFAULT_TASK_SERVER = 'http://127.0.0.1:8283';
   var API_BASE = new URL('.', document.baseURI).href; // 相对页面目录，兼容任意挂载前缀
   var VIEWS = ['chat', 'files', 'memory', 'logs', 'settings'];
   var VIEW_LABEL = { chat: '对话', files: '文件', memory: '记忆', logs: '日志', settings: '设置' };
+
+  var taskServerInput = null;   // the optional task server's address (settings)
 
   var state = {
     view: 'chat', health: null, providers: null, tools: null, indexPath: '',
@@ -80,7 +86,7 @@
       // 写进 localStorage 会让最后关闭/最后刷新的窗口决定所有窗口看什么。
       localStorage.setItem(LS_KEY, JSON.stringify({
         view: state.view, workspace_id: state.workspace ? state.workspace.id : null,
-        model: state.model,
+        model: state.model, task_server: taskServerInput ? taskServerInput.value.trim() : undefined,
         logs_autoscroll: state.logsAutoScroll, sidebar_hidden: state.sidebarHidden
       }));
     } catch (e) { /* 隐私模式下忽略 */ }
@@ -2454,14 +2460,25 @@
     startTabBlink();
   }
 
-  // A task that finished *elsewhere* - the scheduler picked it up while this tab
-  // was in the background - has to reach the tab too, otherwise the work is done
-  // and nobody knows. The event stream is the one place that knows.
+  // A task that finished *elsewhere* - the task server picked it up while this
+  // tab was in the background - has to reach the tab too, otherwise the work is
+  // done and nobody knows.
+  //
+  // The queue lives in the task server (sched/task_server.py, an optional
+  // companion), so the event stream comes from there and not from this server.
+  // Without a task server there is nothing to hear: the connection simply
+  // fails and the page carries on.
   var taskEventsSource = null;
+  function taskServerUrl() {
+    var v = (loadLS().task_server || '').trim();
+    return v || DEFAULT_TASK_SERVER;
+  }
   function subscribeTaskEvents() {
     if (taskEventsSource) return;
+    var base = taskServerUrl();
+    if (!base) return;
     try {
-      taskEventsSource = new EventSource(apiUrl('api/events'));
+      taskEventsSource = new EventSource(base.replace(/\/+$/, '') + '/api/events');
     } catch (e) { return; }
     taskEventsSource.onmessage = function (ev) {
       var data = null;
@@ -2473,9 +2490,11 @@
       }
     };
     taskEventsSource.onerror = function () {
-      // The server restarted or the network hiccuped: close, wait, try again.
+      // No task server (or it restarted): close, wait, try again - slowly, since
+      // the task server is optional and may simply not be running. The page
+      // works fine without it; that is the whole point.
       if (taskEventsSource) { taskEventsSource.close(); taskEventsSource = null; }
-      setTimeout(subscribeTaskEvents, 5000);
+      setTimeout(subscribeTaskEvents, 30000);
     };
   }
 
@@ -4151,6 +4170,21 @@
       saveLS();
       if (state.logsAutoScroll) $('logs-pre').scrollTop = $('logs-pre').scrollHeight;
     };
+    // The task server is optional: the address is only used to listen for
+    // "a background task finished" - nothing here depends on it.
+    taskServerInput = $('task-server');
+    if (taskServerInput) {
+      taskServerInput.value = loadLS().task_server || DEFAULT_TASK_SERVER;
+      $('task-server-save').onclick = function () {
+        saveLS();
+        if (taskEventsSource) { taskEventsSource.close(); taskEventsSource = null; }
+        subscribeTaskEvents();
+        toast('已保存任务服务地址');
+      };
+      taskServerInput.onkeydown = function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); $('task-server-save').click(); }
+      };
+    }
     $('usage-chip').onclick = function () {
       var p = usageProvider();
       if (p && !p.supports_usage && p.usage_console_url) { openConsole(p.usage_console_url); return; }
