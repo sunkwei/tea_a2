@@ -1811,6 +1811,19 @@ python3 sched/wechat_bot.py --login
 python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283
 ```
 
+**开机自启（systemd user unit）**：`scripts/a2_wechat.service` 是一份现成的模板：
+
+```bash
+cp scripts/a2_wechat.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now a2_wechat
+systemctl --user status a2_wechat
+tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=none
+```
+
+服务会**等着凭证出现**：先 `systemctl --user start a2_wechat`，什么时候扫完码，它什么时候接上
+（凭证写在 `~/.tea_agent/wechat/credentials.json`，服务每 5 秒看一眼）。
+
 协议是**微信 iLink Bot API**（<https://www.wechatbot.dev/zh/protocol>）：HTTP + 长轮询，
 所以只用标准库就够（设备上没有 pip 也能跑）。凭证和每个用户的 `context_token` 存在
 `~/.tea_agent/wechat/credentials.json`（context_token 是回复的路由凭据，重启不能丢）。

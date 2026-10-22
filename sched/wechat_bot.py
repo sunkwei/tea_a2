@@ -574,10 +574,23 @@ class WeChatBot:
             self.state.save()
         return payload.get("msgs") or []
 
+    def wait_for_credentials(self):
+        """Wait until someone has scanned the QR code.
+
+        As a service this is the normal way in: the unit starts, the operator
+        runs --login once, and the bot picks the credentials up from the state
+        file. Waiting is friendlier than exiting (and being restarted by
+        systemd every few seconds).
+        """
+        log("还没有凭证，等着扫码（另开一个终端跑：python3 sched/wechat_bot.py --login）")
+        while not self.state.token:
+            time.sleep(5)
+            self.state.load()
+        log("拿到凭证了")
+
     def run(self):
         if not self.state.token:
-            log("还没有凭证，先跑 --login 扫码")
-            return 2
+            self.wait_for_credentials()
         self.ensure_workspace()
         threading.Thread(target=self.watch_tasks, daemon=True).start()
         backoff = 1.0

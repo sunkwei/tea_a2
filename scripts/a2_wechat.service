@@ -1,0 +1,29 @@
+[Unit]
+Description=tea_a2 WeChat bot (the queue's WeChat front end)
+Documentation=file:///home/sunkw/work/git/tea_a2/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# 微信这一端：把微信里的话变成队列操作，做完把结果发回微信。
+# 它调的是 task server（:8283）的 API，task server 再调 agent（:8383）。
+# 第一次要先扫码：另开一个终端跑
+#   python3 /home/sunkw/work/git/tea_a2/sched/wechat_bot.py --login
+# 服务会一直等着凭证出现，扫完就自动接上。
+ExecStart=/usr/bin/python3 /home/sunkw/work/git/tea_a2/sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283
+WorkingDirectory=/home/sunkw/work/git/tea_a2
+Environment=HOME=/home/sunkw
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+# 微信侧固定的工作区：手机排的活儿都在这里做，不碰别人的仓库。
+# 改目录的话记得两处都改：这里和 --workspace-path。
+# 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
+# `journalctl --user` 根本读不到（已实测），所以直接 append 到文件。
+StandardOutput=append:/home/sunkw/.tea_agent/logs/a2_wechat.log
+StandardError=append:/home/sunkw/.tea_agent/logs/a2_wechat.log
+
+[Install]
+WantedBy=default.target
