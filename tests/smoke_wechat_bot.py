@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""The WeChat bot: protocol, command mapping, notifications.
+"""The WeChat bot: protocol, command mapping, notifications, files.
 
 The iLink server is mocked (the real one needs a phone and a scan), and so is
-the task server. What this pins:
+the task server and the WeChat CDN. What this pins:
 
   * the login flow: a QR code, then the status poll, then the credentials on
     disk - and the context_token of every user remembered, because a reply
@@ -12,11 +12,18 @@ the task server. What this pins:
   * the command mapping: plain text queues a task, /tasks /status /result /
     start /cancel /del /answer /quota reach the queue's API;
   * the fixed workspace: the WeChat tasks always go to the same one;
-  * the notification: when a task finishes, the user is told.
+  * the notification: when a task finishes, the user is told;
+  * the files, both ways: a file the task produced is encrypted (AES-128-ECB,
+    openssl), uploaded to the CDN and sent as a file message; a file the user
+    sends is fetched from the CDN, decrypted, and put in the workspace's inbox
+    - where the task can read it. The three key formats of the protocol are
+    all understood, and a file name from the outside cannot escape the inbox.
 
 Usage: python3 tests/smoke_wechat_bot.py
 """
 
+import base64
+import hashlib
 import http.client
 import json
 import os
@@ -27,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
 try:
@@ -65,6 +73,7 @@ class MockILink(BaseHTTPRequestHandler):
     pending = []         # the messages the bot should receive
     qr_status = "confirmed"
     token = "bot-token-123"
+    upload_tickets = []     # the getuploadurl requests the bot made
 
     def log_message(self, *args):
         pass
@@ -112,6 +121,9 @@ class MockILink(BaseHTTPRequestHandler):
             return self._json({"ret": 0})
         if "getconfig" in self.path:
             return self._json({"ret": 0, "typing_ticket": "ticket-1"})
+        if "getuploadurl" in self.path:
+            MockILink.upload_tickets.append(body)
+            return self._json({"ret": 0, "upload_param": "up-%d" % len(MockILink.upload_tickets)})
         if "sendtyping" in self.path:
             return self._json({"ret": 0})
         self._json({"error": "no route"}, 404)
@@ -193,6 +205,56 @@ class MockQueue(BaseHTTPRequestHandler):
         self._json({"ok": True, "id": task_id})
 
 
+class MockCDN(BaseHTTPRequestHandler):
+    """The WeChat CDN: the encrypted bytes live here.
+
+    /upload takes the ciphertext and answers with the x-encrypted-param header
+    (the download reference); /download hands the ciphertext back.
+    """
+
+    protocol_version = "HTTP/1.1"
+    files = {}      # download reference -> ciphertext
+    uploads = []    # what the bot pushed up
+
+    def log_message(self, *args):
+        pass
+
+    def _query(self):
+        if "?" not in self.path:
+            return {}
+        return urllib.parse.parse_qs(self.path.split("?", 1)[1])
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        query = self._query()
+        param = (query.get("encrypted_query_param") or [""])[0]
+        filekey = (query.get("filekey") or [""])[0]
+        reference = "download-" + param
+        MockCDN.files[reference] = raw
+        MockCDN.uploads.append({"param": param, "filekey": filekey,
+                                 "size": len(raw), "data": raw})
+        self.send_response(200)
+        self.send_header("x-encrypted-param", reference)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self):  # noqa: N802
+        query = self._query()
+        param = (query.get("encrypted_query_param") or [""])[0]
+        data = MockCDN.files.get(param)
+        if data is None:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
 class MockAgent(BaseHTTPRequestHandler):
     """The agent's workspace list."""
 
@@ -252,6 +314,9 @@ def main():
     agent = ThreadingHTTPServer(("127.0.0.1", 0), MockAgent)
     agent.daemon_threads = True
     threading.Thread(target=agent.serve_forever, daemon=True).start()
+    cdn = ThreadingHTTPServer(("127.0.0.1", 0), MockCDN)
+    cdn.daemon_threads = True
+    threading.Thread(target=cdn.serve_forever, daemon=True).start()
 
     tmp = tempfile.mkdtemp(prefix="tea_wechat_")
     ws_path = os.path.join(tmp, "wechat-workspace")
@@ -262,6 +327,7 @@ def main():
         "--state-dir", os.path.join(tmp, "state"),
         "--workspace-path", ws_path,
         "--allow-path", "/tmp",
+        "--cdn-url", "http://127.0.0.1:%d" % cdn.server_address[1],
     ])
     bot = wechat_bot.WeChatBot(args)
 
@@ -351,10 +417,142 @@ def main():
               any("做完了" in (m["msg"].get("item_list") or [{}])[0]
                   .get("text_item", {}).get("text", "") for m in MockILink.sent),
               MockILink.sent)
+
+        # ---- out: the files a task produced go to the phone --------------
+        produced = os.path.join(ws_path, "notes.txt")
+        content = "这是任务写出来的文件\n第二行\n".encode("utf-8")
+        with open(produced, "wb") as f:
+            f.write(content)
+        MockILink.sent = []
+        MockILink.upload_tickets = []
+        MockCDN.uploads = []
+        bot.owner[task_id] = "u1"
+        bot.notify_event({"type": "task_done", "task": {
+            "id": task_id, "note": "做完了", "result": "答案", "meta": {},
+            "artifacts": [{"path": "notes.txt", "bytes": len(content),
+                           "kind": "document", "tool": "toolkit_file"}]}})
+        file_msgs = [m for m in MockILink.sent
+                     if any(i.get("type") == 4 for i in (m["msg"].get("item_list") or []))]
+        check("the produced file is sent as a file message", len(file_msgs) == 1,
+              MockILink.sent)
+        item = {}
+        if file_msgs:
+            item = [i for i in file_msgs[0]["msg"]["item_list"] if i.get("type") == 4][0]
+            info = item.get("file_item") or {}
+            media = info.get("media") or {}
+            check("the file message carries the name", info.get("file_name") == "notes.txt", info)
+            check("the file message carries the size", info.get("len") == str(len(content)), info)
+            check("the file message carries a download reference",
+                  bool(media.get("encrypt_query_param")), media)
+            check("the file message carries the aes key",
+                  bool(media.get("aes_key")), media)
+        check("the file was uploaded to the CDN", len(MockCDN.uploads) == 1, MockCDN.uploads)
+        check("the upload asked for a ticket", len(MockILink.upload_tickets) == 1,
+              MockILink.upload_tickets)
+        if MockILink.upload_tickets and file_msgs:
+            ticket = MockILink.upload_tickets[0]
+            check("the ticket names the media type of a file", ticket.get("media_type") == 3, ticket)
+            check("the ticket carries the raw size", ticket.get("rawsize") == len(content), ticket)
+            check("the ticket carries the md5 of the file",
+                  ticket.get("rawfilemd5") == hashlib.md5(content).hexdigest(), ticket)
+            check("the ticket carries the encrypted size",
+                  ticket.get("filesize") == len(MockCDN.uploads[0]["data"]), ticket)
+            key_hex = ticket.get("aeskey") or ""
+            check("the ticket carries the key as 32 hex characters",
+                  len(key_hex) == 32 and all(c in "0123456789abcdef" for c in key_hex), key_hex)
+            plain = wechat_bot.aes_decrypt(MockCDN.uploads[0]["data"],
+                                           bytes.fromhex(key_hex))
+            check("what the CDN got is the file, encrypted",
+                  plain == content, plain[:40])
+            check("the key in the message is the one of the ticket",
+                  wechat_bot.decode_aes_key(
+                      (item.get("file_item") or {}).get("media", {}).get("aes_key", "")
+                  ).hex() == key_hex, item)
+
+        # ---- in: a file the user sends arrives in the workspace ---------
+        incoming = "用户发来的内容\n".encode("utf-8")
+        in_key = os.urandom(16)
+        in_cipher = wechat_bot.aes_encrypt(incoming, in_key)
+        MockCDN.files["download-inbound"] = in_cipher
+        raw = {"message_type": 1, "from_user_id": "u1", "context_token": "ctx-1",
+               "create_time_ms": int(time.time() * 1000),
+               "item_list": [{"type": 4, "file_item": {
+                   "media": {"encrypt_query_param": "download-inbound",
+                             "aes_key": base64.b64encode(in_key.hex().encode()).decode()},
+                   "file_name": "../../evil.sh", "md5": hashlib.md5(incoming).hexdigest(),
+                   "len": str(len(incoming))}}]}
+        MockQueue.calls = []
+        answer = bot.handle_message(raw, "", wechat_bot.files_of(raw), "u1")
+        check("the bot says it got the file", "已收到文件" in answer, answer)
+        inbox = os.path.join(ws_path, "inbox")
+        saved = os.path.join(inbox, "evil.sh")
+        check("the file is saved in the workspace", os.path.isfile(saved), os.listdir(inbox)
+              if os.path.isdir(inbox) else inbox)
+        if os.path.isfile(saved):
+            with open(saved, "rb") as f:
+                check("the saved file is the one the user sent", f.read() == incoming, saved)
+        check("the file name cannot escape the inbox",
+              not os.path.exists(os.path.join(ws_path, "evil.sh")), ws_path)
+        created = [c for c in MockQueue.calls if c[0] == "POST" and c[1] == "/api/tasks"]
+        check("the file becomes a task", len(created) == 1, MockQueue.calls)
+        if created:
+            prompt = created[0][2].get("prompt") or ""
+            check("the task prompt names the file", "inbox/evil.sh" in prompt, prompt)
+            check("the task remembers the attachment",
+                  (created[0][2].get("meta") or {}).get("attachments") == ["inbox/evil.sh"],
+                  created[0][2].get("meta"))
+
+        # ---- in: the other two key formats work too ----------------------
+        for label, key_text in (("hex", in_key.hex()),
+                                ("base64 of the raw bytes", base64.b64encode(in_key).decode())):
+            ref = "download-" + label.replace(" ", "-")
+            MockCDN.files[ref] = in_cipher
+            raw2 = {"message_type": 1, "from_user_id": "u1", "context_token": "ctx-1",
+                    "item_list": [{"type": 4, "file_item": {
+                        "media": {"encrypt_query_param": ref, "aes_key": key_text},
+                        "file_name": "k-%s.bin" % label.split()[0], "len": str(len(incoming))}}]}
+            bot.handle_message(raw2, "", wechat_bot.files_of(raw2), "u1")
+            got = os.path.join(inbox, "k-%s.bin" % label.split()[0])
+            check("a key given as %s is understood" % label, os.path.isfile(got), got)
+
+        # ---- the loop handles a file message the same way -----------------
+        loop_key = os.urandom(16)
+        loop_cipher = wechat_bot.aes_encrypt(b"loop file\n", loop_key)
+        MockCDN.files["download-loop"] = loop_cipher
+        raw_loop = {"message_type": 1, "from_user_id": "u2", "context_token": "ctx-2",
+                    "item_list": [{"type": 4, "file_item": {
+                        "media": {"encrypt_query_param": "download-loop",
+                                  "aes_key": base64.b64encode(loop_key.hex().encode()).decode()},
+                        "file_name": "loop.txt", "len": str(len(b"loop file\n"))}}]}
+        MockILink.sent = []
+        bot.process_message(raw_loop)
+        check("a message with only a file is answered",
+              any("已收到文件" in (m["msg"].get("item_list") or [{}])[0]
+                  .get("text_item", {}).get("text", "") for m in MockILink.sent),
+              MockILink.sent)
+        check("the file of that message is on disk",
+              os.path.isfile(os.path.join(ws_path, "inbox", "loop.txt")),
+              os.listdir(os.path.join(ws_path, "inbox")))
+        check("the context token of that user is remembered",
+              bot.state.context_for("u2") == "ctx-2", bot.state.context_for("u2"))
+
+        # ---- /files sends them again on demand ---------------------------
+        MockILink.sent = []
+        MockCDN.uploads = []
+        # The task that was deleted above is gone; use the one the file made.
+        files_task = sorted(MockQueue.tasks)[-1]
+        MockQueue.tasks[files_task]["artifacts"] = [
+            {"path": "notes.txt", "bytes": len(content), "kind": "document"}]
+        reply = bot.handle("/files " + files_task, "u1")
+        check("/files sends the produced file again",
+              len([m for m in MockILink.sent
+                   if any(i.get("type") == 4 for i in (m["msg"].get("item_list") or []))]) == 1,
+              (reply, MockILink.sent))
     finally:
         ilink.shutdown()
         queue.shutdown()
         agent.shutdown()
+        cdn.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)
 
     print()

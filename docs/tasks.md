@@ -161,8 +161,19 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 | `/result <id>` | 最终回答 + 产出文件 |
 | `/start <id>` / `/cancel <id>` / `/del <id>` | 立刻做 / 停掉 / 删掉 |
 | `/answer <id> <内容>` | 回答一个「等你确认」的任务 |
+| `/files <id>` | 把这个任务的产出文件再发一遍 |
 | `/quota` | minimax 额度还剩多少 |
 | `/help` | 命令表 |
+
+**文件能两个方向走。** 微信发的文件会落到工作区的 `inbox/` 里（`~/.tea_agent/wechat-workspace/inbox/`），
+随任务交给 agent；任务做完，产出的文件会作为**文件消息**发回微信（`/files <id>` 可以再要一次）。
+
+文件走的是 iLink 的媒体那一段：媒体放在微信 CDN（`novac2c.cdn.weixin.qq.com/c2c`）上，
+**AES-128-ECB + PKCS7 加密**（密钥 16 字节随机生成）。加解密用 `openssl` 命令行
+（`openssl enc -aes-128-ecb -K <hex> -nosalt`）——设备上没有 pip，标准库也没有 AES，
+但 openssl 每台 Linux 都有。没有 openssl 时文本通道照常工作，只是文件发不了。
+
+协议里密钥有三种写法（32 位十六进制 / base64(16 字节) / base64(十六进制串)），三种都能解。
 
 **微信这一端的工作区是固定的**（默认 `~/.tea_agent/wechat-workspace`，`--workspace-path`
 可改）：微信排的任务都在这个目录里做，不会去动别的项目。任务做完了，bot 通过任务服务的事件

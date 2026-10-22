@@ -32,10 +32,13 @@ Usage:
 
 import argparse
 import base64
+import binascii
+import hashlib
 import json
 import os
 import re
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -48,6 +51,10 @@ DEFAULT_AGENT = "http://127.0.0.1:8282"
 DEFAULT_TASKS = "http://127.0.0.1:8283"
 DEFAULT_STATE_DIR = os.path.expanduser("~/.tea_agent/wechat")
 DEFAULT_WORKSPACE_PATH = os.path.expanduser("~/.tea_agent/wechat-workspace")
+# The WeChat CDN: the media (images, video, files, voice) live there, encrypted
+# with AES-128-ECB. The bot talks to it directly - the iLink server only hands
+# out the tickets.
+CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 CHANNEL_VERSION = "2.0.0"
 # The protocol wants a client version; the SDK encodes it as 0x00MMNNPP.
 CLIENT_VERSION = "0.10.0"
@@ -57,6 +64,13 @@ MSG_TYPE_USER = 1
 MSG_TYPE_BOT = 2
 MSG_STATE_FINISH = 2
 ITEM_TEXT = 1
+ITEM_FILE = 4
+# The media_type the upload API wants for a plain file.
+MEDIA_FILE = 3
+# A file bigger than this is not worth sending (and WeChat may refuse it).
+MAX_FILE_BYTES = 32 * 1024 * 1024
+# How many files one task may send back.
+MAX_FILES_PER_TASK = 5
 
 
 def log(message):
@@ -72,14 +86,95 @@ class ILinkError(Exception):
         self.status = status
 
 
+def _openssl(args, data):
+    """Run openssl with the bytes on stdin, return the bytes on stdout.
+
+    The media path needs AES-128-ECB, and the standard library does not have
+    it - the device this runs on has no pip, so openssl (which is on every
+    Linux box) does the work.
+    """
+    try:
+        proc = subprocess.run(["openssl"] + args, input=data,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+    except FileNotFoundError:
+        raise ILinkError("openssl is not installed - sending files needs it") from None
+    except subprocess.TimeoutExpired:
+        raise ILinkError("openssl timed out") from None
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:160]
+        raise ILinkError("openssl failed: " + (detail or "exit %d" % proc.returncode))
+    return proc.stdout
+
+
+def aes_encrypt(data, key):
+    """AES-128-ECB + PKCS7, the way the WeChat CDN stores media.
+
+    `key` is the 16 raw bytes; the ciphertext is ceil((len+1)/16)*16 long.
+    """
+    return _openssl(["enc", "-aes-128-ecb", "-K", key.hex(), "-nosalt"], data)
+
+
+def aes_decrypt(data, key):
+    """The other half: AES-128-ECB, padding removed."""
+    if len(data) % 16 != 0:
+        raise ILinkError("the encrypted file is not a multiple of 16 bytes (%d)" % len(data))
+    return _openssl(["enc", "-d", "-aes-128-ecb", "-K", key.hex(), "-nosalt"], data)
+
+
+def decode_aes_key(encoded):
+    """The protocol has three ways of writing the same 16 bytes.
+
+      * 32 hex characters            (image_item.aeskey)
+      * base64 of the 16 raw bytes   (CDNMedia.aes_key, format A)
+      * base64 of the hex string     (CDNMedia.aes_key, format B)
+    """
+    text = (encoded or "").strip()
+    if not text:
+        raise ILinkError("the message carries no aes key")
+    if len(text) == 32 and all(c in "0123456789abcdefABCDEF" for c in text):
+        return binascii.unhexlify(text)
+    try:
+        raw = base64.b64decode(text + "=" * (-len(text) % 4))
+    except (ValueError, binascii.Error):
+        raise ILinkError("cannot decode the aes key") from None
+    if len(raw) == 16:
+        return raw
+    if len(raw) == 32:
+        try:
+            as_text = raw.decode("ascii")
+        except UnicodeDecodeError:
+            as_text = ""
+        if len(as_text) == 32 and all(c in "0123456789abcdefABCDEF" for c in as_text):
+            return binascii.unhexlify(as_text)
+    raise ILinkError("the aes key has an unexpected length (%d bytes)" % len(raw))
+
+
+def encode_aes_key(key):
+    """The key as the CDN media reference wants it: base64 of the hex string."""
+    return base64.b64encode(key.hex().encode("ascii")).decode("ascii")
+
+
+def safe_file_name(name):
+    """A file name we can put on disk: no directories, no surprises."""
+    base = os.path.basename((name or "").replace("\\", "/")).strip()
+    base = re.sub(r"[^0-9A-Za-z._\-\u4e00-\u9fff ]", "_", base)
+    base = base.lstrip(".") or "file.bin"
+    if len(base) > 80:
+        stem, dot, ext = base.rpartition(".")
+        base = (stem[:60] + dot + ext[:15]) if dot else base[:80]
+    return base
+
+
 class ILink:
     """The raw iLink protocol: login, long polling, sending.
 
     Only the standard library: the device this runs on has no pip.
     """
 
-    def __init__(self, base_url=DEFAULT_BASE_URL, client_version=CLIENT_VERSION):
+    def __init__(self, base_url=DEFAULT_BASE_URL, client_version=CLIENT_VERSION,
+                 cdn_base=CDN_BASE_URL):
         self.base_url = base_url.rstrip("/")
+        self.cdn_base = cdn_base.rstrip("/")
         parts = (client_version or "0.0.0").split(".")
         try:
             major, minor, patch = (int(p) & 0xFF for p in (parts + ["0", "0"])[:3])
@@ -155,6 +250,11 @@ class ILink:
         return self._post("/ilink/bot/getupdates", body, token, timeout)
 
     def send_text(self, user_id, context_token, text, token):
+        return self.send_items(user_id, context_token,
+                               [{"type": ITEM_TEXT, "text_item": {"text": text}}], token)
+
+    def send_items(self, user_id, context_token, items, token):
+        """One message with any number of items (text, a file, ...)."""
         msg = {
             "from_user_id": "",
             "to_user_id": user_id,
@@ -162,9 +262,60 @@ class ILink:
             "message_type": MSG_TYPE_BOT,
             "message_state": MSG_STATE_FINISH,
             "context_token": context_token,
-            "item_list": [{"type": ITEM_TEXT, "text_item": {"text": text}}],
+            "item_list": list(items),
         }
         return self._post("/ilink/bot/sendmessage", {"msg": msg, "base_info": self._base_info()}, token)
+
+    # -- the media (the CDN) ----------------------------------------------
+    def get_upload_url(self, filekey, to_user_id, rawsize, rawfilemd5, filesize, aeskey, token):
+        """Ask the iLink server for a ticket to upload one file."""
+        body = {
+            "filekey": filekey,
+            "media_type": MEDIA_FILE,
+            "to_user_id": to_user_id,
+            "rawsize": rawsize,
+            "rawfilemd5": rawfilemd5,
+            "filesize": filesize,
+            "no_need_thumb": True,
+            "aeskey": aeskey,
+            "base_info": self._base_info(),
+        }
+        return self._post("/ilink/bot/getuploadurl", body, token)
+
+    def upload_to_cdn(self, upload_param, filekey, ciphertext):
+        """Put the encrypted bytes on the CDN. Returns the download reference."""
+        url = ("%s/upload?encrypted_query_param=%s&filekey=%s"
+               % (self.cdn_base,
+                  urllib.parse.quote(upload_param, safe=""),
+                  urllib.parse.quote(filekey, safe="")))
+        req = urllib.request.Request(url, data=ciphertext, method="POST")
+        req.add_header("Content-Type", "application/octet-stream")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                resp.read()
+                param = resp.headers.get("x-encrypted-param")
+        except urllib.error.HTTPError as exc:
+            detail = exc.headers.get("x-error-message") if exc.headers else ""
+            raise ILinkError("CDN upload failed: HTTP %s %s" % (exc.code, detail or ""),
+                             status=exc.code) from None
+        except urllib.error.URLError as exc:
+            raise ILinkError("cannot reach the CDN %s: %s" % (url, exc.reason)) from None
+        if not param:
+            raise ILinkError("the CDN upload did not return x-encrypted-param")
+        return param
+
+    def download_from_cdn(self, encrypt_query_param):
+        """The encrypted bytes of a file somebody sent us."""
+        url = ("%s/download?encrypted_query_param=%s"
+               % (self.cdn_base, urllib.parse.quote(encrypt_query_param, safe="")))
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            raise ILinkError("CDN download failed: HTTP %s" % exc.code, status=exc.code) from None
+        except urllib.error.URLError as exc:
+            raise ILinkError("cannot reach the CDN %s: %s" % (url, exc.reason)) from None
 
     def typing_ticket(self, user_id, context_token, token):
         body = {"ilink_user_id": user_id, "context_token": context_token, "base_info": self._base_info()}
@@ -380,6 +531,17 @@ def text_of(raw):
     return "\n".join(p for p in parts if p)
 
 
+def files_of(raw):
+    """The files in an incoming message (the user sent one)."""
+    out = []
+    for item in raw.get("item_list") or []:
+        if item.get("type") == ITEM_FILE:
+            info = item.get("file_item") or {}
+            if info:
+                out.append(info)
+    return out
+
+
 def fmt_task(task):
     """One line about a task."""
     status = task.get("status", "?")
@@ -406,12 +568,14 @@ class WeChatBot:
             "· /del <id> 删掉\n"
             "· /answer <id> <内容> 回答一个等你确认的任务\n"
             "· /quota 额度还剩多少\n"
+            "· /files <id> 把这个任务的产出文件发过来\n"
+            "· 直接发文件 = 排一个任务，文件会放进工作区\n"
             "· /help 这条说明")
 
     def __init__(self, args):
         self.args = args
         self.state = State(os.path.join(args.state_dir, "credentials.json"))
-        self.ilink = ILink(args.base_url)
+        self.ilink = ILink(args.base_url, cdn_base=getattr(args, "cdn_url", CDN_BASE_URL))
         self.queue = Queue(args.tasks)
         self.agent = Agent(args.agent)
         self.workspace_id = ""
@@ -467,7 +631,123 @@ class WeChatBot:
         log("登录超时")
         return False
 
+    # -- the files ---------------------------------------------------------
+    def inbox_dir(self):
+        """Where the files the user sends us land.
+
+        Inside the workspace on purpose: the agent works there, so a task can
+        just read the file the user sent.
+        """
+        path = os.path.join(os.path.abspath(os.path.expanduser(self.args.workspace_path)), "inbox")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def receive_files(self, raw):
+        """Download the files the user sent. Returns the paths on disk."""
+        saved = []
+        for info in files_of(raw):
+            media = info.get("media") or {}
+            param = media.get("encrypt_query_param") or ""
+            if not param:
+                log("a file arrived without a download reference - skipped")
+                continue
+            try:
+                encrypted = self.ilink.download_from_cdn(param)
+                key = decode_aes_key(media.get("aes_key") or "")
+                data = aes_decrypt(encrypted, key)
+            except ILinkError as exc:
+                log("cannot fetch the file: %s" % exc)
+                continue
+            want_md5 = (info.get("md5") or "").strip().lower()
+            if want_md5 and hashlib.md5(data).hexdigest() != want_md5:
+                log("the file's md5 does not match - it was changed on the way")
+            name = safe_file_name(info.get("file_name") or "file.bin")
+            path = os.path.join(self.inbox_dir(), name)
+            stem, dot, ext = name.rpartition(".")
+            attempt = 1
+            while os.path.exists(path):
+                path = os.path.join(self.inbox_dir(),
+                                    ("%s-%d%s" % (stem, attempt, dot)) if dot else name)
+                attempt += 1
+            with open(path, "wb") as f:
+                f.write(data)
+            log("received a file: %s (%d bytes)" % (name, len(data)))
+            saved.append(path)
+        return saved
+
+    def send_file_to_user(self, user_id, path, name=None):
+        """One file to the user: encrypt, upload to the CDN, send."""
+        with open(path, "rb") as f:
+            data = f.read()
+        if len(data) > MAX_FILE_BYTES:
+            raise ILinkError("the file is too big to send (%d bytes)" % len(data))
+        key = os.urandom(16)
+        ciphertext = aes_encrypt(data, key)
+        filekey = os.urandom(16).hex()
+        info = self.ilink.get_upload_url(filekey, user_id, len(data),
+                                         hashlib.md5(data).hexdigest(), len(ciphertext),
+                                         key.hex(), self.state.token)
+        upload_param = (info or {}).get("upload_param")
+        if not upload_param:
+            raise ILinkError("getuploadurl did not return upload_param")
+        param = self.ilink.upload_to_cdn(upload_param, filekey, ciphertext)
+        media = {"encrypt_query_param": param, "aes_key": encode_aes_key(key),
+                 "encrypt_type": 1}
+        item = {"type": ITEM_FILE,
+                "file_item": {"media": media,
+                              "file_name": name or os.path.basename(path),
+                              "len": str(len(data))}}
+        self.ilink.send_items(user_id, self.state.context_for(user_id), [item], self.state.token)
+        return len(data)
+
+    def send_task_files(self, user_id, task):
+        """The files a finished task produced, as file messages."""
+        sent = 0
+        root = os.path.abspath(os.path.expanduser(self.args.workspace_path))
+        for art in (task.get("artifacts") or [])[:MAX_FILES_PER_TASK]:
+            rel = str(art.get("path") or "")
+            if not rel:
+                continue
+            path = os.path.join(root, rel)
+            if not os.path.isfile(path):
+                continue
+            try:
+                self.send_file_to_user(user_id, path, os.path.basename(path))
+                sent += 1
+            except ILinkError as exc:
+                log("cannot send %s: %s" % (rel, exc))
+        return sent
+
     # -- the command mapping ----------------------------------------------
+    def handle_message(self, raw, text, files, user_id):
+        """A message that may carry files as well as text."""
+        if not files:
+            return self.handle(text, user_id)
+        saved = self.receive_files(raw)
+        if not saved:
+            return "文件没能取下来，再发一次？"
+        root = os.path.abspath(os.path.expanduser(self.args.workspace_path))
+        rel = [os.path.relpath(p, root) for p in saved]
+        listed = "、".join(rel)
+        if text:
+            prompt = "%s\n\n（用户发来了这些文件，已经放在工作区里：%s）" % (text, listed)
+        else:
+            prompt = ("用户发来了这些文件，已经放在工作区里：%s。"
+                      "请看一下它们是什么，再按里面的内容办事。" % listed)
+        try:
+            task = self.queue.create(
+                prompt, workspace_id=self.ensure_workspace(),
+                title=(text or rel[0])[:40],
+                provider=self.args.provider or None,
+                allow_paths=self.args.allow_path or None,
+                meta={"wechat_user_id": user_id, "attachments": rel})
+        except ILinkError as exc:
+            return "排队失败：%s" % exc
+        task_id = task.get("id", "?")
+        self.owner[task_id] = user_id
+        return ("已收到文件 %s，已排队 %s\n「%s」"
+                % (listed, task_id, (text or "看看这些文件")[:60]))
+
     def handle(self, text, user_id):
         """What a message means. Returns the reply."""
         text = (text or "").strip()
@@ -522,6 +802,17 @@ class WeChatBot:
                 if task.get("needs_confirmation"):
                     out.append("等你回答：" + (task.get("question") or ""))
                 return "\n".join(out)
+            if cmd in ("/files", "/文件"):
+                if not rest:
+                    return "用法：/files <任务id>"
+                task = self.queue.get(rest[0], workspace_id=self.ensure_workspace())
+                try:
+                    count = self.send_task_files(user_id, task)
+                except ILinkError as exc:
+                    return "文件发不出去：%s" % exc
+                if not count:
+                    return "这个任务没有可发的文件。"
+                return "发了 %d 个文件。" % count
             if cmd in ("/start", "/开始"):
                 if not rest:
                     return "用法：/start <任务id>"
@@ -588,6 +879,27 @@ class WeChatBot:
             self.state.load()
         log("拿到凭证了")
 
+    def process_message(self, raw):
+        """One message from a user: remember the context, answer it.
+
+        A message can be text, a file, or both. The file is fetched from the
+        CDN first, so the task can be about the file.
+        """
+        user_id = raw.get("from_user_id", "")
+        context = raw.get("context_token", "")
+        if user_id and context:
+            self.state.remember_context(user_id, context)
+        text = text_of(raw)
+        files = files_of(raw)
+        if not text and not files:
+            return
+        log("wechat[%s]: %s" % (user_id, (text or "")[:80] or ("%d 个文件" % len(files))))
+        try:
+            answer = self.handle_message(raw, text, files, user_id)
+        except Exception as exc:  # noqa: BLE001 - a bad message must not kill the bot
+            answer = "出错了：%s: %s" % (type(exc).__name__, exc)
+        self.reply(user_id, answer)
+
     def run(self):
         if not self.state.token:
             self.wait_for_credentials()
@@ -611,19 +923,7 @@ class WeChatBot:
             for raw in messages:
                 if raw.get("message_type") != MSG_TYPE_USER:
                     continue
-                user_id = raw.get("from_user_id", "")
-                context = raw.get("context_token", "")
-                if user_id and context:
-                    self.state.remember_context(user_id, context)
-                text = text_of(raw)
-                if not text:
-                    continue
-                log("wechat[%s]: %s" % (user_id, text[:80]))
-                try:
-                    answer = self.handle(text, user_id)
-                except Exception as exc:  # noqa: BLE001 - a bad message must not kill the bot
-                    answer = "出错了：%s: %s" % (type(exc).__name__, exc)
-                self.reply(user_id, answer)
+                self.process_message(raw)
 
     def notify_event(self, event):
         """Tell the user about one task event. Returns True when a message
@@ -639,6 +939,17 @@ class WeChatBot:
         if kind == "task_done":
             text = "做完了 %s\n%s" % (task_id, (task.get("note") or
                                             (task.get("result") or "")[:300]))
+            sent = self.reply(user_id, text)
+            # The files the task produced go out with the answer: a result the
+            # user cannot open on their phone is only half an answer.
+            try:
+                count = self.send_task_files(user_id, task)
+            except ILinkError as exc:
+                log("cannot send the files: %s" % exc)
+                count = 0
+            if count:
+                log("sent %d file(s) to %s" % (count, user_id))
+            return sent
         elif kind == "task_failed":
             text = "%s 失败了：%s" % (task_id, task.get("error") or "未知原因")
         else:
@@ -673,6 +984,8 @@ def build_parser():
                         help="the provider whose quota gates the work (default: the queue's)")
     parser.add_argument("--allow-path", action="append", default=[],
                         help="a directory the WeChat tasks may touch (repeatable)")
+    parser.add_argument("--cdn-url", default=os.environ.get("TEA_WECHAT_CDN", CDN_BASE_URL),
+                        help="the WeChat CDN that stores the media (files)")
     parser.add_argument("--login", action="store_true", help="scan the QR code and exit")
     parser.add_argument("--login-timeout", type=float, default=300.0,
                         help="how long to wait for the scan (default: 300 s)")
