@@ -1,0 +1,449 @@
+# HTTP 接口
+
+## 给上层 Agent 用的接口
+
+所有响应是 JSON，错误统一为 `{"error":{"code":"…","message":"…"}}`。核心就两类：同步查询 + 一条 SSE 流。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/health` | 探活、版本（`0.10.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
+| `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
+| `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
+| `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件 |
+| `GET` | `/api/workspaces/{id}/raw?path=` | 读文件原始字节（图片 / PDF 等，**16 MB 上限**，用于在页面里显示） |
+| `GET` | `/api/workspaces/{id}/download?path=` | 以附件形式下载文件（`Content-Disposition: attachment`），**从磁盘流式发送、无 16 MB 限制**；`&inline=1` 改为在浏览器里直接打开（视频 / PDF） |
+| `GET` / `POST` | `/api/workspaces/{id}/sessions` | 会话列表 / 新建 |
+| `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果） |
+| `GET` / `PUT` | `/api/sessions/{sid}/todos` | 任务列表：GET 随 `/api/sessions/{sid}` 一起返回；PUT 用 `{"items":[…]}` 整体替换，或 `{"index":n,"status":"…"}` 改一条 |
+| `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
+| `POST` | `/api/sessions/{sid}/fork` | 从某一轮分叉出新会话：`{"message_index":N}` 是父会话里某条**用户消息**的下标，复制到该轮结束（含回答与工具结果）；省略或负数 = 复制整个会话。返回 `session`（带 `forked_from` / `fork_turn`）与复制后的 `messages`；父会话不变 |
+| `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON） |
+| `POST` | `/api/workspaces/{id}/sessions/import` | 导入导出的 `.html`（原样或 `{"html":"…"}`）或会话 JSON，新建一个会话；重复导入不会覆盖 |
+| `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |
+| `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
+| `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
+| `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
+| `POST` | `/api/chat` | agent loop 本身；带 `task_id` + `task_context` 时，这一轮就是「在做某个排队任务」，模型会用 `toolkit_task` 汇报进度 |
+| `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
+| `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件。设置页的「重置 provider」走的就是它 |
+| `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`）；key 不会出现在任何响应里 |
+| `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
+| `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
+| `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
+| `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
+| `GET` | `/api/tools` | 工具定义与 JSON Schema |
+| `GET` | `/api/providers` | provider 清单与能力标记（`supports_search` / `supports_fetch` / `supports_usage`），**不含 key** |
+| `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
+| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}` |
+| `POST` | `/api/chat/stop` | 中断当前轮次（对所有人） |
+| `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
+| `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
+| `GET` | `/api/chat/queue?session_id=` | 查看当前排队消息 |
+| `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
+| `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
+| `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
+
+#### token 用量与「缓存命中率」：为什么有的提供方一开始拿不到
+
+指标栏的「缓存命中率」来自 provider 自己报的数字，不是本地估算。但**只有流式响应里带了
+`usage` 的请求才有这些数字**，而 OpenAI 兼容网关大多要你显式开口：
+
+```jsonc
+// 请求体里多这一段
+"stream_options": { "include_usage": true }
+```
+
+MiniMax 的文档写得很直白（`platform.minimax.cn/docs/api-reference/text-chat-openai`）：
+`stream_options.include_usage` 默认 **false**——「是否在流式响应中包含 token 用量」。不传这一句，
+流里的 `usage` 就是 `null`，于是 tea_a2 只能本地估算，指标栏显示「provider 未返回缓存字段」。
+传了之后，用量长这样（同一份文档的响应示例）：
+
+```json
+"usage": {
+  "total_tokens": 473,
+  "total_characters": 0,
+  "prompt_tokens": 170,
+  "completion_tokens": 303,
+  "prompt_tokens_details": { "cached_tokens": 157 }   // ← 前缀缓存命中
+}
+```
+
+`prompt_tokens_details.cached_tokens` 正是 OpenAI 的写法，tea_a2 认；DeepSeek 那种
+`prompt_cache_hit_tokens` 也认（见 `src/llm.cpp` 的 `parse_usage_into`）。
+
+**现在的行为**：
+
+- 默认**会**带 `stream_options.include_usage`（`settings.stream_include_usage`，默认 `true`）——
+  否则大多数网关的用量与缓存命中率都是拿不到的；
+- 某个网关不认这个字段、会回 400 时，tea_a2 记下“这个提供方不支持”，去掉字段重试一次，
+  这一轮照常完成，之后也不再发它（只有这一次多一个来回）；
+- 想按 provider 单独控制，在 provider 块里写 `stream_include_usage: true|false`（不写=跟随全局）；
+- 不用流式（`settings.stream: false`）时不会有这个字段，用量在响应体里，MiniMax 也会给。
+
+### 一次完整的「远程操控」长这样
+
+```bash
+# 1) 找到工作区
+curl -s http://device:8282/api/workspaces | jq -r '.workspaces[0].id'
+
+# 2) 下发任务，边跑边收
+curl -N -X POST http://device:8282/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_xxx","message":"检查 /etc/tea 下的配置文件，把端口改成 9000 并重启服务"}'
+```
+
+SSE 每行 `data: {json}`，按 `type` 分派：
+
+| `type` | 含义 |
+| --- | --- |
+| `start` | 本轮开始（session / provider / model / `messages_before`） |
+| `reasoning_delta` | 思考流 |
+| `content_delta` | 正文增量 |
+| `tool_args_delta` | 工具调用参数的流式增量（只用于进度/速度统计，不当正文渲染） |
+| `tool_call` | 模型请求的工具（`id` / `name` / `arguments`） |
+| `tool_start` | 即将执行 |
+| `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated` |
+| `iteration_end` | 单轮结束，带 `usage` 与 `metrics` |
+| `queue_adopted` | 采纳了一条排队消息（`id` / `content` / `pending`） |
+| `queue_unconsumed` | 轮次结束时仍未采纳的排队消息（`items[]`），客户端应放回输入框 |
+| `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` / `trajectory_id` |
+| `stopped` | 被 `/api/chat/stop` 中断 |
+| `error` | `message` / `detail` |
+| `ping` | 空闲心跳（15s），用于判断链路存活 |
+| `resync` | 回放缓冲溢出：重新拉一次 `/api/sessions/{sid}`，再从 `oldest_seq` 接着收 |
+
+每帧都带一个从 1 递增的 `seq`（`ping` 除外），断线重连靠它对齐。
+
+上层 agent 只需要：发一条 `POST /api/chat`，读 SSE，看 `tool_result` 有没成功，`done` 结束。
+需要打断就调 `/api/chat/stop`——它会在下一个模型/工具边界停住，已产生的会话照样落盘。
+
+### 断线重连：关掉页面不会取消这一轮
+
+轮次的生命周期和那条 HTTP 连接是**分开**的。浏览器关掉、笔记本合盖、换台机器打开 UI，服务端
+那一轮照跑到底——断开只是少了一个订阅者。取消只有三条途径：`POST /api/chat/stop`、
+`POST /api/chat {"interrupt": true}`（显式替换，且会等旧 worker 收尾）、服务端进程退出。
+
+为此每帧都带一个递增的 `seq`，服务端把这一轮发出的帧原样留在一个有上限的回放缓冲里（8 MB，
+超了丢最旧的，并让客户端 `resync`）。重新打开页面时 UI 做三件事：
+
+1. `GET /api/chat/turn?session_id=…` 问一句「这个会话还有轮次在跑吗」；
+2. 有就 `POST /api/chat/attach` 接回去：先回放这一轮从 `seq 1` 开始的全部事件，再继续直播，
+   直到 `done` / `stopped`；
+3. `start` 里的 `messages_before` 说明落盘历史到哪儿为止——回放会把这一轮已经存盘的前几次
+   迭代重新画进 live 气泡，所以客户端先把超出这个下标的消息截掉，屏幕上不会出现两份。
+
+```bash
+# 还在跑吗？跑到第几帧了？
+curl -s 'http://device:8282/api/chat/turn?session_id=s_xxx'
+# {"ok":true,"running":true,"session_id":"s_xxx","last_seq":137,"oldest_seq":1,
+#  "buffered":137,"dropped":0,"pending":0,"started_at":"...","workspace_id":"ws_xxx"}
+
+# 接回去：从 seq 42 之后继续（0 或省略 = 从头回放）
+curl -N -X POST http://device:8282/api/chat/attach \
+  -H 'Content-Type: application/json' -d '{"session_id":"s_xxx","since":42}'
+```
+
+轮次刚结束、还没被回收时 attach 依然可用（把尾巴放完就 `done`）；已经回收则返回
+`404 no_active_turn`，这时 `/api/sessions/{sid}` 就是最终状态。排队消息也一起回来：
+`GET /api/chat/queue?session_id=` 列出的条目仍然挂在服务端那一轮的队列里，等它采纳。
+
+**换一台机器接着看**也是同一条路：轮次属于服务端、按 session 归属，跟发起它的那个浏览器没有
+关系。把主题链接（`/?s=<session_id>`，见下一节）贴到另一台机器上打开即可；不带链接的冷启动
+页面**不会**被"谁在跑就跳到谁"拽走，而是在侧栏把正在跑的会话标成「· 进行中」，点一下才接上。
+
+```bash
+curl -s http://device:8282/api/chat/turns
+# {"ok":true,"turns":[{"running":true,"session_id":"s_xxx","workspace_id":"ws_xxx",
+#   "started_at":"...","last_seq":137,"oldest_seq":1,"buffered":137,"dropped":0,
+#   "pending":0,"subscribers":2}]}
+```
+
+`subscribers` 是此刻有多少个浏览器正跟着这一轮（含发起它的那个）。它同时是一个上限：
+每个跟随者都占着一个 HTTP 线程，所以超过 `TEA_AGENT_MAX_SUBSCRIBERS`（默认 8）的 attach
+会被 `429 too_many_subscribers` 拒绝，而不是把整个服务拖死。
+
+**多个客户端同时看一轮**是允许的、而且是鼓励的用法：每个连接有自己的回放游标，
+所以在台式机上发起一个长任务、拿着笔记本走过去接着看，两边看到的是同一条流；任意一边都能
+插队（`queue_adopted` 会同时出现在两边）。
+
+跟着看和打断它是两件事，所以输入框右侧有两个按钮：
+
+| 按钮 | 作用 |
+| --- | --- |
+| **离开** | 只断开自己这条流：服务端照跑，别人也不受影响。侧栏里那个会话标出「· 进行中」，点一下重新接上 |
+| **停止** | 取消这一轮（对所有人）：在下一个模型/工具边界停住，已产生的内容照样落盘 |
+
+这个页面从不被一轮"锁住"：跟随中切工作区、开新会话、点别的会话都会自动「离开」（服务端照跑），
+不需要先按停止。
+
+注意：默认只监听 `127.0.0.1`，另一台机器要连得上，得用 `--host 0.0.0.0`（或反向代理）启动。
+`--host 0.0.0.0` 意味着同一网段的任何人都能发消息、改配置、甚至销毁状态，所以只在内网使用，
+或者挡一层带鉴权的反向代理。
+
+### 多主题并行：一个 server，几个浏览器
+
+一台设备、一个 `tea_a2`、两三个浏览器，各自看自己的主题——这是预期用法，不是"多个客户端抢一个
+会话"。**主题就是一个会话**；同时看一个主题的多个窗口则是同一轮次的多个订阅者，看到的内容完全
+一样。
+
+**主题有地址**：`/?s=<session_id>`。地址栏跟着当前会话走（打开 / 新建 / 分叉都会更新），顶栏
+右侧的「复制链接」把这条地址放进剪贴板，贴到另一个浏览器或另一台机器上打开就是同一个会话，
+带着正在跑的那一轮直接接上。刷新页面也仍然停在这个主题上，不会跳到"最近更新的那个会话"。
+
+启动时的落点顺序（`web/app.js`）：
+
+1. 地址栏的 `?s=`（最明确，跨机器/贴链接都靠它）；
+2. 本标签页上次看的会话（`sessionStorage`，两个窗口各记各的）；
+3. 上次的工作区（`localStorage`），再不行就是索引里的第一个工作区。
+
+**刻意不再做的事**：以前冷启动会问 `GET /api/chat/turns`，谁在跑就跳到谁的工作区和会话。多主题
+并行时这条规则很烦人——另开一个窗口想看点别的，一打开就被拽到别人正在跑的任务上。现在正在跑
+的会话只在侧栏标「· 进行中（你已离开）」，点一下才接上；工作区、会话、URL 都不会被它改掉。
+
+**跟随中也能走去别处**：切工作区、开新会话、点别的会话都会自动「离开」（断开本页那条 SSE，
+服务端照跑），不需要先按停止，也不会丢掉别人的任务。回到那个会话（点它的行，或用它的
+`?s=` 链接）就重新接上，回放从 `seq 1` 开始，屏幕上的内容和一直开着那边一样。
+
+**上限与保护**（都是环境变量，默认值适合两三台机器）：
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `TEA_AGENT_HTTP_THREADS_MAX` | 128 | HTTP 线程池上限（基础 16 个，按需增长、空闲回收）。每个跟随中的 SSE 都占一个线程，所以这个值同时决定了"同时能跟多少个窗口" |
+| `TEA_AGENT_MAX_SUBSCRIBERS` | 8 | 单个轮次的跟随者上限，超出 `429 too_many_subscribers` |
+| `TEA_AGENT_MAX_ACTIVE_TURNS` | 24 | 同时在跑的轮次上限，超出 `429 too_many_turns` |
+
+改造前线程池固定 32 个、且不回收：实测打开第 32 条 SSE 之后 `/api/health` 直接超时，整个页面
+（包括"停止"按钮）都失灵。现在池子上限可调，跟随者也有上限，被拒绝的只是一个多余的标签页。
+
+**两条写路径的规矩**：
+
+- 同一个会话：新消息默认排队（见下一节），要顶掉正在跑的那一轮必须显式 `interrupt`，而且
+  服务端会等旧 worker 收尾落盘后才开新一轮——否则旧的那份 `Session` 会把新消息覆盖掉。
+- 任务列表、改名、删除会话：轮次进行中一律 `409 turn_running`，因为 worker 会在下一次迭代把
+  改动写回去。等它结束再来。
+
+回归测试：`python3 tests/smoke_multi_session.py`（23 项：三个会话并行、晚到跟随者回放一致、
+默认排队与 `interrupt`、写操作 409、跟随者上限、三个主题各带一个跟随者）、
+`node tests/ui_two_clients.mjs`、`node tests/ui_second_client.mjs`（冷启动不被拽走）、
+`node tests/ui_topic_url.mjs`（同一浏览器的两个标签页各看各的主题，刷新仍在原主题）。
+
+### 插队：轮次进行中追加消息（同会话默认排队）
+
+一轮可能跑很久（长工具、多轮迭代、思考模型）。这段时间里**再发一条 `POST /api/chat` 不会
+顶掉它**：消息进入**当前轮次自己的**队列，agent loop 在下一轮迭代开始前采纳最早的一条，
+把它作为普通 user 消息追加进会话，然后带着新的上下文继续请求模型。一轮只采纳一条，连发几条
+不会挤进同一个请求。
+
+这是为"一个主题、多个窗口"服务的默认行为——另一个浏览器不能因为手快就把别人正在看的任务
+扔掉。响应因此有两种形状：
+
+```bash
+# 轮次进行中：200 + JSON，消息排队，没有新开轮次
+curl -s -X POST http://device:8282/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
+# {"ok":true,"session_id":"s_xxx","workspace_id":"ws_xxx","turn_running":true,
+#  "queued":{"id":"q_...","content":"..."},"pending":1}
+
+# 明确要求顶掉正在跑的那一轮（对所有人）：服务端先取消、等旧 worker 收尾并落盘，
+# 再重新读取会话、开始新一轮。15 秒内停不下来（比如卡在长工具里）返回 409 turn_still_running。
+curl -s -N -X POST http://device:8282/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"换个方向","interrupt":true}'
+
+# 只想排队，不需要 SSE 的客户端可以直接用这个接口
+curl -s -X POST http://device:8282/api/chat/queue \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
+# {"ok":true,"queued":{"id":"q_...","content":"..."},"pending":1}
+
+# 采纳前可以取消：带 id 取消一条，不带 id 取消全部
+curl -s -X POST http://device:8282/api/chat/queue/cancel \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"s_xxx","id":"q_..."}'
+```
+
+为什么 `interrupt` 要等旧 worker：那个 worker 手里攥着自己那份 `Session`，结束时会整份写回。
+在它停之前启动新一轮，新一轮写下的问题与回答会被旧的那份覆盖掉（修复前可稳定复现：新一轮
+的 SSE 明明 `done` 了，磁盘上却没有它的消息）。等待的代价只有一次轮次的收尾时间。
+
+SSE 上的对应事件：
+
+| `type` | 含义 |
+| --- | --- |
+| `queue_adopted` | 已采纳：`id` / `content` / `iteration` / `pending`。该消息已落盘为 user 消息 |
+| `queue_unconsumed` | 轮次在采纳前结束（停止 / 报错 / 迭代上限），`items[]` 原样退回，客户端应放回输入框 |
+| `artifacts` | 本轮产出了新文件：`items[]`（`path` / `bytes` / `kind` / `tool` / `turn`）。UI 用它把下载链接补到回答下面 |
+| `todo` | 任务列表变了：`items[]`（`{id,text,status}`）、`total`、`done`。UI 用它实时更新进度条，不需要等轮次结束 |
+| `tool_images` | `toolkit_load_image` 把图片附加进了对话：`content` 是那条 user 消息的文本，`images[]` 是 `{path, mime}`。客户端应把它插进当前对话（图片走 `/raw`），与本轮结束时回读会话的结果一致 |
+
+几条刻意的约束：
+
+- **队列随轮次存活**。轮次结束队列即销毁，不会留到下一次、无关的对话里突然发出去。
+- **模型已经给完最终答案时也会采纳**：loop 发现队列非空就继续迭代，而不是把消息留成下一轮
+  HTTP 请求；只有停止 / 报错 / 迭代上限才会退回。
+- **只收文本**。图片必须在请求时解码、校验并落到工作区，`/api/chat` 已经为「开始一轮」做了
+  这些；排队路径（包括 `/api/chat` 的默认排队）带 `images` 会明确返回 `400/409
+  images_not_queued`，而不是静默丢掉。
+- 没有进行中的轮次时 `/api/chat/queue` 返回 `409 no_active_turn`：这时直接 `POST /api/chat` 就行。
+- **任务列表 / 改名 / 删除在轮次进行中会被拒绝（`409 turn_running`）**：这些写操作也是
+  "读文件 → 改一处 → 整份写回"，正在跑的 worker 会在下一次迭代把改动覆盖回去。等它结束再来。
+
+内置 Web UI 把这条路径做成了输入框行为：生成中按 **Enter** 进入排队（输入框上方显示排队条，
+每条都能点 × 取消），`Shift+Enter` 仍是换行，右侧是「停止」，旁边还有一个「离开」（只停止
+跟随、不中断轮次）。轮次结束时仍未采纳的消息会自动放回输入框，不会丢字。
+
+### `metrics`：指标栏的数据来源
+
+`iteration_end` 与 `done` 都带一个 `metrics` 块，内置 UI 用它渲染输入框下方的
+「输出速度 / 缓存命中率 / 上下文用量」：
+
+```json
+{
+  "max_context_tokens": 128000,  // 模型窗口；模型没配 max_context_tokens 时为 0
+  "context_tokens": 8642,        // 本轮单次请求最大的 prompt tokens（不是各轮累加）
+  "output_tokens": 512,          // 本轮生成的 tokens（多轮工具调用累加）
+  "ttft_ms": 640,                // 首字延迟
+  "generation_ms": 2140,         // 生成窗口（首字→最后一个增量），t/s 的分母
+  "elapsed_ms": 3120,            // 整轮耗时，含工具执行
+  "estimated": false             // true：provider 没回 usage，这些数字是本地估算
+}
+```
+
+输出速度 = `output_tokens / generation_ms`。用生成窗口而不是整轮耗时，是因为后者包含
+网络排队与工具执行时间，会把 t/s 压得没有意义；窗口短于 250ms（单块响应、非流式）时
+退回整轮耗时。多轮工具调用时两边都是**各轮之和**，所以 `done` 里的 t/s 是「纯生成时间」
+的吞吐，而 `elapsed_ms` 会大得多（工具执行不在里面）。
+
+UI 在生成过程中显示的是 `≈` 前缀的**实时估算**：把本轮收到的 `content_delta` /
+`reasoning_delta` / `tool_args_delta` 按字符折算成 token，除以「本轮首字→现在」的窗口
+（窗口在每次 `iteration_end` 重置，因此工具执行时间同样不计入）。服务端数字到达后立刻
+换成真实值——两边的口径一致，实时值不会长时间偏离最终值。
+
+provider 只在 `stream_options.include_usage` 打开时才回传 usage。没回传时后端用同一个
+token 估算器补上 `context_tokens` / `output_tokens` 并置 `estimated: true`，UI 用「≈」
+标出来；缓存命中率无法估算，于是显示 `—` 而不是编一个数字。每轮日志里也有一行：
+
+```
+turn finished ok=true iterations=4 elapsed_ms=3120 output_tokens=512 ttft_ms=640 gen_ms=2140 context=128/128000
+```
+
+### 流式渲染的预算：别让 UI 成为瓶颈
+
+SSE 的 delta 比屏幕刷新还密（一个 30 KB 的回答能有几百条）。如果每条 delta 都重建气泡，
+工作量就是「段落数 × delta 数」，主线程被占满，Firefox 会直接弹出「此网页拖慢了您的
+firefox，可停止此页面」。内置 UI 现在按三条规则做：
+
+1. **一帧一次**：delta 只置脏，真正的渲染在 `requestAnimationFrame` 里做一次，连续 10 条
+   delta 合并成一次 DOM 操作。rAF 会被浏览器挂起（后台/被遮挡的标签页，headless 下导航回来
+   也可能不再产生帧），所以旁边挂一个 200ms 看门狗：帧来了走帧、看门狗自动取消，帧不来也
+   保证每 200ms 至少画一次——事件在收、`state.live` 在长、画面却一动不动是最坏的组合。
+2. **只改变化的那部分**：气泡的「结构」（段落数、工具行状态、思考行有无、是否已结束）
+   变了才整块重建；纯文字增长只重画最后一个段落 + 思考面板，之前的段落和工具行保持
+   原来的 DOM 节点，不会被重新解析、重新创建。
+3. **指标栏只写变了的项**：每 500ms 的指标刷新逐项比较，`textContent`/`style.width` 没变
+   就不写；贴底滚动也只在真的偏移时才写 `scrollTop`。
+
+同一段 320 条 delta 的流（`tests/ui_render_perf.mjs`）：整块重建从 **324 次降到 4 次**，
+样式与布局时间从 ~420ms 降到 ~170ms。
+
+### 轨迹：每一轮「实际做了什么」的审计记录
+
+会话记录（`/api/sessions/{sid}`）回答「说了什么」，轨迹回答「做了什么」：每一次模型
+迭代、每一次工具调用的原始参数与真实输出、上下文压缩、以及工具**自己回报**的文件改动。
+被上层 agent 远程操控时，这是唯一不用反推聊天记录的证据链。
+
+- 位置：`<workspace>/.tea_agent_run/trajectories/<session_id>.jsonl`，**一轮一行**。
+- 一行 = 一个 turn 对象：`turn_id` / `session_id` / `workspace_id` / `provider` / `model` /
+  `started_at` / `finished_at` / `ok` / `iterations` / `usage{prompt,completion,total,cached}`
+  / `steps[]` / `files_changed[]`。
+- 步骤 `kind`：
+  - `model`：`reasoning_chars` / `content_chars` / 请求的 `tool_calls` 名字 /
+    `tokens{prompt,completion,cached}` / `ttft_ms`（provider 没回 usage 时标 `usage_estimated`）；
+  - `tool`：`name` / `arguments`（模型发出的原始 JSON 字符串）/ `ok` / `exit_code` /
+    `truncated` / `output_filter` + `dropped_lines` / `output`（按上限截断并留标记）；
+  - `compaction`：`covered_messages` / `summary_bytes`。
+- `files_changed` 只写工具真实回报的结果：`toolkit_file` 的 write/append/delete/move 带
+  `path`（写入还带 `bytes` 与 `size`），`toolkit_exec` 只带 `command`——不猜路径。
+- 增量落盘：turn 一开始就写头行，之后每一步**原地刷新同一行**（同偏移重写 + 截断），
+  因此进程被 kill 或断电时文件里仍是最后一份完整快照。读入时按 `turn_id` 取最后一条，
+  尾部被写坏的半行会被跳过；`?full=1` 里未完成的轮次带 `"partial": true`。
+- 文件里不含任何 api_key，API 响应也不含。
+
+```bash
+# SSE 的 done 事件直接给出 id，不需要轮询
+curl -N -X POST http://device:8282/api/chat -d '{"workspace_id":"ws_x","message":"..."}'
+# data: {"type":"done",...,"trajectory_id":"t_1a2b3c4d5e6f"}
+
+curl -s http://device:8282/api/sessions/s_9f8e7d/trajectory            # 摘要，最新在前
+curl -s 'http://device:8282/api/sessions/s_9f8e7d/trajectory?full=1'   # 带 steps / files_changed
+curl -s http://device:8282/api/turns/t_1a2b3c4d5e6f/trajectory         # 单轮完整轨迹
+curl -s 'http://device:8282/api/sessions/s_9f8e7d/trajectory?format=jsonl'  # 原始 JSONL
+```
+
+默认视图（摘要）：
+
+```json
+[{"turn_id":"t_1a2b3c4d5e6f","started_at":"2026-01-01T00:00:00.000Z","elapsed_ms":4213,
+  "ok":true,"iterations":4,"steps":7,
+  "usage":{"prompt_tokens":1843,"completion_tokens":512,"total_tokens":2355,"cached_tokens":1024},
+  "files_changed":1,"partial":false}]
+```
+
+内置 UI 在每条助手回复上方显示一行折叠的「轨迹」（例如 `4 步 · 1.2 s · 284 tok`），
+展开后是步骤时间线（模型 / 工具 / 压缩）、工具参数与实际输出、以及本轮改动过的文件与
+字节数。
+
+留存与上限，按工作区覆盖（`<workspace>/.tea_agent_run/settings.yaml`）：
+
+```yaml
+settings:
+  enable_trajectory: true           # false => 完全不写轨迹
+  trajectory_step_max_bytes: 8192   # 单条工具输出保留多少字节（超出留截断标记）
+  trajectory_max_turns: 200         # 每个会话文件最多留几轮
+  trajectory_max_bytes: 8388608     # 每个会话文件最多多少字节（默认 8 MB）
+```
+
+超出上限时**从最旧的轮次删起**，并在工作区日志里写清删了什么：
+
+```
+trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; limits 1 turns / 8388608 bytes)
+```
+
+
+---
+
+### 原语层：给脚本用的 API
+
+产品是「聊天」和「任务队列」；**原语**是「一次模型调用」「一条记录」「一个事件」。
+策略——什么时候开工、做什么、什么时候停、通知谁——应该写在脚本里，而不是长在服务端里。
+
+| 接口 | 干什么 |
+| --- | --- |
+| `POST /api/llm/chat` | **一次模型调用**：没有 agent loop，不执行任何工具。`{prompt\|messages, system, provider, model, tools, temperature, max_tokens, stream}`。不流式时返回 `{content, reasoning, tool_calls[], usage, elapsed_ms}`；流式时是 SSE（`content_delta` / `reasoning_delta`，最后一条 `done` 带全部结果）。`tools` 原样透传——协议归调用方，服务端只负责把请求送出去。 |
+| `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id` + `task_context`（这一轮在做某个排队任务，模型会据此汇报进度）。 |
+| `GET /api/providers/{name}/usage` | 这个 provider 的额度（5 小时窗口 + 每周窗口）；provider 没声明额度端点时是 400。 |
+
+`sched/tea_api.py` 是 agent 这层的客户端（纯标准库，设备上跑得起来）：
+
+```python
+from tea_api import Tea
+tea = Tea("http://127.0.0.1:8282")
+
+quota = tea.usage("minimax")              # 额度
+for event in tea.events(workspace_id=ws):  # 订阅，而不是轮询
+    if event["type"] == "done":
+        notify(event)                     # 通知怎么发，是你的事
+```
+
+---
+
+
+---
+
+← 回到 [README](../README.md)
+
+---
+
+← 回到 [README](../README.md)
