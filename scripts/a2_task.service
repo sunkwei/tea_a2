@@ -1,28 +1,33 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装：
+# 它会把这三个单元装到 ~/.config/systemd/user/ 并把仓库路径换掉。
 [Unit]
 Description=tea_a2 task server (the task queue; the agent on 127.0.0.1:8383 is the channel)
-Documentation=file:///home/sunkw/work/git/tea_a2/README.md
+Documentation=file://%h/work/git/tea_a2/README.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=exec
+# append: 不会自己建目录，日志目录不在的话单元起不来。
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
 # 任务服务：排队 / 执行 / 状态 / 结果。agent 那边只是「工作区通道」，
 # 所以这里指到 8383；额度闸门问的就是它（GET /api/providers/minimax/usage）。
 # 任务服务自己听 8283，浏览器「设置 → 任务服务（可选）」填 http://127.0.0.1:8283
 # 就能在后台任务跑完时闪一下标签页。
 # --workspace-path：队列自己独占的工作区（后台任务在这里做，不碰别人的仓库）。
 #                  默认 ~/.tea_agent/task-workspace
-ExecStart=/usr/bin/python3 /home/sunkw/work/git/tea_a2/sched/task_server.py --agent http://localhost:8383 --port 8283
-WorkingDirectory=/home/sunkw/work/git/tea_a2
-Environment=HOME=/home/sunkw
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/task_server.py --agent http://localhost:8383 --port 8283
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
 Environment=LANG=zh_CN.UTF-8
 Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=5s
 # 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
 # `journalctl --user` 根本读不到（已实测），所以直接 append 到文件。
-StandardOutput=append:/home/sunkw/.tea_agent/logs/a2_task.log
-StandardError=append:/home/sunkw/.tea_agent/logs/a2_task.log
+StandardOutput=append:%h/.tea_agent/logs/a2_task.log
+StandardError=append:%h/.tea_agent/logs/a2_task.log
 
 [Install]
 WantedBy=default.target

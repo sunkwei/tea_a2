@@ -183,8 +183,9 @@ build/bin/tea_agent --workspace . --open
 | `a2_task.service` | 任务队列（Python）：排队 / 执行 / 状态 / 结果 | 8283 |
 | `a2_wechat.service` | 队列的微信前端 | — |
 
-单元文件在 `scripts/` 里（`a2.service` 之外的三个要自己 `cp` 到
-`~/.config/systemd/user/`）。详见 [部署](docs/deploy.md)。
+单元文件在 `scripts/` 里，是**跟机器无关的模板**（路径用 `%h`，也就是运行单元的用户的主目录）。
+装的时候用 `scripts/install-units.sh [仓库路径]`：它把单元装到 `~/.config/systemd/user/` 并把仓库
+路径换成本机的。详见 [部署](docs/deploy.md)。
 
 ## 文档
 

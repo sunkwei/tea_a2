@@ -134,15 +134,20 @@ python3 sched/wechat_bot.py --login
 python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283
 ```
 
-**开机自启（systemd user unit）**：`scripts/a2_wechat.service` 是一份现成的模板：
+**开机自启（systemd user unit）**：`scripts/a2_wechat.service` 是一份**跟机器无关的模板**
+（路径写的是 `%h`，即运行单元的用户的主目录；仓库默认在 `~/work/git/tea_a2`）。装：
 
 ```bash
-cp scripts/a2_wechat.service ~/.config/systemd/user/
-systemctl --user daemon-reload
+scripts/install-units.sh [仓库路径]       # 不给参数就是本仓库；给了就装那个路径
 systemctl --user enable --now a2_wechat
 systemctl --user status a2_wechat
 tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=none
 ```
+
+`install-units.sh` 把 `a2` / `a2_task` / `a2_wechat` 三个单元装到 `~/.config/systemd/user/`，
+把模板里的仓库路径换成本机的，然后 `daemon-reload`。**目标机器的目录不一样不用手改**：
+给对路径就行；实在要手改，模板里要改的只有 `ExecStart` / `WorkingDirectory` /
+`StandardOutput` 三处的仓库路径。
 
 服务会**等着凭证出现**：先 `systemctl --user start a2_wechat`，什么时候扫完码，它什么时候接上
 （凭证写在 `~/.tea_agent/wechat/credentials.json`，服务每 5 秒看一眼）。
