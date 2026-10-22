@@ -21,8 +21,8 @@ Restart=on-failure
 RestartSec=5s
 # 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
 # `journalctl --user` 根本读不到（已实测），所以直接 append 到文件。
-StandardOutput=append:/home/sunkw/.tea_agent/logs/a2_py.log
-StandardError=append:/home/sunkw/.tea_agent/logs/a2_py.log
+StandardOutput=append:/home/sunkw/.tea_agent/logs/a2_task.log
+StandardError=append:/home/sunkw/.tea_agent/logs/a2_task.log
 
 [Install]
 WantedBy=default.target
