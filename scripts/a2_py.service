@@ -10,6 +10,8 @@ Type=exec
 # 所以这里指到 8383；额度闸门问的就是它（GET /api/providers/minimax/usage）。
 # 任务服务自己听 8283，浏览器「设置 → 任务服务（可选）」填 http://127.0.0.1:8283
 # 就能在后台任务跑完时闪一下标签页。
+# --workspace-path：队列自己独占的工作区（后台任务在这里做，不碰别人的仓库）。
+#                  默认 ~/.tea_agent/task-workspace
 ExecStart=/usr/bin/python3 /home/sunkw/work/git/tea_a2/sched/task_server.py --agent http://localhost:8383 --port 8283
 WorkingDirectory=/home/sunkw/work/git/tea_a2
 Environment=HOME=/home/sunkw

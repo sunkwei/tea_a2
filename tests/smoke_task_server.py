@@ -235,10 +235,12 @@ providers:
         "--no-console", "--log-file", os.path.join(home, "logs", "tea_agent.log"),
         "--workspace", ws_dir,
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    task_ws_path = os.path.join(tmp, "task-workspace")
     task_server_cmd = [
         sys.executable, SERVER, "--agent", "http://127.0.0.1:%d" % agent_port,
         "--host", "127.0.0.1", "--port", str(task_port), "--data-dir", data_dir,
         "--provider", "minimax", "--interval", "2", "--max-per-round", "4",
+        "--workspace-path", task_ws_path,
     ]
     task_server = subprocess.Popen(task_server_cmd,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -391,7 +393,14 @@ providers:
         status, plain = call(task_port, "POST", "/api/tasks",
                              {"prompt": "no workspace named"})
         check("a task can be queued without naming a workspace",
-              status == 200 and plain.get("workspace_id") == ws_id, (status, plain))
+              status == 200 and bool(plain.get("workspace_id")), (status, plain))
+        check("the queue works in a workspace of its own",
+              plain.get("workspace_id") != ws_id and os.path.isdir(task_ws_path),
+              (plain.get("workspace_id"), task_ws_path))
+        _, listed = call(agent_port, "GET", "/api/workspaces")
+        check("the agent knows the queue's workspace",
+              any(w.get("id") == plain.get("workspace_id") for w in listed.get("workspaces", [])),
+              [w.get("path") for w in listed.get("workspaces", [])])
         status, gone = call(task_port, "DELETE", "/api/tasks/" + plain.get("id", ""))
         check("a task can be deleted without naming a workspace",
               status == 200 and gone.get("ok") is True, (status, gone))

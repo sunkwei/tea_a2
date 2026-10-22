@@ -140,6 +140,10 @@ class Agent:
     def stop(self, session_id):
         return self._request("POST", "/api/chat/stop", {"session_id": session_id})
 
+    def register_workspace(self, path, name=""):
+        """Add a workspace to the agent's index (it is the agent's registry)."""
+        return self._request("POST", "/api/workspaces", {"path": path, "name": name})
+
     def chat(self, workspace_id, message, provider=None, session_id=None,
              task_id=None, task_context=None):
         """Run one turn and yield the agent's events as they happen.
@@ -915,6 +919,7 @@ class App:
     def __init__(self, args):
         self.args = args
         self._page = None
+        self._task_ws_id = ""
         self.store = Store(args.data_dir)
         self.agent = Agent(args.agent)
         self.events = Events()
@@ -953,8 +958,38 @@ class App:
             pass
         return ""
 
+    def task_workspace_id(self):
+        """The queue's OWN workspace: a directory of its own, registered with
+        the agent so the agent can work there.
+
+        The queue must not scribble into somebody's project: a background task
+        that writes files belongs in a directory that is nobody's checkout. So
+        the service keeps one workspace of its own (by default under the tea
+        home), and every task that does not name a workspace works there.
+        """
+        if self.args.workspace:
+            return self.args.workspace        # the operator named one
+        if self._task_ws_id:
+            return self._task_ws_id
+        path = os.path.abspath(os.path.expanduser(self.args.workspace_path))
+        try:
+            os.makedirs(path, exist_ok=True)
+            for ws in self.agent.workspaces():
+                if os.path.abspath(ws.get("path", "")) == path:
+                    self._task_ws_id = ws.get("id", "")
+                    return self._task_ws_id
+            created = self.agent.register_workspace(path, self.args.workspace_name)
+            self._task_ws_id = created.get("id", "")
+            log("task workspace: %s (%s)" % (path, self._task_ws_id or "?"))
+        except (AgentError, OSError) as exc:
+            log("cannot prepare the task workspace %s: %s" % (path, exc))
+        return self._task_ws_id
+
     def default_workspace(self):
         """The workspace a task goes to when the caller does not name one."""
+        own = self.task_workspace_id()
+        if own:
+            return own
         wanted = self.args.workspace
         try:
             workspaces = self.agent.workspaces()
@@ -1008,7 +1043,12 @@ def main(argv=None):
     parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
                         help="where the task records live (default: %s)" % DEFAULT_DATA_DIR)
     parser.add_argument("--workspace", default=os.environ.get("TEA_AGENT_WORKSPACE", ""),
-                        help="the workspace whose queue is worked on (default: the first one)")
+                        help="the workspace whose queue is worked on (default: the queue's own)")
+    parser.add_argument("--workspace-path", default=os.environ.get(
+        "TEA_TASK_WORKSPACE", os.path.join("~", ".tea_agent", "task-workspace")),
+        help="the queue's own workspace directory (created and registered with the agent)")
+    parser.add_argument("--workspace-name", default=os.environ.get("TEA_TASK_WORKSPACE_NAME", "任务"),
+                        help="the name the queue's workspace gets in the agent")
     parser.add_argument("--provider", default=DEFAULT_PROVIDER,
                         help="the provider whose quota gates the work (default: %s)" % DEFAULT_PROVIDER)
     parser.add_argument("--window", default="window", choices=["window", "weekly"],
@@ -1062,6 +1102,9 @@ def main(argv=None):
         app.store.create(task)
         log("queued task %s (%s)" % (task["id"], task["title"] or ""))
         return 0
+
+    # The queue's own workspace: created (and registered with the agent) once.
+    app.task_workspace_id()
 
     # The records of a previous run: a task that was running then is not
     # running now (its worker died with that process).
