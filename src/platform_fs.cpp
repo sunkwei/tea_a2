@@ -521,6 +521,7 @@ bool read_file(const std::string& path, std::string* out, size_t max_bytes, bool
   CloseHandle(h);
   if (!read_ok) return false;
   out->resize(got);
+  trim_utf8_edges(out);
   return true;
 #else
   const int fd = ::open(path.c_str(), O_RDONLY);
@@ -546,6 +547,10 @@ bool read_file(const std::string& path, std::string* out, size_t max_bytes, bool
   ::close(fd);
   if (total > want && truncated) *truncated = true;
   out->resize(got);
+  // A cut in the middle of a multi-byte character would make the tool result
+  // invalid UTF-8, and the JSON layer refuses to serialise that - the agent
+  // would crash on a file whose size happens to land mid-character.
+  trim_utf8_edges(out);
   return true;
 #endif
 }
@@ -574,6 +579,7 @@ bool read_file_tail(const std::string& path, size_t max_bytes, std::string* out)
   CloseHandle(h);
   if (!read_ok) return false;
   out->resize(got);
+  trim_utf8_edges(out, true);   // the window may start mid-character
   return true;
 #else
   const int fd = ::open(path.c_str(), O_RDONLY);
@@ -596,6 +602,7 @@ bool read_file_tail(const std::string& path, size_t max_bytes, std::string* out)
   }
   ::close(fd);
   out->resize(got);
+  trim_utf8_edges(out, true);   // the window may start mid-character
   return true;
 #endif
 }

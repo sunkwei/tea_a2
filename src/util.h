@@ -40,6 +40,11 @@ std::string join(const std::vector<std::string>& parts, const std::string& sep);
 
 /// Truncate to at most `max_bytes` without splitting a UTF-8 sequence.
 std::string truncate_utf8(const std::string& s, size_t max_bytes, bool* truncated = nullptr);
+/// Drop a trailing incomplete UTF-8 sequence (and, with `head`, a leading one).
+/// A file cut in the middle of a multi-byte character would make the whole
+/// tool result invalid UTF-8 - and the JSON layer refuses to serialise that,
+/// which crashed the agent on a file whose size happened to land mid-character.
+void trim_utf8_edges(std::string* s, bool head = false);
 size_t utf8_length(const std::string& s);
 bool is_valid_utf8(const std::string& s);
 std::string human_size(uint64_t bytes);

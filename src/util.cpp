@@ -197,6 +197,40 @@ std::string truncate_utf8(const std::string& s, size_t max_bytes, bool* truncate
   return s.substr(0, cut);
 }
 
+void trim_utf8_edges(std::string* s, bool head) {
+  if (!s || s->empty()) return;
+  // How many bytes the character at the edge needs.
+  auto need_of = [](unsigned char c) -> size_t {
+    if ((c & 0x80) == 0x00) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1;   // not a lead byte: invalid, leave it alone
+  };
+  if (!head) {
+    // The tail: walk back over the continuation bytes to the lead byte.
+    size_t back = 0;
+    while (back < 4 && back < s->size()) {
+      const unsigned char c = static_cast<unsigned char>((*s)[s->size() - 1 - back]);
+      if ((c & 0xC0) != 0x80) {
+        if (back + 1 < need_of(c)) s->resize(s->size() - back - 1);
+        return;
+      }
+      ++back;
+    }
+    return;
+  }
+  // The head: the first bytes may be the tail of a character that started before
+  // the read window.
+  size_t skip = 0;
+  while (skip < 4 && skip < s->size()) {
+    const unsigned char c = static_cast<unsigned char>((*s)[skip]);
+    if ((c & 0xC0) != 0x80) break;
+    ++skip;
+  }
+  if (skip > 0) s->erase(0, skip);
+}
+
 size_t utf8_length(const std::string& s) {
   size_t n = 0;
   for (unsigned char c : s) {
