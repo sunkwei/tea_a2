@@ -173,7 +173,8 @@ def call(port, method, path, body=None, timeout=60):
     try:
         return resp.status, json.loads(raw or b"null")
     except ValueError:
-        return resp.status, {"raw": raw.decode("utf-8", "replace")}
+        # Not JSON (the page): hand back the text.
+        return resp.status, raw.decode("utf-8", "replace")
 
 
 def wait_task_status(base_port, ws_id, task_id, wanted, timeout=90.0):
@@ -380,6 +381,22 @@ providers:
         check("the event carries the task record",
               any(e.get("type") == "task_done" and e.get("task", {}).get("id") == task3.get("id")
                   for e in events), types)
+
+        # ---- the page ------------------------------------------------------
+        status, page = call(task_port, "GET", "/")
+        check("the task page is served", status == 200 and "排队中" in str(page), status)
+        check("the page has a section for the finished tasks",
+              "已完成" in str(page) and "进行中" in str(page), "")
+        status, one = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s" % (task_id, ws_id))
+        check("a task says where its record lives",
+              str(one.get("record_path", "")).endswith(task_id + ".json"), one.get("record_path"))
+        check("a task says which agent to reach",
+              one.get("agent_url") == "http://127.0.0.1:%d" % agent_port, one.get("agent_url"))
+        check("a task says which workspace it works in",
+              bool(one.get("workspace_path")), one.get("workspace_path"))
+        status, health = call(task_port, "GET", "/api/health")
+        check("the health reports the quota left",
+              isinstance(health.get("quota_percent"), (int, float)), health.get("quota_percent"))
 
         # ---- a provider without a quota -------------------------------------
         status, task4 = call(task_port, "POST", "/api/tasks",

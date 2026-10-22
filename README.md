@@ -1748,6 +1748,19 @@ curl http://127.0.0.1:8283/api/tasks
 | `POST` | `/api/tasks/{id}/confirm?workspace_id=` | 回答一个「等你确认」的任务：`{message}`，答案会成为同一会话的下一轮 |
 | `GET` | `/api/events` | 生命周期事件流（SSE）：`task_created` / `task_updated` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled` |
 
+### 网页：<http://127.0.0.1:8283/>
+
+任务服务自带一个页面（`sched/task_ui.html`，一个静态文件，纯标准库伺服），分三段：
+
+- **排队中**：什么时候排的、任务内容、provider、可以「开始」或「删除」；
+- **进行中**：进度条与百分比、agent 报上来的最新中间状态（展开看历史）、可以「取消」；
+  「等你确认」的任务在这里，答一句就继续；
+- **已完成**：**最终回答**、**生成物**（agent 产出的文件，点开直接下载）、中间状态、
+  **任务目录**（记录文件在哪、工作区在哪）和「在 agent 里打开这个会话」的链接。
+
+页面靠 `/api/events`（SSE）实时刷新，5 秒轮询一次兜底；顶栏还显示 agent 的连通状态和
+**minimax 额度还剩多少**。
+
 ### 任务是什么
 
 一个任务 = 一句要做的事 + 它的状态。记录是**一个任务一个文件**

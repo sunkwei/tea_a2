@@ -200,6 +200,10 @@ class Store:
     def _path(self, workspace_id, task_id):
         return os.path.join(self._dir(workspace_id), task_id + ".json")
 
+    def record_path(self, workspace_id, task_id):
+        """Where a task's record lives - the page shows it."""
+        return self._path(workspace_id, task_id)
+
     def create(self, task):
         with self.lock:
             os.makedirs(self._dir(task.get("workspace_id")), exist_ok=True)
@@ -473,6 +477,13 @@ class Engine:
                                   lambda t: t.update({"session_id": session_id}))
             elif kind == "tool_call" and event.get("name") == "toolkit_task":
                 self._apply_report(workspace_id, task_id, event, report)
+            elif kind == "artifacts":
+                # The files this turn produced: the page shows them under the
+                # finished task.
+                items = event.get("items") or []
+                if items:
+                    self.store.update(workspace_id, task_id,
+                                      lambda t: t.update({"artifacts": items}))
             elif kind == "content_delta":
                 answer += event.get("text") or ""
             elif kind == "done":
@@ -611,6 +622,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
+        if path in ("/", "/ui", "/index.html"):
+            return self._page()
         if path == "/api/health":
             return self._health()
         if path == "/api/tasks":
@@ -640,6 +653,20 @@ class Handler(BaseHTTPRequestHandler):
         return self._error(404, "not_found", "no such endpoint: %s" % path)
 
     # -- handlers -------------------------------------------------------
+    def _page(self):
+        """The task queue's own page: queued, running, finished."""
+        html = self.app.page_html()
+        if not html:
+            return self._error(404, "not_found",
+                               "the page file (task_ui.html) is missing next to this script")
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _health(self):
         agent = self.app.agent
         try:
@@ -648,12 +675,14 @@ class Handler(BaseHTTPRequestHandler):
         except AgentError as exc:
             health = {"error": str(exc)}
             agent_ok = False
+        left, _ = self.app.engine.quota_left(self.app.args.provider)
         self._json(200, {
             "ok": True,
             "agent": agent.base,
             "agent_ok": agent_ok,
             "agent_health": health,
             "provider": self.app.args.provider,
+            "quota_percent": left,
             "data_dir": self.app.store.root,
             "counts": self.app.store.counts(),
         })
@@ -662,14 +691,15 @@ class Handler(BaseHTTPRequestHandler):
         workspace_id = self._one("workspace_id")
         status = self._one("status")
         tasks = self.app.store.list(workspace_id or None, status or None)
-        self._json(200, {"tasks": tasks, "counts": self.app.store.counts(workspace_id or None)})
+        self._json(200, {"tasks": [self.app.decorate(t) for t in tasks],
+                         "counts": self.app.store.counts(workspace_id or None)})
 
     def _get(self, task_id):
         workspace_id = self._one("workspace_id")
         task = self.app.store.load(workspace_id, task_id)
         if task is None:
             return self._error(404, "not_found", "no task %r" % task_id)
-        self._json(200, task)
+        self._json(200, self.app.decorate(task))
 
     def _create(self):
         body = self._body()
@@ -812,10 +842,44 @@ class App:
 
     def __init__(self, args):
         self.args = args
+        self._page = None
         self.store = Store(args.data_dir)
         self.agent = Agent(args.agent)
         self.events = Events()
         self.engine = Engine(self.store, self.agent, self.events, args)
+
+    def page_html(self):
+        """The page, read once at startup (it is a static file next to us)."""
+        if self._page is None:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "task_ui.html")
+            try:
+                with open(path, encoding="utf-8") as f:
+                    self._page = f.read()
+            except OSError:
+                self._page = ""
+        return self._page
+
+    def decorate(self, task):
+        """Add the bits a reader wants: where the record is, which workspace,
+        and the agent to reach."""
+        task = dict(task)
+        task["record_path"] = self.store.record_path(task.get("workspace_id"), task.get("id"))
+        task["agent_url"] = self.agent.base
+        path = self.workspace_path(task.get("workspace_id"))
+        if path:
+            task["workspace_path"] = path
+        return task
+
+    def workspace_path(self, workspace_id):
+        if not workspace_id:
+            return ""
+        try:
+            for ws in self.agent.workspaces():
+                if ws.get("id") == workspace_id:
+                    return ws.get("path", "")
+        except AgentError:
+            pass
+        return ""
 
     def default_workspace(self):
         """The workspace a task goes to when the caller does not name one."""
