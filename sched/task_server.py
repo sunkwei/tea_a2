@@ -46,8 +46,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8282")
 DEFAULT_PORT = int(os.environ.get("TEA_TASK_PORT", "8283"))
+DEFAULT_WORKSPACE_PATH = os.path.expanduser(os.environ.get(
+    "TEA_TASK_WORKSPACE", os.path.join("~", ".tea_agent", "task-workspace")))
+# The ledger lives in the queue's own workspace, next to the work: one directory
+# holds everything about the queue.
 DEFAULT_DATA_DIR = os.path.expanduser(os.environ.get(
-    "TEA_TASK_DATA", os.path.join("~", ".tea_agent", "tasks")))
+    "TEA_TASK_DATA", os.path.join(DEFAULT_WORKSPACE_PATH, "tasks")))
 # The provider whose quota gates the work. MiniMax M Plan reports one; a
 # provider without a quota endpoint is worked on anyway (with a warning).
 DEFAULT_PROVIDER = os.environ.get("TEA_TASK_PROVIDER", "minimax")
@@ -209,45 +213,35 @@ class Store:
         self.lock = threading.RLock()
         os.makedirs(self.root, exist_ok=True)
 
-    def _dir(self, workspace_id):
-        return os.path.join(self.root, workspace_id or "_global")
-
-    def _path(self, workspace_id, task_id):
-        return os.path.join(self._dir(workspace_id), task_id + ".json")
+    def _path(self, task_id):
+        return os.path.join(self.root, task_id + ".json")
 
     def record_path(self, workspace_id, task_id):
         """Where a task's record lives - the page shows it."""
-        return self._path(workspace_id, task_id)
+        return self._path(task_id)
 
     def create(self, task):
         with self.lock:
-            os.makedirs(self._dir(task.get("workspace_id")), exist_ok=True)
             self._write(task)
         return task
 
     def load(self, workspace_id, task_id):
+        # One ledger, one directory: the task ids are unique, so the workspace a
+        # task works in is a field of the record, not a directory.
         with self.lock:
             try:
-                with open(self._path(workspace_id, task_id), encoding="utf-8") as f:
+                with open(self._path(task_id), encoding="utf-8") as f:
                     return json.load(f)
             except (OSError, ValueError):
-                pass
-            if workspace_id:
                 return None
-            # No workspace given: look in every one of them. The task ids are
-            # unique, so the first hit is the right one.
-            for task in self.list():
-                if task.get("id") == task_id:
-                    return task
-            return None
 
     def save(self, task):
         with self.lock:
             self._write(task)
 
     def _write(self, task):
-        os.makedirs(self._dir(task.get("workspace_id")), exist_ok=True)
-        path = self._path(task.get("workspace_id"), task.get("id"))
+        os.makedirs(self.root, exist_ok=True)
+        path = self._path(task.get("id"))
         # Atomic: a reader (the API, the scheduler) never sees half a record.
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".task-")
         try:
@@ -275,50 +269,31 @@ class Store:
     def list(self, workspace_id=None, status=None):
         out = []
         with self.lock:
-            roots = [self._dir(workspace_id)] if workspace_id else []
-            if not roots:
-                try:
-                    roots = [os.path.join(self.root, d) for d in os.listdir(self.root)]
-                except OSError:
-                    roots = []
-            for root in roots:
-                if not os.path.isdir(root):
+            try:
+                names = os.listdir(self.root)
+            except OSError:
+                names = []
+            for name in names:
+                if not name.endswith(".json"):
                     continue
-                try:
-                    names = os.listdir(root)
-                except OSError:
+                task = self.load(workspace_id, name[:-5])
+                if task is None:
                     continue
-                for name in names:
-                    if not name.endswith(".json"):
-                        continue
-                    task = self.load(os.path.basename(root), name[:-5])
-                    if task is None:
-                        continue
-                    if status and task.get("status") != status:
-                        continue
-                    out.append(task)
+                if workspace_id and task.get("workspace_id") != workspace_id:
+                    continue
+                if status and task.get("status") != status:
+                    continue
+                out.append(task)
         out.sort(key=lambda t: (t.get("created_at") or "", t.get("id") or ""))
         return out
 
     def delete(self, workspace_id, task_id):
         with self.lock:
-            path = self._path(workspace_id, task_id)
             try:
-                os.unlink(path)
+                os.unlink(self._path(task_id))
                 return True
             except OSError:
-                pass
-            if workspace_id:
                 return False
-            # No workspace given: the record may live in any of them.
-            for task in self.list():
-                if task.get("id") == task_id:
-                    try:
-                        os.unlink(self._path(task.get("workspace_id"), task_id))
-                        return True
-                    except OSError:
-                        return False
-            return False
 
     def counts(self, workspace_id=None):
         counts = {QUEUED: 0, RUNNING: 0, WAITING: 0, DONE: 0, FAILED: 0, CANCELLED: 0}
@@ -920,7 +895,11 @@ class App:
         self.args = args
         self._page = None
         self._task_ws_id = ""
-        self.store = Store(args.data_dir)
+        data_dir = args.data_dir
+        if not data_dir:
+            data_dir = os.path.join(os.path.abspath(os.path.expanduser(args.workspace_path)),
+                                    "tasks")
+        self.store = Store(data_dir)
         self.agent = Agent(args.agent)
         self.events = Events()
         self.engine = Engine(self.store, self.agent, self.events, args)
@@ -1040,13 +1019,12 @@ def main(argv=None):
     parser.add_argument("--host", default="127.0.0.1", help="where to serve the task API")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help="the port of the task API (default: %d)" % DEFAULT_PORT)
-    parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
-                        help="where the task records live (default: %s)" % DEFAULT_DATA_DIR)
+    parser.add_argument("--data-dir", default="",
+                        help="where the task records live (default: <workspace-path>/tasks)")
     parser.add_argument("--workspace", default=os.environ.get("TEA_AGENT_WORKSPACE", ""),
                         help="the workspace whose queue is worked on (default: the queue's own)")
-    parser.add_argument("--workspace-path", default=os.environ.get(
-        "TEA_TASK_WORKSPACE", os.path.join("~", ".tea_agent", "task-workspace")),
-        help="the queue's own workspace directory (created and registered with the agent)")
+    parser.add_argument("--workspace-path", default=DEFAULT_WORKSPACE_PATH,
+                        help="the queue's own workspace directory (created and registered with the agent)")
     parser.add_argument("--workspace-name", default=os.environ.get("TEA_TASK_WORKSPACE_NAME", "任务"),
                         help="the name the queue's workspace gets in the agent")
     parser.add_argument("--provider", default=DEFAULT_PROVIDER,

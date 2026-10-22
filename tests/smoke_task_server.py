@@ -449,8 +449,9 @@ providers:
             "question": "", "error": "", "result": "", "meta": {},
             "created_at": old, "updated_at": old, "started_at": old, "finished_at": "",
         }
-        os.makedirs(os.path.join(data_dir, ws_id), exist_ok=True)
-        with open(os.path.join(data_dir, ws_id, "t_stale01.json"), "w", encoding="utf-8") as f:
+        # One ledger, one directory: the record sits directly in the data dir.
+        os.makedirs(data_dir, exist_ok=True)
+        with open(os.path.join(data_dir, "t_stale01.json"), "w", encoding="utf-8") as f:
             json.dump(stale, f, ensure_ascii=False)
         task_server.terminate()
         try:
