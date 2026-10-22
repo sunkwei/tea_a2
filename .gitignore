@@ -20,6 +20,11 @@ desktop.ini
 # Local agent scratch space created inside a workspace
 .tea_agent_run/
 
+# Python bytecode: the queue and the WeChat bot are plain scripts, the
+# interpreter compiles them on the machine that runs them.
+__pycache__/
+*.pyc
+
 # Runtime logs
 *.log
 vcvars*.log
