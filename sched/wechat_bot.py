@@ -65,6 +65,13 @@ MSG_TYPE_BOT = 2
 MSG_STATE_FINISH = 2
 ITEM_TEXT = 1
 ITEM_FILE = 4
+# The media kinds. The item *number* is not documented on our side, so the
+# media of an incoming message is found by the key the item carries
+# ("file_item", "image_item", ...). That way a picture is neither mistaken
+# for a file nor dropped on the floor.
+MEDIA_ITEM_KEYS = ("file_item", "image_item", "video_item", "voice_item")
+# The magic bytes of the pictures we know.
+IMAGE_MAGIC = (b"\xff\xd8\xff", b"\x89PNG", b"GIF8", b"RIFF", b"BM")
 # The media_type the upload API wants for a plain file.
 MEDIA_FILE = 3
 # A file bigger than this is not worth sending (and WeChat may refuse it).
@@ -311,6 +318,17 @@ class ILink:
             raise ILinkError("the CDN upload did not return x-encrypted-param")
         return param
 
+    def download_url(self, url):
+        """The bytes behind a full CDN url."""
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            raise ILinkError("CDN download failed: HTTP %s" % exc.code, status=exc.code) from None
+        except urllib.error.URLError as exc:
+            raise ILinkError("cannot reach the CDN %s: %s" % (url, exc.reason)) from None
+
     def download_from_cdn(self, encrypt_query_param):
         """The encrypted bytes of a file somebody sent us."""
         url = ("%s/download?encrypted_query_param=%s"
@@ -538,15 +556,42 @@ def text_of(raw):
     return "\n".join(p for p in parts if p)
 
 
-def files_of(raw):
-    """The files in an incoming message (the user sent one)."""
+def media_of(raw):
+    """The media of an incoming message: (kind, info) for every item.
+
+    The kind comes from the key the item carries, not from its number: a
+    file is a "file_item", a picture an "image_item".
+    """
     out = []
     for item in raw.get("item_list") or []:
-        if item.get("type") == ITEM_FILE:
-            info = item.get("file_item") or {}
+        for kind in MEDIA_ITEM_KEYS:
+            info = item.get(kind) or {}
             if info:
-                out.append(info)
+                out.append((kind, info))
     return out
+
+
+def files_of(raw):
+    """The files in an incoming message (the user sent one)."""
+    return [info for kind, info in media_of(raw) if kind == "file_item"]
+
+
+def looks_like_image(data):
+    """Is this a picture we can look at?"""
+    return bool(data) and any(data.startswith(magic) for magic in IMAGE_MAGIC)
+
+
+def image_ext(data):
+    """The file extension that goes with the picture we got."""
+    if data.startswith(b"\x89PNG"):
+        return ".png"
+    if data.startswith(b"GIF8"):
+        return ".gif"
+    if data.startswith(b"RIFF"):
+        return ".webp"
+    if data.startswith(b"BM"):
+        return ".bmp"
+    return ".jpg"
 
 
 def fmt_task(task):
@@ -649,37 +694,73 @@ class WeChatBot:
         os.makedirs(path, exist_ok=True)
         return path
 
+    def inbox_path(self, name):
+        """A free path in the inbox for that name (no overwriting)."""
+        path = os.path.join(self.inbox_dir(), name)
+        stem, dot, ext = name.rpartition(".")
+        attempt = 1
+        while os.path.exists(path):
+            path = os.path.join(self.inbox_dir(),
+                                ("%s-%d%s" % (stem, attempt, dot + ext)) if dot else name)
+            attempt += 1
+        return path
+
+    def fetch_media(self, kind, info):
+        """The bytes of one media item, decrypted. None if it did not work."""
+        media = info.get("media") or {}
+        param = (media.get("encrypt_query_param")
+                 or info.get("encrypt_query_param") or "")
+        key_text = (media.get("aes_key") or media.get("aeskey")
+                    or info.get("aes_key") or info.get("aeskey") or "")
+        try:
+            if param:
+                raw = self.ilink.download_from_cdn(param)
+            elif info.get("cdn_url"):
+                raw = self.ilink.download_url(info["cdn_url"])
+            else:
+                log("a %s arrived without a download reference - skipped" % kind)
+                log("  its keys: %s" % ", ".join(sorted(info.keys())))
+                return None
+            if looks_like_image(raw):
+                return raw                       # already the picture itself
+            if key_text:
+                return aes_decrypt(raw, decode_aes_key(key_text))
+            if len(raw) % 16 == 0:
+                log("a %s arrived encrypted but without a key - skipped" % kind)
+                log("  its keys: %s" % ", ".join(sorted(info.keys())))
+                return None
+            return raw
+        except ILinkError as exc:
+            log("cannot fetch the %s: %s" % (kind, exc))
+            log("  its keys: %s" % ", ".join(sorted(info.keys())))
+            return None
+
+    def media_name(self, kind, info, data):
+        """The name the media gets on disk."""
+        name = info.get("file_name") or info.get("name") or ""
+        if not name and kind != "file_item":
+            name = "image" + image_ext(data)
+        return safe_file_name(name or "file.bin")
+
     def receive_files(self, raw):
-        """Download the files the user sent. Returns the paths on disk."""
+        """Download the media the user sent. Returns [(kind, path)]."""
         saved = []
-        for info in files_of(raw):
-            media = info.get("media") or {}
-            param = media.get("encrypt_query_param") or ""
-            if not param:
-                log("a file arrived without a download reference - skipped")
+        for kind, info in media_of(raw):
+            data = self.fetch_media(kind, info)
+            if data is None:
                 continue
-            try:
-                encrypted = self.ilink.download_from_cdn(param)
-                key = decode_aes_key(media.get("aes_key") or "")
-                data = aes_decrypt(encrypted, key)
-            except ILinkError as exc:
-                log("cannot fetch the file: %s" % exc)
+            if len(data) > MAX_FILE_BYTES:
+                log("the %s is too big (%d bytes) - skipped" % (kind, len(data)))
                 continue
             want_md5 = (info.get("md5") or "").strip().lower()
             if want_md5 and hashlib.md5(data).hexdigest() != want_md5:
-                log("the file's md5 does not match - it was changed on the way")
-            name = safe_file_name(info.get("file_name") or "file.bin")
-            path = os.path.join(self.inbox_dir(), name)
-            stem, dot, ext = name.rpartition(".")
-            attempt = 1
-            while os.path.exists(path):
-                path = os.path.join(self.inbox_dir(),
-                                    ("%s-%d%s" % (stem, attempt, dot)) if dot else name)
-                attempt += 1
+                log("the %s's md5 does not match - it was changed on the way" % kind)
+            name = self.media_name(kind, info, data)
+            path = self.inbox_path(name)
             with open(path, "wb") as f:
                 f.write(data)
-            log("received a file: %s (%d bytes)" % (name, len(data)))
-            saved.append(path)
+            log("received %s: %s (%d bytes)" % (kind.replace("_item", ""), name, len(data)))
+            saved.append((kind, path))
         return saved
 
     def send_file_to_user(self, user_id, path, name=None):
@@ -726,28 +807,36 @@ class WeChatBot:
         return sent
 
     # -- the command mapping ----------------------------------------------
-    def handle_message(self, raw, text, files, user_id):
-        """A message that may carry files as well as text."""
-        if not files:
+    def handle_message(self, raw, text, media, user_id):
+        """A message that may carry files (or pictures) as well as text."""
+        if not media:
             return self.handle(text, user_id)
         saved = self.receive_files(raw)
         if not saved:
             return "文件没能取下来，再发一次？"
         root = os.path.abspath(os.path.expanduser(self.args.workspace_path))
-        rel = [os.path.relpath(p, root) for p in saved]
-        listed = "、".join(rel)
-        if text:
-            prompt = "%s\n\n（用户发来了这些文件，已经放在工作区里：%s）" % (text, listed)
+        rel_files = [os.path.relpath(p, root) for kind, p in saved if kind == "file_item"]
+        rel_images = [os.path.relpath(p, root) for kind, p in saved if kind != "file_item"]
+        parts = []
+        if rel_files:
+            parts.append("文件：%s" % "、".join(rel_files))
+        if rel_images:
+            parts.append("图片：%s" % "、".join(rel_images))
+        listed = "；".join(parts)
+        note = "用户发来了这些文件，已经放在工作区里：%s。" % listed
+        if rel_images:
+            note += ("图片用 toolkit_load_image 看（路径相对于工作区根目录），"
+                     "看完里面的内容再办事。")
         else:
-            prompt = ("用户发来了这些文件，已经放在工作区里：%s。"
-                      "请看一下它们是什么，再按里面的内容办事。" % listed)
+            note += "请看一下它们是什么，再按里面的内容办事。"
+        prompt = ("%s\n\n（%s）" % (text, note)) if text else note
         try:
             task = self.queue.create(
                 prompt, workspace_id=self.ensure_workspace(),
-                title=(text or rel[0])[:40],
+                title=(text or (rel_files + rel_images)[0])[:40],
                 provider=self.args.provider or None,
                 allow_paths=self.args.allow_path or None,
-                meta={"wechat_user_id": user_id, "attachments": rel})
+                meta={"wechat_user_id": user_id, "attachments": rel_files + rel_images})
         except ILinkError as exc:
             return "排队失败：%s" % exc
         task_id = task.get("id", "?")
@@ -897,12 +986,12 @@ class WeChatBot:
         if user_id and context:
             self.state.remember_context(user_id, context)
         text = text_of(raw)
-        files = files_of(raw)
-        if not text and not files:
+        media = media_of(raw)
+        if not text and not media:
             return
-        log("wechat[%s]: %s" % (user_id, (text or "")[:80] or ("%d 个文件" % len(files))))
+        log("wechat[%s]: %s" % (user_id, (text or "")[:80] or ("%d 个媒体" % len(media))))
         try:
-            answer = self.handle_message(raw, text, files, user_id)
+            answer = self.handle_message(raw, text, media, user_id)
         except Exception as exc:  # noqa: BLE001 - a bad message must not kill the bot
             answer = "出错了：%s: %s" % (type(exc).__name__, exc)
         self.reply(user_id, answer)
