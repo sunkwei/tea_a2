@@ -72,6 +72,7 @@ node tests/ui_files_download.mjs                          # 文件页「下载�
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
+node tests/ui_reasoning_follow.mjs                        # 「深度思考」展开时贴着最新输出走（需 google-chrome）
 node tests/ui_agent_doc.mjs                               # 记忆页的 agent.md 编辑框（需 google-chrome）
 node tests/ui_system_prompt.mjs                           # 设置页的系统提示词编辑/预览/恢复默认（需 google-chrome）
 python3 tests/smoke_destroy.py                            # 销毁：预览/确认/删除 tea home 与各 .tea_agent_run
@@ -337,6 +338,12 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 
 脚本开跑前会检查端口占用，发现残留监听就直接报错退出——否则会静默连到上一次遗留的实例上，
 表现为「卡住」而不是失败。
+
+`tests/ui_reasoning_follow.mjs` 钉住「深度思考」面板的滚动：面板自己是可滚的盒子
+（`.reason-panel`，max-height 240px），而推理文字是一段段长进去的——面板不动的话，用户看到的
+永远是**最早**的那段推理，正在生成的新内容全在框外。测试用 mock provider 慢慢吐 reasoning，
+断言：面板开着时贴着底部（不是顶部）、点开就跳到最新输出、用户自己往上滚过之后新的 delta 不
+把他拽回底部、这一轮结束后面板里的推理是完整的。
 
 `tests/smoke_invalid_utf8.py` 钉住「不是 UTF-8 的字节不许杀死整轮」：agent 读到的文件、命令打印的
 原始字节、模型自己吐出来的文本，最后都要进 JSON 文档，而 nlohmann 的解析器接受字符串里的非法字节、

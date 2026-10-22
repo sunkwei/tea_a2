@@ -1111,6 +1111,11 @@
 
   function renderChat() {
     var box = $('messages');
+    // 整块重画会换掉思考面板，所以先记住用户把它放在哪：贴着底部（跟着最新
+    // 输出走）还是自己往上滚了（在读旧内容）。重建后要接着这个状态。
+    var oldReason = state.liveNode && state.liveNode.querySelector('.reasoning .reason-panel');
+    var reasonFollow = !oldReason || panelAtBottom(oldReason);
+    var reasonTop = oldReason ? oldReason.scrollTop : 0;
     clear(box);
     state.liveNode = null;
     state.liveView = null;
@@ -1151,6 +1156,11 @@
     if (state.live) {
       state.liveNode = assistantNode(state.live, state.live.outputs, 'live', true);
       box.appendChild(state.liveNode);
+      var liveReason = state.liveNode.querySelector('.reasoning .reason-panel');
+      if (liveReason) {
+        if (reasonFollow) scrollPanelBottom(liveReason);
+        else liveReason.scrollTop = reasonTop;
+      }
     }
     if (state.streamError) box.appendChild(el('div', 'msg error', state.streamError));
     else if (!state.messages.length && !state.live) {
@@ -1196,7 +1206,7 @@
     var n = live.blocks.length;
     return n > 0 && live.blocks[n - 1].type === 'md';
   }
-  function buildLiveNode(live) {
+  function buildLiveNode(live, reasonFollow, reasonTop) {
     var box = $('messages');
     var node = assistantNode(live, live.outputs, 'live', true);
     if (state.liveNode && state.liveNode.parentNode === box) box.replaceChild(node, state.liveNode);
@@ -1215,6 +1225,13 @@
       reasonEl: node.querySelector('.reasoning .reason-panel'),
       reasonText: live.reasoning || ''
     };
+    // 重建后思考面板回到顶部：贴着底部就继续跟最新输出，用户自己往上滚过
+    // 就还回原处，别把他拽走。
+    var reasonEl = state.liveView.reasonEl;
+    if (reasonEl) {
+      if (reasonFollow === false) reasonEl.scrollTop = reasonTop || 0;
+      else scrollPanelBottom(reasonEl);
+    }
     state.liveMdAt = 0;      // 重建后下一帧就渲染一次
   }
   function renderLive() {
@@ -1234,7 +1251,12 @@
 
     if (!canPatch) {
       // 结构变了（新增段落 / 思考开始 / 工具状态变化 / 本轮结束）：整块重建。
-      buildLiveNode(live);
+      // 重建会换掉思考面板，先记住用户把它放在哪（底部 = 继续跟最新输出，
+      // 否则还回原处）。
+      var oldPanel = view && view.reasonEl;
+      var follow = !oldPanel || panelAtBottom(oldPanel);
+      var keepTop = oldPanel ? oldPanel.scrollTop : 0;
+      buildLiveNode(live, follow, keepTop);
       scrollMaybe();
       return;
     }
@@ -1263,10 +1285,13 @@
     }
     var reasoning = live.reasoning || '';
     if (view.reasonEl && reasoning !== view.reasonText) {
+      // 面板开着就贴着最新一行走；用户自己往上滚过想读旧内容，就不动他。
+      var wasBottom = panelAtBottom(view.reasonEl);
       view.reasonEl.textContent = reasoning;
       var summary = view.node.querySelector('.reasoning .tool-summary');
       if (summary) summary.textContent = reasoning.length + ' 字';
       view.reasonText = reasoning;
+      if (wasBottom) scrollPanelBottom(view.reasonEl);
     }
     scrollMaybe();
   }
@@ -1299,6 +1324,16 @@
     state.liveFrame = 0;
   }
   function nearBottom() { var s = $('chat-scroll'); return s.scrollHeight - s.scrollTop - s.clientHeight < 80; }
+  /// 「深度思考」面板自己就是一个可滚动的盒子（max-height 240px，overflow:auto）。
+  /// 停在顶部就只看得见最早的那段推理——正在生成的新内容全在框外看不见。
+  function panelAtBottom(panel) {
+    if (!panel) return true;
+    return panel.scrollHeight - panel.scrollTop - panel.clientHeight < 24;
+  }
+  function scrollPanelBottom(panel) {
+    if (!panel) return;
+    panel.scrollTop = panel.scrollHeight;
+  }
   /// 只在真的偏移时才写 scrollTop：贴底滚动是常态，每帧写一次同样的值同样会
   /// 触发滚动相关的布局工作。
   function scrollMaybe(force) {
@@ -4111,6 +4146,12 @@
         // 轨迹面板内容按需加载：折叠时只有一行摘要，展开才请求完整记录。
         if (row.classList.contains('traj-row') && row.classList.contains('open')) {
           loadTrajectoryPanel(row);
+        }
+        // 展开「深度思考」时把面板滚到最新一行：面板自己是可滚的盒子，停在
+        // 顶部就只看得见最早的那段推理（正在生成的新内容在框外）。
+        if (row.classList.contains('open')) {
+          var reasonPanel = row.querySelector('.reason-panel');
+          if (reasonPanel) scrollPanelBottom(reasonPanel);
         }
       }
     });
