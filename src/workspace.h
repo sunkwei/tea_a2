@@ -118,7 +118,18 @@ class Workspace {
 
   std::vector<SessionInfo> list_sessions() const;
   bool load_session(const std::string& id, Session* out, std::string* err) const;
+  /// Write the whole session (transcript, summary, artifacts). The task list
+  /// is NOT part of it - see save_todos.
   bool save_session(const Session& session, std::string* err) const;
+  /// Write the task list of a session - and only that.
+  ///
+  /// The task list has its own write path on purpose: a turn holds its own copy
+  /// of the session and writes the whole file back when it ends, so a list that
+  /// somebody else changed meanwhile (the browser ticking an item off, a script
+  /// writing the list) would be silently overwritten. The list therefore lives
+  /// outside the session save, and whoever changes it writes it here.
+  bool save_todos(const std::string& session_id, const std::vector<TodoItem>& todos,
+                  std::string* err) const;
   bool create_session(const std::string& title, Session* out, std::string* err) const;
   bool delete_session(const std::string& id, std::string* err) const;
   bool rename_session(const std::string& id, const std::string& title, std::string* err) const;

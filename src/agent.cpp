@@ -1328,9 +1328,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         }
         todo_event["items"] = items;
         emit(todo_event);
+        // The list has its own write path: the session save would write this
+        // turn's (possibly older) copy of it over the file.
         std::string todo_save_err;
-        if (!workspace.save_session(*session, &todo_save_err)) {
-          LOG_WARN("todo: cannot persist the session: ", todo_save_err);
+        if (!workspace.save_todos(session->info.id, session->todos, &todo_save_err)) {
+          LOG_WARN("todo: cannot persist the task list: ", todo_save_err);
         }
       }
 
@@ -1426,6 +1428,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
   out.ok = out.error.empty() && !out.cancelled;
   out.elapsed_ms = now_ms() - started;
+
   session->info.updated_at = now_iso8601();
   workspace.save_session(*session, nullptr);
 

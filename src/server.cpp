@@ -2176,6 +2176,12 @@ void ApiServer::Impl::install_routes() {
               send_error(res, 500, "io_error", err);
               return;
             }
+            // The list has its own write path (a running turn writes its own
+            // copy of the session back; the list is not part of that).
+            if (!ws.save_todos(req.matches[1].str(), session.todos, &err)) {
+              send_error(res, 500, "io_error", err);
+              return;
+            }
             int total = 0, done = 0;
             todo_counts(session.todos, &total, &done);
             nlohmann::json items = nlohmann::json::array();

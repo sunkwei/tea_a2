@@ -44,6 +44,9 @@ class MockProvider(BaseHTTPRequestHandler):
     # The scripted plan the mock asks the agent to run. Kept in one place so the
     # assertions and the mock cannot drift apart.
     calls = []
+    # Seconds to wait before answering. Used to keep a turn running while
+    # something else writes to the session.
+    delay = 0.0
 
     def log_message(self, *args):
         pass
@@ -99,6 +102,8 @@ class MockProvider(BaseHTTPRequestHandler):
             return
         payload = self._read_json()
         MockProvider.records.append(payload)
+        if MockProvider.delay:
+            time.sleep(MockProvider.delay)
         msgs = payload.get("messages") or []
         after_tool = bool(msgs) and msgs[-1].get("role") == "tool"
 
@@ -457,6 +462,37 @@ providers:
         check("the restored session has the same progress",
               all(t["status"] == "done" for t in restored.get("todos") or []),
               restored.get("todos"))
+        # ---- a list written by somebody else during the turn survives -----
+        # A turn holds its own copy of the session and writes the file back
+        # when it ends. If the task list were part of that write, a change made
+        # while the turn runs (the browser ticking an item off, a script writing
+        # the list) would be silently undone - the list would jump back to what
+        # it was when the turn started.
+        MockProvider.delay = 1.5
+        MockProvider.calls = []
+        result = {}
+
+        def run_in_background():
+            result["events"] = run_turn(port, wid, sid, "take your time")
+
+        worker = threading.Thread(target=run_in_background, daemon=True)
+        worker.start()
+        time.sleep(0.6)          # the turn is running now
+        mine = [{"id": "t1", "text": "written by somebody else", "status": "done"}]
+        with open(session_file, encoding="utf-8") as f:
+            doc = json.load(f)
+        doc["todos"] = mine
+        with open(session_file, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+        worker.join(timeout=60)
+        MockProvider.delay = 0.0
+        with open(session_file, encoding="utf-8") as f:
+            doc = json.load(f)
+        check("a task list written during the turn survives it",
+              doc.get("todos") == mine, doc.get("todos"))
+        _, detail = call(port, "GET", "/api/sessions/" + sid)
+        check("the API reports the same list",
+              detail.get("todos") == mine, detail.get("todos"))
     finally:
         try:
             proc.terminate()

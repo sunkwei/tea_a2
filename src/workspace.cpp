@@ -847,15 +847,31 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
     }
     j["artifacts"] = arts;
   }
-  if (!session.todos.empty()) {
-    nlohmann::json todos = nlohmann::json::array();
-    for (std::size_t i = 0; i < session.todos.size(); ++i) {
-      todos.push_back(session.todos[i].to_json());
-    }
-    j["todos"] = todos;
-  }
+  // The task list belongs to whoever changed it (save_todos), not to the
+  // session save: a turn writes its own copy of the session back at the end,
+  // and that copy can be older than the list on disk. So the list is taken from
+  // the file, not from this copy. A brand new session has no list yet - there
+  // the copy is the only one there is.
   const std::string dir = sessions_dir();
-  if (!write_file_atomic(session_file_for(dir, session.info.id), j.dump(2) + "\n", err)) {
+  const std::string session_path = session_file_for(dir, session.info.id);
+  const bool fresh_session = !path_exists(session_path);
+  if (fresh_session) {
+    if (!session.todos.empty()) {
+      nlohmann::json todos = nlohmann::json::array();
+      for (std::size_t i = 0; i < session.todos.size(); ++i) {
+        todos.push_back(session.todos[i].to_json());
+      }
+      j["todos"] = todos;
+    }
+  } else {
+    bool existing_ok = false;
+    const nlohmann::json existing = read_json_file(session_path, &existing_ok);
+    if (existing_ok && existing.is_object()) {
+      auto todos_it = existing.find("todos");
+      if (todos_it != existing.end()) j["todos"] = *todos_it;
+    }
+  }
+  if (!write_file_atomic(session_path, j.dump(2) + "\n", err)) {
     return false;
   }
 
@@ -863,7 +879,9 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
   // list shows "3/7" without opening every session file.
   SessionInfo info = session.info;
   info.message_count = static_cast<int>(session.messages.size());
-  todo_counts(session.todos, &info.todo_total, &info.todo_done);
+  if (fresh_session) {
+    todo_counts(session.todos, &info.todo_total, &info.todo_done);
+  }
   const std::string index_path = path_join(dir, "index.json");
   bool ok = false;
   nlohmann::json index = read_json_file(index_path, &ok);
@@ -874,13 +892,70 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
     if (it->is_object()) {
       auto id_it = it->find("id");
       if (id_it != it->end() && id_it->is_string() && id_it->get<std::string>() == info.id) {
-        *it = info.to_json();
+        // The progress in the index belongs to the task list, and the task list
+        // is written elsewhere (save_todos). Carry the counts over instead of
+        // resetting them to zero.
+        nlohmann::json entry = info.to_json();
+        if (!fresh_session) {
+          auto total_it = it->find("todo_total");
+          auto done_it = it->find("todo_done");
+          if (total_it != it->end() && total_it->is_number()) entry["todo_total"] = *total_it;
+          if (done_it != it->end() && done_it->is_number()) entry["todo_done"] = *done_it;
+        }
+        *it = entry;
         replaced = true;
         break;
       }
     }
   }
   if (!replaced) list.push_back(info.to_json());
+  return write_file_atomic(index_path, list.dump(2) + "\n", err);
+}
+
+bool Workspace::save_todos(const std::string& session_id, const std::vector<TodoItem>& todos,
+                            std::string* err) const {
+  StateLock lock(state_mutex());
+  const std::string dir = sessions_dir();
+  const std::string path = session_file_for(dir, session_id);
+  if (!path_exists(path)) {
+    if (err) *err = "session not found: " + session_id;
+    return false;
+  }
+  bool ok = false;
+  nlohmann::json j = read_json_file(path, &ok);
+  if (!ok || !j.is_object()) {
+    if (err) *err = "cannot read the session file: " + path;
+    return false;
+  }
+  nlohmann::json items = nlohmann::json::array();
+  for (std::size_t i = 0; i < todos.size(); ++i) {
+    items.push_back(todos[i].to_json());
+  }
+  j["todos"] = items;
+  if (!write_file_atomic(path, j.dump(2) + "\n", err)) {
+    return false;
+  }
+
+  // The index carries the progress ("3/7" in the session list).
+  int total = 0, done = 0;
+  todo_counts(todos, &total, &done);
+  const std::string index_path = path_join(dir, "index.json");
+  bool index_ok = false;
+  nlohmann::json index = read_json_file(index_path, &index_ok);
+  nlohmann::json list = nlohmann::json::array();
+  if (index_ok && index.is_array()) list = index;
+  bool replaced = false;
+  for (auto it = list.begin(); it != list.end(); ++it) {
+    if (!it->is_object()) continue;
+    auto id_it = it->find("id");
+    if (id_it != it->end() && id_it->is_string() && id_it->get<std::string>() == session_id) {
+      (*it)["todo_total"] = total;
+      (*it)["todo_done"] = done;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) return true;   // not in the index (a foreign file): leave it alone
   return write_file_atomic(index_path, list.dump(2) + "\n", err);
 }
 
