@@ -1799,6 +1799,39 @@ curl -X DELETE http://127.0.0.1:8283/api/tasks/t_xxxxxxxx
 **改一条任务**（改不了 prompt，只能改状态）：`PATCH` 那条路给的是 agent 侧的任务记录，
 队列这边没有改 prompt 的接口——要改就删了重排。
 
+### 微信那一端：`sched/wechat_bot.py`
+
+微信也能当队列的前端：发一句话就是排一个任务，做完微信里会收到结果。
+
+```bash
+# 1) 扫码登录（把打印出来的链接在手机上用微信扫）
+python3 sched/wechat_bot.py --login
+
+# 2) 常驻
+python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283
+```
+
+协议是**微信 iLink Bot API**（<https://www.wechatbot.dev/zh/protocol>）：HTTP + 长轮询，
+所以只用标准库就够（设备上没有 pip 也能跑）。凭证和每个用户的 `context_token` 存在
+`~/.tea_agent/wechat/credentials.json`（context_token 是回复的路由凭据，重启不能丢）。
+
+微信里的命令：
+
+| 说的话 | 做的事 |
+| --- | --- |
+| 任何一句话 | 排一个任务（额度有余量就自动开工），回你任务 id |
+| `/tasks` | 任务列表（排队 / 进行中 / 已完成） |
+| `/status <id>` | 一个任务的状态、进度、最新中间状态 |
+| `/result <id>` | 最终回答 + 产出文件 |
+| `/start <id>` / `/cancel <id>` / `/del <id>` | 立刻做 / 停掉 / 删掉 |
+| `/answer <id> <内容>` | 回答一个「等你确认」的任务 |
+| `/quota` | minimax 额度还剩多少 |
+| `/help` | 命令表 |
+
+**微信这一端的工作区是固定的**（默认 `~/.tea_agent/wechat-workspace`，`--workspace-path`
+可改）：微信排的任务都在这个目录里做，不会去动别的项目。任务做完了，bot 通过任务服务的事件
+流知道，然后把结果发回微信。
+
 ### 网页：<http://127.0.0.1:8283/>
 
 任务服务自带一个页面（`sched/task_ui.html`，一个静态文件，纯标准库伺服），分三段：
