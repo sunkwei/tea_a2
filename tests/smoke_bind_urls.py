@@ -117,7 +117,7 @@ def run(tmp, host, probe_host=None):
     proc = subprocess.Popen(
         [EXE, "--host", host, "--port", str(port), "--tea-home", home, "--workspace", ws,
          "--log-level", "error", "--console-level", "error"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding="utf-8",
         errors="replace")
     probe = None
     # A specific bind only answers on that address; a wildcard bind answers on
@@ -212,7 +212,7 @@ def run_checks(tmp):
               isinstance(one_probe, tuple) and one_probe[0] == 200, one_probe)
 
     # 4) --help still documents the flag this behaviour hangs off.
-    help_out = subprocess.run([EXE, "--help"], capture_output=True, text=True).stdout
+    help_out = subprocess.run([EXE, "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True).stdout
     check("--help still documents --host", "--host <addr>" in help_out, help_out[:300])
 
     failed = [n for n, ok in results if not ok]

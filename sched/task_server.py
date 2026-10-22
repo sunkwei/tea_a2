@@ -42,7 +42,18 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+try:
+    # Python 3.7+
+    from http.server import ThreadingHTTPServer
+except ImportError:  # Python 3.6
+    from http.server import HTTPServer
+    from socketserver import ThreadingMixIn
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        """The 3.6 spelling of http.server.ThreadingHTTPServer."""
+        daemon_threads = True
 
 DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8282")
 DEFAULT_PORT = int(os.environ.get("TEA_TASK_PORT", "8283"))

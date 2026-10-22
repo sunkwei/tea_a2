@@ -39,7 +39,18 @@ import tempfile
 import threading
 import time
 import zlib
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+try:
+    # Python 3.7+
+    from http.server import ThreadingHTTPServer
+except ImportError:  # Python 3.6
+    from http.server import HTTPServer
+    from socketserver import ThreadingMixIn
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        """The 3.6 spelling of http.server.ThreadingHTTPServer."""
+        daemon_threads = True
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -298,18 +309,30 @@ providers:
         check("the user's own input is not claimed as output",
               all(a["path"] != "input.png" for a in arts), [a["path"] for a in arts])
 
-        # ---- a file a command produced (and build noise that must not be) ---
-        # python3 first, python as the fallback: on Windows the `python3` name can
-        # be the Microsoft Store alias, which prints an install hint and exits 9009
-        # without running anything - the file would then never be created and the
-        # test would fail for a reason that has nothing to do with the artifacts
-        # list.
-        _write = ("open('chart.svg','w').write('<svg/>');"
-                   "open('noise.o','w').write('x');"
-                   "open('main.c','w').write('int main(){}');")
-        _py = 'python3 -c "%s" || python -c "%s"' % (_write, _write)
-        MockProvider.calls = [("c3", "toolkit_exec", {
-            "command": _py,
+        # ---- a file a command produced (and build noise that must not be) ---
+
+        # python3 first, python as the fallback: on Windows the `python3` name can
+
+        # be the Microsoft Store alias, which prints an install hint and exits 9009
+
+        # without running anything - the file would then never be created and the
+
+        # test would fail for a reason that has nothing to do with the artifacts
+
+        # list.
+
+        _write = ("open('chart.svg','w').write('<svg/>');"
+
+                   "open('noise.o','w').write('x');"
+
+                   "open('main.c','w').write('int main(){}');")
+
+        _py = 'python3 -c "%s" || python -c "%s"' % (_write, _write)
+
+        MockProvider.calls = [("c3", "toolkit_exec", {
+
+            "command": _py,
+
             "timeout_ms": 60000})]
         events = run_turn(port, wid, sid, "生成图表")
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)

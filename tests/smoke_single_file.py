@@ -99,7 +99,7 @@ providers:
 
         # ---- 2) the binary is static (ELF) --------------------------------
         expect_static = os.environ.get("TEA_EXPECT_STATIC", "1") != "0"
-        kind = subprocess.run(["file", "-b", binary], capture_output=True, text=True).stdout
+        kind = subprocess.run(["file", "-b", binary], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True).stdout
         is_static = "statically linked" in kind
         # Only assert on ELF: on Windows/macOS this check does not apply.
         if expect_static and "ELF" in kind and not is_static:
@@ -109,7 +109,7 @@ providers:
         if is_static:
             # `ldd` prints a localised "not a dynamic executable"; the reliable
             # signal is whether any resolved library appears ("name => path").
-            ldd = subprocess.run(["ldd", binary], capture_output=True, text=True)
+            ldd = subprocess.run(["ldd", binary], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             listed = [l for l in (ldd.stdout + ldd.stderr).splitlines() if "=>" in l]
             if listed:
                 failures.append("2: ldd still resolves shared libraries: %s" % listed[:3])

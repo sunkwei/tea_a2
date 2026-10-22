@@ -101,7 +101,7 @@ def run(tmp, extra_args, hit_api=True, settle=0.6):
     proc = subprocess.Popen(
         [EXE, "--host", "127.0.0.1", "--port", str(port), "--tea-home", home,
          "--workspace", ws, "--log-file", log_file] + extra_args,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding="utf-8",
         errors="replace")
     try:
         if not wait_health(port):
@@ -178,8 +178,8 @@ def main():
     err_out, err_log = run(tmp, ["--log-level", "error"])
     check("--log-level error narrows the log file", "[INFO]" not in err_log, err_log[:300])
     check("--help documents both thresholds",
-          "--console-level" in subprocess.run([EXE, "--help"], capture_output=True,
-                                              text=True).stdout)
+          "--console-level" in subprocess.run([EXE, "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                              universal_newlines=True).stdout)
 
     failed = [n for n, ok in results if not ok]
     print("\n%d/%d checks passed" % (len(results) - len(failed), len(results)))

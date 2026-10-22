@@ -24,7 +24,18 @@ import tempfile
 import threading
 import time
 import zlib
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+try:
+    # Python 3.7+
+    from http.server import ThreadingHTTPServer
+except ImportError:  # Python 3.6
+    from http.server import HTTPServer
+    from socketserver import ThreadingMixIn
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        """The 3.6 spelling of http.server.ThreadingHTTPServer."""
+        daemon_threads = True
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

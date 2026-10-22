@@ -24,6 +24,12 @@ tea_agent（C++，基础能力）              task server（Python，可选伴�
 
 ### 任务服务：`sched/task_server.py`
 
+> **Python 3.6+**：设备上的 Python 通常很老，队列与微信那一端因此只用标准库、并且不碰
+> 3.7 之后才有的东西（`http.server.ThreadingHTTPServer` 在 3.6 上是
+> `socketserver.ThreadingMixIn` + `HTTPServer`，`subprocess.run(capture_output=…)` 在 3.6 上是
+> `stdout=PIPE` + `universal_newlines=True`）。`tests/smoke_py36.py` 盯着这件事，
+> `scripts/py36_compat.py` 负责改写。
+
 一个只用标准库的 HTTP 服务（设备上没有 pip 也能跑），默认听 `127.0.0.1:8283`：
 
 ```bash
