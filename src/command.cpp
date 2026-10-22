@@ -267,6 +267,10 @@ CommandResult run_command(const CommandOptions& opts) {
   remove_path(script_path, false, nullptr);
 
   strip_utf8_bom(&raw);
+  // The output was cut at a byte limit, which can land in the middle of a
+  // multi-byte character. The cut edge is dropped, so the text stays valid
+  // UTF-8 instead of carrying a broken character into the tool result.
+  trim_utf8_edges(&raw);
   res.output = native_to_utf8(raw);
   trim_trailing_newlines(&res.output);
   res.exit_code = static_cast<int>(exit_code);
@@ -411,6 +415,10 @@ CommandResult run_command(const CommandOptions& opts) {
   }
 
   strip_utf8_bom(&raw);
+  // The output was cut at a byte limit, which can land in the middle of a
+  // multi-byte character. The cut edge is dropped, so the text stays valid
+  // UTF-8 instead of carrying a broken character into the tool result.
+  trim_utf8_edges(&raw);
   res.output = native_to_utf8(raw);
   trim_trailing_newlines(&res.output);
   res.exit_code = exit_code;

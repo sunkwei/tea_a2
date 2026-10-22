@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace tea {
 
 // --------------------------------------------------------------------------
@@ -47,6 +49,15 @@ std::string truncate_utf8(const std::string& s, size_t max_bytes, bool* truncate
 void trim_utf8_edges(std::string* s, bool head = false);
 size_t utf8_length(const std::string& s);
 bool is_valid_utf8(const std::string& s);
+/// Replace every byte sequence that is not valid UTF-8 with U+FFFD.
+///
+/// The world outside is not UTF-8: a binary file, a command that prints raw
+/// bytes, a file name in a Latin-1 directory, a GBK-encoded source file. The
+/// JSON parser accepts such bytes inside a string, but the serialiser refuses
+/// them ("invalid UTF-8 byte at index N"), and that used to kill the whole
+/// turn. Sanitising at the source keeps the model request, the session file
+/// and the event stream valid UTF-8 instead of merely survivable.
+std::string sanitize_utf8(const std::string& s);
 std::string human_size(uint64_t bytes);
 
 /// Show only enough of a secret to identify it: "sk-94e...a84b".
@@ -171,6 +182,15 @@ std::string wide_to_utf8(const std::wstring& s);
 std::string acp_to_utf8(const std::string& s);        // Windows ANSI/OEM page -> UTF-8
 std::string native_to_utf8(const std::string& s);     // UTF-8 passthrough, else acp_to_utf8
 std::string json_escape(const std::string& s);
+
+/// Serialise JSON without ever throwing on a byte that is not valid UTF-8.
+///
+/// nlohmann's default is `strict`: one byte that is not valid UTF-8 anywhere
+/// in the document aborts the whole serialisation with a type_error. That
+/// turned "a file contains one odd byte" into "the agent crashed". `replace`
+/// writes U+FFFD instead, so a document that carries text from the outside
+/// world can always be serialised.
+std::string dump_json(const nlohmann::json& j, int indent = -1);
 
 /// Escape a string so a terminal does not interpret control sequences.
 std::string sanitize_for_terminal(const std::string& s);

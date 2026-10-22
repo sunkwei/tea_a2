@@ -276,6 +276,70 @@ bool is_valid_utf8(const std::string& s) {
   return true;
 }
 
+std::string sanitize_utf8(const std::string& s) {
+  if (s.empty() || is_valid_utf8(s)) return s;
+  // U+FFFD, the replacement character: what a reader sees for a byte that
+  // cannot be decoded.
+  static const char kReplacement[] = "\xEF\xBF\xBD";
+  std::string out;
+  out.reserve(s.size());
+  size_t i = 0;
+  const size_t n = s.size();
+  while (i < n) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c < 0x80) {  // plain ASCII
+      out.push_back(static_cast<char>(c));
+      ++i;
+      continue;
+    }
+    // How many bytes the character needs, and the range its first continuation
+    // byte may take (the ranges that exclude overlong forms and surrogates).
+    size_t need = 0;
+    unsigned char lo = 0x80;
+    unsigned char hi = 0xBF;
+    if (c >= 0xC2 && c <= 0xDF) {
+      need = 1;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+      need = 2;
+      if (c == 0xE0) lo = 0xA0;         // no overlong three-byte forms
+      if (c == 0xED) hi = 0x9F;         // no surrogates (U+D800..U+DFFF)
+    } else if (c >= 0xF0 && c <= 0xF4) {
+      need = 3;
+      if (c == 0xF0) lo = 0x90;         // no overlong four-byte forms
+      if (c == 0xF4) hi = 0x8F;         // nothing above U+10FFFF
+    } else {
+      // A stray continuation byte, an overlong two-byte lead (0xC0/0xC1) or
+      // a byte that never starts a character (0xF5..0xFF).
+      out.append(kReplacement, 3);
+      ++i;
+      continue;
+    }
+    bool ok = (i + need) < n;
+    for (size_t k = 1; ok && k <= need; ++k) {
+      const unsigned char cc = static_cast<unsigned char>(s[i + k]);
+      const unsigned char clo = (k == 1) ? lo : 0x80;
+      const unsigned char chi = (k == 1) ? hi : 0xBF;
+      if (cc < clo || cc > chi) ok = false;
+    }
+    if (!ok) {
+      // Not a character after all. Skip this one byte only: the next one may
+      // well start a perfectly good character.
+      out.append(kReplacement, 3);
+      ++i;
+      continue;
+    }
+    out.append(s, i, need + 1);
+    i += need + 1;
+  }
+  return out;
+}
+
+std::string dump_json(const nlohmann::json& j, int indent) {
+  // error_handler_t::replace: a byte that is not valid UTF-8 becomes U+FFFD
+  // instead of throwing. The JSON layer must never be the reason a turn dies.
+  return j.dump(indent, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
 const char* sniff_image_mime(const std::string& bytes) {
   const unsigned char* b = reinterpret_cast<const unsigned char*>(bytes.data());
   const std::size_t n = bytes.size();

@@ -248,7 +248,7 @@ void TrajectoryRecorder::flush() {
   if (!active_) return;
 
   nlohmann::json turn = build();
-  std::string line = turn.dump();
+  std::string line = dump_json(turn);
 
   // Whole-turn byte cap: shed the oldest tool output bodies (the biggest part)
   // until the record fits, and say so instead of silently losing context.
@@ -265,11 +265,11 @@ void TrajectoryRecorder::flush() {
       step["output_truncated"] = true;
       shed = true;
       turn = build();
-      line = turn.dump();
+      line = dump_json(turn);
     }
     if (shed) {
       turn["turn_truncated"] = true;
-      line = turn.dump();
+      line = dump_json(turn);
       LOG_WARN("trajectory: turn ", turn_id_, " exceeded trajectory_max_bytes; tool output shed");
     }
   }

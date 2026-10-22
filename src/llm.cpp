@@ -333,11 +333,19 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
     }
   }
 
+  // The provider's own bytes are not guaranteed to be UTF-8 (a gateway that
+  // re-encodes, a model that emits a raw byte inside a string). The JSON
+  // parser accepts them, the serialiser does not - so they are cleaned here,
+  // before they reach a document that has to be serialised.
+  result.content = sanitize_utf8(result.content);
+  result.reasoning = sanitize_utf8(result.reasoning);
+
   for (auto it = acc.calls.begin(); it != acc.calls.end(); ++it) {
     ToolCall call = it->second;
     if (call.id.empty()) call.id = "call_" + std::to_string(it->first + 1);
     if (call.name.empty()) call.name = "unknown";
     if (call.raw_arguments.empty()) call.raw_arguments = "{}";
+    call.raw_arguments = sanitize_utf8(call.raw_arguments);
     try {
       call.arguments = nlohmann::json::parse(call.raw_arguments);
     } catch (const std::exception&) {
@@ -397,7 +405,7 @@ ChatResult llm_chat(const ChatRequest& req, const DeltaCallback& on_delta,
     stream_options["include_usage"] = true;
     body["stream_options"] = stream_options;
   }
-  const std::string payload = body.dump();
+  const std::string payload = dump_json(body);
 
   LOG_DEBUG("llm: POST ", url, " model=", req.model, " bytes=", payload.size(),
             " tools=", req.tools.size(), " stream=", req.stream ? 1 : 0);

@@ -419,10 +419,22 @@ std::string truncate_middle(const std::string& text, std::size_t keep_bytes) {
   if (text.size() <= keep_bytes || keep_bytes < 64) return text;
   const std::size_t head = keep_bytes * 2 / 3;
   const std::size_t tail = keep_bytes - head;
+  // Both ends have to land on a character boundary. A cut in the middle of a
+  // multi-byte character leaves the message invalid UTF-8, and the JSON layer
+  // refuses to serialise that - which used to kill the turn with "invalid
+  // UTF-8 byte at index N" right after a big tool result was trimmed.
+  const std::string head_text = truncate_utf8(text, head);
+  std::string tail_text = text.substr(text.size() - tail);
+  std::size_t skip = 0;
+  while (skip < 4 && skip < tail_text.size() &&
+         (static_cast<unsigned char>(tail_text[skip]) & 0xC0) == 0x80) {
+    ++skip;
+  }
+  if (skip > 0) tail_text.erase(0, skip);
   std::ostringstream out;
-  out << text.substr(0, head) << "\n... [tea_agent truncated " << (text.size() - head - tail)
+  out << head_text << "\n... [tea_agent truncated " << (text.size() - head - tail)
       << " bytes of a single oversized message] ...\n"
-      << text.substr(text.size() - tail);
+      << tail_text;
   return out.str();
 }
 
@@ -1379,7 +1391,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       // Trajectory: the raw arguments the model emitted plus what the tool
       // actually reported (paths, byte counts, exit code, filter decisions).
       trajectory.record_tool(call.name,
-                             call.raw_arguments.empty() ? call.arguments.dump()
+                             call.raw_arguments.empty() ? dump_json(call.arguments)
                                                         : call.raw_arguments,
                              tool_result, tool_message.elapsed_ms);
 

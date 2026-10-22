@@ -150,7 +150,7 @@ bool WorkspaceRegistry::save(std::string* err) const {
   root["workspaces"] = list;
   const std::string parent = path_parent(index_path_);
   if (!parent.empty()) make_dirs(parent);
-  return write_file_atomic(index_path_, root.dump(2) + "\n", err);
+  return write_file_atomic(index_path_, dump_json(root, 2) + "\n", err);
 }
 
 void WorkspaceRegistry::refresh_flags() {
@@ -321,12 +321,12 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
     meta["name"] = entry_.name;
     meta["path"] = root_;
     meta["created_at"] = entry_.created_at.empty() ? now_iso8601() : entry_.created_at;
-    write_file_atomic(meta_file(), meta.dump(2) + "\n");
+    write_file_atomic(meta_file(), dump_json(meta, 2) + "\n");
   }
   if (!path_exists(memory_file())) {
     nlohmann::json mem = nlohmann::json::object();
     mem["notes"] = nlohmann::json::array();
-    write_file_atomic(memory_file(), mem.dump(2) + "\n");
+    write_file_atomic(memory_file(), dump_json(mem, 2) + "\n");
   }
   // agent.md is the workspace's experience log (see load_agent_doc). Seeded so
   // the file is discoverable - by the model (it is injected into the prompt)
@@ -891,7 +891,7 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
       if (todos_it != existing.end()) j["todos"] = *todos_it;
     }
   }
-  if (!write_file_atomic(session_path, j.dump(2) + "\n", err)) {
+  if (!write_file_atomic(session_path, dump_json(j, 2) + "\n", err)) {
     return false;
   }
 
@@ -929,7 +929,7 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
     }
   }
   if (!replaced) list.push_back(info.to_json());
-  return write_file_atomic(index_path, list.dump(2) + "\n", err);
+  return write_file_atomic(index_path, dump_json(list, 2) + "\n", err);
 }
 
 bool Workspace::save_todos(const std::string& session_id, const std::vector<TodoItem>& todos,
@@ -952,7 +952,7 @@ bool Workspace::save_todos(const std::string& session_id, const std::vector<Todo
     items.push_back(todos[i].to_json());
   }
   j["todos"] = items;
-  if (!write_file_atomic(path, j.dump(2) + "\n", err)) {
+  if (!write_file_atomic(path, dump_json(j, 2) + "\n", err)) {
     return false;
   }
 
@@ -976,7 +976,7 @@ bool Workspace::save_todos(const std::string& session_id, const std::vector<Todo
     }
   }
   if (!replaced) return true;   // not in the index (a foreign file): leave it alone
-  return write_file_atomic(index_path, list.dump(2) + "\n", err);
+  return write_file_atomic(index_path, dump_json(list, 2) + "\n", err);
 }
 
 bool Workspace::create_session(const std::string& title, Session* out, std::string* err) const {
@@ -1012,7 +1012,7 @@ bool Workspace::delete_session(const std::string& id, std::string* err) const {
       if (id_it != it->end() && id_it->is_string() && id_it->get<std::string>() == id) continue;
       list.push_back(*it);
     }
-    write_file_atomic(index_path, list.dump(2) + "\n");
+    write_file_atomic(index_path, dump_json(list, 2) + "\n");
   }
   return true;
 }
@@ -1249,7 +1249,7 @@ nlohmann::json Workspace::add_memory_note(const std::string& text, std::string* 
   for (std::size_t i = 0; i < notes.size(); ++i) arr.push_back(notes[i]);
   mem["notes"] = arr;
   mem["updated_at"] = now_iso8601();
-  if (!write_file_atomic(memory_file(), mem.dump(2) + "\n", err)) return nlohmann::json();
+  if (!write_file_atomic(memory_file(), dump_json(mem, 2) + "\n", err)) return nlohmann::json();
   return note;
 }
 
@@ -1273,7 +1273,7 @@ bool Workspace::delete_memory_note(const std::string& note_id, std::string* err)
   nlohmann::json mem = nlohmann::json::object();
   mem["notes"] = arr;
   mem["updated_at"] = now_iso8601();
-  return write_file_atomic(memory_file(), mem.dump(2) + "\n", err);
+  return write_file_atomic(memory_file(), dump_json(mem, 2) + "\n", err);
 }
 
 std::vector<std::string> Workspace::tail_log(std::size_t max_lines) const {

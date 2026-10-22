@@ -124,15 +124,33 @@ std::string head_tail(const std::vector<std::string>& lines, std::size_t head, s
   return merge_ranges(lines, keep, "middle of a long output with nothing worth keeping", dropped_out);
 }
 
+/// The last `keep` bytes of `text`, starting at a character boundary: a tail
+/// that begins in the middle of a multi-byte character would make the whole
+/// tool result invalid UTF-8, and the JSON layer refuses to serialise that.
+std::string tail_on_boundary(const std::string& text, std::size_t keep) {
+  if (keep == 0 || text.size() <= keep) return text;
+  std::string tail = text.substr(text.size() - keep);
+  std::size_t skip = 0;
+  while (skip < 4 && skip < tail.size() &&
+         (static_cast<unsigned char>(tail[skip]) & 0xC0) == 0x80) {
+    ++skip;
+  }
+  if (skip > 0) tail.erase(0, skip);
+  return tail;
+}
+
 std::string hard_byte_cap(const std::string& text, std::size_t max_bytes, bool* changed) {
   if (text.size() <= max_bytes) return text;
   *changed = true;
   const std::size_t head = max_bytes / 3;
   const std::size_t tail = max_bytes - head;
+  // Both cuts land on a character boundary (see tail_on_boundary).
+  const std::string head_text = truncate_utf8(text, head);
+  const std::string tail_text = tail_on_boundary(text, tail);
   std::ostringstream out;
-  out << text.substr(0, head) << "\n... [tea_agent omitted " << (text.size() - head - tail)
+  out << head_text << "\n... [tea_agent omitted " << (text.size() - head - tail)
       << " bytes of output] ...\n"
-      << text.substr(text.size() - tail);
+      << tail_text;
   return out.str();
 }
 

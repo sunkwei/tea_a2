@@ -178,7 +178,7 @@ void send_json(httplib::Response& res, const nlohmann::json& body, int status = 
   res.status = status;
   res.set_header("Access-Control-Allow-Origin", "*");
   res.set_header("Cache-Control", "no-store");
-  res.set_content(body.dump(), "application/json; charset=utf-8");
+  res.set_content(dump_json(body), "application/json; charset=utf-8");
 }
 
 void send_error(httplib::Response& res, int status, const std::string& code,
@@ -304,7 +304,7 @@ struct ChatTurn {
       // The sequence number is what makes a reconnect lossless: the client tells
       // us the last one it saw and we replay everything after it.
       stamped["seq"] = next_seq++;
-      frame = "data: " + stamped.dump() + "\n\n";
+      frame = "data: " + dump_json(stamped) + "\n\n";
       log.push_back(frame);
       log_bytes += frame.size();
       // One turn cannot grow without bound: a long agent run streams a lot of
@@ -397,7 +397,7 @@ struct ChatTurn {
           ev["reason"] = "event_buffer_overflow";
           ev["dropped"] = log_dropped;
           ev["oldest_seq"] = log_base;
-          resync_frame = "data: " + ev.dump() + "\n\n";
+          resync_frame = "data: " + dump_json(ev) + "\n\n";
           sub->cursor = log_base;
         }
         const long long end_seq = log_base + static_cast<long long>(log.size());
@@ -1294,7 +1294,7 @@ void ApiServer::Impl::install_routes() {
             nlohmann::json e = nlohmann::json::object();
             e["type"] = (kind == DeltaKind::Reasoning) ? "reasoning_delta" : "content_delta";
             e["text"] = text;
-            const std::string frame = "data: " + e.dump() + "\n\n";
+            const std::string frame = "data: " + dump_json(e) + "\n\n";
             if (!sink.write(frame.data(), frame.size())) return;
           };
           result = llm_chat(request, on_delta, nullptr);
@@ -1322,7 +1322,7 @@ void ApiServer::Impl::install_routes() {
             done["error"] = result.error;
             done["detail"] = result.detail;
           }
-          const std::string frame = "data: " + done.dump() + "\n\n";
+          const std::string frame = "data: " + dump_json(done) + "\n\n";
           sink.write(frame.data(), frame.size());
           return true;
         });

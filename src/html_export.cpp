@@ -14,16 +14,20 @@ namespace {
 // escaping
 // ---------------------------------------------------------------------------
 std::string esc(const std::string& s) {
+  // A session written by an older version (or by a tool result that was never
+  // cleaned) can carry bytes that are not valid UTF-8. The export is a
+  // document; it has to be readable, so those bytes become U+FFFD here.
+  const std::string in = sanitize_utf8(s);
   std::string out;
-  out.reserve(s.size() + 16);
-  for (std::size_t i = 0; i < s.size(); ++i) {
-    switch (s[i]) {
+  out.reserve(in.size() + 16);
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    switch (in[i]) {
       case '&': out += "&amp;"; break;
       case '<': out += "&lt;"; break;
       case '>': out += "&gt;"; break;
       case '"': out += "&quot;"; break;
       case '\'': out += "&#39;"; break;
-      default: out += s[i];
+      default: out += in[i];
     }
   }
   return out;
@@ -744,7 +748,7 @@ std::string message_html(const Workspace& ws, const Message& m, std::size_t* ima
 
   for (std::size_t i = 0; i < m.tool_calls.size(); ++i) {
     const ToolCall& call = m.tool_calls[i];
-    const std::string args = call.raw_arguments.empty() ? call.arguments.dump(2)
+    const std::string args = call.raw_arguments.empty() ? dump_json(call.arguments, 2)
                                                        : call.raw_arguments;
     out << "<details class=\"call\"><summary>调用 " << esc(call.name);
     // The interesting part of a call is usually one field ("command", "path").
@@ -1055,9 +1059,9 @@ std::string export_session_html(const Workspace& workspace, const Session& sessi
   // The JSON block is the restore path. "</" is escaped so a message containing
   // "</script>" cannot end the block early (HTML parsers only look for the
   // literal sequence, which is why the backslash form is enough).
-  std::string payload = export_session_json(workspace, session, version, image_data,
-                                            images_omitted)
-                            .dump(2);
+  std::string payload = dump_json(export_session_json(workspace, session, version, image_data,
+                                                      images_omitted),
+                                  2);
   std::string safe_payload;
   for (std::size_t i = 0; i < payload.size(); ++i) {
     if (payload[i] == '<' && i + 1 < payload.size() && payload[i + 1] == '/') {

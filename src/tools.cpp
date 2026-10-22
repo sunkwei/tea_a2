@@ -265,7 +265,7 @@ ToolResult tool_stat(const std::string& path) {
   j["type"] = path_is_dir(path) ? "dir" : "file";
   j["size"] = file_size(path);
   j["mtime"] = file_mtime_iso(path);
-  result.output = j.dump(2);
+  result.output = dump_json(j, 2);
   result.ok = true;
   return result;
 }
@@ -1082,7 +1082,7 @@ WebToolResponse web_tool_post(const std::string& url, const std::string& api_key
   auth.name = "Authorization";
   auth.value = "Bearer " + api_key;
   req.headers.push_back(auth);
-  req.body = payload.dump();
+  req.body = dump_json(payload);
   req.content_type = "application/json";
   // Dedicated budget: the LLM read timeout is minutes long on purpose, and
   // inheriting it made one slow endpoint stall the whole turn.
@@ -1266,7 +1266,7 @@ ToolResult tool_search(const nlohmann::json& args, const ToolContext& ctx) {
   nlohmann::json::const_iterator results_it = resp.body.find("results");
   if (results_it == resp.body.end() || !results_it->is_array()) {
     result.output = "error: unexpected response shape (missing 'results' array): " +
-                    truncate_utf8(resp.body.dump(), 2000);
+                    truncate_utf8(dump_json(resp.body), 2000);
     return result;
   }
   const nlohmann::json& results = *results_it;
@@ -1734,22 +1734,29 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
                                  const ToolContext& ctx) const {
   ToolResult result;
   try {
-    if (name == "toolkit_exec") return tool_exec(arguments, ctx);
-    if (name == "toolkit_file") return tool_file(arguments, ctx);
-    if (name == "toolkit_memory") return tool_memory(arguments, ctx);
-    if (name == "toolkit_todo") return tool_todo(arguments, ctx);
-    if (name == "toolkit_load_image") return tool_load_image(arguments, ctx);
-    if (name == "toolkit_task") return tool_task(arguments, ctx);
-    if (name == "toolkit_agent_doc") return tool_agent_doc(arguments, ctx);
-    if (name == "toolkit_search") return tool_search(arguments, ctx);
-    if (name == "toolkit_fetch") return tool_fetch(arguments, ctx);
+    if (name == "toolkit_exec") result = tool_exec(arguments, ctx);
+    else if (name == "toolkit_file") result = tool_file(arguments, ctx);
+    else if (name == "toolkit_memory") result = tool_memory(arguments, ctx);
+    else if (name == "toolkit_todo") result = tool_todo(arguments, ctx);
+    else if (name == "toolkit_load_image") result = tool_load_image(arguments, ctx);
+    else if (name == "toolkit_task") result = tool_task(arguments, ctx);
+    else if (name == "toolkit_agent_doc") result = tool_agent_doc(arguments, ctx);
+    else if (name == "toolkit_search") result = tool_search(arguments, ctx);
+    else if (name == "toolkit_fetch") result = tool_fetch(arguments, ctx);
+    else {
+      result.ok = false;
+      result.output = "error: unknown tool '" + name + "'";
+    }
   } catch (const std::exception& e) {
     result.ok = false;
     result.output = std::string("error: tool threw an exception: ") + e.what();
-    return result;
   }
-  result.ok = false;
-  result.output = "error: unknown tool '" + name + "'";
+  // Everything a tool hands back ends up in a JSON document: the model request,
+  // the session file, the event stream. The JSON serialiser refuses bytes that
+  // are not valid UTF-8, so a binary file, a command that prints raw bytes or
+  // a Latin-1 file name used to kill the whole turn with
+  // "invalid UTF-8 byte at index N". Replace what cannot be encoded instead.
+  result.output = sanitize_utf8(result.output);
   return result;
 }
 

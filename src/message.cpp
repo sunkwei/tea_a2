@@ -62,7 +62,7 @@ nlohmann::json Message::to_wire(bool include_reasoning,
       call["type"] = "function";
       nlohmann::json fn = nlohmann::json::object();
       fn["name"] = tc.name;
-      fn["arguments"] = tc.raw_arguments.empty() ? tc.arguments.dump() : tc.raw_arguments;
+      fn["arguments"] = tc.raw_arguments.empty() ? dump_json(tc.arguments) : tc.raw_arguments;
       call["function"] = fn;
       arr.push_back(call);
     }
