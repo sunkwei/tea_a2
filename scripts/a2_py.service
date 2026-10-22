@@ -1,0 +1,26 @@
+[Unit]
+Description=tea_a2 task server (the task queue; the agent on 127.0.0.1:8383 is the channel)
+Documentation=file:///home/sunkw/work/git/tea_a2/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# 任务服务：排队 / 执行 / 状态 / 结果。agent 那边只是「工作区通道」，
+# 所以这里指到 8383；额度闸门问的就是它（GET /api/providers/minimax/usage）。
+# 任务服务自己听 8283，浏览器「设置 → 任务服务（可选）」填 http://127.0.0.1:8283
+# 就能在后台任务跑完时闪一下标签页。
+ExecStart=/usr/bin/python3 /home/sunkw/work/git/tea_a2/sched/task_server.py --agent http://localhost:8383 --port 8283
+WorkingDirectory=/home/sunkw/work/git/tea_a2
+Environment=HOME=/home/sunkw
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5s
+# 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
+# `journalctl --user` 根本读不到（已实测），所以直接 append 到文件。
+StandardOutput=append:/home/sunkw/.tea_agent/logs/a2_py.log
+StandardError=append:/home/sunkw/.tea_agent/logs/a2_py.log
+
+[Install]
+WantedBy=default.target

@@ -212,7 +212,15 @@ class Store:
                 with open(self._path(workspace_id, task_id), encoding="utf-8") as f:
                     return json.load(f)
             except (OSError, ValueError):
+                pass
+            if workspace_id:
                 return None
+            # No workspace given: look in every one of them. The task ids are
+            # unique, so the first hit is the right one.
+            for task in self.list():
+                if task.get("id") == task_id:
+                    return task
+            return None
 
     def save(self, task):
         with self.lock:
@@ -670,7 +678,11 @@ class Handler(BaseHTTPRequestHandler):
         workspace_id = str(body.get("workspace_id") or "").strip()
         prompt = str(body.get("prompt") or "").strip()
         if not workspace_id:
-            return self._error(400, "bad_request", "'workspace_id' is required")
+            # The same default the scheduler uses: the first workspace.
+            workspace_id = self.app.default_workspace()
+        if not workspace_id:
+            return self._error(400, "bad_request",
+                               "'workspace_id' is required (the agent has no workspace)")
         if not prompt:
             return self._error(400, "bad_request", "'prompt' is required")
         task = {
@@ -805,6 +817,21 @@ class App:
         self.events = Events()
         self.engine = Engine(self.store, self.agent, self.events, args)
 
+    def default_workspace(self):
+        """The workspace a task goes to when the caller does not name one."""
+        wanted = self.args.workspace
+        try:
+            workspaces = self.agent.workspaces()
+        except AgentError:
+            return wanted
+        if not workspaces:
+            return wanted
+        if wanted:
+            for ws in workspaces:
+                if ws.get("id") == wanted:
+                    return wanted
+        return workspaces[0].get("id", "")
+
     def cancel_task(self, workspace_id, task_id):
         task = self.store.load(workspace_id, task_id)
         if task is None:
@@ -902,11 +929,14 @@ def main(argv=None):
 
     try:
         health = app.agent.health()
+        log("agent up: %s (provider %s, model %s)"
+            % (args.agent, health.get("provider"), health.get("model")))
     except AgentError as exc:
-        print("cannot reach the agent at %s: %s" % (args.agent, exc), file=sys.stderr)
-        return 2
-    log("agent up: %s (provider %s, model %s)"
-        % (args.agent, health.get("provider"), health.get("model")))
+        # As a service, the agent may simply not be up yet (or be restarting).
+        # Serving anyway and letting the scheduler retry every round is more
+        # useful than exiting and letting systemd bounce us.
+        log("the agent at %s is not reachable yet (%s) - serving anyway, retrying every round"
+            % (args.agent, exc))
     log("task server: http://%s:%d  (records in %s)" % (args.host, args.port, app.store.root))
 
     if not args.no_serve:

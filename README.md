@@ -1713,6 +1713,20 @@ tea_agent（C++，基础能力）              task server（Python，可选伴�
 # 起服务（agent 默认在 8282）
 python3 sched/task_server.py --agent http://127.0.0.1:8282 --port 8283
 
+**开机自启（systemd user unit）**：`scripts/a2_py.service` 是一份现成的模板，装到
+`~/.config/systemd/user/a2_py.service` 之后：
+
+```bash
+cp scripts/a2_py.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now a2_py
+systemctl --user status a2_py
+tail -f ~/.tea_agent/logs/a2_py.log     # 这台机器 journald 是 Storage=none，user 单元的输出只能看文件
+```
+
+agent 还没起来时它不会退出，只是每轮重试（服务化以后「先起谁」不重要了）。
+浏览器里把「设置 → 任务服务（可选）」填成 `http://127.0.0.1:8283`，后台任务跑完时标签页就会闪。
+
 # 排一个任务（不用起服务也能排：直接写进记录）
 python3 sched/task_server.py --submit "把 README 里的例子都跑一遍"
 
