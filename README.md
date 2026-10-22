@@ -479,7 +479,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.9.1
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.10.0
 ```
 
 ### 常见错误的对照表
@@ -512,7 +512,7 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.9.1
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.9.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/health` | 探活、版本（`0.10.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
@@ -1728,7 +1728,9 @@ agent 还没起来时它不会退出，只是每轮重试（服务化以后「�
 浏览器里把「设置 → 任务服务（可选）」填成 `http://127.0.0.1:8283`，后台任务跑完时标签页就会闪。
 
 # 排一个任务（不用起服务也能排：直接写进记录）
-python3 sched/task_server.py --submit "把 README 里的例子都跑一遍"
+# 它要先问 agent「有哪些工作区」，所以 agent 不在默认的 8282 上时要指路：
+python3 sched/task_server.py --agent http://127.0.0.1:8383 --submit "把 README 里的例子都跑一遍"
+#   （等价写法：TEA_AGENT_URL=http://127.0.0.1:8383 python3 sched/task_server.py --submit "…"）
 
 # 看看队列里有什么
 curl http://127.0.0.1:8283/api/tasks
@@ -1916,10 +1918,10 @@ cmake --build --preset arm64-linux -j"$(nproc)"
 
 | 构建 | 大小 | 运行库依赖 |
 | --- | --- | --- |
-| Windows x64 / MinGW-w64（0.9.1 实测，`win64-mingw-cross`） | 6.7 MB（`strip` 后 4.3 MB） | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
-| Windows x64 / MSVC（0.8.1 实测，未在 0.9.1 重测） | 2.6 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
-| Linux x64（0.9.1 实测，静态构建） | 6.1 MB（`strip` 后 5.2 MB） | **完全静态**：不依赖目标机的 glibc 版本 |
-| Linux aarch64（0.9.1 实测，静态构建） | 17.8 MB，`strip` 后 4.5 MB | 默认完全静态（Arm GNU 11.3 + 静态 glibc）；该工具链的 libstdc++ 自带调试信息，部署前记得 `strip` |
+| Windows x64 / MinGW-w64（0.10.0 实测，`win64-mingw-cross`） | 6.8 MB（`strip` 后 4.3 MB） | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
+| Windows x64 / MSVC（0.8.1 实测，未在 0.10.0 重测） | 2.6 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
+| Linux x64（0.10.0 实测，静态构建） | 6.2 MB（`strip` 后 5.2 MB） | **完全静态**：不依赖目标机的 glibc 版本 |
+| Linux aarch64（0.10.0 实测，静态构建） | 17.8 MB，`strip` 后 4.6 MB | 默认完全静态（Arm GNU 11.3 + 静态 glibc）；该工具链的 libstdc++ 自带调试信息，部署前记得 `strip` |
 
 想进一步压：`-DCMAKE_BUILD_TYPE=MinSizeRel` + `strip`；不需要 HTTPS 可
 `-DTEA_AGENT_USE_MBEDTLS=OFF`（体积显著下降，但 Linux 上就没有 `https://` 了）；
@@ -2114,7 +2116,7 @@ commit 则是**构建期元数据**，它既不在源码里、也不在二进制
 
 ```
 # tea_agent.buildinfo（与二进制放在一起）
-version=0.9.1
+version=0.10.0
 commit=678cd2c1f014        # 工作区有未提交改动时是 <hash>-dirty
 ```
 
