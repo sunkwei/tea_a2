@@ -1,0 +1,27 @@
+[Unit]
+Description=tea_a2 local agent (built-in web UI on 127.0.0.1:8383)
+Documentation=file:///home/sunkw/work/git/tea_a2/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# 用 ~/bin/a2 这个符号链接而不是 build/bin/tea_agent：重新构建后它自动指向新二进制，
+# `systemctl --user restart a2` 就是「上最新版本」。
+ExecStart=/home/sunkw/bin/a2 --port 8383
+WorkingDirectory=/home/sunkw
+Environment=HOME=/home/sunkw
+Environment=LANG=zh_CN.UTF-8
+Restart=on-failure
+RestartSec=3s
+# 手工占用 8383 会让启动失败：systemd 默认的启动限流把它拦在失败态，不会无限重试。
+
+# 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
+# `journalctl --user` 根本读不到（已实测），所以直接 append 到文件。
+# 内置日志照旧写 ~/.tea_agent/logs/tea_agent.log（控制台级别默认 warn，
+# 于是这里通常只有启动横幅 + WARN/ERROR）。
+StandardOutput=append:/home/sunkw/.tea_agent/logs/a2.console.log
+StandardError=append:/home/sunkw/.tea_agent/logs/a2.console.log
+
+[Install]
+WantedBy=default.target
