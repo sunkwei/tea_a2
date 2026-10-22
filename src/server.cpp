@@ -2849,6 +2849,18 @@ void ApiServer::Impl::install_routes() {
     // server (sched/task_server.py), so the caller says what the work is; this
     // side only tells the model "this turn works on that task".
     const std::string task_context = trim(json_string(body, "task_context"));
+    // Extra directories the file tools may touch in this turn. A caller that
+    // drives its own policy (the task queue) says per task what it may work
+    // in; the grant lasts this turn only.
+    std::vector<std::string> allow_paths;
+    auto allow_it = body.find("allow_paths");
+    if (allow_it != body.end() && allow_it->is_array()) {
+      for (std::size_t i = 0; i < allow_it->size(); ++i) {
+        if (!(*allow_it)[i].is_string()) continue;
+        const std::string one = trim((*allow_it)[i].get<std::string>());
+        if (!one.empty()) allow_paths.push_back(one);
+      }
+    }
 
     // ---- image attachments ------------------------------------------------
     std::vector<ImageAttachment> images;
@@ -2953,7 +2965,7 @@ void ApiServer::Impl::install_routes() {
     AppConfig* cfg = config;
     ToolRegistry* reg = tools;
     turn->worker = std::thread([turn, cfg, reg, message, images, provider, model, system_prompt,
-                             allowed_tools, task_id, task_context]() {
+                             allowed_tools, task_id, task_context, allow_paths]() {
       Agent agent(cfg, reg);
       TurnOptions options;
       options.provider = provider;
@@ -2964,6 +2976,7 @@ void ApiServer::Impl::install_routes() {
       options.tools = allowed_tools;
       options.task_id = task_id;
       options.task_context = task_context;
+      options.allow_paths = allow_paths;
       EventEmitter emit = [turn](const nlohmann::json& event) { turn->emit_event(event); };
       try {
         agent.run_turn(turn->workspace, &turn->session, message, images, options, emit,

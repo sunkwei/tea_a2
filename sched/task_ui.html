@@ -101,6 +101,8 @@
               placeholder="写一句要做的事，排队等着（额度有余量时自动开工）"></textarea>
     <div class="newrow">
       <input id="new-title" type="text" spellcheck="false" placeholder="标题（可留空）">
+      <input id="new-allow" type="text" spellcheck="false"
+             placeholder="允许访问的目录（逗号分隔，可留空）">
       <button class="primary" id="new-go">排队</button>
     </div>
   </div>
@@ -156,6 +158,12 @@ function card(t) {
   var fill = el('i'); fill.style.width = pct + '%'; bar.appendChild(fill);
   c.appendChild(bar);
   c.appendChild(el('div', 'note', (t.note || '') + (t.note ? '  ' : '') + '(' + pct + '%)'));
+
+  if (t.allow_paths && t.allow_paths.length) {
+    var ap = el('div', 'path');
+    ap.textContent = '本任务可额外访问：' + t.allow_paths.join('、');
+    c.appendChild(ap);
+  }
 
   var times = el('div', 'times');
   times.appendChild(el('span', '', '排队 ' + ago(t.created_at) + '（' + when(t.created_at) + '）'));
@@ -288,13 +296,16 @@ function createTask() {
   var prompt = document.getElementById('new-prompt').value.trim();
   if (!prompt) { document.getElementById('new-prompt').focus(); return; }
   var title = document.getElementById('new-title').value.trim();
+  var allow = document.getElementById('new-allow').value.trim();
   fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ prompt: prompt, title: title }) })
+                        body: JSON.stringify({ prompt: prompt, title: title,
+                                               allow_paths: allow ? allow.split(',') : [] }) })
     .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
     .then(function (res) {
       if (!res.ok) { window.alert('排队失败：' + ((res.d.error || {}).message || '未知错误')); return; }
       document.getElementById('new-prompt').value = '';
       document.getElementById('new-title').value = '';
+      document.getElementById('new-allow').value = '';
       refresh();
     });
 }

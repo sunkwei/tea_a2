@@ -113,6 +113,17 @@ class Workspace {
   /// Map a user/model supplied path to an absolute one, enforcing the
   /// workspace boundary unless allow_outside_workspace is set.
   std::string resolve_path(const std::string& path, std::string* err) const;
+
+  /// Extra directories this turn may touch, on top of the workspace root.
+  ///
+  /// The boundary is normally the workspace: the file tools refuse anything
+  /// outside it. A caller that drives its own policy (the task queue does) can
+  /// say "this turn may also work in these directories" - the list belongs to
+  /// the Workspace object, and a Workspace is one turn's copy, so the grant
+  /// lasts exactly that turn. Empty => the workspace root is the only place
+  /// the file tools may reach.
+  void set_allowed_roots(const std::vector<std::string>& roots);
+  const std::vector<std::string>& allowed_roots() const { return allowed_roots_; }
   /// Make a path relative to the workspace root when possible (for display).
   std::string display_path(const std::string& absolute) const;
 
@@ -179,6 +190,8 @@ class Workspace {
   WorkspaceEntry entry_;
   std::string root_;
   std::string run_dir_;
+  /// Per-turn extra roots for the file tools (see set_allowed_roots).
+  std::vector<std::string> allowed_roots_;
   Settings settings_;
   std::string instructions_;
   uint64_t free_bytes_ = 0;

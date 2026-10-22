@@ -411,6 +411,18 @@ providers:
         check("a task for a workspace nobody has is refused",
               status == 400, (status, body))
 
+        # ---- a task that may touch another directory ------------------------
+        status, allowed = call(task_port, "POST", "/api/tasks",
+                               {"prompt": "may look elsewhere",
+                                "allow_paths": ["/tmp/one", "/tmp/two"]})
+        check("a task can ask for extra directories",
+              status == 200 and allowed.get("allow_paths") == ["/tmp/one", "/tmp/two"],
+              (status, allowed.get("allow_paths")))
+        status, body = call(task_port, "POST", "/api/tasks",
+                            {"prompt": "x", "allow_paths": "not/a/list"})
+        check("a broken allow_paths is ignored, not fatal", status == 200, (status, body))
+        call(task_port, "DELETE", "/api/tasks/" + allowed.get("id", ""))
+
         # ---- the page ------------------------------------------------------
         status, page = call(task_port, "GET", "/")
         check("the task page is served", status == 200 and "排队中" in str(page), status)

@@ -36,6 +36,10 @@ struct TurnOptions {
   /// the workspace instructions and agent.md stay: they are what makes the agent
   /// work *here* rather than in a vacuum.
   std::string system_prompt;
+  /// Extra directories the file tools may touch in this turn, on top of the
+  /// workspace root. A caller that drives its own policy (the task queue) says
+  /// per task what it may work in; the grant lasts exactly this turn.
+  std::vector<std::string> allow_paths;
   /// The tools this turn may use. Empty => the usual set (whatever the provider
   /// supports). A caller that drives its own policy can hand the agent exactly the
   /// tools it wants - or none at all.

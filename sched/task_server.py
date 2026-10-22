@@ -149,7 +149,7 @@ class Agent:
         return self._request("POST", "/api/workspaces", {"path": path, "name": name})
 
     def chat(self, workspace_id, message, provider=None, session_id=None,
-             task_id=None, task_context=None):
+             task_id=None, task_context=None, allow_paths=None):
         """Run one turn and yield the agent's events as they happen.
 
         This is the whole contract between the queue and the channel: the
@@ -166,6 +166,8 @@ class Agent:
             body["task_id"] = task_id
         if task_context:
             body["task_context"] = task_context
+        if allow_paths:
+            body["allow_paths"] = list(allow_paths)
         req = urllib.request.Request(
             self.base + "/api/chat", data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST")
@@ -502,9 +504,10 @@ class Engine:
         session_id = task.get("session_id") or ""
         report = {"progress": None, "note": "", "needs_confirmation": False, "question": ""}
         answer = ""
+        allow_paths = task.get("allow_paths") or []
         for event in self.agent.chat(workspace_id, message, provider=provider,
                                      session_id=session_id, task_id=task_id,
-                                     task_context=context):
+                                     task_context=context, allow_paths=allow_paths):
             kind = event.get("type")
             if kind == "start":
                 session_id = event.get("session_id") or session_id
@@ -750,6 +753,20 @@ class Handler(BaseHTTPRequestHandler):
                                "'workspace_id' is required (the agent has no workspace)")
         if not prompt:
             return self._error(400, "bad_request", "'prompt' is required")
+        # Extra directories the file tools may touch while this task runs. The
+        # agent's boundary is the workspace; this is the task saying "and these
+        # ones, for this task only".
+        allow_paths = []
+        raw_paths = body.get("allow_paths")
+        if isinstance(raw_paths, str):
+            raw_paths = raw_paths.replace(";", ",").split(",")
+        if isinstance(raw_paths, list):
+            for one in raw_paths:
+                if not isinstance(one, str):
+                    continue
+                one = one.strip()
+                if one:
+                    allow_paths.append(os.path.abspath(os.path.expanduser(one)))
         if body.get("workspace_id"):
             # A task that names a workspace nobody has would sit in the queue and
             # fail later, with a much less obvious reason. Check it now - unless
@@ -769,6 +786,7 @@ class Handler(BaseHTTPRequestHandler):
             "title": str(body.get("title") or "").strip(),
             "provider": str(body.get("provider") or "").strip(),
             "model": str(body.get("model") or "").strip(),
+            "allow_paths": allow_paths,
             "session_id": "",
             "status": QUEUED,
             "progress": 0,
@@ -1042,6 +1060,9 @@ def main(argv=None):
     parser.add_argument("--submit", metavar="PROMPT",
                         help="put a task in the queue and exit (no server needed)")
     parser.add_argument("--title", default="", help="title for --submit")
+    parser.add_argument("--allow-path", action="append", default=[],
+                        help="a directory the task may touch (repeatable; the file "
+                             "tools are otherwise fenced to the workspace)")
     parser.add_argument("--no-serve", action="store_true",
                         help="do not serve; only run the scheduler (for a cron-style setup)")
     args = parser.parse_args(argv)
@@ -1062,6 +1083,7 @@ def main(argv=None):
             "title": args.title,
             "provider": args.provider,
             "model": "",
+            "allow_paths": [os.path.abspath(os.path.expanduser(p)) for p in args.allow_path],
             "session_id": "",
             "status": QUEUED,
             "progress": 0,

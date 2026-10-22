@@ -663,6 +663,15 @@ bool Workspace::append_agent_doc(const std::string& text, std::string* err) cons
   return write_file_atomic(agent_doc_file(), current, err);
 }
 
+void Workspace::set_allowed_roots(const std::vector<std::string>& roots) {
+  allowed_roots_.clear();
+  for (std::size_t i = 0; i < roots.size(); ++i) {
+    const std::string trimmed = trim(roots[i]);
+    if (trimmed.empty()) continue;
+    allowed_roots_.push_back(path_absolute(expand_user(trimmed)));
+  }
+}
+
 std::string Workspace::resolve_path(const std::string& path_in, std::string* err) const {
   std::string p = trim(path_in);
   if (p.size() >= 2 && ((p.front() == '"' && p.back() == '"') || (p.front() == '\'' && p.back() == '\''))) {
@@ -676,8 +685,19 @@ std::string Workspace::resolve_path(const std::string& path_in, std::string* err
   const std::string full =
       path_is_absolute(p) ? path_absolute(p) : path_absolute(path_join(root_, p));
   if (!settings_.allow_outside_workspace && !path_is_within(full, root_)) {
+    // A turn may be granted extra directories (the task queue does it per
+    // task). They count as inside the boundary.
+    for (std::size_t i = 0; i < allowed_roots_.size(); ++i) {
+      if (path_is_within(full, allowed_roots_[i])) return full;
+    }
     if (err) {
-      *err = "path escapes the workspace: '" + p + "' (workspace root: " + root_ + ")";
+      std::string extra;
+      for (std::size_t i = 0; i < allowed_roots_.size(); ++i) {
+        extra += (extra.empty() ? "" : ", ");
+        extra += allowed_roots_[i];
+      }
+      *err = "path escapes the workspace: '" + p + "' (workspace root: " + root_ +
+             (extra.empty() ? "" : ("; allowed in this turn: " + extra)) + ")";
     }
     return std::string();
   }

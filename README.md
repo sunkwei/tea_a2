@@ -1744,7 +1744,7 @@ curl http://127.0.0.1:8283/api/tasks
 | --- | --- | --- |
 | `GET` | `/api/health` | 服务自己、以及它连着的 agent 的状态、队列计数 |
 | `GET` | `/api/tasks?workspace_id=&status=` | 任务列表 + 每种状态的计数 |
-| `POST` | `/api/tasks` | 排队：`{workspace_id, prompt, title?, provider?, model?, meta?}` |
+| `POST` | `/api/tasks` | 排队：`{workspace_id?, prompt, title?, provider?, model?, allow_paths?, meta?}` |
 | `GET` | `/api/tasks/{id}?workspace_id=` | 单个任务：状态、进度、中间状态、结果 |
 | `DELETE` | `/api/tasks/{id}?workspace_id=` | 删掉一个任务（正在跑的先停掉） |
 | `POST` | `/api/tasks/{id}/start?workspace_id=` | 现在就做这件事（同样过额度闸门） |
@@ -1830,6 +1830,33 @@ curl -X DELETE http://127.0.0.1:8283/api/tasks/t_xxxxxxxx
 **队列自己的数据也都放在这个目录里**：`tasks/<id>.json` 是任务记录（一个任务一个文件，扁平
 放置 —— 任务 id 唯一，任务在哪个工作区做是记录里的一个字段，不是目录）。于是「关于这个队列的
 东西」全在一个目录下：账本、产物、agent 的运行时目录。
+
+### 任务能碰哪些目录
+
+agent 的文件工具默认被关在**工作区**里（`toolkit_file` 读工作区外的路径会得到
+`path escapes the workspace`）。后台任务常常要碰别处的目录，所以每条任务可以**自己声明**
+能额外访问哪些目录：
+
+```bash
+# 排队时带上
+curl -X POST http://127.0.0.1:8283/api/tasks -H 'Content-Type: application/json' \
+     -d '{"prompt":"整理 /data/raw 的日志","allow_paths":["/data/raw"]}'
+
+# 命令行
+python3 sched/task_server.py --submit "整理 /data/raw 的日志" --allow-path /data/raw
+```
+
+网页上排队时，第三个输入框就是它（逗号分隔）。
+
+这个授权是**逐轮**的：agent 收到 `allow_paths` 后，只在这一轮里把这些目录算作工作区内，
+下一轮就恢复围栏；system prompt 里也会写明这一轮能碰哪些目录（模型不知道就会乱试或者
+干脆拒绝做）。
+
+范围仍然是收紧的：授权 `/data/raw` 不等于授权 `/data`（越出授权目录照样被挡）。
+
+> 命令工具（`toolkit_exec`）本来就不受这个围栏限制：它在进程当前目录里跑，shell 里
+> `cd`/`cat` 随便走。围栏管的是**文件工具**（`toolkit_file`、`toolkit_load_image`）和
+> `toolkit_exec` 显式传的 `cwd`。
 
 ### 任务是什么
 

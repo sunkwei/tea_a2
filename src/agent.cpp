@@ -209,6 +209,19 @@ long long Agent::estimate_tokens(const std::vector<Message>& messages) {
   return total;
 }
 
+/// The extra directories this turn may touch, as the prompt should say it.
+static std::string allowed_roots_line(const Workspace& workspace) {
+  const std::vector<std::string>& roots = workspace.allowed_roots();
+  if (roots.empty()) return std::string();
+  std::string out = "- File tools may also access these directories in this turn: ";
+  for (std::size_t i = 0; i < roots.size(); ++i) {
+    out += (i ? ", " : "");
+    out += roots[i];
+  }
+  out += "\n";
+  return out;
+}
+
 std::string Agent::build_system_prompt(const Workspace& workspace, const Session& session,
                                            const std::string& persona_override,
                                            const std::string& task_context) const {
@@ -275,7 +288,14 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
            "Prefer staying inside the workspace unless the task really needs another "
            "path, and never modify anything outside it without being asked.\n";
   } else {
-    out << "- File tools are restricted to the workspace root.\n";
+    out << "- File tools are restricted to the workspace root";
+    const std::string extra = allowed_roots_line(workspace);
+    if (!extra.empty()) {
+      out << ", plus the directories this turn was given";
+      out << extra;
+    } else {
+      out << ".\n";
+    }
   }
   if (!session.info.created_at.empty()) {
     out << "- Session started (UTC): " << session.info.created_at << "\n";
@@ -694,6 +714,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
                            std::atomic<bool>* cancel) {
   TurnResult out;
   const int64_t started = now_ms();
+
+  // The file tools' boundary: the workspace root, plus whatever this turn was
+  // granted. A Workspace is one turn's copy, so the grant does not outlive it.
+  workspace.set_allowed_roots(options.allow_paths);
 
   const std::string provider =
       options.provider.empty() ? config_->active_provider : options.provider;
