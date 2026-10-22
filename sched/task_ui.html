@@ -72,6 +72,14 @@
   button:hover { color: var(--fg); border-color: var(--faint); }
   button.danger:hover { color: var(--err); border-color: var(--err); }
   .empty { color: var(--faint); font-size: 13px; padding: 4px 2px 12px; }
+  .new { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .new textarea, .new input {
+    width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 9px; font: inherit; resize: vertical;
+  }
+  .newrow { display: flex; gap: 8px; margin-top: 8px; }
+  .newrow input { flex: 1 1 auto; }
+  button.primary { color: var(--accent); border-color: var(--accent); }
   .path { color: var(--faint); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; word-break: break-all; }
   a.ext { color: var(--accent); text-decoration: none; font-size: 12px; }
   a.ext:hover { text-decoration: underline; }
@@ -88,6 +96,14 @@
   </div>
 </header>
 <main>
+  <div class="new">
+    <textarea id="new-prompt" rows="2" spellcheck="false"
+              placeholder="写一句要做的事，排队等着（额度有余量时自动开工）"></textarea>
+    <div class="newrow">
+      <input id="new-title" type="text" spellcheck="false" placeholder="标题（可留空）">
+      <button class="primary" id="new-go">排队</button>
+    </div>
+  </div>
   <h2>排队中 <span class="n" id="n-queued">0</span></h2>
   <div id="s-queued"></div>
   <h2>进行中 <span class="n" id="n-running">0</span></h2>
@@ -268,6 +284,21 @@ function render() {
   document.getElementById('m-age').textContent = Math.round((Date.now() - state.at) / 1000) + ' 秒前';
 }
 
+function createTask() {
+  var prompt = document.getElementById('new-prompt').value.trim();
+  if (!prompt) { document.getElementById('new-prompt').focus(); return; }
+  var title = document.getElementById('new-title').value.trim();
+  fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ prompt: prompt, title: title }) })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (res) {
+      if (!res.ok) { window.alert('排队失败：' + ((res.d.error || {}).message || '未知错误')); return; }
+      document.getElementById('new-prompt').value = '';
+      document.getElementById('new-title').value = '';
+      refresh();
+    });
+}
+
 function refresh() {
   return fetch('/api/tasks').then(function (r) { return r.json(); }).then(function (d) {
     state.tasks = d.tasks || [];
@@ -290,6 +321,10 @@ function health() {
   });
 }
 
+document.getElementById('new-go').onclick = createTask;
+document.getElementById('new-prompt').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); createTask(); }
+});
 refresh(); health();
 setInterval(refresh, 5000);
 setInterval(health, 10000);

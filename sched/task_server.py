@@ -292,7 +292,18 @@ class Store:
                 os.unlink(path)
                 return True
             except OSError:
+                pass
+            if workspace_id:
                 return False
+            # No workspace given: the record may live in any of them.
+            for task in self.list():
+                if task.get("id") == task_id:
+                    try:
+                        os.unlink(self._path(task.get("workspace_id"), task_id))
+                        return True
+                    except OSError:
+                        return False
+            return False
 
     def counts(self, workspace_id=None):
         counts = {QUEUED: 0, RUNNING: 0, WAITING: 0, DONE: 0, FAILED: 0, CANCELLED: 0}
@@ -715,6 +726,18 @@ class Handler(BaseHTTPRequestHandler):
                                "'workspace_id' is required (the agent has no workspace)")
         if not prompt:
             return self._error(400, "bad_request", "'prompt' is required")
+        if body.get("workspace_id"):
+            # A task that names a workspace nobody has would sit in the queue and
+            # fail later, with a much less obvious reason. Check it now - unless
+            # the agent is down, in which case the queue has to keep accepting.
+            try:
+                known = [w.get("id") for w in self.app.agent.workspaces()]
+            except AgentError:
+                known = []          # the agent is down: the queue keeps accepting
+            if known and workspace_id not in known:
+                return self._error(400, "bad_request",
+                                   "no workspace %r (the agent knows: %s)"
+                                   % (workspace_id, ", ".join(known)))
         task = {
             "id": "t_" + os.urandom(6).hex(),
             "workspace_id": workspace_id,
@@ -746,20 +769,24 @@ class Handler(BaseHTTPRequestHandler):
         task = self.app.store.load(workspace_id, task_id)
         if task is None:
             return self._error(404, "not_found", "no task %r" % task_id)
+        # The record knows its own workspace - use it, the caller may not have
+        # said which one.
+        owner = task.get("workspace_id") or workspace_id
         if task.get("status") == RUNNING:
-            self.app.cancel_task(workspace_id, task_id)
-        if not self.app.store.delete(workspace_id, task_id):
+            self.app.cancel_task(owner, task_id)
+        if not self.app.store.delete(owner, task_id):
             return self._error(404, "not_found", "no task %r" % task_id)
         self.app.events.publish({"type": "task_deleted", "task": task})
         self._json(200, {"ok": True, "id": task_id})
 
     def _action(self, task_id, action):
+        # The task id is unique, so the workspace is optional: look the task up
+        # and use the workspace it says it belongs to.
         workspace_id = self._one("workspace_id")
-        if not workspace_id:
-            return self._error(400, "bad_request", "'workspace_id' is required")
         task = self.app.store.load(workspace_id, task_id)
         if task is None:
             return self._error(404, "not_found", "no task %r" % task_id)
+        workspace_id = task.get("workspace_id") or workspace_id
         if action == "start":
             return self._start(workspace_id, task)
         if action == "cancel":

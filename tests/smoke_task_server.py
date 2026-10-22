@@ -382,6 +382,24 @@ providers:
               any(e.get("type") == "task_done" and e.get("task", {}).get("id") == task3.get("id")
                   for e in events), types)
 
+        # ---- no workspace named: it is found anyway ------------------------
+        # The task ids are unique, so the workspace is optional everywhere: a
+        # task that does not name one goes to the first one, and a lookup finds
+        # it wherever it lives.
+        status, plain = call(task_port, "POST", "/api/tasks",
+                             {"prompt": "no workspace named"})
+        check("a task can be queued without naming a workspace",
+              status == 200 and plain.get("workspace_id") == ws_id, (status, plain))
+        status, gone = call(task_port, "DELETE", "/api/tasks/" + plain.get("id", ""))
+        check("a task can be deleted without naming a workspace",
+              status == 200 and gone.get("ok") is True, (status, gone))
+        status, _ = call(task_port, "GET", "/api/tasks/" + plain.get("id", ""))
+        check("the deleted task is gone", status == 404, status)
+        status, body = call(task_port, "POST", "/api/tasks",
+                            {"prompt": "x", "workspace_id": "ws_nope"})
+        check("a task for a workspace nobody has is refused",
+              status == 400, (status, body))
+
         # ---- the page ------------------------------------------------------
         status, page = call(task_port, "GET", "/")
         check("the task page is served", status == 200 and "排队中" in str(page), status)

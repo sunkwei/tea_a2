@@ -1748,6 +1748,53 @@ curl http://127.0.0.1:8283/api/tasks
 | `POST` | `/api/tasks/{id}/confirm?workspace_id=` | 回答一个「等你确认」的任务：`{message}`，答案会成为同一会话的下一轮 |
 | `GET` | `/api/events` | 生命周期事件流（SSE）：`task_created` / `task_updated` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled` |
 
+### 使用手册：排队与撤销
+
+**排一条新任务**（三种办法，任选）：
+
+```bash
+# 1) 网页：打开 http://127.0.0.1:8283/ ，顶部写一句要做的事，点「排队」
+#    （Ctrl/Cmd+Enter 也可以）
+
+# 2) HTTP API：workspace_id 可以不写（默认第一个工作区）
+curl -X POST http://127.0.0.1:8283/api/tasks \
+     -H 'Content-Type: application/json' \
+     -d '{"prompt":"把 README 的例子跑一遍","title":"例子"}'
+#    → {"id":"t_xxxxxxxx","status":"queued","workspace_id":"ws_...","created_at":"..."}
+
+# 3) 命令行：不用服务在跑，直接写进队列
+python3 sched/task_server.py --submit "把 README 的例子跑一遍" --title "例子"
+```
+
+可以带的字段：`prompt`（必填）、`title`、`workspace_id`（默认第一个）、`provider`（默认
+`minimax`，即用谁的额度当闸门）、`model`、`meta`（自己用的自由字段）。写错 `workspace_id`
+会被当场挡下（400，并列出 agent 真正认识的工作区），不会排到一半才失败。
+
+排完它就**等着**：调度器每轮看一眼队列，minimax 额度够（默认至少剩 5%）就开工，不够就一直等。
+想立刻做：`POST /api/tasks/{id}/start`（网页上就是卡片里的「开始」按钮）。
+
+**删掉一条还没执行的任务**：
+
+```bash
+# 命令行
+curl -X DELETE http://127.0.0.1:8283/api/tasks/t_xxxxxxxx
+# → {"ok":true,"id":"t_xxxxxxxx"}
+
+# 网页：卡片右下角的「删除」（会先确认）
+```
+
+说明：
+
+- `workspace_id` 同样可以不给 —— 任务 id 是唯一的，接口自己在所有工作区里找。
+- 删的是**记录文件**（`~/.tea_agent/tasks/<workspace_id>/<id>.json`），删完再查是 404。
+- 正在跑的任务也删得掉：先 `POST /api/chat/stop` 把那一轮停掉，再删记录（网页上的「删除」、
+  命令行上的 `DELETE` 都是这个行为）。
+- 「等你确认」的任务删掉之前记得先回答或者取消它——不过删掉会连带把等待丢掉，所以想留着就
+  用 `POST /api/tasks/{id}/cancel`。
+
+**改一条任务**（改不了 prompt，只能改状态）：`PATCH` 那条路给的是 agent 侧的任务记录，
+队列这边没有改 prompt 的接口——要改就删了重排。
+
 ### 网页：<http://127.0.0.1:8283/>
 
 任务服务自带一个页面（`sched/task_ui.html`，一个静态文件，纯标准库伺服），分三段：
