@@ -235,11 +235,13 @@ providers:
         "--no-console", "--log-file", os.path.join(home, "logs", "tea_agent.log"),
         "--workspace", ws_dir,
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    task_server = subprocess.Popen([
+    task_server_cmd = [
         sys.executable, SERVER, "--agent", "http://127.0.0.1:%d" % agent_port,
         "--host", "127.0.0.1", "--port", str(task_port), "--data-dir", data_dir,
         "--provider", "minimax", "--interval", "2", "--max-per-round", "4",
-    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    ]
+    task_server = subprocess.Popen(task_server_cmd,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     failures = []
     checks = []
@@ -425,6 +427,35 @@ providers:
         _, one = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s" % (task4.get("id"), ws_id))
         check("a task of another provider is left alone",
               one.get("status") == "queued", one.get("status"))
+
+        # ---- a task that was running when the server started ---------------
+        # The worker thread died with the process, so the record is not running
+        # any more: left as "running" it would sit in the queue for ever, since
+        # the scheduler only starts queued tasks.
+        old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
+        stale = {
+            "id": "t_stale01", "workspace_id": ws_id, "prompt": "x", "title": "僵尸任务",
+            "provider": "minimax", "model": "", "session_id": "", "status": "running",
+            "progress": 10, "note": "", "steps": [], "needs_confirmation": False,
+            "question": "", "error": "", "result": "", "meta": {},
+            "created_at": old, "updated_at": old, "started_at": old, "finished_at": "",
+        }
+        os.makedirs(os.path.join(data_dir, ws_id), exist_ok=True)
+        with open(os.path.join(data_dir, ws_id, "t_stale01.json"), "w", encoding="utf-8") as f:
+            json.dump(stale, f, ensure_ascii=False)
+        task_server.terminate()
+        try:
+            task_server.wait(timeout=10)
+        except Exception:
+            task_server.kill()
+        task_server = subprocess.Popen(task_server_cmd,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        wait_health(task_port)
+        status, body = call(task_port, "GET", "/api/tasks/t_stale01?workspace_id=" + ws_id)
+        check("a task that was running when the server started is marked failed",
+              status == 200 and body.get("status") == "failed", (status, body))
+        check("the failure says what happened",
+              "restart" in (body.get("error") or ""), body.get("error"))
     finally:
         for proc in (task_server, agent):
             try:
