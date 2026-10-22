@@ -25,6 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wsConnect } from './mini_ws.mjs';
+import { acquireBrowser } from './chrome_pool.mjs';
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent');
@@ -185,10 +186,8 @@ try {
   const sidB = await mk('topic B');
 
   // ---- one browser, two tabs, two topics --------------------------------
-  const cdpPort = await freePort();
-  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox',
-    `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, 'chrome')}`,
-    'about:blank'], { stdio: 'ignore' });
+  chrome = await acquireBrowser(tmp);
+  const cdpPort = chrome.cdpPort;
   for (let i = 0; i < 120; i++) {
     try {
       const list = JSON.parse((await getJson(cdpPort, '/json/list')).body);

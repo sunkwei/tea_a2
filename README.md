@@ -529,15 +529,8 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.9.1
 | `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
-| `POST` | `/api/tasks` | 排一个任务：`{workspace_id, prompt, title?, session_id?, provider?}` → 任务记录（status=queued） |
-| `GET` | `/api/tasks?workspace_id=&status=` | 任务列表：排队中 / 进行中 / 等待确认 / 已完成，含进度、中间状态与 `counts` 汇总 |
-| `GET` | `/api/events?workspace_id=` | 生命周期事件流（SSE）：任务被创建/开始/更新/确认/完成/失败/等确认/取消 |
 | `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
-| `PATCH` | `/api/tasks/{id}` | 改任务记录的任意字段（含 `meta`、`step`）；见下面的「原语层」 |
-| `GET` | `/api/tasks/{id}?workspace_id=` | 单个任务 |
-| `POST` | `/api/tasks/{id}/start?workspace_id=` | 现在就做这件事（body 可带 `provider`/`model` 覆盖） |
-| `POST` | `/api/tasks/{id}/cancel?workspace_id=` | 停掉正在跑的那个 |
-| `POST` | `/api/tasks/{id}/confirm?workspace_id=` | 回答一个「等你确认」的任务：`{message}`，答案会成为同一会话的下一轮 |
+| `POST` | `/api/chat` | agent loop 本身；带 `task_id` + `task_context` 时，这一轮就是「在做某个排队任务」，模型会用 `toolkit_task` 汇报进度 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
 | `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件。设置页的「重置 provider」走的就是它 |
 | `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`）；key 不会出现在任何响应里 |
@@ -939,6 +932,7 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 | `toolkit_agent_doc` | `read` `append` `replace` `scripts`：维护 `.tea_agent_run/agent.md`（本工作区的经验：坑、可复用命令与脚本） |
 | `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
 | `toolkit_todo` | 把复杂任务分解成阶段列表并维护进度：`list` `set`/`replace` `add` `update` `clear`。列表存在会话里、每轮注入 system prompt、每次变更通过 SSE 的 `todo` 事件推给 UI |
+| `toolkit_task` | 汇报**排队任务**的进度：`op=update progress=0-100 note=…`，需要人确认时 `needs_confirmation=true question=…`。任务队列在 Python 侧（`sched/task_server.py`），agent 这边只报数：任务服务从这一轮的事件流里读走这些参数 |
 
 相对路径基于工作区根目录；默认**禁止越出工作区**，判定前会解析符号链接，所以工作区里的软链
 也无法把工具带出去。这个边界可以在网页上开关——见下面的「文件访问范围」。
@@ -1689,16 +1683,62 @@ settings:
 
 ---
 
-## 任务队列与配额调度（`sched/`）
+## 任务队列：agent 是通道，队列在 Python 侧
 
-不是所有事都要马上做。「排队」这件事本身也可以排：把活儿写进任务队列，等**供应商还有额度**
+不是所有事都要马上做。「排队」这件事本身也可以排：把活儿写进队列，等**供应商还有额度**
 的时候再让 agent 去做。
+
+分工是这样的：
+
+```
+tea_agent（C++，基础能力）              task server（Python，可选伴生件）
+  /api/chat (SSE)      ←── 调用 ──      任务队列：排队 / 执行 / 状态 / 结果
+  /api/providers/{n}/usage ←── 调用 ──  额度闸门：查 minimax 还有多少
+  /api/workspaces     ←── 调用 ──      记录存放在它自己这里
+  /api/chat/stop      ←── 调用 ──      事件流：task_created / task_done / …
+```
+
+**agent 侧完全不知道队列的存在**：它只有「这一轮在做某个任务」的提示，以及一个
+「报进度」的工具。队列的一切（记录、状态机、什么时候开工）都在 Python 侧。
+所以：
+
+- agent 单独就能跑，一个 Python 进程都没有也不影响任何功能；
+- 队列侧的一切策略（什么时候开工、做什么、做完通知谁）都写在 Python 里，不用改 C++。
+
+### 任务服务：`sched/task_server.py`
+
+一个只用标准库的 HTTP 服务（设备上没有 pip 也能跑），默认听 `127.0.0.1:8283`：
+
+```bash
+# 起服务（agent 默认在 8282）
+python3 sched/task_server.py --agent http://127.0.0.1:8282 --port 8283
+
+# 排一个任务（不用起服务也能排：直接写进记录）
+python3 sched/task_server.py --submit "把 README 里的例子都跑一遍"
+
+# 看看队列里有什么
+curl http://127.0.0.1:8283/api/tasks
+```
+
+它提供的**任务管理接口**：
+
+| 方法 | 路径 | 干什么 |
+| --- | --- | --- |
+| `GET` | `/api/health` | 服务自己、以及它连着的 agent 的状态、队列计数 |
+| `GET` | `/api/tasks?workspace_id=&status=` | 任务列表 + 每种状态的计数 |
+| `POST` | `/api/tasks` | 排队：`{workspace_id, prompt, title?, provider?, model?, meta?}` |
+| `GET` | `/api/tasks/{id}?workspace_id=` | 单个任务：状态、进度、中间状态、结果 |
+| `DELETE` | `/api/tasks/{id}?workspace_id=` | 删掉一个任务（正在跑的先停掉） |
+| `POST` | `/api/tasks/{id}/start?workspace_id=` | 现在就做这件事（同样过额度闸门） |
+| `POST` | `/api/tasks/{id}/cancel?workspace_id=` | 停掉正在跑的那个（`POST /api/chat/stop`） |
+| `POST` | `/api/tasks/{id}/confirm?workspace_id=` | 回答一个「等你确认」的任务：`{message}`，答案会成为同一会话的下一轮 |
+| `GET` | `/api/events` | 生命周期事件流（SSE）：`task_created` / `task_updated` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled` |
 
 ### 任务是什么
 
-一个任务 = 一句要做的事 + 它的状态。状态文件是**一个任务一个文件**
-（`<workspace>/.tea_agent_run/tasks/<id>.json`），所以两个写入者不会撞在同一个文件上，
-重启也不会丢。
+一个任务 = 一句要做的事 + 它的状态。记录是**一个任务一个文件**
+（`<data-dir>/<workspace_id>/<id>.json`，默认 `~/.tea_agent/tasks/`），所以两个写入者
+不会撞在同一个文件上，重启也不会丢。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -1708,83 +1748,36 @@ settings:
 | `steps[]` | 中间状态的历史：什么时候、做了什么、进度多少 |
 | `needs_confirmation` + `question` | **需要用户确认**：agent 停下来等一个答案，任务不会假装做完 |
 | `session_id` | 跑这个任务的会话（确认之后接着在同一个会话里继续） |
-
-任务的生命周期由服务端管：开始 → 跑 → 结束；agent 只负责报进度和中间状态。
+| `result` | 最后一轮的回答 |
+| `meta` | 给脚本自己用的自由字段 |
 
 ### agent 怎么报进度：`toolkit_task`
 
 ```
-toolkit_task op=update progress=50 note="已经把构建产物删了" 
+toolkit_task op=update progress=50 note="已经把构建产物删了"
 toolkit_task op=update needs_confirmation=true question="可以删掉旧构建产物吗？"
-toolkit_task op=get / op=list
 ```
-
-不带 `task_id` 时指的是**当前这一轮所属的任务**。`needs_confirmation=true` 会让任务停在
-`waiting_confirmation`——这是「任务需要用户确认」在状态里的样子。
 
 模型怎么知道这一轮属于某个任务？**system prompt 里会写清楚**（任务 id、标题、要做的事），
 并告诉它用 `toolkit_task` 汇报进度与中间状态、遇到需要人确认的就停下来问。没有这一段，
-模型只会把任务当成普通提问：进度永远是 0，`needs_confirmation` 也永远用不上——这正是
-「进度条不动」和「等确认」两件事曾经只在测试里成立的原因。
+模型只会把任务当成普通提问：进度永远是 0，`needs_confirmation` 也永远用不上。
 
-### 崩在「运行中」的任务
+**agent 这一侧不存任务记录**：`toolkit_task` 只是「报数」——把 progress/note/question
+说出来。任务服务在读这一轮的事件流（`tool_call` 里带着这些参数），据此更新自己的记录。
+所以两边各有各的职责，也就没有两份真相。
 
-agent 进程死掉时，任务记录会停在 `running`。这样它就卡住了：调度器只做排队的任务，
-`POST /api/tasks/{id}/start` 也只接受 `queued` / `waiting_confirmation`。所以**服务端启动时
-会回收这类僵尸任务**：把它们标成 `failed`，并写明「agent 在这个任务运行时停掉了（服务端重启过）」，
-需要的话再 `PATCH` 一次 `{"status":"queued"}` 重新排队。回收只动**一分钟内没有更新过**的任务，
-免得把另一个进程正在做的任务抢走。
+### 额度闸门
 
-### 原语层：给脚本用的 API
-
-产品是「聊天」和「任务队列」；**原语**是「一次模型调用」「一条记录」「一个事件」。
-策略——什么时候开工、做什么、什么时候停、通知谁——应该写在脚本里，而不是长在服务端里。
-
-| 接口 | 干什么 |
-| --- | --- |
-| `POST /api/llm/chat` | **一次模型调用**：没有 agent loop，不执行任何工具。`{prompt\|messages, system, provider, model, tools, temperature, max_tokens, stream}`。不流式时返回 `{content, reasoning, tool_calls[], usage, elapsed_ms}`；流式时是 SSE（`content_delta` / `reasoning_delta`，最后一条 `done` 带全部结果）。`tools` 原样透传——协议归调用方，服务端只负责把请求送出去。 |
-| `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id`（这一轮属于哪个任务）。 |
-| `PATCH /api/tasks/{id}` | 改任务记录的**任意**字段：`status`、`progress`、`note`、`question`、`needs_confirmation`、`meta`（自己的那套账记在这儿，不用服务端加字段）、`step`（追加一条中间状态）。 |
-| `GET /api/events` | 生命周期事件流（SSE）：`task_created` / `task_started` / `task_updated` / `task_confirmed` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled`；`?workspace_id=` 可过滤。内置 UI 就靠它知道「后台的任务跑完了」。 |
-
-`sched/tea_api.py` 是这层的客户端（纯标准库，设备上跑得起来）：
-
-```python
-from tea_api import Tea
-tea = Tea("http://127.0.0.1:8282")
-
-quota = tea.usage("minimax")              # 额度
-task = tea.create_task(ws, "把 README 跑一遍")   # 排队
-tea.start_task(ws, task["id"])             # 现在就做
-for event in tea.events(workspace_id=ws):    # 订阅，而不是轮询
-    if event["type"] == "task_done":
-        notify(event["task"])               # 通知怎么发，是你的事
-```
-
-### 调度器：`sched/task_runner.py`
-
-它做三件事：查额度 → 挑排队中的任务 → 看着它做完。
-
-```bash
-# 放进队列
-python3 sched/task_runner.py --submit "把 README 里的例子都跑一遍"
-
-# 跑一轮就退出（看效果用这个）
-python3 sched/task_runner.py --once
-
-# 常驻：每 5 分钟看一次额度，有余量就做一件
-python3 sched/task_runner.py --workspace ws_xxx --interval 300
-```
-
-额度取自 provider 自己的额度端点（MiniMax M Plan 走 `GET /api/providers/minimax/usage`，
-即「5 小时窗口 + 每周窗口」）。**只有余量够的时候才开工**：
+安排执行任务时，任务服务先问 agent：「minimax 这个 provider 还剩多少额度？」
+（`GET /api/providers/minimax/usage`，即「5 小时窗口 + 每周窗口」）。**只有余量够的时候
+才开工**：
 
 ```
-2026-10-21 20:11:32  scheduler up: http://127.0.0.1:8282, workspace ws_b5e0…, provider minimax
-2026-10-21 20:11:32  quota of 'minimax': 0.0% left (need 5%) - not starting anything, the window resets in 42 min
-2026-10-21 20:12:32  quota of 'minimax': 60.0% left - going to work
-2026-10-21 20:12:32  started task t_4b2f… (a task)
-2026-10-21 20:12:35  task t_4b2f…: done 100%
+2026-10-22 07:38:47  agent up: http://127.0.0.1:8282 (provider minimax, model MiniMax-M3.1-Flash)
+2026-10-22 07:38:47  quota of 'minimax': 95.0% left - going to work
+2026-10-22 07:38:47    started task t_66fc879b3089 (调度器冒烟)
+2026-10-22 07:38:53    task t_66fc879b3089: running 100% - 已在工作区根目录创建 notes.txt…
+2026-10-22 07:38:56    task t_66fc879b3089: done 100% - 已在工作区根目录创建 notes.txt…
 ```
 
 几个刻意的选择：
@@ -1795,15 +1788,34 @@ python3 sched/task_runner.py --workspace ws_xxx --interval 300
   「查的是 A 的额度、跑的却是 B」就成了假账。
 - **别的 provider 的任务不碰**：任务自己指定了 provider 就由它自己排队。
 - **一次做一件**（`--max-per-round`）：额度是窗口制的，一口气全做完没有意义。
-- **在等人确认时停下**：那一轮跑完就停，日志里会写清楚要人回答什么。
+- **在等人确认时停下**：那一轮跑完就停，记录里写清楚要人回答什么；回答之后在**同一个会话**
+  里接着做。
 
-只依赖标准库：这个调度器跑在设备上、和 agent 在一起，那里没有 pip。
+### 原语层：给脚本用的 API
 
-回归测试：`python3 tests/smoke_task_runner.py`（28 项）——用一个假 provider 同时提供
-「聊天」和「额度」两个端点，验证余量为 0 时任务保持排队、**一次模型请求都没发**；余量
-够时任务被启动并跑完；需要确认的任务停在 `waiting_confirmation`，回答之后继续做完。
+产品是「聊天」和「任务队列」；**原语**是「一次模型调用」「一条记录」「一个事件」。
+策略——什么时候开工、做什么、什么时候停、通知谁——应该写在脚本里，而不是长在服务端里。
+
+| 接口 | 干什么 |
+| --- | --- |
+| `POST /api/llm/chat` | **一次模型调用**：没有 agent loop，不执行任何工具。`{prompt\|messages, system, provider, model, tools, temperature, max_tokens, stream}`。不流式时返回 `{content, reasoning, tool_calls[], usage, elapsed_ms}`；流式时是 SSE（`content_delta` / `reasoning_delta`，最后一条 `done` 带全部结果）。`tools` 原样透传——协议归调用方，服务端只负责把请求送出去。 |
+| `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id` + `task_context`（这一轮在做某个排队任务，模型会据此汇报进度）。 |
+| `GET /api/providers/{name}/usage` | 这个 provider 的额度（5 小时窗口 + 每周窗口）；provider 没声明额度端点时是 400。 |
+
+`sched/tea_api.py` 是 agent 这层的客户端（纯标准库，设备上跑得起来）：
+
+```python
+from tea_api import Tea
+tea = Tea("http://127.0.0.1:8282")
+
+quota = tea.usage("minimax")              # 额度
+for event in tea.events(workspace_id=ws):  # 订阅，而不是轮询
+    if event["type"] == "done":
+        notify(event)                     # 通知怎么发，是你的事
+```
 
 ---
+
 ## 部署到嵌入式设备
 
 ### 交叉编译
@@ -1992,9 +2004,6 @@ src/
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆/产出文件、索引；
                             并发写用进程级锁 + 原子替换（见「并发」一节）
-  task.{h,cpp}               任务队列：一个任务一个文件（.tea_agent_run/tasks/），
-                            状态/进度/中间状态/等待用户确认
-  state_lock.h              进程级锁：所有「读-改-写」的状态文件共用一把
   html_export.{h,cpp}       会话 → 自包含 HTML（内联 CSS/图片、可导入的 JSON 区块）
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源
   http.{h,cpp}              传输分派（socket+TLS / WinHTTP，自动回退）
@@ -2013,7 +2022,8 @@ tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/
 tests/e2e.ps1              端到端测试（155 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
-sched/task_runner.py        调度器：查 provider 额度，有余量就做排队中的任务
+sched/task_server.py        任务服务（Python，可选）：任务队列 + 额度闸门 + 事件流
+sched/tea_api.py            agent 那层的 HTTP 客户端封装（纯标准库）
 CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
 cmake/toolchains/           aarch64-linux-gnu.cmake / mingw-w64-x86_64.cmake（交叉编译入口）
 cmake/version_git_hash.cmake 生成 tea_agent.buildinfo（写在二进制旁边，不动源码树）
@@ -2101,7 +2111,7 @@ node tests/ui_metrics_layout.mjs                          # 指标栏始终单�
 python3 tests/smoke_single_file.py                        # 内嵌证书 + 静态链接 + 静态下的 DNS
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
-python3 tests/smoke_task_runner.py                        # 任务队列 + 配额调度器（余量为 0 就不开工）
+python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建

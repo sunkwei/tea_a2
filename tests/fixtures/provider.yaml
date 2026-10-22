@@ -21,6 +21,12 @@ providers:
     api_key: mock-key-not-used
     default_model: mock-model
     description: local mock used by the end-to-end test
+    # The mock also answers the M Plan quota endpoint, so the task server (the
+    # queue) can be exercised end to end: it asks the agent how much quota is
+    # left before it starts a task.
+    supports_usage: true
+    usage_type: minimax_token_plan
+    usage_url: http://127.0.0.1:8790/v1/token_plan/remains
     models:
       mock-model:
         max_context_tokens: 128000

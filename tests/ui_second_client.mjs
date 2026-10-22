@@ -27,6 +27,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wsConnect } from './mini_ws.mjs';
+import { acquireBrowser } from './chrome_pool.mjs';
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent');
@@ -183,20 +184,8 @@ try {
     mine && mine.workspace_id);
 
   // ---- PC B: a brand new browser profile, nothing in common with A -------
-  const cdpPort = await freePort();
-  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox',
-    `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, 'pcB')}`,
-    'about:blank'], { stdio: 'ignore' });
-  let target = null;
-  for (let i = 0; i < 120; i++) {
-    try {
-      const l = JSON.parse((await getJson(cdpPort, '/json/list')).body);
-      target = l.find((t) => t.type === 'page');
-      if (target) break;
-    } catch {}
-    await sleep(150);
-  }
-  if (!target) throw new Error('no chrome page target');
+  chrome = await acquireBrowser(tmp);
+  const target = { webSocketDebuggerUrl: chrome.webSocketDebuggerUrl };
   ws = wsConnect(target.webSocketDebuggerUrl);
   await new Promise((r) => ws.on('open', r));
   ws.on('message', (raw) => {

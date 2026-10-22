@@ -364,8 +364,8 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
     out << "The work was put in a queue to be done later; a scheduler started it when the "
            "provider had quota left. Two things follow from that:\n";
     out << "  * Report on the task with toolkit_task (op=update): progress=0-100 and a one-line "
-           "note of what you just did. The task record is the only place that progress becomes "
-           "visible - the user watches it there, and the scheduler waits for it.\n";
+           "note of what you just did. That report is what the task server records and shows - "
+           "without it the task looks like nothing happened.\n";
     out << "  * If the work cannot go on without the user, report it with "
            "needs_confirmation=true and your question. The task then waits for an answer instead "
            "of being marked done - say what you need and stop there.\n";

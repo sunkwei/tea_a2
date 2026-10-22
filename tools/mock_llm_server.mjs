@@ -178,6 +178,31 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // The MiniMax M Plan quota endpoint: the task server asks it whether there
+    // is room to work. The mock always says "yes".
+    if (req.method === 'GET' && url.pathname.endsWith('/token_plan/remains')) {
+      const now = Date.now();
+      const row = {
+        model_name: 'general',
+        start_time: now,
+        end_time: now + 5 * 3600 * 1000,
+        remains_time: 5 * 3600 * 1000,
+        current_interval_remaining_percent: 100,
+        current_interval_status: 1,
+        weekly_start_time: now,
+        weekly_end_time: now + 7 * 24 * 3600 * 1000,
+        weekly_remains_time: 7 * 24 * 3600 * 1000,
+        current_weekly_remaining_percent: 100,
+        current_weekly_status: 1,
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        base_resp: { status_code: 0, status_msg: 'success' },
+        model_remains: [row],
+      }));
+      return;
+    }
+
     if (req.method !== 'POST' || !url.pathname.endsWith('/chat/completions')) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message: `no route for ${req.method} ${url.pathname}` } }));

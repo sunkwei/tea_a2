@@ -13,7 +13,8 @@
 param(
     [string]$Exe = "",
     [int]$AgentPort = 8399,
-    [int]$MockPort = 8790
+    [int]$MockPort = 8790,
+    [int]$TaskPort = 8398
 )
 
 $ErrorActionPreference = 'Stop'
@@ -310,37 +311,76 @@ try {
     Check "stream terminates cleanly for a strict client" ($probeCode -eq 0) `
         (($probeOut -join ' ').Trim())
 
-    # ---- the task queue (what a scheduler works through) --------------------
-    $taskBody = @{ workspace_id = $wsId; prompt = 'run the mock sequence as a task'; title = 'e2e task' } |
-        ConvertTo-Json -Compress
-    $task = Invoke-RestMethod -Method Post -Uri "$base/api/tasks" -ContentType 'application/json' -Body $taskBody
-    Check "POST /api/tasks creates a task" ($null -ne $task.id -and $task.status -eq 'queued') `
-        "id=$($task.id) status=$($task.status)"
-    Check "the task keeps its prompt" ($task.prompt -eq 'run the mock sequence as a task') $task.prompt
-    $taskFile = Join-Path $wsDir ".tea_agent_run\tasks\$($task.id).json"
-    Check "the task is persisted under .tea_agent_run/tasks" (Test-Path $taskFile) $taskFile
+    # ---- the task queue (the Python task server) ----------------------------
+    #
+    # The queue is an optional companion: it keeps the tasks and drives the
+    # agent through its HTTP API. The agent itself has no task API at all.
+    $agentTasks = $null
+    try {
+        $agentTasks = Invoke-RestMethod "$base/api/tasks?workspace_id=$wsId" -ErrorAction Stop
+    } catch { }
+    Check "the agent has no task API" ($null -eq $agentTasks) "the agent answered with a task list"
 
-    $taskList = Invoke-RestMethod "$base/api/tasks?workspace_id=$wsId"
-    Check "GET /api/tasks lists the task" (@($taskList.tasks).Count -ge 1) `
-        "count=$(@($taskList.tasks).Count)"
-    Check "the counts report the queued task" ($taskList.counts.queued -ge 1) `
-        ($taskList.counts | ConvertTo-Json -Compress)
-
-    $started = Invoke-RestMethod -Method Post -Uri "$base/api/tasks/$($task.id)/start?workspace_id=$wsId" `
-        -ContentType 'application/json' -Body '{}'
-    Check "POST /api/tasks/{id}/start runs it" ($started.status -eq 'running') "status=$($started.status)"
-    Check "the task got a session" (-not [string]::IsNullOrEmpty($started.session_id)) $started.session_id
-
-    $taskDone = $null
-    for ($i = 0; $i -lt 60; $i++) {
-        Start-Sleep -Milliseconds 500
-        $one = Invoke-RestMethod "$base/api/tasks/$($task.id)?workspace_id=$wsId"
-        if ($one.status -in @('done', 'failed', 'cancelled', 'waiting_confirmation')) { $taskDone = $one; break }
+    $python = $null
+    foreach ($candidate in @('python', 'python3', 'py')) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) { $python = $candidate; break }
     }
-    Check "the task ends up done" ($null -ne $taskDone -and $taskDone.status -eq 'done') `
-        "status=$($taskDone.status)"
-    Check "a finished task is at 100%" ($taskDone.progress -eq 100) "progress=$($taskDone.progress)"
-    Check "a finished task has no error" ([string]::IsNullOrEmpty($taskDone.error)) $taskDone.error
+    if (-not $python) {
+        Write-Host "  [skip] the task queue checks (no python on this machine)" -ForegroundColor Yellow
+    } else {
+        $taskBase = "http://127.0.0.1:$TaskPort"
+        $taskData = Join-Path $scratch 'tasks'
+        $taskServer = Start-Process -PassThru -WindowStyle Hidden -FilePath $python `
+            -ArgumentList @((Join-Path $PSScriptRoot '..\sched\task_server.py'),
+            '--agent', $base, '--host', '127.0.0.1', '--port', "$TaskPort",
+            '--data-dir', $taskData, '--provider', 'mock', '--interval', '2',
+            '--max-per-round', '4')
+        try {
+            $up = $false
+            for ($i = 0; $i -lt 40; $i++) {
+                Start-Sleep -Milliseconds 250
+                try {
+                    $h = Invoke-RestMethod "$taskBase/api/health" -ErrorAction Stop
+                    $up = $true; break
+                } catch { }
+            }
+            Check "the task server comes up" $up $taskBase
+
+            $taskBody = @{ workspace_id = $wsId; prompt = 'run the mock sequence as a task'; title = 'e2e task' } |
+                ConvertTo-Json -Compress
+            $task = Invoke-RestMethod -Method Post -Uri "$taskBase/api/tasks" `
+                -ContentType 'application/json' -Body $taskBody
+            Check "POST /api/tasks creates a task" ($null -ne $task.id -and $task.status -eq 'queued') `
+                "id=$($task.id) status=$($task.status)"
+            Check "the task keeps its prompt" ($task.prompt -eq 'run the mock sequence as a task') $task.prompt
+            $taskFile = Join-Path $taskData "$wsId\$($task.id).json"
+            Check "the task is persisted by the task server" (Test-Path $taskFile) $taskFile
+
+            $taskList = Invoke-RestMethod "$taskBase/api/tasks?workspace_id=$wsId"
+            Check "GET /api/tasks lists the task" (@($taskList.tasks).Count -ge 1) `
+                "count=$(@($taskList.tasks).Count)"
+            Check "the counts report the queued task" ($taskList.counts.queued -ge 1) `
+                ($taskList.counts | ConvertTo-Json -Compress)
+
+            $started = Invoke-RestMethod -Method Post -Uri "$taskBase/api/tasks/$($task.id)/start?workspace_id=$wsId" `
+                -ContentType 'application/json' -Body '{}'
+            Check "POST /api/tasks/{id}/start runs it" ($started.status -eq 'running') "status=$($started.status)"
+
+            $taskDone = $null
+            for ($i = 0; $i -lt 60; $i++) {
+                Start-Sleep -Milliseconds 500
+                $one = Invoke-RestMethod "$taskBase/api/tasks/$($task.id)?workspace_id=$wsId"
+                if ($one.status -in @('done', 'failed', 'cancelled', 'waiting_confirmation')) { $taskDone = $one; break }
+            }
+            Check "the task ends up done" ($null -ne $taskDone -and $taskDone.status -eq 'done') `
+                "status=$($taskDone.status)"
+            Check "a finished task is at 100%" ($taskDone.progress -eq 100) "progress=$($taskDone.progress)"
+            Check "a finished task has no error" ([string]::IsNullOrEmpty($taskDone.error)) $taskDone.error
+            Check "the task got a session" (-not [string]::IsNullOrEmpty($taskDone.session_id)) $taskDone.session_id
+        } finally {
+            if ($taskServer -and -not $taskServer.HasExited) { Stop-Process -Id $taskServer.Id -Force }
+        }
+    }
 
     Write-Host "`n== trajectory (per-turn audit record) ==" -ForegroundColor Cyan
     $startEvent = $events | Where-Object { $_.type -eq 'start' } | Select-Object -First 1

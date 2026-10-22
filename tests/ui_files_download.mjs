@@ -18,6 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wsConnect } from './mini_ws.mjs';
+import { acquireBrowser } from './chrome_pool.mjs';
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent');
@@ -84,18 +85,8 @@ try {
   fs.writeFileSync(path.join(run, 'scripts', 'marker.txt'), 'download-marker\n');
 
   const cdpPort = await freePort();
-  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox',
-    `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, 'chrome')}`,
-    'about:blank'], { stdio: 'ignore' });
-  let target = null;
-  for (let i = 0; i < 100; i++) {
-    try {
-      const list = JSON.parse((await getJson(cdpPort, '/json/list')).body);
-      target = list.find((t) => t.type === 'page');
-      if (target) break;
-    } catch {}
-    await sleep(150);
-  }
+  chrome = await acquireBrowser(tmp);
+  const target = { webSocketDebuggerUrl: chrome.webSocketDebuggerUrl };
   if (!target) throw new Error('no chrome page target');
   ws = wsConnect(target.webSocketDebuggerUrl);
   await new Promise((r) => ws.on('open', r));

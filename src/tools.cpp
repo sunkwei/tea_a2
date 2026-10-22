@@ -10,7 +10,6 @@
 #include "command.h"
 #include "http.h"
 #include "log.h"
-#include "task.h"
 #include "util.h"
 
 namespace tea {
@@ -773,67 +772,30 @@ constexpr std::size_t kMaxLoadedImageBytes = 8u * 1024u * 1024u;
 
 // toolkit_task -- report on the task this turn belongs to.
 //
-// A task is work that was queued for later (see /api/tasks and sched/). The
-// agent owns three things about it: how far it has come, what it just did, and
-// whether a human has to confirm something before it goes on. The scheduler and
-// the task list read them from the task record.
+// A task is work that was queued for later (the queue itself lives in the task
+// server, sched/task_server.py). This side does not keep task records: the
+// agent only says three things about the work - how far it has come, what it
+// just did, and whether a human has to confirm something before it goes on -
+// and the task server reads that from the turn's event stream.
 
 ToolResult tool_task(const nlohmann::json& args, const ToolContext& ctx) {
   ToolResult result;
-  if (!ctx.workspace) {
-    result.output = "error: no workspace is active";
-    return result;
-  }
   const std::string op = to_lower(trim(arg_str(args, "op", "update")));
 
-  if (op == "list") {
-    const std::vector<Task> tasks = TaskStore::list(*ctx.workspace);
-    if (tasks.empty()) {
-      result.ok = true;
-      result.output = "no tasks in this workspace";
-      return result;
-    }
-    std::string out;
-    for (std::size_t i = 0; i < tasks.size(); ++i) {
-      const Task& t = tasks[i];
-      out += t.id + "  " + t.status + "  " + std::to_string(t.progress) + "%  " + t.title;
-      if (t.needs_confirmation) out += "  [needs confirmation]";
-      if (!t.note.empty()) out += "  - " + t.note;
-      out += "\n";
-    }
-    result.ok = true;
-    result.output = out;
+  if (op == "list" || op == "get") {
+    // The queue lives in the task server (sched/task_server.py); this process
+    // does not keep task records - it only says what it is doing.
+    result.output =
+        "this agent does not keep the task queue: it only reports on the task it is working on. "
+        "The queue (enqueue, status, results) is served by the task server.";
     return result;
   }
-
-  std::string id = trim(arg_str(args, "task_id"));
-  if (id.empty() && ctx.task_id) id = *ctx.task_id;
-  if (id.empty()) {
-    result.output = "error: this turn is not part of a task, so there is nothing to report";
-    return result;
-  }
-
-  if (op == "get") {
-    Task t;
-    std::string err;
-    if (!TaskStore::load(*ctx.workspace, id, &t, &err)) {
-      result.output = "error: " + err;
-      return result;
-    }
-    result.ok = true;
-    result.output = t.id + ": " + t.status + " (" + std::to_string(t.progress) + "%) " + t.title;
-    if (!t.note.empty()) result.output += "\nlatest: " + t.note;
-    if (t.needs_confirmation) result.output += "\nwaiting for the user: " + t.question;
-    return result;
-  }
-
   if (op != "update") {
-    result.output = "error: op must be update, get or list";
+    result.output = "error: op must be update";
     return result;
   }
 
-  // ---- update -------------------------------------------------------------
-  const bool has_progress = args.is_object() && args.contains("progress");
+  const bool has_progress = args.contains("progress");
   int progress = 0;
   if (has_progress) {
     if (!args["progress"].is_number()) {
@@ -847,52 +809,29 @@ ToolResult tool_task(const nlohmann::json& args, const ToolContext& ctx) {
     }
   }
   const std::string note = trim(arg_str(args, "note"));
-  bool wants_confirmation = false;
-  bool has_confirmation = false;
-  if (args.is_object() && args.contains("needs_confirmation")) {
+  const std::string question = trim(arg_str(args, "question"));
+  bool needs_confirmation = false;
+  if (args.contains("needs_confirmation")) {
     if (!args["needs_confirmation"].is_boolean()) {
       result.output = "error: 'needs_confirmation' must be true or false";
       return result;
     }
-    wants_confirmation = args["needs_confirmation"].get<bool>();
-    has_confirmation = true;
+    needs_confirmation = args["needs_confirmation"].get<bool>();
   }
-  const std::string question = trim(arg_str(args, "question"));
 
-  Task updated;
-  std::string err;
-  const bool ok = TaskStore::update(
-      *ctx.workspace, id,
-      [&](Task* t) {
-        if (has_progress) t->progress = progress;
-        if (!note.empty()) t->note = note;
-        if (has_confirmation) t->needs_confirmation = wants_confirmation;
-        if (!question.empty()) t->question = question;
-        // The history of what happened, in order - this is the "intermediate
-        // state" the task list shows.
-        nlohmann::json step = nlohmann::json::object();
-        step["at"] = now_iso8601();
-        step["progress"] = t->progress;
-        if (!note.empty()) step["note"] = note;
-        if (has_confirmation) step["needs_confirmation"] = wants_confirmation;
-        if (!question.empty()) step["question"] = question;
-        t->steps.push_back(step);
-        // Keep the history bounded: a long task would otherwise grow the file
-        // without limit.
-        while (t->steps.size() > 100) t->steps.erase(t->steps.begin());
-      },
-      &updated, &err);
-  if (!ok) {
-    result.output = "error: " + err;
-    return result;
+  // The report is the arguments of this very call: the task server reads them
+  // from the turn's event stream and puts them in the task record. This side
+  // only says it out loud, so the transcript shows what was reported.
+  std::string label;
+  if (ctx.task_id && !ctx.task_id->empty()) label = *ctx.task_id + ": ";
+  if (has_progress) label += "progress " + std::to_string(progress) + "%";
+  if (!note.empty()) label += (label.empty() ? "" : " - ") + note;
+  if (needs_confirmation) {
+    label += (label.empty() ? "" : " - ");
+    label += question.empty() ? "waiting for the user" : ("waiting for the user: " + question);
   }
   result.ok = true;
-  result.output = "task " + updated.id + ": " + updated.status + " (" +
-                  std::to_string(updated.progress) + "%)";
-  if (updated.needs_confirmation) {
-    result.output += " - waiting for the user";
-    if (!updated.question.empty()) result.output += ": " + updated.question;
-  }
+  result.output = label.empty() ? "reported (nothing new)" : label;
   return result;
 }
 
@@ -1619,25 +1558,19 @@ ToolRegistry::ToolRegistry() {
     ToolDef def;
     def.name = "toolkit_task";
     def.description =
-        "Report on the task this turn belongs to. A task is work that was queued for "
-        "later (POST /api/tasks): the scheduler starts it when the provider still has "
-        "quota, and the task list shows how far it got. Use op=update to report the "
-        "progress (0-100) and what you just did (note); use op=update with "
-        "needs_confirmation=true and a question when the work cannot go on without the "
-        "user - the task then waits for an answer instead of being marked done. op=get "
-        "reads the task, op=list shows all of them. Without a task_id it refers to the "
-        "task of this turn. 汇报任务进度、中间状态，或请求用户确认。";
+        "Report on the task this turn belongs to. A task is work that was queued to be done "
+        "later; the task server started it and watches it, and the report is what it sees. "
+        "Use op=update to report the progress (0-100) and what you just did (note); use "
+        "op=update with needs_confirmation=true and a question when the work cannot go on "
+        "without the user - the task then waits for an answer instead of being marked done. "
+        "汇报任务进度、中间状态，或请求用户确认。";
     def.parameters = nlohmann::json::parse(R"JSON({
       "type": "object",
       "properties": {
         "op": {
           "type": "string",
-          "enum": ["update", "get", "list"],
-          "description": "update: report progress; get: read the task; list: all tasks of this workspace."
-        },
-        "task_id": {
-          "type": "string",
-          "description": "Which task. Optional: it defaults to the task of this turn."
+          "enum": ["update"],
+          "description": "update: report the progress and the intermediate state."
         },
         "progress": {
           "type": "integer",

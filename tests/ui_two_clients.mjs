@@ -26,6 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wsConnect } from './mini_ws.mjs';
+import { acquireBrowser } from './chrome_pool.mjs';
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent');
@@ -101,18 +102,8 @@ providers:
 /// asserts is read from the real DOM and the URL, so a "topic" is observable.
 async function openClient(name, url) {
   const cdpPort = await freePort();
-  const proc = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox',
-    `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, name)}`,
-    'about:blank'], { stdio: 'ignore' });
-  let target = null;
-  for (let i = 0; i < 120; i++) {
-    try {
-      const list = JSON.parse((await getJson(cdpPort, '/json/list')).body);
-      target = list.find((t) => t.type === 'page');
-      if (target) break;
-    } catch {}
-    await sleep(150);
-  }
+  const proc = await acquireBrowser(tmp);
+  const target = { webSocketDebuggerUrl: proc.webSocketDebuggerUrl };
   if (!target) throw new Error('no page target for ' + name);
   const sock = wsConnect(target.webSocketDebuggerUrl);
   await new Promise((r) => sock.on('open', r));

@@ -13,6 +13,7 @@ import path from 'node:path';
 // Requires google-chrome (or CHROME_BIN) and node >= 18.
 //   node tests/ui_setup_flow.mjs [path-to-tea_agent-binary]
 import { fileURLToPath } from 'node:url';
+import { acquireBrowser } from './chrome_pool.mjs';
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent');
 const CHROME = process.env.CHROME_BIN || '/usr/bin/google-chrome';
@@ -52,21 +53,9 @@ try {
     await sleep(150);
   }
 
-  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox',
-    `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, 'chrome')}`,
-    'about:blank'], { stdio: 'ignore' });
+  chrome = await acquireBrowser(tmp);
 
-  let target = null;
-  for (let i = 0; i < 100; i++) {
-    try {
-      const r = await getJson(cdpPort, '/json/list');
-      const list = JSON.parse(r.body);
-      target = list.find((t) => t.type === 'page');
-      if (target) break;
-    } catch {}
-    await sleep(150);
-  }
-  if (!target) throw new Error('no chrome page target');
+  const target = { webSocketDebuggerUrl: chrome.webSocketDebuggerUrl };
 
   const { wsConnect } = await import('./mini_ws.mjs');
   ws = wsConnect(target.webSocketDebuggerUrl);
