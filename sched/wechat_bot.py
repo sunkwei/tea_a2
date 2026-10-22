@@ -90,20 +90,27 @@ def _openssl(args, data):
     """Run openssl with the bytes on stdin, return the bytes on stdout.
 
     The media path needs AES-128-ECB, and the standard library does not have
-    it - the device this runs on has no pip, so openssl (which is on every
-    Linux box) does the work.
+    it - the device this runs on has no pip, so openssl does the work.
+
+    Two ways to call it: `openssl` on the PATH (every normal Linux), and
+    `busybox openssl` on the small devices, where openssl is an applet of
+    busybox rather than a program of its own.
     """
-    try:
-        proc = subprocess.run(["openssl"] + args, input=data,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
-    except FileNotFoundError:
-        raise ILinkError("openssl is not installed - sending files needs it") from None
-    except subprocess.TimeoutExpired:
-        raise ILinkError("openssl timed out") from None
-    if proc.returncode != 0:
-        detail = proc.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:160]
-        raise ILinkError("openssl failed: " + (detail or "exit %d" % proc.returncode))
-    return proc.stdout
+    last = None
+    for command in (["openssl"], ["busybox", "openssl"]):
+        try:
+            proc = subprocess.run(command + args, input=data,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        except FileNotFoundError:
+            last = command[0]
+            continue
+        except subprocess.TimeoutExpired:
+            raise ILinkError("openssl timed out") from None
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:160]
+            raise ILinkError("openssl failed: " + (detail or "exit %d" % proc.returncode))
+        return proc.stdout
+    raise ILinkError("%s is not installed - sending files needs it" % (last or "openssl"))
 
 
 def aes_encrypt(data, key):
