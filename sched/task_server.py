@@ -31,6 +31,7 @@ install is not an option.
 """
 
 import argparse
+import calendar
 import json
 import os
 import shutil
@@ -62,6 +63,16 @@ TERMINAL = (DONE, FAILED, CANCELLED)
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def parse_iso(text):
+    """The epoch seconds of a stamp this module wrote ('' -> None)."""
+    if not text:
+        return None
+    try:
+        return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
 
 
 def log(message):
@@ -413,6 +424,40 @@ class Engine:
             if self.start_task(task, provider):
                 started += 1
         return started
+
+    # ---- the tasks this process inherited --------------------------------
+    def recover_stale_tasks(self, min_age=60):
+        """A task that was running when this process started is not running any more.
+
+        The worker thread died with the process, so the record would sit in
+        "running" for ever: the scheduler only starts queued tasks, and
+        POST .../start refuses anything else. Mark those tasks failed, with a
+        reason that says what happened, so they can be queued again.
+
+        Only tasks that have not been touched for a minute are recovered: another
+        task server working on the same records would otherwise have its task
+        pulled out from under it.
+        """
+        cutoff = time.time() - min_age
+        recovered = []
+        for task in self.store.list(status=RUNNING):
+            stamp = parse_iso(task.get("updated_at") or task.get("started_at") or "")
+            if stamp is not None and stamp > cutoff:
+                continue                    # somebody is still working on it
+            workspace_id = task.get("workspace_id")
+            task_id = task.get("id")
+            self.store.update(workspace_id, task_id, lambda t: t.update({
+                "status": FAILED,
+                "finished_at": now_iso(),
+                "error": "the task server restarted while this task was running; "
+                         "queue it again if the work still has to be done",
+            }))
+            log("  task %s was running when the server started - marked failed" % task_id)
+            recovered.append(self.store.load(workspace_id, task_id))
+        for task in recovered:
+            if task is not None:
+                self.events.publish({"type": "task_failed", "task": task})
+        return recovered
 
     # ---- running one task -------------------------------------------------
     def start_task(self, task, provider=None):
@@ -1017,6 +1062,10 @@ def main(argv=None):
         app.store.create(task)
         log("queued task %s (%s)" % (task["id"], task["title"] or ""))
         return 0
+
+    # The records of a previous run: a task that was running then is not
+    # running now (its worker died with that process).
+    app.engine.recover_stale_tasks()
 
     try:
         health = app.agent.health()
