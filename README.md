@@ -144,7 +144,8 @@ build/bin/tea_agent --workspace . --open
 
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
 
-（界面的导览在 [用起来](docs/using.md)。）
+（界面的导览在 [用起来](docs/using.md)；要直接敲命令，看
+[使用手册](docs/manual.md)。）
 
 ```bash
 # 常用参数
@@ -191,6 +192,7 @@ build/bin/tea_agent --workspace . --open
 
 | | |
 | --- | --- |
+| [使用手册](docs/manual.md) | **命令清单**：命令行参数、curl 配方、队列命令、微信命令、脚本、环境变量 |
 | [用起来](docs/using.md) | 界面导览：配置对话框、工作区、主题地址、分叉、图片 |
 | [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照 |
 | [构建与跨平台编译](docs/build.md) | 依赖、本机构建、交叉编译（aarch64 / Windows）、产物校验 |

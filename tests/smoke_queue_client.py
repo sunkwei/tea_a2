@@ -311,6 +311,9 @@ providers:
         check("Queue.create_task works", bool(created.get("id")), created)
         check("the client unwraps the envelope",
               isinstance(created.get("id"), str) and "code" not in created, created)
+        later = queue.create_task("do it later", not_before="+5")
+        check("Queue.create_task takes not_before",
+              bool(later.get("not_before")) and later.get("not_before_text") == "+5", later)
         one = queue.task(created["id"])
         check("Queue.task works", one.get("id") == created["id"], one)
         listing = queue.tasks()

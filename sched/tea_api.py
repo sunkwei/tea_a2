@@ -259,8 +259,15 @@ class Queue:
         return self._request("GET", "/api/tasks/%s?%s" % (urllib.parse.quote(task_id), query))
 
     def create_task(self, prompt, workspace_id=None, title=None, provider=None,
-                    allow_paths=None, meta=None, priority=None, idempotency_key=None):
-        """Put a task in the queue. It waits until the provider has quota."""
+                    allow_paths=None, meta=None, priority=None, idempotency_key=None,
+                    not_before=None):
+        """Put a task in the queue. It waits until the provider has quota.
+
+        `not_before` is the "do it later" knob: "+5" (five hours from now),
+        "23:30" (today at half past eleven), "+30m", "+2d" or an absolute
+        "2026-10-24T09:00:00Z". The task waits until then - and it does not
+        hold up the tasks behind it.
+        """
         body = {"prompt": prompt}
         if workspace_id:
             body["workspace_id"] = workspace_id
@@ -276,6 +283,8 @@ class Queue:
             body["priority"] = priority
         if idempotency_key:
             body["idempotency_key"] = idempotency_key
+        if not_before:
+            body["not_before"] = not_before
         # The same key means the same task: a retried submission must not queue
         # the work twice.
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None

@@ -13,6 +13,7 @@ README 讲的是「这是什么、为什么这么设计」；[HTTP 接口](api.m
 | 起服务、改端口、换模型、看日志 | [1. 起服务](#1-起服务) |
 | 用 curl 让 agent 干活 | [2. agent 的 HTTP 命令](#2-agent-的-http-命令) |
 | 排队、查进度、取消、重做 | [3. 任务队列的命令](#3-任务队列的命令) |
+| 定时做一件活儿（`not_before`、微信 `/at`） | [3.2.1](#321-定时做一件活儿) · [4](#4-微信端的命令) |
 | 在微信里排队 | [4. 微信端的命令](#4-微信端的命令) |
 | 写脚本调 agent | [5. 给脚本用的客户端](#5-给脚本用的客户端) |
 | 构建、测试、装成服务 | [6. 脚本](#6-脚本) |
@@ -102,6 +103,9 @@ WARNING 顶出屏幕。排查时 `--console-level debug` 就能在终端跟着�
 
 `TEA_AGENT_HOME` 与 `--tea-home` 同时给，以**命令行**为准。
 
+队列和微信端另有一组自己的环境变量，见 [3.8](#38-队列的命令行小抄) 与
+[4](#4-微信端的命令)。
+
 ### 1.4 ⚠️ 安全须知
 
 **这个程序没有任何认证机制。** `toolkit_exec` 能执行任意系统命令，所以：
@@ -171,10 +175,17 @@ curl -s $B/api/health
 curl -s $B/api/config/status     # 配置在哪儿、加载了没、有哪些 provider
 curl -s $B/api/providers          # provider 清单与能力标记（不含 key）
 curl -s $B/api/tools              # 工具定义与 JSON Schema
+
+# 这个 provider 的额度还剩多少（key 只在服务端用，客户端看不到）
+curl -s $B/api/providers/minimax/usage
+# {"ok":true,"provider":"minimax","percent":75.0,...}
 ```
 
 `config_loaded:false` 表示还没配置好——这时候 `POST /api/chat` 会返回
 `409 config_missing`，而不是闷头跑。
+
+额度那一行：provider 没声明 `supports_usage` 时是 `400 usage_not_supported`，
+上游查不到是 `502 usage_failed`，provider 名写错是 `404`。
 
 ### 2.2 下发一轮对话（主入口）
 
@@ -292,6 +303,9 @@ curl -s $B/api/workspaces
 curl -s -X POST $B/api/workspaces -H 'Content-Type: application/json' \
   -d '{"path":"/home/me/work/proj","name":"proj"}'
 
+# 注销一个工作区（**只从索引里去掉，文件一个都不删**）
+curl -s -X DELETE $B/api/workspaces/ws_xxx
+
 # 列目录
 curl -s "$B/api/workspaces/ws_xxx/tree?path=src"
 
@@ -363,6 +377,9 @@ curl -s "$B/api/workspaces/ws_xxx/memory"
 curl -s -X POST "$B/api/workspaces/ws_xxx/memory" -H 'Content-Type: application/json' \
   -d '{"text":"这个项目用 pnpm，不要用 npm"}'
 
+# 删掉一条记忆（id 形如 n_xxx，从 GET /memory 的返回里拿）
+curl -s -X DELETE "$B/api/workspaces/ws_xxx/memory/n_xxx"
+
 # system prompt（current_prompt 是当前真正生效的人设，content 是磁盘上的覆盖）
 curl -s "$B/api/workspaces/ws_xxx/system-prompt"
 curl -s -X PUT "$B/api/workspaces/ws_xxx/system-prompt" -H 'Content-Type: application/json' \
@@ -370,12 +387,16 @@ curl -s -X PUT "$B/api/workspaces/ws_xxx/system-prompt" -H 'Content-Type: applic
 
 # 工作区经验（.tea_agent_run/agent.md）
 curl -s "$B/api/workspaces/ws_xxx/agent-doc"
+curl -s -X PUT "$B/api/workspaces/ws_xxx/agent-doc" -H 'Content-Type: application/json' \
+  -d '{"content":"这个仓库用 pnpm，不要用 npm"}'
 
 # 运行日志
 curl -s "$B/api/workspaces/ws_xxx/logs?tail=300"
 
 # 工作区设置（文件访问范围等）
 curl -s "$B/api/workspaces/ws_xxx/settings"
+curl -s -X PUT "$B/api/workspaces/ws_xxx/settings" -H 'Content-Type: application/json' \
+  -d '{"allow_outside_workspace":true}'
 ```
 
 保存 system prompt 后**下一轮**生效（每轮重新读盘）。
@@ -414,6 +435,21 @@ curl -s $B/api/destroy
 curl -s -X POST $B/api/destroy -H 'Content-Type: application/json' \
   -d '{"confirm":"destroy"}'
 ```
+
+### 2.11 绕过 agent，直接问模型
+
+`/api/chat` 跑的是完整的一圈（模型 → 工具 → 模型 …）。只是要一次模型回答，用
+`/api/llm/chat`——**不执行任何工具**，答案直接回来：
+
+```bash
+curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
+  -d '{"prompt":"用一句话说：什么是 SSE","max_tokens":64}'
+# {"ok":true,"provider":"deepseek","model":"deepseek-flash","content":"...",
+#  "finish_reason":"stop","elapsed_ms":812,"usage":{...}}
+```
+
+带 `messages` 就是自己拼历史；带 `tools` 就是把工具定义交给模型——**它只会返回
+工具调用，不会替你执行**，要执行得你自己来（那正是 `/api/chat` 做的事）。
 
 ---
 
@@ -471,7 +507,33 @@ curl -X POST http://127.0.0.1:8283/api/tasks \
 ```
 
 能带的字段：`prompt`（必填）、`title`、`workspace_id`（默认第一个工作区）、
-`provider`、`model`、`allow_paths`、`meta`、`priority`、`idempotency_key`。
+`provider`、`model`、`allow_paths`、`meta`、`priority`、`idempotency_key`、
+`not_before`（**定时**）。
+
+### 3.2.1 定时做一件活儿
+
+给任务一个「最早什么时候开始」的时间：
+
+```bash
+# 五小时后
+curl -X POST http://127.0.0.1:8283/api/tasks -H 'Content-Type: application/json' \
+     -d '{"prompt":"把 README 的例子跑一遍","not_before":"+5"}'
+
+# 今天 23:30（已经过了就尽快做，**不是明天**）
+curl -X POST http://127.0.0.1:8283/api/tasks -H 'Content-Type: application/json' \
+     -d '{"prompt":"把 README 的例子跑一遍","not_before":"23:30"}'
+
+# 绝对时间
+curl -X POST http://127.0.0.1:8283/api/tasks -H 'Content-Type: application/json' \
+     -d '{"prompt":"把 README 的例子跑一遍","not_before":"2026-10-24T09:00:00Z"}'
+```
+
+写法一共这几种：`+5`（五小时后）、`+30m`（半小时后）、`+2d`（两天后）、
+`23:30`（今天这个钟点，过了就尽快做）、`2026-10-24T09:00:00Z`（绝对时间）。
+看不懂就返回 `400 bad_request`，`data.error` 里说明它没听懂。
+
+**到点之前这个任务不会被启动，但它也不挡着后面的任务**——「晚点做」不是
+「排在第几位」。
 
 同一个 `Idempotency-Key` 重复提交**只排一次**（客户端重试、机器人重复发消息都靠它）：
 
@@ -503,6 +565,10 @@ curl -s "http://127.0.0.1:8283/api/tasks/t_xxx/events?since_event_id=0"
 curl -s http://127.0.0.1:8283/api/health      # 队列计数、平均排队时长、失败率……
 curl -s "http://127.0.0.1:8283/api/audit?task_id=t_xxx"
 ```
+
+一条任务记录里除了状态和结果，还有：`not_before`（绝对时间）、`not_before_text`
+（你写的那句话）、`starts_at_local`（本机时间，给界面显示）、`queue_position`
+（前面还有几个）、`attempt`（第几次做）、`pending_message`（等确认时你给的答案）。
 
 ### 3.4 动一个任务
 
@@ -587,6 +653,18 @@ python3 sched/task_server.py --agent http://127.0.0.1:8383 --submit "..."
 TEA_AGENT_URL=http://127.0.0.1:8383 python3 sched/task_server.py --submit "..."
 ```
 
+队列这一层有自己的环境变量：
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `TEA_AGENT_URL` | agent 的地址 | `http://127.0.0.1:8282` |
+| `TEA_TASK_PORT` | 队列自己监听哪个端口 | `8283` |
+| `TEA_TASK_WORKSPACE` | 队列独占的工作区目录 | `~/.tea_agent/task-workspace` |
+| `TEA_TASK_DATA` | 任务记录放在哪 | `<工作区>/tasks` |
+| `TEA_TASK_PROVIDER` | 用谁的额度当闸门 | `minimax` |
+| `TEA_AGENT_WORKSPACE` | 这一份队列做哪个工作区的活儿 | 队列自己的 |
+| `TEA_TASK_WORKSPACE_NAME` | 它在 agent 里叫什么名字 | `任务` |
+
 ---
 
 ## 4. 微信端的命令
@@ -615,6 +693,10 @@ python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0
 | `--login` | 扫码登录然后退出 | |
 | `--login-timeout <s>` | 等扫码多久 | `300` |
 
+微信端的环境变量：`TEA_AGENT_URL`（agent 的地址）、`TEA_TASK_URL`（队列的地址，
+默认 `http://127.0.0.1:8283`）、`TEA_TASK_PROVIDER`（用谁的额度）、
+`TEA_WECHAT_CDN`（微信 CDN 的地址）。
+
 ### 微信里的命令
 
 | 说的话 | 做的事 |
@@ -630,10 +712,21 @@ python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0
 | `/answer <id> <内容>` | 回答一个「等你确认」的任务 |
 | `/retry <id>` | 重做一个失败的任务 |
 | `/quota` | 额度还剩多少 |
+| `/at <时间> <活儿>` | 定时做：`+5` 五小时后、`23:30` 今天晚上十点半、`+30m` 半小时后 |
 | `/help` | 命令表 |
 
 中文别名也认：`/任务`、`/状态`、`/结果`、`/文件`、`/开始`、`/取消`、`/删除`、`/回答`、
-`/重试`、`/额度`。
+`/重试`、`/额度`、`/定时`、`/晚点`（`/help` 的中文别名是 `/帮助`）。
+
+**定时**有两条路说，效果一样：
+
+```
+/at 23:30 把 README 跑一遍        # 明确一点
+把 README 跑一遍 @23:30          # 消息结尾带一个钟点
+把 README 跑一遍 @+5             # 或者加一个相对时间
+```
+
+到点之前这个活儿不会被启动，但它**不挡着**别的活儿。
 
 **文件能两个方向走**：微信发的文件落到工作区的 `inbox/`，随任务交给 agent；任务做完，
 产出的文件作为**文件消息**发回微信。文件走微信 CDN，**AES-128-ECB + PKCS7 加密**，
@@ -664,6 +757,7 @@ tea.llm_chat(prompt="说：ok", max_tokens=10)   # 一次模型调用（不跑 a
 
 # ---- 队列这一层 ----
 task = queue.create_task("把 README 的例子跑一遍", title="例子")
+later = queue.create_task("明早再说", not_before="+5")     # 定时做
 queue.start_task(task["id"])
 queue.task(task["id"])             # 一个任务
 queue.tasks(status="queued")       # 列表
@@ -806,6 +900,8 @@ HTTP 引擎、轨迹开关等。
 | 队列的接口返回 `{code, message, request_id, data}` | 队列的统一信封。**客户端要取 `data`** |
 | 终端刷屏 | 那是 INFO 回声。`--console-level warn`（默认）或 `--no-console`；要看细节用 `--console-level debug` |
 | 看日志 | `~/.tea_agent/logs/tea_agent.log`（全局）、`<workspace>/.tea_agent_run/logs/agent.log`（工作区）。`--log-level debug` 更全 |
+| `400 bad_request`（排任务时） | `not_before` 的时间没看懂。写法只有 `+5` / `+30m` / `+2d` / `23:30` / 绝对 ISO 时间 |
+| `409 fixed_by_cli`（改工作区设置时） | 这个进程是用 `--allow-outside-workspace` 起的，界面里**收不回来**。去掉那个参数重启 |
 
 ---
 
