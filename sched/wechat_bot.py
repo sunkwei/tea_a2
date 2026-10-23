@@ -412,14 +412,15 @@ class Queue:
         self.base = base.rstrip("/")
         self.timeout = timeout
 
-    def _request(self, method, path, body=None, timeout=None):
+    def _request(self, method, path, body=None, timeout=None, headers=None):
         url = self.base + path
         data = None
-        headers = {}
+        head = {}
         if body is not None:
             data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            head["Content-Type"] = "application/json"
+        head.update(headers or {})
+        req = urllib.request.Request(url, data=data, headers=head, method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 raw = resp.read().decode("utf-8", "replace")
@@ -441,7 +442,8 @@ class Queue:
     def health(self):
         return self._request("GET", "/api/health", timeout=10)
 
-    def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None, meta=None):
+    def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
+               meta=None, key=""):
         body = {"prompt": prompt}
         if workspace_id:
             body["workspace_id"] = workspace_id
@@ -453,7 +455,11 @@ class Queue:
             body["allow_paths"] = list(allow_paths)
         if meta:
             body["meta"] = meta
-        return self._request("POST", "/api/tasks", body)
+        # The same key means the same task: a command that is repeated (or a
+        # request that times out and is sent again) must not queue the work
+        # twice.
+        headers = {"Idempotency-Key": key} if key else None
+        return self._request("POST", "/api/tasks", body, headers=headers)
 
     def list(self, workspace_id=None, status=None):
         query = {}
@@ -477,6 +483,17 @@ class Queue:
         if query:
             path += "?" + urllib.parse.urlencode(query)
         return self._request("DELETE", path)
+
+    def retry(self, task_id, workspace_id=None):
+        """Try a failed task again."""
+        return self.action(task_id, "retry", workspace_id=workspace_id)
+
+    def events(self, task_id, since_event_id=0, workspace_id=None):
+        """The task's event log."""
+        query = {"workspace_id": workspace_id or "", "since_event_id": since_event_id}
+        path = "/api/tasks/%s/events?%s" % (urllib.parse.quote(task_id),
+                                            urllib.parse.urlencode(query))
+        return self._request("GET", path)
 
     def action(self, task_id, action, body=None, workspace_id=None):
         query = {"workspace_id": workspace_id} if workspace_id else {}
@@ -547,6 +564,18 @@ def resolve_workspace(agent, path, name=""):
     return created.get("id", "")
 
 
+def idempotency_key(user_id, text):
+    """A key that says "this is the same work".
+
+    The queue keeps one task per key, so a command that is repeated (or a
+    request that is sent again because the answer was lost) does not queue the
+    work twice. The key is stable for the same text within a short window.
+    """
+    stamp = int(time.time() // 300)      # five minutes
+    raw = ("%s|%s|%s" % (user_id, text.strip(), stamp)).encode("utf-8")
+    return base64.b32encode(hashlib.sha256(raw).digest()[:8]).decode("ascii").rstrip("=")
+
+
 def text_of(raw):
     """The text of an incoming message."""
     parts = []
@@ -599,6 +628,9 @@ def fmt_task(task):
     status = task.get("status", "?")
     line = "%s  %s  %d%%  %s" % (task.get("id", "?"), status, int(task.get("progress") or 0),
                                  task.get("title") or (task.get("prompt") or "")[:30])
+    position = int(task.get("queue_position") or 0)
+    if position:
+        line += "  [队列第 %d 位]" % position
     note = task.get("note") or ""
     if note:
         line += "  — " + note[:60]
@@ -620,6 +652,7 @@ class WeChatBot:
             "· /del <id> 删掉\n"
             "· /answer <id> <内容> 回答一个等你确认的任务\n"
             "· /quota 额度还剩多少\n"
+            "· /retry <id> 重做一个失败的任务\n"
             "· /files <id> 把这个任务的产出文件发过来\n"
             "· 直接发文件 = 排一个任务，文件会放进工作区\n"
             "· /help 这条说明")
@@ -853,13 +886,15 @@ class WeChatBot:
             return self.HELP
         if text.startswith("/"):
             return self.command(text, user_id)
-        # Anything else: a task to do.
+        # Anything else: a task to do. The key is derived from the user and the
+        # text, so the same command twice in a row does not queue it twice.
         try:
             task = self.queue.create(
                 text, workspace_id=self.ensure_workspace(), title=text[:40],
                 provider=self.args.provider or None,
                 allow_paths=self.args.allow_path or None,
-                meta={"wechat_user_id": user_id})
+                meta={"wechat_user_id": user_id},
+                key=idempotency_key(user_id, text))
         except ILinkError as exc:
             return "排队失败：%s" % exc
         task_id = task.get("id", "?")
@@ -929,7 +964,16 @@ class WeChatBot:
                     return "用法：/answer <任务id> <你要回答的内容>"
                 task = self.queue.action(rest[0], "confirm", {"message": " ".join(rest[1:])},
                                         workspace_id=self.ensure_workspace())
-                return "已回答 %s：%s" % (rest[0], task.get("status", "?"))
+                # The answer goes back into the queue: it does not interrupt
+                # whatever is running now.
+                return ("已回答 %s：回到队列里了（%s），前面的活儿做完它接着做。"
+                        % (rest[0], task.get("status", "?")))
+            if cmd in ("/retry", "/重试"):
+                if not rest:
+                    return "用法：/retry <任务id>"
+                task = self.queue.retry(rest[0], workspace_id=self.ensure_workspace())
+                return ("重试 %s：%s（第 %s 次）"
+                        % (rest[0], task.get("status", "?"), task.get("attempt") or 1))
             if cmd in ("/quota", "/额度"):
                 health = self.queue.health()
                 left = health.get("quota_percent")

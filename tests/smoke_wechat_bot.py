@@ -170,7 +170,8 @@ class MockQueue(BaseHTTPRequestHandler):
             body = json.loads(raw or b"{}")
         except ValueError:
             body = {}
-        MockQueue.calls.append(("POST", self.path, body))
+        MockQueue.calls.append(("POST", self.path, body,
+                                self.headers.get("Idempotency-Key", "")))
         if self.path == "/api/tasks":
             MockQueue.counter += 1
             task_id = "t_mock%03d" % MockQueue.counter
@@ -183,7 +184,8 @@ class MockQueue(BaseHTTPRequestHandler):
                     "allow_paths": body.get("allow_paths") or []}
             MockQueue.tasks[task_id] = task
             return self._json(task)
-        if "/start" in self.path or "/cancel" in self.path or "/confirm" in self.path:
+        if "/start" in self.path or "/cancel" in self.path or "/confirm" in self.path \
+                or "/retry" in self.path:
             task_id = self.path.split("/api/tasks/")[1].split("/")[0]
             task = MockQueue.tasks.get(task_id)
             if task is None:
@@ -192,6 +194,9 @@ class MockQueue(BaseHTTPRequestHandler):
                 task["status"] = "running"
             elif "/cancel" in self.path:
                 task["status"] = "cancelled"
+            elif "/retry" in self.path:
+                task["status"] = "queued"
+                task["attempt"] = int(task.get("attempt") or 1) + 1
             else:
                 task["status"] = "running"
                 task["needs_confirmation"] = False
@@ -358,11 +363,31 @@ def main():
         check("the task is in the fixed workspace", body.get("workspace_id") == ws_id, body)
         check("the task remembers who queued it",
               (body.get("meta") or {}).get("wechat_user_id") == "u1", body)
+        check("a queued task shows where it stands",
+              "队列" in wechat_bot.fmt_task({"id": "t_x", "status": "queued",
+                                             "progress": 0, "title": "t",
+                                             "queue_position": 3}),
+              wechat_bot.fmt_task({"id": "t_x", "status": "queued", "progress": 0,
+                                   "title": "t", "queue_position": 3}))
         check("the task carries the allowed directory",
               body.get("allow_paths") == ["/tmp"], body)
         # The id comes back in the response; the request body has none.
         task_id = sorted(MockQueue.tasks)[-1] if MockQueue.tasks else ""
         check("the queued task has an id", bool(task_id), MockQueue.tasks)
+
+        # ---- the same command twice is one task ---------------------------
+        MockQueue.calls = []
+        first_reply = bot.handle("同一个活儿", "u1")
+        second_reply = bot.handle("同一个活儿", "u1")
+        created = [c for c in MockQueue.calls if c[0] == "POST" and c[1] == "/api/tasks"]
+        check("the request carries an idempotency key",
+              created and created[0][3], created[0] if created else None)
+        check("the same command carries the same key",
+              len(created) == 2 and created[0][3] == created[1][3],
+              [c[3] for c in created])
+        check("the reply says it is queued",
+              "已排队" in first_reply and "已排队" in second_reply,
+              (first_reply, second_reply))
 
         # ---- the commands -----------------------------------------------
         MockQueue.calls = []
@@ -383,6 +408,13 @@ def main():
               bot.handle("/del " + task_id, "u1"))
         check("/quota says how much is left", "42" in bot.handle("/quota", "u1"),
               bot.handle("/quota", "u1"))
+        live_id = sorted(MockQueue.tasks)[-1] if MockQueue.tasks else ""
+        check("/retry asks the queue to try again",
+              "重试" in bot.handle("/retry " + live_id, "u1"),
+              bot.handle("/retry " + live_id, "u1"))
+        check("/answer says the task goes back into the queue",
+              "队列" in bot.handle("/answer %s 可以" % live_id, "u1"),
+              bot.handle("/answer %s 可以" % live_id, "u1"))
         check("/help lists the commands", "用法" in bot.handle("/help", "u1"))
         check("an unknown command says so", "不认识" in bot.handle("/nonsense", "u1"))
 
