@@ -264,6 +264,7 @@ settings:
   command_timeout_ms: 600000
   keep_turns: 6
   enable_compaction: true
+  compaction_trigger_ratio: 0.65   # 历史到预算的 65% 就开始做摘要
   compaction_keep_recent: 4
   tool_output_max_lines: 400
   system_prompt: |             # 也可以整体替换默认规则

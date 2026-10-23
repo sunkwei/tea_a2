@@ -211,6 +211,15 @@ context: max=1000000 reserve_output=333333 fixed=847 budget=665820 kept=4/4 used
 只是不再发给模型。摘要会写进 system prompt 的「Compact history」小节，并在 SSE 里发一个
 `compaction` 事件。摘要失败（网络/模型报错）时自动退回丢弃最旧消息，不会卡死会话。
 
+**什么时候开始压**：不是压到窗口边界，而是到**预算的 65%**（`compaction_trigger_ratio`，
+默认 0.65）。压一次之后，逐字保留的原文只剩预算的 16%（`compaction_retain_ratio`），
+摘要本身最多 800 token。留这么宽的余量有两个原因：一是压到「刚好够」的话下一轮立刻又超，
+二是我们算 token 是**估**的（ASCII 4 字符/token、CJK 1 字符/token，工具 schema 按固定值估），
+估算偏乐观时真实请求会比预算大——提前压就是给这种偏差留的余量。
+
+`keep_turns`（默认 10）是「最近 N 轮逐字保留」的**硬下限**，即使超预算也照发；
+`compaction_keep_recent`（默认 4）同理，压完至少留下这么多条消息。
+
 ### 4. 前缀缓存命中率是**可测量**的
 
 DeepSeek / opencode 网关都按「最长公共前缀」缓存提示词。系统提示词里任何每轮都变的内容

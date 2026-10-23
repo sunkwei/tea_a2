@@ -467,8 +467,8 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
   if (max_output > output_cap) max_output = output_cap;
 
   // dsh compacts at a ratio of the window rather than at the hard boundary:
-  // threshold 0.8 of the message budget, verbatim tail down to 0.16. Compacting
-  // exactly "just enough" would re-trigger on the very next turn.
+  // threshold 0.65 of the message budget, verbatim tail down to 0.16.
+  // Compacting exactly "just enough" would re-trigger on the very next turn.
   // 4 core tool schemas (exec/file/memory/agent_doc); measured from the JSON that
   // /api/tools serves, ~4 bytes per token. Provider-scoped web tools add more,
   // which the callers cover by keeping this reserve on the generous side.

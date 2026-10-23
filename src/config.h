@@ -179,8 +179,10 @@ struct Settings {
   bool enable_compaction = true;
   /// Compact when the live history reaches this fraction of the message budget.
   /// Compacting exactly at the hard boundary would re-trigger on the very next
-  /// turn; borrowing dsh's 0.8 leaves hysteresis.
-  double compaction_trigger_ratio = 0.8;
+  /// turn, so the trigger sits well below it: 0.65 leaves enough room for the
+  /// next few turns, which is also what keeps the request inside the provider's
+  /// real window when the estimate is a little optimistic.
+  double compaction_trigger_ratio = 0.65;
   /// Fold history until the verbatim tail is at most this fraction of the budget.
   /// dsh uses 0.16: compacting "just enough" makes every following turn compact
   /// again, so we aim for a small tail instead.
