@@ -145,6 +145,28 @@ class Agent:
     def workspaces(self):
         return self._request("GET", "/api/workspaces").get("workspaces") or []
 
+    def session(self, session_id):
+        """The conversation behind a task (its messages, artifacts, todos)."""
+        if not session_id:
+            return {}
+        try:
+            return self._request("GET", "/api/sessions/%s" % urllib.parse.quote(session_id))
+        except AgentError:
+            return {}
+
+    def download(self, workspace_id, path):
+        """One file the task produced. Returns the bytes."""
+        if not workspace_id or not path:
+            return b""
+        url = ("%s/api/workspaces/%s/download?path=%s"
+               % (self.base, urllib.parse.quote(workspace_id),
+                  urllib.parse.quote(path)))
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:
+                return resp.read()
+        except (urllib.error.URLError, OSError):
+            return b""
+
     def usage(self, provider):
         """How much of the provider's subscription is left.
 
@@ -229,9 +251,97 @@ class Store:
     def _path(self, task_id):
         return os.path.join(self.root, task_id + ".json")
 
+    def _events_path(self, task_id):
+        return os.path.join(self.root, task_id + ".events.jsonl")
+
     def record_path(self, workspace_id, task_id):
         """Where a task's record lives - the page shows it."""
         return self._path(task_id)
+
+    def events_path(self, task_id):
+        return self._events_path(task_id)
+
+    # ---- the event log -------------------------------------------------
+    def record_event(self, task_id, event_type, payload):
+        """Append one event to the task's log. Returns the event.
+
+        The events used to be a broadcast and nothing else: whoever was
+        listening saw them, and after a restart there was no way to find out
+        what had happened to a task. Now every state change is written down,
+        with a number the client can ask "everything after N".
+        """
+        with self.lock:
+            events = self.events(task_id)
+            number = (events[-1]["event_id"] + 1) if events else 1
+            event = {"event_id": number, "task_id": task_id, "type": event_type,
+                     "payload": payload if isinstance(payload, dict) else {},
+                     "created_at": now_iso()}
+            try:
+                with open(self._events_path(task_id), "a", encoding="utf-8") as f:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+            return event
+
+    def events(self, task_id, since_event_id=0):
+        """The task's events, newest last. `since_event_id` skips the old ones."""
+        out = []
+        try:
+            with open(self._events_path(task_id), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if event.get("event_id", 0) > since_event_id:
+                        out.append(event)
+        except OSError:
+            pass
+        return out
+
+    # ---- the audit log -------------------------------------------------
+    def audit(self, action, task_id="", detail=None, actor=""):
+        """One line in the audit log: who did what to which task."""
+        entry = {"at": now_iso(), "action": action, "task_id": task_id or "",
+                 "actor": actor or "", "detail": detail if isinstance(detail, dict) else {}}
+        try:
+            with open(os.path.join(self.root, "audit.log"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+        return entry
+
+    def audit_log(self, task_id="", limit=200):
+        out = []
+        try:
+            with open(os.path.join(self.root, "audit.log"), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if task_id and entry.get("task_id") != task_id:
+                        continue
+                    out.append(entry)
+        except OSError:
+            pass
+        return out[-limit:]
+
+    # ---- idempotency ---------------------------------------------------
+    def find_by_idempotency(self, key, workspace_id=None):
+        """The task a repeated submission with the same key must return."""
+        if not key:
+            return None
+        for task in self.list(workspace_id=workspace_id):
+            if task.get("idempotency_key") == key:
+                return task
+        return None
 
     def create(self, task):
         with self.lock:
@@ -279,7 +389,14 @@ class Store:
             self._write(task)
             return task
 
-    def list(self, workspace_id=None, status=None):
+    def list(self, workspace_id=None, status=None, created_from="", created_to="",
+             tag="", business_id="", page=0, page_size=0):
+        """The tasks, newest first, with the filters the history view needs.
+
+        The filters beyond status are the ones a business side asks for: a time
+        range, a tag, a business id - the tag and the business id live in the
+        task's meta, where the submitter put them.
+        """
         out = []
         with self.lock:
             try:
@@ -287,7 +404,7 @@ class Store:
             except OSError:
                 names = []
             for name in names:
-                if not name.endswith(".json"):
+                if not name.endswith(".json") or name.endswith(".events.jsonl"):
                     continue
                 task = self.load(workspace_id, name[:-5])
                 if task is None:
@@ -296,8 +413,24 @@ class Store:
                     continue
                 if status and task.get("status") != status:
                     continue
+                created = task.get("created_at") or ""
+                if created_from and created < created_from:
+                    continue
+                if created_to and created > created_to:
+                    continue
+                meta = task.get("meta") or {}
+                if tag and tag not in (meta.get("tags") or []):
+                    continue
+                if business_id and str(meta.get("business_id") or "") != str(business_id):
+                    continue
                 out.append(task)
-        out.sort(key=lambda t: (t.get("created_at") or "", t.get("id") or ""))
+        # Newest first: the history view is a list of what just happened.
+        out.sort(key=lambda t: (t.get("created_at") or "", t.get("id") or ""), reverse=True)
+        total = len(out)
+        if page_size and page_size > 0:
+            page = max(1, int(page or 1))
+            start = (page - 1) * page_size
+            out = out[start:start + page_size]
         return out
 
     def delete(self, workspace_id, task_id):
@@ -318,11 +451,17 @@ class Store:
 
 
 class Events:
-    """The queue's own event stream: who wants to know, gets told."""
+    """The queue's own event stream: who wants to know, gets told.
 
-    def __init__(self):
+    Every event is also written to the task's log: a broadcast alone leaves
+    nothing behind when the process restarts, and a task's history has to
+    survive that.
+    """
+
+    def __init__(self, store=None):
         self.lock = threading.Lock()
         self.subscribers = []
+        self.store = store
 
     def subscribe(self):
         queue = []
@@ -342,6 +481,14 @@ class Events:
                 self.subscribers.remove(listener)
 
     def publish(self, event):
+        # Write it down first: the log is the history, the broadcast is only
+        # for the clients that happen to be listening.
+        if self.store is not None:
+            task = event.get("task") or {}
+            task_id = task.get("id") or ""
+            if task_id:
+                payload = {k: v for k, v in event.items() if k != "task"}
+                self.store.record_event(task_id, event.get("type") or "event", payload)
         with self.lock:
             listeners = list(self.subscribers)
         for listener in listeners:
@@ -360,10 +507,20 @@ class Engine:
         self.events = events
         self.args = args
         self.running = {}     # task id -> {"session_id":..., "thread":...}
+        self._quota = (None, None, 0.0)   # (percent, window, read_at)
 
     # ---- the quota gate ---------------------------------------------------
-    def quota_left(self, provider):
-        """(percent_left, window_name) - (None, None) when there is no quota."""
+    def quota_left(self, provider, fresh=False):
+        """(percent_left, window_name) - (None, None) when there is no quota.
+
+        The queue polls every second now (so a task waits at most that long),
+        and the quota endpoint is a real HTTP call to the provider: asking it
+        every second would be rude and slow. The answer is therefore cached
+        for --quota-interval seconds.
+        """
+        now = time.time()
+        if not fresh and self._quota[2] and now - self._quota[2] < self.args.quota_interval:
+            return self._quota[0], self._quota[1]
         try:
             quota = self.agent.usage(provider)
         except AgentError as exc:
@@ -371,21 +528,59 @@ class Engine:
                 log("provider %r does not report a quota (%s)" % (provider, exc.message))
             else:
                 log("cannot read the quota of %r: %s" % (provider, exc))
+            self._quota = (None, None, now)
             return None, None
         window = self.args.window
         block = quota.get(window) or quota.get("weekly") or {}
         value = block.get("remaining_percent")
         if value is None:
+            self._quota = (None, None, now)
             return None, None
         try:
-            return float(value), window
+            percent = float(value)
         except (TypeError, ValueError):
+            self._quota = (None, None, now)
             return None, None
+        self._quota = (percent, window, now)
+        return percent, window
+
+    # ---- how many tasks may run at the same time --------------------------
+    def running_count(self):
+        """The tasks that are running right now - ours and everybody else's.
+
+        The rule is one RUNNING task at a time (the queue is serial). It has to
+        be counted from the *records*, not from this process's threads: a task
+        that is still running when the next round comes up must keep the slot.
+        """
+        mine = set(self.running)
+        count = 0
+        for task in self.store.list(status=RUNNING):
+            if task.get("id") in mine:
+                count += 1
+                continue
+            # A record that says "running" but was not touched for a while is
+            # a leftover from a crashed process - it must not hold the slot
+            # for ever.
+            stamp = parse_iso(task.get("updated_at") or task.get("started_at") or "")
+            if stamp is not None and time.time() - stamp > self.args.stale_after:
+                continue
+            count += 1
+        return count
 
     # ---- one round --------------------------------------------------------
     def round(self):
         provider = self.args.provider
-        left, window = self.quota_left(provider)
+        queued = self.store.list(status=QUEUED)
+        if not queued:
+            # Nothing to do: do not call the provider either. The quota is
+            # only interesting when there is work waiting for it.
+            log("nothing queued")
+            return 0
+
+        # The quota is read fresh whenever there is work: the queue polls
+        # every --interval seconds, and a task that waits for a quota change
+        # must not be kept waiting by a cached answer.
+        left, window = self.quota_left(provider, fresh=True)
         if left is None:
             if not self.args.allow_without_quota:
                 log("no quota to look at - not starting anything "
@@ -399,14 +594,24 @@ class Engine:
                 return 0
             log("quota of %r: %s%% left - going to work" % (provider, left))
 
-        queued = self.store.list(status=QUEUED)
-        if not queued:
-            log("nothing queued")
+        # The queue is serial: at most --max-concurrent tasks run at the same
+        # time (one by default). The check is against the records, so a task
+        # that is still running keeps its slot when the next round comes.
+        busy = self.running_count()
+        if busy >= self.args.max_concurrent:
+            log("%d task(s) already running - waiting" % busy)
             return 0
+
+        # Highest priority first, then the queue order (FIFO). A task that
+        # asked for a different provider is left alone.
+        queued.sort(key=lambda t: (-int(t.get("priority") or 0),
+                                   t.get("created_at") or "", t.get("id") or ""))
 
         started = 0
         for task in queued:
             if started >= self.args.max_per_round:
+                break
+            if self.running_count() >= self.args.max_concurrent:
                 break
             wanted = task.get("provider")
             if wanted and wanted != provider:
@@ -418,7 +623,7 @@ class Engine:
         return started
 
     # ---- the tasks this process inherited --------------------------------
-    def recover_stale_tasks(self, min_age=60):
+    def recover_stale_tasks(self, min_age=None):
         """A task that was running when this process started is not running any more.
 
         The worker thread died with the process, so the record would sit in
@@ -430,7 +635,7 @@ class Engine:
         task server working on the same records would otherwise have its task
         pulled out from under it.
         """
-        cutoff = time.time() - min_age
+        cutoff = time.time() - (self.args.stale_after if min_age is None else min_age)
         recovered = []
         for task in self.store.list(status=RUNNING):
             stamp = parse_iso(task.get("updated_at") or task.get("started_at") or "")
@@ -462,6 +667,9 @@ class Engine:
 
         provider = provider or task.get("provider") or self.args.provider
         context = self.context_for(task)
+        # A task that was waiting for an answer carries it with it: the answer
+        # is the next thing said in the task's session.
+        pending = task.get("pending_message") or ""
         self.store.update(workspace_id, task_id, lambda t: t.update({
             "status": RUNNING,
             "provider": provider,
@@ -471,9 +679,11 @@ class Engine:
             "needs_confirmation": False,
             "question": "",
             "note": "started",
+            "pending_message": "",
         }))
 
-        thread = threading.Thread(target=self._run, args=(workspace_id, task_id, provider, context),
+        thread = threading.Thread(target=self._run,
+                                  args=(workspace_id, task_id, provider, context, pending or None),
                                   daemon=True)
         self.running[task_id] = thread
         thread.start()
@@ -552,14 +762,12 @@ class Engine:
                 self.store.update(workspace_id, task_id, lambda t: t.update({
                     "status": FAILED, "error": event.get("message") or "the turn failed",
                     "finished_at": now_iso()}))
-                self.events.publish({"type": "task_failed",
-                                     "task": self.store.load(workspace_id, task_id)})
+                self.events.publish({"type": "task_failed", "task": self.store.load(workspace_id, task_id)})
                 return
             elif kind == "stopped":
                 self.store.update(workspace_id, task_id, lambda t: t.update({
                     "status": CANCELLED, "finished_at": now_iso()}))
-                self.events.publish({"type": "task_cancelled",
-                                     "task": self.store.load(workspace_id, task_id)})
+                self.events.publish({"type": "task_cancelled", "task": self.store.load(workspace_id, task_id)})
                 return
         # The stream ended without a verdict (the agent died, the connection broke).
         self.store.update(workspace_id, task_id, lambda t: t.update({
@@ -653,6 +861,13 @@ class Handler(BaseHTTPRequestHandler):
     def _query(self):
         return urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
 
+    def _int(self, name, default=0):
+        raw = self._one(name)
+        try:
+            return int(str(raw).strip())
+        except (TypeError, ValueError):
+            return default
+
     def _one(self, name, default=""):
         values = self._query().get(name) or []
         return values[0] if values else default
@@ -677,10 +892,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._health()
         if path == "/api/tasks":
             return self._list()
-        if path.startswith("/api/tasks/"):
-            return self._get(path.rsplit("/", 1)[-1])
         if path == "/api/events":
             return self._events()
+        if path == "/api/audit":
+            return self._audit()
+        if path.startswith("/api/tasks/"):
+            rest = path[len("/api/tasks/"):]
+            if "/" in rest:
+                task_id, action = rest.split("/", 1)
+                if action == "events":
+                    return self._task_events(task_id)
+                if action == "export":
+                    return self._export(task_id)
+                return self._error(404, "not_found", "no such action: %s" % action)
+            return self._get(rest)
         return self._error(404, "not_found", "no such endpoint: %s" % path)
 
     def do_POST(self):  # noqa: N802
@@ -734,21 +959,130 @@ class Handler(BaseHTTPRequestHandler):
             "quota_percent": left,
             "data_dir": self.app.store.root,
             "counts": self.app.store.counts(),
+            "metrics": self.app.metrics(),
         })
 
     def _list(self):
         workspace_id = self._one("workspace_id")
         status = self._one("status")
-        tasks = self.app.store.list(workspace_id or None, status or None)
-        self._json(200, {"tasks": [self.app.decorate(t) for t in tasks],
-                         "counts": self.app.store.counts(workspace_id or None)})
+        query = self._query()
+        page = self._int("page", 0)
+        page_size = self._int("page_size", 0)
+        filters = {"workspace_id": workspace_id or None, "status": status or None,
+                   "created_from": self._one("created_from"),
+                   "created_to": self._one("created_to"),
+                   "tag": self._one("tag"), "business_id": self._one("business_id")}
+        everything = self.app.store.list(**filters)
+        total = len(everything)
+        if page_size and page_size > 0:
+            page = max(1, page)
+            start = (page - 1) * page_size
+            everything = everything[start:start + page_size]
+        elif page and page > 0:
+            start = (page - 1) * 50
+            everything = everything[start:start + 50]
+        self._json(200, {"tasks": [self.app.decorate(t) for t in everything],
+                         "counts": self.app.store.counts(workspace_id or None),
+                         "total": total, "page": page or 1,
+                         "page_size": page_size or 0})
 
     def _get(self, task_id):
         workspace_id = self._one("workspace_id")
         task = self.app.store.load(workspace_id, task_id)
         if task is None:
             return self._error(404, "not_found", "no task %r" % task_id)
-        self._json(200, self.app.decorate(task))
+        full = self._one("include").lower() in ("full", "1", "true")
+        self._json(200, self.app.decorate(task, full=full))
+
+    def _task_events(self, task_id):
+        """The task's event log, optionally only what came after the last one
+        the client saw."""
+        workspace_id = self._one("workspace_id")
+        task = self.app.store.load(workspace_id, task_id)
+        if task is None:
+            return self._error(404, "not_found", "no task %r" % task_id)
+        since = self._int("since_event_id", 0)
+        events = self.app.store.events(task_id, since)
+        self._json(200, {"task_id": task_id, "events": events,
+                         "last_event_id": events[-1]["event_id"] if events else since})
+
+    def _export(self, task_id):
+        """The result of a task, as one document or as a zip.
+
+        The zip is what somebody wants six months later: the manifest, the
+        final answer, the conversation, the events, the files. The layout is
+        the one the requirement suggests.
+        """
+        import io
+        import zipfile
+
+        workspace_id = self._one("workspace_id")
+        task = self.app.store.load(workspace_id, task_id)
+        if task is None:
+            return self._error(404, "not_found", "no task %r" % task_id)
+        fmt = (self._one("format") or "json").lower()
+        with_artifacts = self._one("include_artifacts").lower() not in ("0", "false", "no")
+        session = self.app.agent.session(task.get("session_id") or "")
+        messages = session.get("messages") or []
+        events = self.app.store.events(task_id)
+        artifacts = task.get("artifacts") or []
+        manifest = {
+            "task_id": task_id,
+            "workspace_id": task.get("workspace_id") or "",
+            "title": task.get("title") or "",
+            "status": task.get("status") or "",
+            "priority": task.get("priority") or 0,
+            "attempt": task.get("attempt") or 1,
+            "created_at": task.get("created_at") or "",
+            "started_at": task.get("started_at") or "",
+            "finished_at": task.get("finished_at") or "",
+            "session_id": task.get("session_id") or "",
+            "error": task.get("error") or "",
+            "artifacts": artifacts,
+            "exported_at": now_iso(),
+        }
+        if fmt == "zip":
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+                z.writestr("final_answer.md", (task.get("result") or "").encode("utf-8"))
+                z.writestr("error.json", json.dumps(
+                    {"error": task.get("error") or ""}, ensure_ascii=False, indent=2))
+                z.writestr("conversation.jsonl", "".join(
+                    json.dumps(m, ensure_ascii=False) + "\n" for m in messages).encode("utf-8"))
+                z.writestr("events.jsonl", "".join(
+                    json.dumps(e, ensure_ascii=False) + "\n" for e in events).encode("utf-8"))
+                if with_artifacts:
+                    for art in artifacts:
+                        rel = str(art.get("path") or "")
+                        if not rel:
+                            continue
+                        data = self.app.agent.download(task.get("workspace_id") or "", rel)
+                        if not data:
+                            continue
+                        name = "artifacts/" + rel.lstrip("/")
+                        z.writestr(name, data)
+            body = buf.getvalue()
+            self.app.store.audit("export", task_id, {"format": "zip", "bytes": len(body)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="task-%s.zip"' % task_id)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if fmt != "json":
+            return self._error(400, "bad_request", "format must be json or zip")
+        document = {"manifest": manifest, "final_answer": task.get("result") or "",
+                    "events": events, "conversation": messages, "artifacts": artifacts}
+        self.app.store.audit("export", task_id, {"format": "json"})
+        self._json(200, document)
+
+    def _audit(self):
+        task_id = self._one("task_id")
+        limit = self._int("limit", 200)
+        self._json(200, {"entries": self.app.store.audit_log(task_id, max(1, min(limit, 1000)))})
 
     def _create(self):
         body = self._body()
@@ -790,6 +1124,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "bad_request",
                                    "no workspace %r (the agent knows: %s)"
                                    % (workspace_id, ", ".join(known)))
+        # The idempotency key: the same key must not queue the same work twice
+        # (a client that retries a submission, a bot that repeats a command).
+        key = str(self.headers.get("Idempotency-Key") or body.get("idempotency_key") or "").strip()
+        if key:
+            existing = self.app.store.find_by_idempotency(key)
+            if existing is not None:
+                self._json(200, self.app.decorate(existing))
+                return
+        try:
+            priority = int(body.get("priority") or 0)
+        except (TypeError, ValueError):
+            priority = 0
         task = {
             "id": "t_" + os.urandom(6).hex(),
             "workspace_id": workspace_id,
@@ -808,13 +1154,21 @@ class Handler(BaseHTTPRequestHandler):
             "error": "",
             "result": "",
             "meta": body.get("meta") if isinstance(body.get("meta"), dict) else {},
+            "priority": priority,
+            "attempt": 1,
+            "idempotency_key": key,
+            "pending_message": "",
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "started_at": "",
             "finished_at": "",
         }
         self.app.store.create(task)
-        self.app.events.publish({"type": "task_created", "task": task})
+        self.app.publish("task_created", task)
+        self.app.store.audit("submit", task["id"], {"prompt": prompt[:200], "key": key})
+        self._json(200, self.app.decorate(task))
+
+        self.app.publish("task_created", task)
         self._json(200, task)
 
     def _delete(self, task_id):
@@ -829,7 +1183,7 @@ class Handler(BaseHTTPRequestHandler):
             self.app.cancel_task(owner, task_id)
         if not self.app.store.delete(owner, task_id):
             return self._error(404, "not_found", "no task %r" % task_id)
-        self.app.events.publish({"type": "task_deleted", "task": task})
+        self.app.publish("task_deleted", task)
         self._json(200, {"ok": True, "id": task_id})
 
     def _action(self, task_id, action):
@@ -846,6 +1200,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._cancel(workspace_id, task)
         if action == "confirm":
             return self._confirm(workspace_id, task)
+        if action == "retry":
+            return self._retry(workspace_id, task)
         return self._error(404, "not_found", "no such action: %s" % action)
 
     def _start(self, workspace_id, task):
@@ -866,7 +1222,12 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, self.app.store.load(workspace_id, task.get("id")) or task)
 
     def _cancel(self, workspace_id, task):
+        if task.get("status") in TERMINAL:
+            return self._error(409, "already_finished",
+                               "task %s is %s - it cannot be cancelled"
+                               % (task.get("id"), task.get("status")))
         self.app.cancel_task(workspace_id, task.get("id"))
+        self.app.store.audit("cancel", task.get("id"))
         self._json(200, self.app.store.load(workspace_id, task.get("id")) or task)
 
     def _confirm(self, workspace_id, task):
@@ -877,22 +1238,47 @@ class Handler(BaseHTTPRequestHandler):
         if not message:
             return self._error(400, "bad_request", "'message' is required")
         if not task.get("needs_confirmation"):
+            # Replying twice to the same question must not queue the task
+            # twice: the answer is already there, so this is a no-op.
+            if task.get("pending_message"):
+                self._json(200, self.app.decorate(task))
+                return
             return self._error(409, "not_waiting",
                                "task %s is not waiting for an answer" % task.get("id"))
-        # The answer continues the work in the same session - the agent picks it
-        # up as the next turn.
+        # The answer goes back into the queue - at the end of the line, and
+        # without interrupting whatever is running now. The task carries the
+        # answer with it: the agent picks it up as the next turn in the same
+        # session.
         self.app.store.update(workspace_id, task.get("id"), lambda t: t.update({
-            "status": RUNNING,
+            "status": QUEUED,
             "needs_confirmation": False,
             "question": "",
-            "note": "user confirmed: " + message,
+            "pending_message": message,
+            "note": "answered: " + message[:80],
         }))
-        provider = task.get("provider") or self.app.args.provider
-        context = self.app.engine.context_for(task)
-        threading.Thread(target=self.app.engine._run,
-                         args=(workspace_id, task.get("id"), provider, context, message),
-                         daemon=True).start()
-        self._json(200, self.app.store.load(workspace_id, task.get("id")) or task)
+        self.app.publish("task_answered", self.app.store.load(workspace_id, task.get("id")))
+        self.app.store.audit("answer", task.get("id"), {"message": message[:200]})
+        self._json(200, self.app.decorate(self.app.store.load(workspace_id, task.get("id")) or task))
+
+    def _retry(self, workspace_id, task):
+        """Try a failed task again: the same task, one attempt further."""
+        if task.get("status") not in (FAILED, CANCELLED):
+            return self._error(409, "not_failed",
+                               "task %s is %s - only a failed or cancelled task is retried"
+                               % (task.get("id"), task.get("status")))
+        self.app.store.update(workspace_id, task.get("id"), lambda t: t.update({
+            "status": QUEUED,
+            "error": "",
+            "finished_at": "",
+            "progress": 0,
+            "needs_confirmation": False,
+            "question": "",
+            "note": "attempt %d" % (int(t.get("attempt") or 1) + 1),
+            "attempt": int(t.get("attempt") or 1) + 1,
+        }))
+        self.app.publish("task_retried", self.app.store.load(workspace_id, task.get("id")))
+        self.app.store.audit("retry", task.get("id"))
+        self._json(200, self.app.decorate(self.app.store.load(workspace_id, task.get("id")) or task))
 
     def _events(self):
         """The queue's event stream (SSE)."""
@@ -930,7 +1316,7 @@ class App:
                                     "tasks")
         self.store = Store(data_dir)
         self.agent = Agent(args.agent)
-        self.events = Events()
+        self.events = Events(self.store)
         self.engine = Engine(self.store, self.agent, self.events, args)
 
     def page_html(self):
@@ -944,16 +1330,79 @@ class App:
                 self._page = ""
         return self._page
 
-    def decorate(self, task):
+    def publish(self, event_type, task, **extra):
+        """Tell everybody who is listening (and write the event down)."""
+        event = {"type": event_type, "task": task}
+        event.update(extra)
+        self.events.publish(event)
+        return event
+
+    def decorate(self, task, full=False):
         """Add the bits a reader wants: where the record is, which workspace,
-        and the agent to reach."""
+        the agent to reach, and where the task stands in the queue."""
         task = dict(task)
         task["record_path"] = self.store.record_path(task.get("workspace_id"), task.get("id"))
         task["agent_url"] = self.agent.base
         path = self.workspace_path(task.get("workspace_id"))
         if path:
             task["workspace_path"] = path
+        # Where the task stands: only a queued task has a place in the line.
+        task["queue_position"] = self.queue_position(task)
+        task["current_step"] = task.get("note") or ""
+        if full:
+            task["events"] = self.store.events(task.get("id") or "")
+            task["history"] = task.get("steps") or []
         return task
+
+    def queue_position(self, task):
+        """1 = next in line, 0 = not queued (nothing to wait for)."""
+        if not task or task.get("status") != QUEUED:
+            return 0
+        queued = self.store.list(status=QUEUED)
+        queued.sort(key=lambda t: (-int(t.get("priority") or 0),
+                                   t.get("created_at") or "", t.get("id") or ""))
+        for index, one in enumerate(queued):
+            if one.get("id") == task.get("id"):
+                return index + 1
+        return 0
+
+    def metrics(self):
+        """What somebody watching the queue wants to see.
+
+        The queue length and how long the work waits are the two numbers that
+        say whether the queue is healthy; the failure rate says whether the
+        work itself is.
+        """
+        tasks = self.store.list()
+        counts = self.store.counts()
+        waits = []
+        durations = []
+        failed = 0
+        finished = 0
+        for task in tasks:
+            created = parse_iso(task.get("created_at") or "")
+            started = parse_iso(task.get("started_at") or "")
+            ended = parse_iso(task.get("finished_at") or "")
+            if task.get("status") == QUEUED and created is not None:
+                waits.append(max(0, time.time() - created))
+            if started is not None and ended is not None:
+                durations.append(max(0, ended - started))
+            if task.get("status") in (DONE, FAILED):
+                finished += 1
+                if task.get("status") == FAILED:
+                    failed += 1
+        return {
+            "queue_length": counts.get(QUEUED, 0),
+            "running": counts.get(RUNNING, 0),
+            "waiting_interaction": counts.get(WAITING, 0),
+            "done": counts.get(DONE, 0),
+            "failed": counts.get(FAILED, 0),
+            "cancelled": counts.get(CANCELLED, 0),
+            "avg_queue_wait_s": round(sum(waits) / len(waits), 1) if waits else 0.0,
+            "avg_task_duration_s": (round(sum(durations) / len(durations), 1)
+                                    if durations else 0.0),
+            "failure_rate": (round(failed / float(finished), 3) if finished else 0.0),
+        }
 
     def workspace_path(self, workspace_id):
         if not workspace_id:
@@ -1015,6 +1464,10 @@ class App:
         task = self.store.load(workspace_id, task_id)
         if task is None:
             return False
+        if task.get("status") in TERMINAL:
+            # A finished task is history: cancelling it would rewrite what
+            # happened.
+            return False
         session_id = task.get("session_id")
         if session_id:
             try:
@@ -1064,7 +1517,15 @@ def main(argv=None):
                         help="only work while at least this much of the window is left (%%)")
     parser.add_argument("--allow-without-quota", action="store_true",
                         help="work even when the provider does not report a quota")
-    parser.add_argument("--interval", type=float, default=60.0,
+    parser.add_argument("--max-concurrent", type=int, default=1,
+                        help="how many tasks may run at the same time (1 = the queue is serial)")
+    parser.add_argument("--quota-interval", type=float, default=60.0,
+                        help="how long the provider's quota answer is reused (the queue polls "
+                             "every --interval seconds; the quota endpoint is a real call)")
+    parser.add_argument("--stale-after", type=float, default=300.0,
+                        help="a task that was not touched for this many seconds does not hold "
+                             "a slot any more")
+    parser.add_argument("--interval", type=float, default=2.0,
                         help="seconds between rounds (default: 60)")
     parser.add_argument("--max-per-round", type=int, default=1,
                         help="how many queued tasks to start in one round (default: 1)")

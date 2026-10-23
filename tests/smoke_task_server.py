@@ -93,6 +93,13 @@ class Provider(BaseHTTPRequestHandler):
             body = {}
         messages = body.get("messages") or []
         last = messages[-1] if messages else {}
+        if isinstance(last.get("content"), str) and "FAILME" in last["content"]:
+            # A task that cannot be done: the agent's turn fails.
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error":{"message":"the model is on fire"}}')
+            return
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -174,11 +181,12 @@ def wait_health(port, timeout=30.0):
     return False
 
 
-def call(port, method, path, body=None, timeout=60):
+def call(port, method, path, body=None, timeout=60, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    headers = {"Content-Type": "application/json"} if body is not None else {}
+    head = {"Content-Type": "application/json"} if body is not None else {}
+    head.update(headers or {})
     conn.request(method, path, body=json.dumps(body) if body is not None else None,
-                 headers=headers)
+                 headers=head)
     resp = conn.getresponse()
     raw = resp.read()
     try:
@@ -345,9 +353,18 @@ providers:
                                 "/api/tasks/%s/confirm?workspace_id=%s" % (task2.get("id"), ws_id),
                                 {"message": "yes, go ahead"})
         check("the user can answer a waiting task", status == 200, (status, answered))
+        # The answer does not interrupt what is running: the task goes back
+        # into the queue and waits its turn.
+        check("the answered task goes back into the queue",
+              answered.get("status") == "queued", answered.get("status"))
+        check("the task carries the answer with it",
+              answered.get("pending_message"), answered)
         done2 = wait_task_status(task_port, ws_id, task2.get("id"), ("done", "failed"), timeout=90)
         check("the task finishes after the answer",
               done2 and done2.get("status") == "done", done2)
+        check("the answer reached the agent",
+              done2 and done2.get("result") and "understood" in done2.get("result", ""),
+              done2 and done2.get("result"))
 
         # ---- delete ---------------------------------------------------------
         status, deleted = call(task_port, "DELETE",
@@ -459,6 +476,164 @@ providers:
         _, one = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s" % (task4.get("id"), ws_id))
         check("a task of another provider is left alone",
               one.get("status") == "queued", one.get("status"))
+
+        # ---- the queue is serial --------------------------------------------
+        # Two tasks, one provider: the second must wait for the first. The
+        # provider answers in a moment, so a queue that starts both would show
+        # two RUNNING tasks at the same time.
+        Provider.quota_remaining = 100.0
+        _, first = call(task_port, "POST", "/api/tasks",
+                        {"workspace_id": ws_id, "prompt": "serial one"})
+        _, second = call(task_port, "POST", "/api/tasks",
+                         {"workspace_id": ws_id, "prompt": "serial two"})
+        worst = 0
+        for _ in range(40):
+            _, listing = call(task_port, "GET", "/api/tasks?workspace_id=" + ws_id)
+            running = [t for t in (listing.get("tasks") or []) if t.get("status") == "running"]
+            worst = max(worst, len(running))
+            if len(listing.get("tasks") or []) >= 2 and all(
+                    t.get("status") in ("done", "failed")
+                    for t in listing.get("tasks") or []):
+                break
+            time.sleep(0.3)
+        check("only one task runs at a time", worst <= 1, "max concurrent: %d" % worst)
+
+        # ---- the queue position ---------------------------------------------
+        # The quota is closed, so the tasks stay in the line and the order is
+        # the queue's to decide.
+        Provider.quota_remaining = 0.0
+        time.sleep(3)
+        _, third = call(task_port, "POST", "/api/tasks",
+                        {"workspace_id": ws_id, "prompt": "third", "priority": 5})
+        _, fourth = call(task_port, "POST", "/api/tasks",
+                         {"workspace_id": ws_id, "prompt": "fourth"})
+        check("a queued task knows where it stands",
+              third.get("queue_position", 0) >= 1, third.get("queue_position"))
+        check("the queue position counts the tasks in front",
+              fourth.get("queue_position", 0) > third.get("queue_position", 0),
+              (third.get("queue_position"), fourth.get("queue_position")))
+        check("a task that is not queued has no position",
+              call(task_port, "GET", "/api/tasks/%s?workspace_id=%s"
+                   % (first.get("id"), ws_id))[1].get("queue_position", 0) == 0,
+              first.get("id"))
+        # A higher priority runs first.
+        Provider.quota_remaining = 100.0
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            _, third_now = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s"
+                                % (third.get("id"), ws_id))
+            if third_now.get("started_at"):
+                break
+            time.sleep(0.3)
+        _, fourth_now = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s"
+                             % (fourth.get("id"), ws_id))
+        check("the priority decides who runs first",
+              third_now.get("started_at")
+              and (not fourth_now.get("started_at")
+                   or third_now.get("started_at") <= fourth_now.get("started_at")),
+              (third_now.get("started_at"), fourth_now.get("started_at")))
+
+        # ---- the idempotency key --------------------------------------------
+        key = "key-%d" % random.randint(1, 999999)
+        status, one = call(task_port, "POST", "/api/tasks",
+                           {"workspace_id": ws_id, "prompt": "only once"},
+                           headers={"Idempotency-Key": key})
+        status2, again = call(task_port, "POST", "/api/tasks",
+                              {"workspace_id": ws_id, "prompt": "only once"},
+                              headers={"Idempotency-Key": key})
+        check("the same idempotency key does not queue the work twice",
+              one.get("id") and again.get("id") == one.get("id"), (one.get("id"),
+                                                                  again.get("id")))
+        call(task_port, "DELETE", "/api/tasks/%s?workspace_id=%s" % (one.get("id"), ws_id))
+
+        # ---- the event log ----------------------------------------------------
+        _, events = call(task_port, "GET", "/api/tasks/%s/events?workspace_id=%s"
+                         % (first.get("id"), ws_id))
+        check("the task has an event log", len(events.get("events") or []) >= 1, events)
+        numbers = [e.get("event_id") for e in (events.get("events") or [])]
+        check("the events are numbered", numbers == sorted(numbers) and numbers[0] == 1, numbers)
+        if numbers:
+            _, after = call(task_port, "GET", "/api/tasks/%s/events?since_event_id=%d&workspace_id=%s"
+                            % (first.get("id"), numbers[0], ws_id))
+            check("since_event_id skips what the client already has",
+                  all(e.get("event_id") > numbers[0] for e in (after.get("events") or [])),
+                  after)
+        _, full = call(task_port, "GET", "/api/tasks/%s?include=full&workspace_id=%s"
+                       % (first.get("id"), ws_id))
+        check("include=full brings the whole state",
+              isinstance(full.get("events"), list) and "history" in full, sorted(full.keys()))
+
+        # ---- the audit log ----------------------------------------------------
+        _, audit = call(task_port, "GET", "/api/audit?task_id=" + first.get("id"))
+        check("the audit log records what happened",
+              any(e.get("action") == "submit" for e in (audit.get("entries") or [])), audit)
+
+        # ---- the metrics ------------------------------------------------------
+        _, health = call(task_port, "GET", "/api/health")
+        metrics = health.get("metrics") or {}
+        check("the health endpoint has the metrics",
+              "queue_length" in metrics and "failure_rate" in metrics, metrics)
+
+        # ---- the result export -------------------------------------------------
+        status, document = call(task_port, "GET", "/api/tasks/%s/export?format=json&workspace_id=%s"
+                                % (first.get("id"), ws_id))
+        check("the export is a document",
+              status == 200 and (document.get("manifest") or {}).get("task_id") == first.get("id"),
+              (status, str(document)[:120]))
+        check("the export carries the answer and the events",
+              "final_answer" in document and isinstance(document.get("events"), list), sorted(document.keys()))
+        conn = http.client.HTTPConnection("127.0.0.1", task_port, timeout=60)
+        conn.request("GET", "/api/tasks/%s/export?format=zip&workspace_id=%s"
+                     % (first.get("id"), ws_id))
+        resp = conn.getresponse()
+        blob = resp.read()
+        check("the export is a zip", resp.status == 200 and blob[:2] == b"PK",
+              (resp.status, blob[:8]))
+        import io
+        import zipfile
+        names = []
+        if blob[:2] == b"PK":
+            with zipfile.ZipFile(io.BytesIO(blob)) as z:
+                names = z.namelist()
+        check("the zip has the manifest, the answer, the conversation and the events",
+              all(n in names for n in ("manifest.json", "final_answer.md",
+                                       "conversation.jsonl", "events.jsonl")), names)
+
+        # ---- retry ------------------------------------------------------------
+        status, failed = call(task_port, "POST", "/api/tasks",
+                              {"workspace_id": ws_id, "prompt": "FAILME please"})
+        failed = wait_task_status(task_port, ws_id, failed.get("id"), ("done", "failed"),
+                                  timeout=90)
+        check("a task that cannot be done is failed", failed.get("status") == "failed",
+              failed.get("status"))
+        status, retried = call(task_port, "POST", "/api/tasks/%s/retry?workspace_id=%s"
+                               % (failed.get("id"), ws_id))
+        check("a failed task can be retried",
+              status == 200 and retried.get("status") == "queued"
+              and retried.get("attempt") == 2, (status, retried))
+        status, refused = call(task_port, "POST", "/api/tasks/%s/retry?workspace_id=%s"
+                               % (first.get("id"), ws_id))
+        check("a task that is not failed cannot be retried", status == 409, (status, refused))
+
+        # ---- the list: pagination and the filters ------------------------------
+        status, page = call(task_port, "GET", "/api/tasks?workspace_id=%s&page_size=2" % ws_id)
+        check("the list can be paginated",
+              status == 200 and len(page.get("tasks") or []) <= 2 and page.get("total", 0) >= 2,
+              (len(page.get("tasks") or []), page.get("total")))
+        status, tagged = call(task_port, "POST", "/api/tasks",
+                              {"workspace_id": ws_id, "prompt": "tagged",
+                               "meta": {"tags": ["alpha"], "business_id": "B-7"}})
+        status, filtered = call(task_port, "GET", "/api/tasks?workspace_id=%s&tag=alpha" % ws_id)
+        check("the list can be filtered by tag",
+              status == 200 and any(t.get("id") == tagged.get("id")
+                                    for t in (filtered.get("tasks") or [])), filtered)
+        status, filtered = call(task_port, "GET", "/api/tasks?workspace_id=%s&business_id=B-7" % ws_id)
+        check("the list can be filtered by business id",
+              status == 200 and any(t.get("id") == tagged.get("id")
+                                    for t in (filtered.get("tasks") or [])), filtered)
+        status, filtered = call(task_port, "GET", "/api/tasks?workspace_id=%s&created_from=2999" % ws_id)
+        check("the list can be filtered by time",
+              status == 200 and not (filtered.get("tasks") or []), filtered)
 
         # ---- a task that was running when the server started ---------------
         # The worker thread died with the process, so the record is not running

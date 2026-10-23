@@ -192,6 +192,7 @@ build/bin/tea_agent --workspace . --open
 | | |
 | --- | --- |
 | [用起来](docs/using.md) | 界面导览：配置对话框、工作区、主题地址、分叉、图片 |
+| [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照 |
 | [构建与跨平台编译](docs/build.md) | 依赖、本机构建、交叉编译（aarch64 / Windows）、产物校验 |
 | [部署](docs/deploy.md) | 嵌入式设备、静态单文件、TLS 证书、Windows 自启、systemd 单元 |
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |

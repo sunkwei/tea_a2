@@ -180,6 +180,30 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 
 协议里密钥有三种写法（32 位十六进制 / base64(16 字节) / base64(十六进制串)），三种都能解。
 
+### 队列自己的 API
+
+`sched/task_server.py` 既是队列也是它的 API。完整的接口表和**需求逐条对照**
+（`docs/pending_task.txt` 是需求书，`docs/pending_task.md` 是我们的回答）在
+[需求对照表](pending_task.md)。这里只说与日常使用有关的几条：
+
+| 做的事 | 怎么用 |
+| --- | --- |
+| 排队 | `POST /api/tasks {"prompt": …, "workspace_id": …, "priority": 0}`；同一个 `Idempotency-Key` 重复提交只排一次 |
+| 看队列 | `GET /api/tasks?status=queued&page=1&page_size=20`（还能按 `created_from/to`、`tag`、`business_id` 过滤） |
+| 看一个任务 | `GET /api/tasks/{id}`（`include=full` 带上事件与流水） |
+| 看发生了什么 | `GET /api/tasks/{id}/events?since_event_id=N`（事件落盘，重启后还在） |
+| 回答「问你呢」 | `POST /api/tasks/{id}/confirm {"message": "…"}`——**任务回到队列队尾**，不打断正在跑的活儿，答案随任务带回去 |
+| 重做一个失败的 | `POST /api/tasks/{id}/retry`（同一个任务，`attempt + 1`，历史留着） |
+| 导出结果 | `GET /api/tasks/{id}/export?format=zip`（`manifest.json` / `final_answer.md` / `conversation.jsonl` / `events.jsonl` / `artifacts/`） |
+| 看指标 | `GET /api/health` 的 `metrics`（队列长度、平均排队时长、失败率……） |
+| 看审计 | `GET /api/audit?task_id=…` |
+
+**队列是串行的**：同一时刻只有一个任务在跑（`--max-concurrent`，默认 1）。这条以前只是
+「每轮最多起一个」，上一轮没跑完下一轮照起——现在按**记录**数，跑着的任务占着位置。
+
+**调度很快，但额度不打扰人**：`--interval` 默认 2 秒（以前 60 秒），而 provider 的额度接口
+**只在有排队任务时**才查——空闲时一次都不调。
+
 **微信这一端的工作区是固定的**（默认 `~/.tea_agent/wechat-workspace`，`--workspace-path`
 可改）：微信排的任务都在这个目录里做，不会去动别的项目。任务做完了，bot 通过任务服务的事件
 流知道，然后把结果发回微信。
