@@ -1,5 +1,8 @@
 # HTTP 接口
 
+> 这一页讲**每个接口的字段与语义**。要直接敲命令，看
+> [使用手册](manual.md)。
+
 ## 给上层 Agent 用的接口
 
 所有响应是 JSON，错误统一为 `{"error":{"code":"…","message":"…"}}`。核心就两类：同步查询 + 一条 SSE 流。
@@ -15,7 +18,7 @@
 | `GET` | `/api/workspaces/{id}/download?path=` | 以附件形式下载文件（`Content-Disposition: attachment`），**从磁盘流式发送、无 16 MB 限制**；`&inline=1` 改为在浏览器里直接打开（视频 / PDF） |
 | `GET` / `POST` | `/api/workspaces/{id}/sessions` | 会话列表 / 新建 |
 | `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果） |
-| `GET` / `PUT` | `/api/sessions/{sid}/todos` | 任务列表：GET 随 `/api/sessions/{sid}` 一起返回；PUT 用 `{"items":[…]}` 整体替换，或 `{"index":n,"status":"…"}` 改一条 |
+| `GET` / `PUT` | `/api/sessions/{sid}/todos` | 任务列表：GET 随 `/api/sessions/{sid}` 一起返回；PUT 用 `{"items":[…]}` 整体替换，或 `{"index":n,"status":"…"}` 改一条（`index` **从 1 起算**） |
 | `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
 | `POST` | `/api/sessions/{sid}/fork` | 从某一轮分叉出新会话：`{"message_index":N}` 是父会话里某条**用户消息**的下标，复制到该轮结束（含回答与工具结果）；省略或负数 = 复制整个会话。返回 `session`（带 `forked_from` / `fork_turn`）与复制后的 `messages`；父会话不变 |
 | `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON） |
@@ -36,7 +39,7 @@
 | `GET` | `/api/providers` | provider 清单与能力标记（`supports_search` / `supports_fetch` / `supports_usage`），**不含 key** |
 | `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
 | **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}` |
-| `POST` | `/api/chat/stop` | 中断当前轮次（对所有人） |
+| `POST` | `/api/chat/stop` | 中断当前轮次（对所有人）。**必须带 `{"session_id":"…"}`**，否则 `cancelled` 一直是 false |
 | `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
 | `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
 | `GET` | `/api/chat/queue?session_id=` | 查看当前排队消息 |
@@ -425,18 +428,26 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 | `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id` + `task_context`（这一轮在做某个排队任务，模型会据此汇报进度）。 |
 | `GET /api/providers/{name}/usage` | 这个 provider 的额度（5 小时窗口 + 每周窗口）；provider 没声明额度端点时是 400。 |
 
-`sched/tea_api.py` 是 agent 这层的客户端（纯标准库，设备上跑得起来）：
+`sched/tea_api.py` 是这两层接口的客户端（纯标准库，设备上跑得起来）：`Tea` 说 agent 的
+原语层，`Queue` 说任务队列（任务相关的接口住在 Python 侧的队列上，不在 agent 上）：
 
 ```python
-from tea_api import Tea
-tea = Tea("http://127.0.0.1:8282")
+from tea_api import Tea, Queue
 
+tea = Tea("http://127.0.0.1:8282")
 quota = tea.usage("minimax")              # 额度
-for event in tea.events(workspace_id=ws):  # 订阅，而不是轮询
-    if event["type"] == "done":
-        notify(event)                     # 通知怎么发，是你的事
+
+queue = Queue("http://127.0.0.1:8283")
+task = queue.create_task("do the thing")
+queue.start_task(task["id"])
+for event in queue.events():              # 订阅，而不是轮询
+    if event["type"] == "task_done":
+        notify(event["task"])             # 通知怎么发，是你的事
 ```
 
+`Queue` 会把队列的信封（`{code, message, request_id, data}`）拆开：`data` 里的东西直接
+给你，`code` 非零就抛 `ApiError`。带一把项目钥匙就只看得见那个项目。
+
 ---
 
 
@@ -446,4 +457,4 @@ for event in tea.events(workspace_id=ws):  # 订阅，而不是轮询
 
 ---
 
-← 回到 [README](../README.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)

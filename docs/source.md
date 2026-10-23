@@ -35,7 +35,7 @@ tests/e2e.ps1              端到端测试（155 项）；tests/sse_probe.mjs �
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
 sched/task_server.py        任务服务（Python，可选）：任务队列 + 额度闸门 + 事件流
-sched/tea_api.py            agent 那层的 HTTP 客户端封装（纯标准库）
+sched/tea_api.py            HTTP 客户端封装（纯标准库）：Tea 说 agent，Queue 说任务队列
 CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
 cmake/toolchains/           aarch64-linux-gnu.cmake / mingw-w64-x86_64.cmake（交叉编译入口）
 cmake/version_git_hash.cmake 生成 tea_agent.buildinfo（写在二进制旁边，不动源码树）
@@ -101,4 +101,4 @@ miniz 只取上游 release 里的**合并版两个文件**（`miniz.c` + `miniz.
 
 ---
 
-← 回到 [README](../README.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)

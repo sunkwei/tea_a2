@@ -400,6 +400,22 @@ def main():
               "已排队" in first_reply and "已排队" in second_reply,
               (first_reply, second_reply))
 
+        # ---- a task that waits for its time -------------------------------
+        MockQueue.calls = []
+        reply = bot.handle("/at 23:30 把 README 跑一遍", "u1")
+        created = [c for c in MockQueue.calls if c[0] == "POST" and c[1] == "/api/tasks"]
+        check("/at queues the task with a time",
+              created and created[0][2].get("not_before") == "23:30", created)
+        check("/at says when the task may start", "已排队" in reply, reply)
+        MockQueue.calls = []
+        reply = bot.handle("把 README 跑一遍 @+5", "u1")
+        created = [c for c in MockQueue.calls if c[0] == "POST" and c[1] == "/api/tasks"]
+        check("a trailing @time is split off the task",
+              created and created[0][2].get("not_before") == "+5"
+              and created[0][2].get("prompt") == "把 README 跑一遍", created)
+        check("the split-off time is not part of the prompt",
+              "把 README 跑一遍" in reply, reply)
+
         # ---- the commands -----------------------------------------------
         MockQueue.calls = []
         check("/tasks lists the queue", "任务" in bot.handle("/tasks", "u1"), bot.handle("/tasks", "u1"))

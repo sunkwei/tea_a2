@@ -471,7 +471,7 @@ class Queue:
         return key
 
     def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
-               meta=None, key=""):
+               meta=None, key="", not_before=""):
         body = {"prompt": prompt}
         if workspace_id:
             body["workspace_id"] = workspace_id
@@ -483,6 +483,10 @@ class Queue:
             body["allow_paths"] = list(allow_paths)
         if meta:
             body["meta"] = meta
+        if not_before:
+            # "not before": the queue may not start the task before this time
+            # ("+5" = five hours from now, "23:30" = today at 23:30).
+            body["not_before"] = not_before
         # The same key means the same task: a command that is repeated (or a
         # request that times out and is sent again) must not queue the work
         # twice.
@@ -531,10 +535,18 @@ class Queue:
         return self._request("POST", path, body or {})
 
     def events(self, workspace_id=None, timeout=3600):
-        """The queue's event stream (SSE), as (event, data) pairs."""
+        """The queue's event stream (SSE), as (event, data) pairs.
+
+        The key goes with the request: without it the stream answers as the
+        local operator and hands the bot every project's events - the bot
+        works in one project and must not hear the others.
+        """
         query = {"workspace_id": workspace_id} if workspace_id else {}
         url = self.base + "/api/events" + ("?" + urllib.parse.urlencode(query) if query else "")
-        req = urllib.request.Request(url, method="GET")
+        head = {}
+        if self.key:
+            head["Authorization"] = "Bearer " + self.key
+        req = urllib.request.Request(url, headers=head, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             for raw_line in resp:
                 line = raw_line.decode("utf-8", "replace").strip()
@@ -604,6 +616,19 @@ def idempotency_key(user_id, text):
     return base64.b32encode(hashlib.sha256(raw).digest()[:8]).decode("ascii").rstrip("=")
 
 
+# A message may end with "@<time>" to say when the work may start: "把 README
+# 跑一遍 @23:30" is the task "把 README 跑一遍", not before 23:30.
+_SCHEDULE_TAIL = re.compile(r"\s*@(\+\d+[hmd]?|\d{1,2}:\d{2})\s*$")
+
+
+def split_schedule(text):
+    """('把 README 跑一遍 @23:30') -> ('把 README 跑一遍', '23:30')."""
+    match = _SCHEDULE_TAIL.search(text or "")
+    if not match:
+        return (text or "").strip(), ""
+    return (text or "")[:match.start()].strip(), match.group(1)
+
+
 def text_of(raw):
     """The text of an incoming message."""
     parts = []
@@ -659,6 +684,9 @@ def fmt_task(task):
     position = int(task.get("queue_position") or 0)
     if position:
         line += "  [队列第 %d 位]" % position
+    when = task.get("starts_at_local") or ""
+    if when:
+        line += "  [%s 之后才能开工]" % when
     note = task.get("note") or ""
     if note:
         line += "  — " + note[:60]
@@ -682,6 +710,8 @@ class WeChatBot:
             "· /quota 额度还剩多少\n"
             "· /retry <id> 重做一个失败的任务\n"
             "· /files <id> 把这个任务的产出文件发过来\n"
+            "· /at <时间> <活儿> 定时做（'+5' 五小时后，'23:30' 今天晚上十点半）\n"
+            "· 消息后面加 @23:30 也可以定时\n"
             "· 直接发文件 = 排一个任务，文件会放进工作区\n"
             "· /help 这条说明")
 
@@ -920,17 +950,25 @@ class WeChatBot:
             return self.command(text, user_id)
         # Anything else: a task to do. The key is derived from the user and the
         # text, so the same command twice in a row does not queue it twice.
+        text, not_before = split_schedule(text)
+        if not text:
+            return "（没看懂：发一句话就是排一个任务，/help 有全部命令）"
         try:
             task = self.queue.create(
                 text, workspace_id=self.ensure_workspace(), title=text[:40],
                 provider=self.args.provider or None,
                 allow_paths=self.args.allow_path or None,
                 meta={"wechat_user_id": user_id},
-                key=idempotency_key(user_id, text))
+                key=idempotency_key(user_id, text),
+                not_before=not_before)
         except ILinkError as exc:
             return "排队失败：%s" % exc
         task_id = task.get("id", "?")
         self.owner[task_id] = user_id
+        when = task.get("starts_at_local") or ""
+        if when:
+            return ("已排队 %s\n「%s」\n%s 之后才能开工，额度有余量就自动做。"
+                    % (task_id, text[:60], when))
         return ("已排队 %s\n「%s」\n额度有余量就自动开工，做完我告诉你。"
                 % (task_id, text[:60]))
 
@@ -1000,6 +1038,28 @@ class WeChatBot:
                 # whatever is running now.
                 return ("已回答 %s：回到队列里了（%s），前面的活儿做完它接着做。"
                         % (rest[0], task.get("status", "?")))
+            if cmd in ("/at", "/定时", "/晚点"):
+                # /at 23:30 把 README 跑一遍
+                parts = text.split(None, 2)
+                if len(parts) < 3:
+                    return ("用法：/at <时间> <要做的活儿>\n"
+                            "时间可以是 '+5'（五小时后）或 '23:30'（今天晚上十点半，"
+                            "已经过了就尽快做）")
+                when, what = parts[1], parts[2]
+                try:
+                    task = self.queue.create(
+                        what, workspace_id=self.ensure_workspace(), title=what[:40],
+                        provider=self.args.provider or None,
+                        allow_paths=self.args.allow_path or None,
+                        meta={"wechat_user_id": user_id},
+                        key=idempotency_key(user_id, what + "@" + when),
+                        not_before=when)
+                except ILinkError as exc:
+                    return "排队失败：%s" % exc
+                task_id = task.get("id", "?")
+                self.owner[task_id] = user_id
+                started = task.get("starts_at_local") or when
+                return ("已排队 %s\n「%s」\n%s 之后才能开工。" % (task_id, what[:60], started))
             if cmd in ("/retry", "/重试"):
                 if not rest:
                     return "用法：/retry <任务id>"

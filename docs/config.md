@@ -1,5 +1,8 @@
 # 配置
 
+> 这一页讲**配置文件的字段**。要直接敲命令，看
+> [使用手册](manual.md)。
+
 ## 配置
 
 `provider.yaml` 就是 OpenAI 兼容端点清单（第一个 provider 的第一个模型是默认，见下）：
@@ -320,4 +323,4 @@ settings:
 
 ---
 
-← 回到 [README](../README.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)

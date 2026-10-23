@@ -29,7 +29,7 @@
 
 | 需求 | 状态 | 说明 |
 | --- | --- | --- |
-| FR-01 提交接口（agent 标识、输入、上下文、元数据、优先级、回调地址） | ⚠️ | 有 `workspace_id`（≈agent 标识）、`prompt`（≈input）、`title`、`provider`、`model`、`allow_paths`、`meta`、`priority`。**缺** `context`（独立字段）与 `callback_url`（webhook） |
+| FR-01 提交接口（agent 标识、输入、上下文、元数据、优先级、回调地址） | ⚠️ | 有 `workspace_id`（≈agent 标识）、`prompt`（≈input）、`title`、`provider`、`model`、`allow_paths`、`meta`、`priority`、`not_before`（定时）。**缺** `context`（独立字段）与 `callback_url`（webhook） |
 | FR-02 返回 task_id / QUEUED / **队列位置** / 创建时间 | ✅ | `queue_position` 有了（按优先级→入队时间排队） |
 | FR-03 Idempotency-Key | ✅ | 头或 body 字段都行；同一个键返回**同一个任务**，不重复入队 |
 | FR-04 参数校验 | ⚠️ | 空 prompt / 未知 workspace → 400；**没有超长输入的上限** |

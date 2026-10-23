@@ -1,5 +1,8 @@
 # 任务队列（Python 侧）
 
+> 这一页讲**队列的策略**。要直接敲命令，看
+> [使用手册](manual.md)。
+
 ## 任务队列：agent 是通道，队列在 Python 侧
 
 不是所有事都要马上做。「排队」这件事本身也可以排：把活儿写进队列，等**供应商还有额度**
@@ -189,6 +192,7 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 | 做的事 | 怎么用 |
 | --- | --- |
 | 排队 | `POST /api/tasks {"prompt": …, "workspace_id": …, "priority": 0}`；同一个 `Idempotency-Key` 重复提交只排一次 |
+| 定时做 | 排队时带 `not_before`：`"+5"`（五小时后）、`"23:30"`（今天 23:30；已经过了就尽快做）、`"+30m"`、`"+2d"`、或绝对的 `"2026-10-24T09:00:00Z"`。到点之前这个任务不会被启动，**但它不挡着后面的任务** |
 | 看队列 | `GET /api/tasks?status=queued&page=1&page_size=20`（还能按 `created_from/to`、`tag`、`business_id` 过滤） |
 | 看一个任务 | `GET /api/tasks/{id}`（`include=full` 带上事件与流水） |
 | 看发生了什么 | `GET /api/tasks/{id}/events?since_event_id=N`（事件落盘，重启后还在） |
@@ -203,6 +207,11 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 40401 不存在、40901 状态冲突……），细节在 `data.error`。`request_id` 也放在 `X-Request-Id` 头里——
 报障时把这个号说出来就能在日志里找到那一次请求。
 
+**定时（not before）**：一个任务可以带一个「最早什么时候开始」的时间。`+5` 是从现在起五小时后，
+`23:30` 是今天晚上十点半——**如果这个钟点已经过了，就当成「尽快做」**（不是明天）。到点之前它躺在队列里，
+但**不挡着**后面的任务（那不是「排在第几位」，是「晚点做」）。队列的记录里有 `not_before`（绝对时间）、
+`not_before_text`（用户写的那句话）和 `starts_at_local`（本机时间，给界面显示）。
+
 **队列按项目串行**：**同一个工作区（项目）**一个时刻只跑一个任务，**不同项目可以并行**。
 这条以前只是「每轮最多起一个」，上一轮没跑完下一轮照起——现在按**记录**数，跑着的任务占着位置。
 `--max-concurrent` 可以再给一个全局上限（默认 0 = 只按项目算）。
@@ -210,6 +219,9 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 **权限按项目**：每个项目一把钥匙，`Authorization: Bearer <key>`（或 `X-Project-Key`）带着它就
 **只能**碰这个项目的任务、事件、导出和排队，别人的 → 403。钥匙由本机操作者用
 `POST /api/projects {"workspace_id": …}` 领；**带钥匙的人领不到别人的钥匙**。
+事件流和审计日志也按这个规矩：`GET /api/events`（SSE）带钥匙的连接只收到**本项目**的事件帧
+（帧里带着任务内容，所以别人的帧就是别人的秘密）；`GET /api/audit` 同理，带钥匙的调用者
+只读得到本项目的审计行。**不带钥匙的调用者是本机操作者**，看得到全部——队列网页就是它。
 微信 bot 用的是它自己工作区的那把钥匙，所以它只在自己的项目里活动。
 不带钥匙的调用者是本机操作者（队列网页就是它）——服务只监听 127.0.0.1。
 
@@ -338,4 +350,4 @@ toolkit_task op=update needs_confirmation=true question="可以删掉旧构建�
 
 ---
 
-← 回到 [README](../README.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)

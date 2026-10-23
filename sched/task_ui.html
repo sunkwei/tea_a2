@@ -46,6 +46,7 @@
   .pill.done { color: var(--ok); border-color: var(--ok); }
   .pill.failed { color: var(--err); border-color: var(--err); }
   .pill.cancelled { color: var(--faint); } .pill.waiting_confirmation { color: var(--warn); border-color: var(--warn); }
+  .pill.when { color: var(--accent); border-color: var(--accent); }
   .prompt { color: var(--dim); margin: 7px 0 4px; white-space: pre-wrap; word-break: break-word; }
   .prompt.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .bar { height: 5px; background: var(--panel2); border-radius: 3px; overflow: hidden; margin: 9px 0 5px; }
@@ -115,7 +116,7 @@
 </main>
 <script>
 'use strict';
-var state = { tasks: [], health: null, at: Date.now() };
+var state = { tasks: [], health: null, agent: '', at: Date.now() };
 
 function el(tag, cls, text) {
   var n = document.createElement(tag);
@@ -148,6 +149,7 @@ function card(t) {
   r1.appendChild(el('span', 'tid', t.id));
   r1.appendChild(el('span', 'pill ' + (t.status || ''), t.status || ''));
   if (t.provider) r1.appendChild(el('span', 'pill', t.provider));
+  if (t.starts_at_local) r1.appendChild(el('span', 'pill when', '⏰ ' + t.starts_at_local));
   c.appendChild(r1);
 
   var p = el('div', 'prompt clamp', t.prompt || '');
@@ -325,16 +327,21 @@ function refresh() {
 }
 
 function health() {
-  return fetch('/api/health').then(function (r) { return r.json(); }).then(function (h) {
-    state.health = unwrap(h);
+  return fetch('/api/health').then(function (r) { return r.json(); }).then(function (resp) {
+    // 接口返回的是信封 {code, message, request_id, data:{...}}, 字段都在 data 里,
+    // 直接取 resp.agent_ok 是 undefined, 会永远显示"连不上"
+    var h = unwrap(resp);
+    state.health = h;
+    state.agent = h.agent || state.agent;
     var ok = !!h.agent_ok;
     document.getElementById('d-agent').className = 'dot ' + (ok ? 'ok' : 'bad');
-    document.getElementById('m-agent').textContent = (h.agent || '') + (ok ? '' : '（连不上）');
-    var c = (h.counts || {});
+    document.getElementById('m-agent').textContent = (state.agent || '') + (ok ? '' : '（连不上）');
     document.getElementById('m-quota').textContent = h.quota_percent != null ?
       h.quota_percent + '%' : '—';
   }).catch(function () {
+    // 连任务服务本身都没连上
     document.getElementById('d-agent').className = 'dot bad';
+    document.getElementById('m-agent').textContent = (state.agent || '') + '（连不上）';
   });
 }
 

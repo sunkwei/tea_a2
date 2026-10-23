@@ -207,4 +207,4 @@ curl -s -X POST http://127.0.0.1:8282/api/workspaces/<ws_id>/sessions/import \
 
 ---
 
-← 回到 [README](../README.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)

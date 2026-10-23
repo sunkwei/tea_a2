@@ -637,6 +637,62 @@ providers:
               status == 200 and all(t.get("id") for t in (plain.get("tasks") or [])),
               (status, plain))
 
+        # ---- the key is a door, not a master key -----------------------------
+        # The audit log holds every project's business and the submit line
+        # carries the prompt: a key reads its own lines and no others.
+        status, foreign_audit = call(task_port, "GET", "/api/audit?task_id=" + slow_tasks[1],
+                                     headers=auth)
+        check("a key does not read another project's audit line",
+              status == 200 and not any(e.get("task_id") == slow_tasks[1]
+                                        for e in (foreign_audit.get("entries") or [])),
+              (status, foreign_audit))
+        status, roster = call(task_port, "GET", "/api/projects", headers=auth)
+        check("a key does not see the project roster",
+              status == 200 and not [p for p in (roster.get("projects") or [])
+                                     if p.get("workspace_id") == parallel[0]],
+              (status, roster))
+        status, wrong = call(task_port, "GET", "/api/tasks",
+                              headers={"Authorization": "Bearer NOT-A-REAL-KEY"})
+        check("a key that belongs to nobody is refused",
+              status == 401, (status, wrong))
+        status, own = call(task_port, "GET", "/api/tasks", headers=auth)
+        check("the counts belong to the caller's project",
+              status == 200 and sum((own.get("counts") or {}).values())
+              == len(own.get("tasks") or []), (status, own.get("counts")))
+
+        # ---- "not before": a task that waits for its time --------------------
+        # '+5' is five hours from now, '23:30' is today at 23:30 (and if that
+        # hour has passed, the task may start right away).
+        status, later = call(task_port, "POST", "/api/tasks",
+                             {"workspace_id": ws_id, "prompt": "later", "not_before": "+5"})
+        check("a task can be scheduled",
+              status == 200 and later.get("not_before") and later.get("not_before_text") == "+5",
+              (status, later))
+        check("the schedule is shown in the task's own time",
+              bool(later.get("starts_at_local")), later.get("starts_at_local"))
+        status, past = call(task_port, "POST", "/api/tasks",
+                            {"workspace_id": ws_id, "prompt": "now", "not_before": "00:01"})
+        check("a time that has passed today means 'as soon as possible'",
+              status == 200 and past.get("not_before"), (status, past))
+        now_minute = int(time.time() // 60) * 60
+        check("the schedule of a passed hour is now, not tomorrow",
+              past.get("not_before") == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_minute)),
+              past.get("not_before"))
+        status, nonsense = call(task_port, "POST", "/api/tasks",
+                                {"workspace_id": ws_id, "prompt": "x", "not_before": "whenever"})
+        check("a time that means nothing is refused", status == 400, (status, nonsense))
+        # The scheduled task must not start, and must not hold the queue.
+        time.sleep(5)
+        _, listing = call(task_port, "GET", "/api/tasks?workspace_id=" + ws_id)
+        still = [t for t in (listing.get("tasks") or []) if t.get("id") == later.get("id")]
+        check("a task waits for its time",
+              still and still[0].get("status") == "queued"
+              and not still[0].get("started_at"), still)
+        status, started = call(task_port, "POST", "/api/tasks/%s/start?workspace_id=%s"
+                               % (later.get("id"), ws_id))
+        check("a scheduled task can still be started by hand",
+              status == 200, (status, started))
+
         # ---- the unified envelope ---------------------------------------------
         status, envelope = call(task_port, "GET", "/api/tasks", raw=True)
         check("every answer has the same shape",

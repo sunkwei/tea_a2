@@ -257,4 +257,4 @@ macOS 走 `uname`。宿主名、时区、CPU 数、物理内存、可用 shell�
 
 ---
 
-← 回到 [README](../README.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)

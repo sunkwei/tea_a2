@@ -1,5 +1,8 @@
 # 构建与跨平台编译
 
+> 这一页讲**怎么把二进制造出来**。要直接敲命令，看
+> [使用手册](manual.md)。
+
 | 角色 | 要求 |
 | --- | --- |
 | 构建系统 | CMake ≥ 3.20（3.x / 4.x 均可） |
@@ -273,4 +276,4 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.10.2
 
 ---
 
-← 回到 [README](../README.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)

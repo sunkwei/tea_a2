@@ -35,6 +35,7 @@ import base64
 import calendar
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -124,6 +125,54 @@ def parse_iso(text):
 
 def log(message):
     print("%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
+
+
+def iso_from_epoch(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def parse_not_before(text, now=None):
+    """When a task may start at least.
+
+      '+5'      five hours from now ('+30m', '+2d' work too)
+      '23:30'   today at 23:30 (local time); if that hour has already passed
+                today, the task may start as soon as possible
+      '2026-10-24T09:00:00Z'   an absolute time (UTC, like every other stamp)
+
+    Returns (iso_utc, the text as it was written) - (None, "") when the text
+    means nothing.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None, ""
+    now = time.time() if now is None else now
+
+    match = re.match(r"^\+(\d+)\s*([hmd]?)$", raw)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2) or "h"
+        seconds = amount * {"h": 3600, "m": 60, "d": 86400}[unit]
+        return iso_from_epoch(now + seconds), raw
+
+    match = re.match(r"^(\d{1,2}):(\d{2})$", raw)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if hour > 23 or minute > 59:
+            return None, ""
+        local = time.localtime(now)
+        today = time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
+                              hour, minute, 0, 0, 0, -1))
+        if today <= now:
+            # The hour has passed today: start as soon as possible (not
+            # tomorrow - the user meant today). Rounded to the minute, so the
+            # stamp reads like the other times.
+            return iso_from_epoch(int(now // 60) * 60), raw
+        return iso_from_epoch(today), raw
+
+    stamp = parse_iso(raw)
+    if stamp is not None:
+        return raw, raw
+    return None, ""
 
 
 class AgentError(Exception):
@@ -532,12 +581,18 @@ class Store:
         return out
 
     def delete(self, workspace_id, task_id):
+        """The record goes, and its log goes with it: a file nobody can reach
+        any more is only litter."""
         with self.lock:
             try:
                 os.unlink(self._path(task_id))
-                return True
             except OSError:
                 return False
+            try:
+                os.unlink(self._events_path(task_id))
+            except OSError:
+                pass
+            return True
 
     def counts(self, workspace_id=None):
         counts = {QUEUED: 0, RUNNING: 0, WAITING: 0, DONE: 0, FAILED: 0, CANCELLED: 0}
@@ -709,11 +764,17 @@ class Engine:
                                    t.get("created_at") or "", t.get("id") or ""))
 
         started = 0
+        now = time.time()
         for task in queued:
             if started >= self.args.max_per_round:
                 break
             if self.args.max_concurrent and self.running_count() >= self.args.max_concurrent:
                 break
+            # "Not before": the task waits for its time - and it does not hold
+            # the queue: the tasks behind it may go first.
+            not_before = parse_iso(task.get("not_before") or "")
+            if not_before is not None and not_before > now:
+                continue
             # One task at a time per project.
             if self.running_count(task.get("workspace_id")):
                 # The project is working on something else: the task keeps its
@@ -971,15 +1032,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("X-Request-Id", self._request_id())
-        self.end_headers()
-        self.wfile.write(raw)
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(raw)
 
     def _error(self, status, code, message):
         """An error is the same envelope with a number instead of a zero."""
@@ -1031,6 +1086,19 @@ class Handler(BaseHTTPRequestHandler):
         """The project the caller's key belongs to ("" = operator / no key)."""
         return self.app.store.project_of_key(self._key())
 
+    def _guard(self):
+        """A key that belongs to no project gets nothing.
+
+        No key at all = the local operator. A key that is not in the book =
+        nobody: it must not pass for the operator, or a typo (or a guess)
+        would turn into a master key that sees every project.
+        """
+        key = self._key()
+        if key and not self.app.store.project_of_key(key):
+            self._error(401, "unauthenticated", "this key belongs to no project")
+            return False
+        return True
+
     def _forbid(self, what):
         return self._error(403, "forbidden",
                            "this key does not open %s" % what)
@@ -1068,6 +1136,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._page()
         if path == "/api/health":
             return self._health()
+        if not self._guard():
+            return
         if path == "/api/tasks":
             return self._list()
         if path == "/api/events":
@@ -1090,6 +1160,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
+        if not self._guard():
+            return
         if path == "/api/tasks":
             return self._create()
         if path == "/api/projects":
@@ -1104,6 +1176,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
+        if not self._guard():
+            return
         if path.startswith("/api/tasks/"):
             return self._delete(path.rsplit("/", 1)[-1])
         return self._error(404, "not_found", "no such endpoint: %s" % path)
@@ -1168,7 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
             start = (page - 1) * 50
             everything = everything[start:start + 50]
         self._json(200, {"tasks": [self.app.decorate(t) for t in everything],
-                         "counts": self.app.store.counts(workspace_id or None),
+                         "counts": self.app.store.counts(caller or workspace_id or None),
                          "total": total, "page": page or 1,
                          "page_size": page_size or 0})
 
@@ -1190,6 +1264,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         known = self.app.store.projects()
         out = []
+        caller = self._project_of_caller()
         try:
             workspaces = self.app.agent.workspaces() or []
         except AgentError:
@@ -1198,10 +1273,14 @@ class Handler(BaseHTTPRequestHandler):
             workspace_id = ws.get("id") or ""
             if not workspace_id:
                 continue
+            if caller and workspace_id != caller:
+                continue        # a key sees its own project, not the roster
             out.append({"workspace_id": workspace_id,
                         "name": ws.get("name") or "",
                         "has_key": bool(known.get(workspace_id))})
         for workspace_id in known:
+            if caller and workspace_id != caller:
+                continue
             if not any(p["workspace_id"] == workspace_id for p in out):
                 out.append({"workspace_id": workspace_id, "name": "", "has_key": True})
         out.sort(key=lambda p: p["workspace_id"])
@@ -1317,7 +1396,27 @@ class Handler(BaseHTTPRequestHandler):
     def _audit(self):
         task_id = self._one("task_id")
         limit = self._int("limit", 200)
-        self._json(200, {"entries": self.app.store.audit_log(task_id, max(1, min(limit, 1000)))})
+        entries = self.app.store.audit_log(task_id, max(1, min(limit, 1000)))
+        scope = self._project_of_caller()
+        if scope:
+            # The log holds every project's business, and a prompt is that
+            # project's own. A key reads its own lines and no others.
+            entries = [e for e in entries if self._entry_in_scope(e, scope)]
+        self._json(200, {"entries": entries})
+
+    def _entry_in_scope(self, entry, scope):
+        """Is this audit line about the project the caller may see?"""
+        detail = entry.get("detail") or {}
+        workspace_id = detail.get("workspace_id") or ""
+        if workspace_id:
+            return workspace_id == scope
+        task_id = entry.get("task_id") or ""
+        if not task_id:
+            return False
+        task = self.app.store.load(scope, task_id)
+        if task is None:
+            return False        # the task is gone: nobody can vouch for it
+        return (task.get("workspace_id") or "") == scope
 
     def _create(self):
         body = self._body()
@@ -1374,6 +1473,17 @@ class Handler(BaseHTTPRequestHandler):
             priority = int(body.get("priority") or 0)
         except (TypeError, ValueError):
             priority = 0
+        # "not before": the task may not start before this time. The text is
+        # what the user wrote ("+5", "23:30"); the stamp is absolute.
+        not_before, not_before_text = "", ""
+        wanted = body.get("not_before")
+        if wanted not in (None, ""):
+            not_before, not_before_text = parse_not_before(str(wanted))
+            if not not_before:
+                return self._error(400, "bad_request",
+                                   "'not_before' is not a time I understand: %r "
+                                   "(try '+5' for five hours from now, or '23:30')"
+                                   % str(wanted)[:40])
         task = {
             "id": "t_" + os.urandom(6).hex(),
             "workspace_id": workspace_id,
@@ -1394,6 +1504,8 @@ class Handler(BaseHTTPRequestHandler):
             "meta": body.get("meta") if isinstance(body.get("meta"), dict) else {},
             "priority": priority,
             "attempt": 1,
+            "not_before": not_before,
+            "not_before_text": not_before_text,
             "idempotency_key": key,
             "pending_message": "",
             "created_at": now_iso(),
@@ -1405,9 +1517,6 @@ class Handler(BaseHTTPRequestHandler):
         self.app.publish("task_created", task)
         self.app.store.audit("submit", task["id"], {"prompt": prompt[:200], "key": key})
         self._json(200, self.app.decorate(task))
-
-        self.app.publish("task_created", task)
-        self._json(200, task)
 
     def _delete(self, task_id):
         workspace_id = self._one("workspace_id")
@@ -1421,9 +1530,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._forbid("task %s" % task_id)
         if task.get("status") == RUNNING:
             self.app.cancel_task(owner, task_id)
+        # Tell the listeners first, then take the record away: the event is
+        # the last thing the task says.
+        self.app.publish("task_deleted", task)
         if not self.app.store.delete(owner, task_id):
             return self._error(404, "not_found", "no task %r" % task_id)
-        self.app.publish("task_deleted", task)
         self._json(200, {"ok": True, "id": task_id})
 
     def _action(self, task_id, action):
@@ -1523,7 +1634,14 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, self.app.decorate(self.app.store.load(workspace_id, task.get("id")) or task))
 
     def _events(self):
-        """The queue's event stream (SSE)."""
+        """The queue's event stream (SSE).
+
+        A caller that presents a project key sees only that project's events:
+        the stream is a broadcast, so without this filter a key would learn
+        what every other project is doing (the prompt text travels with the
+        event). The local operator (no key) sees everything.
+        """
+        caller = self._project_of_caller()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -1534,6 +1652,8 @@ class Handler(BaseHTTPRequestHandler):
             while state["alive"]:
                 if queue:
                     event = queue.pop(0)
+                    if caller and not self._event_belongs_to(event, caller):
+                        continue
                     frame = "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
                     self.wfile.write(frame.encode("utf-8"))
                     self.wfile.flush()
@@ -1543,6 +1663,12 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             self.app.events.unsubscribe(listener)
+
+    @staticmethod
+    def _event_belongs_to(event, workspace_id):
+        """Does this event belong to that project?"""
+        task = event.get("task") or {}
+        return (task.get("workspace_id") or "") == workspace_id
 
 
 class App:
@@ -1591,6 +1717,18 @@ class App:
         # Where the task stands: only a queued task has a place in the line.
         task["queue_position"] = self.queue_position(task)
         task["current_step"] = task.get("note") or ""
+        # When the task may start: the absolute time and how it was written.
+        not_before = task.get("not_before") or ""
+        task["not_before"] = not_before
+        task["not_before_text"] = task.get("not_before_text") or ""
+        if not_before:
+            stamp = parse_iso(not_before)
+            task["starts_at_local"] = (time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
+                                       if stamp is not None else not_before)
+            task["starts_in_s"] = int(stamp - time.time()) if stamp is not None else 0
+        else:
+            task["starts_at_local"] = ""
+            task["starts_in_s"] = 0
         if full:
             task["events"] = self.store.events(task.get("id") or "")
             task["history"] = task.get("steps") or []
