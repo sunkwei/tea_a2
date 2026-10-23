@@ -408,12 +408,19 @@ class Store:
     def load(self, workspace_id, task_id):
         # One ledger, one directory: the task ids are unique, so the workspace a
         # task works in is a field of the record, not a directory.
+        if not task_id or not isinstance(task_id, str):
+            return None
         with self.lock:
             try:
                 with open(self._path(task_id), encoding="utf-8") as f:
-                    return json.load(f)
+                    loaded = json.load(f)
             except (OSError, ValueError):
                 return None
+        if not isinstance(loaded, dict) or not loaded.get("id"):
+            # projects.json and friends live in the same directory; they are not
+            # tasks.
+            return None
+        return loaded
 
     def save(self, task):
         with self.lock:
@@ -465,6 +472,9 @@ class Store:
                     continue
                 task = self.load(workspace_id, name[:-5])
                 if task is None:
+                    continue
+                if not isinstance(task, dict) or not task.get("id"):
+                    # Not a task record (projects.json lives here too).
                     continue
                 if workspace_id and task.get("workspace_id") != workspace_id:
                     continue

@@ -619,6 +619,12 @@ providers:
         check("a key cannot export another project's task", status == 403, (status, denied))
         status, ok = call(task_port, "GET", "/api/tasks?workspace_id=%s" % ws_id, headers=auth)
         check("a key can read its own task", status == 200, (status, ok))
+        # The key file lives in the same directory as the task records: it must
+        # not turn up as a task.
+        status, plain = call(task_port, "GET", "/api/tasks")
+        check("the key file is not mistaken for a task",
+              status == 200 and all(t.get("id") for t in (plain.get("tasks") or [])),
+              (status, plain))
 
         # ---- the event log ----------------------------------------------------
         _, events = call(task_port, "GET", "/api/tasks/%s/events?workspace_id=%s"
