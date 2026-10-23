@@ -6,7 +6,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.10.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/health` | 探活、版本（`0.10.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
