@@ -379,10 +379,20 @@ providers:
         out = tool_output(events)
         check("an all-done list is reported as complete",
               "4/4 done" in out and "All steps are done" in out, out[:240])
+        # A plan that is finished is not carried into the next turn: it is dead
+        # weight in the prompt and a stale panel in the UI.
+        _, detail = call(port, "GET", "/api/sessions/%s" % sid)
+        check("a finished plan is cleared when the turn ends",
+              not (detail.get("todos") or []), detail.get("todos"))
         _, index = call(port, "GET", "/api/workspaces/%s/sessions" % wid)
         entry = [s for s in index["sessions"] if s["id"] == sid][0]
-        check("the index shows 4/4", entry.get("todo_total") == 4
-              and entry.get("todo_done") == 4, entry)
+        # No list means no progress in the index either (the counts are only
+        # written when there is something to count).
+        check("the index shows no progress", not entry.get("todo_total")
+              and not entry.get("todo_done"), entry)
+        evs = todo_events(events)
+        check("the clients are told the list is gone",
+              bool(evs) and not (evs[-1].get("items") or []), evs[-1:])
 
         # ---- refusals -------------------------------------------------------
         MockProvider.calls = [("c10", "toolkit_todo", {
@@ -394,7 +404,7 @@ providers:
         check("two active steps are refused",
               "only one step may be 'active'" in out, out[:160])
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
-        check("the refused plan did not replace the list", len(detail["todos"]) == 4,
+        check("the refused plan did not replace the list", not (detail["todos"] or []),
               detail["todos"])
 
         MockProvider.calls = [("c11", "toolkit_todo", {"op": "update", "index": 99,
@@ -409,18 +419,22 @@ providers:
               tool_output(events)[:160])
 
         # ---- editable from outside (the UI checkbox path) -------------------
+        # The plan was cleared when it finished; make a new one to tick off.
+        MockProvider.calls = [("c13", "toolkit_todo", {"op": "set", "items": steps})]
+        run_turn(port, wid, sid, "new plan")
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
         items = detail["todos"]
-        items[0]["status"] = "pending"
+        check("the new plan is there", len(items) == 4, items)
+        items[0]["status"] = "done"
         status, updated = call(port, "PUT", "/api/sessions/%s/todos" % sid,
                                {"items": items})
         check("PUT replaces the list", status == 200 and updated.get("ok") is True,
               (status, updated))
-        check("the counts drop back to 3/4",
-              updated.get("total") == 4 and updated.get("done") == 3, updated)
+        check("the counts follow the list",
+              updated.get("total") == 4 and updated.get("done") == 1, updated)
         status, one = call(port, "PUT", "/api/sessions/%s/todos" % sid,
-                           {"index": 1, "status": "done"})
-        check("PUT can tick a single item", status == 200 and one.get("done") == 4, one)
+                           {"index": 2, "status": "done"})
+        check("PUT can tick a single item", status == 200 and one.get("done") == 2, one)
         status, err = call(port, "PUT", "/api/sessions/%s/todos" % sid,
                            {"index": 1, "status": "finished"})
         check("an invalid status is refused",
@@ -429,8 +443,20 @@ providers:
         status, err = call(port, "PUT", "/api/sessions/%s/todos" % sid,
                            {"index": 99, "status": "done"})
         check("an unknown index is 404", status == 404, status)
+        # Ticking the last box finishes the plan: it is cleared, like the
+        # agent's own path.
+        call(port, "PUT", "/api/sessions/%s/todos" % sid, {"index": 3, "status": "done"})
+        status, last = call(port, "PUT", "/api/sessions/%s/todos" % sid,
+                            {"index": 4, "status": "done"})
+        check("a plan ticked off completely is cleared",
+              status == 200 and last.get("total") == 0 and last.get("done") == 0
+              and not (last.get("items") or []), (status, last))
 
         # ---- survives a restart --------------------------------------------
+        # A plan that is still open survives; a finished one does not (it was
+        # cleared when its turn ended).
+        MockProvider.calls = [("c14", "toolkit_todo", {"op": "set", "items": steps})]
+        run_turn(port, wid, sid, "new plan again")
         proc.terminate()
         proc.wait(timeout=10)
         proc = subprocess.Popen([
@@ -446,7 +472,7 @@ providers:
         before = len(MockProvider.records)
         run_turn(port, wid, sid, "where are we?")
         prompt = system_prompt(MockProvider.records[before])
-        check("a fresh process still injects the plan", "Task list (4/4 done" in prompt,
+        check("a fresh process still injects the plan", "Task list (0/4 done" in prompt,
               prompt[-300:])
 
         # ---- export / import carry the list --------------------------------
@@ -471,7 +497,7 @@ providers:
         check("the restored session has the same steps",
               [t["text"] for t in restored.get("todos") or []] == steps, restored.get("todos"))
         check("the restored session has the same progress",
-              all(t["status"] == "done" for t in restored.get("todos") or []),
+              all(t["status"] == "pending" for t in restored.get("todos") or []),
               restored.get("todos"))
         # ---- a list written by somebody else during the turn survives -----
         # A turn holds its own copy of the session and writes the file back

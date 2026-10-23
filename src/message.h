@@ -141,5 +141,9 @@ struct Session {
 
 /// "3/7" style progress for a task list.
 void todo_counts(const std::vector<TodoItem>& todos, int* total, int* done);
+/// True when the list has steps and every one of them is done - a finished
+/// plan. Such a list is not carried into the next turn: it is dead weight in
+/// the prompt and a stale panel in the UI.
+bool todos_finished(const std::vector<TodoItem>& todos);
 
 }  // namespace tea

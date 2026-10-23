@@ -372,7 +372,8 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
     }
     out << "Keep it current: mark a step active before starting it and done as soon as it is "
            "finished (exactly one active at a time). Do not restate the list in your answer - "
-           "the user already sees it.";
+           "the user already sees it. A plan whose steps are all done is cleared when the turn "
+           "ends, so you never have to clear it yourself.";
   }
 
   // A turn that works on a queued task. The model has to know: without this it
@@ -1479,6 +1480,23 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   trajectory.finish(out.ok, out.error, out.detail, out.iterations, out.usage,
                     out.usage_estimated);
 
+
+  // A plan that is finished when the turn ends is not carried into the next
+  // one: it is dead weight in the prompt (every turn injects it) and a stale
+  // panel in the UI. The conversation keeps the record of what was done.
+  if (session && todos_finished(session->todos)) {
+    session->todos.clear();
+    nlohmann::json todo_event = nlohmann::json::object();
+    todo_event["type"] = "todo";
+    todo_event["items"] = nlohmann::json::array();
+    todo_event["total"] = 0;
+    todo_event["done"] = 0;
+    emit(todo_event);
+    std::string todo_save_err;
+    if (!workspace.save_todos(session->info.id, session->todos, &todo_save_err)) {
+      LOG_WARN("todo: cannot clear the finished task list: ", todo_save_err);
+    }
+  }
 
   if (out.cancelled) {
     nlohmann::json event = nlohmann::json::object();

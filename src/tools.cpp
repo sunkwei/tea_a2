@@ -1518,7 +1518,9 @@ ToolRegistry::ToolRegistry() {
         "op=update to mark the step you are working on 'active' before starting it and 'done' "
         "immediately after finishing it. Exactly one step may be active at a time. Keep "
         "steps short and outcome-shaped (\"add the todo tool\", not \"work on stuff\"). A "
-        "single trivial edit does not need a list. 复杂任务分解为阶段任务列表，并记录完成情况。";
+        "single trivial edit does not need a list. A plan whose steps are all done is cleared "
+        "when the turn ends - you do not have to clear it yourself. "
+        "复杂任务分解为阶段任务列表，并记录完成情况。";
     def.parameters = nlohmann::json::parse(R"JSON({
       "type": "object",
       "properties": {

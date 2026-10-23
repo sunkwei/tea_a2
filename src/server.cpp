@@ -2171,6 +2171,9 @@ void ApiServer::Impl::install_routes() {
               }
               if (!trim(text).empty()) session.todos[at].text = trim(text);
             }
+            // A plan the user has ticked off completely is finished: drop it
+            // instead of carrying it into the next turn.
+            if (todos_finished(session.todos)) session.todos.clear();
             session.info.updated_at = now_iso8601();
             if (!ws.save_session(session, &err)) {
               send_error(res, 500, "io_error", err);

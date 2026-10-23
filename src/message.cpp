@@ -316,6 +316,12 @@ void todo_counts(const std::vector<TodoItem>& todos, int* total, int* done) {
   if (done) *done = d;
 }
 
+bool todos_finished(const std::vector<TodoItem>& todos) {
+  int total = 0, done = 0;
+  todo_counts(todos, &total, &done);
+  return total > 0 && done == total;
+}
+
 nlohmann::json SessionInfo::to_json() const {
   nlohmann::json j = nlohmann::json::object();
   j["id"] = id;
