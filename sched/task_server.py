@@ -1692,8 +1692,9 @@ def main(argv=None):
                              "a slot any more")
     parser.add_argument("--interval", type=float, default=2.0,
                         help="seconds between rounds (default: 60)")
-    parser.add_argument("--max-per-round", type=int, default=1,
-                        help="how many queued tasks to start in one round (default: 1)")
+    parser.add_argument("--max-per-round", type=int, default=4,
+                        help="how many queued tasks one round may start (the per-project rule still "
+                             "holds: two tasks of the same project never run together)")
     parser.add_argument("--submit", metavar="PROMPT",
                         help="put a task in the queue and exit (no server needed)")
     parser.add_argument("--title", default="", help="title for --submit")

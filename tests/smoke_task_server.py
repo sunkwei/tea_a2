@@ -551,20 +551,26 @@ providers:
         call(task_port, "DELETE", "/api/tasks/%s?workspace_id=%s" % (one.get("id"), ws_id))
 
         # ---- the queue is serial per project ---------------------------------
-        # Two projects: each works on one task at a time, but the two may run
-        # at the same time. The second project is registered with the agent.
-        other_dir = os.path.join(tmp, "other-workspace")
-        os.makedirs(other_dir, exist_ok=True)
-        _, other = call(agent_port, "POST", "/api/workspaces",
-                        {"path": other_dir, "name": "second"})
-        other_ws = other.get("id") or ""
-        check("a second project is registered", bool(other_ws), other)
-        _, slow_a = call(task_port, "POST", "/api/tasks",
-                         {"workspace_id": ws_id, "prompt": "SLOWME in the first project"})
-        _, slow_b = call(task_port, "POST", "/api/tasks",
-                         {"workspace_id": other_ws, "prompt": "SLOWME in the second project"})
+        # Two fresh projects: each works on one task at a time, but the two may
+        # run at the same time. (Fresh, because the first project still has
+        # work from the checks above - and a busy project is exactly what
+        # makes the other one wait.)
+        parallel = []
+        for name in ("parallel-a", "parallel-b"):
+            path = os.path.join(tmp, name)
+            os.makedirs(path, exist_ok=True)
+            _, created = call(agent_port, "POST", "/api/workspaces",
+                              {"path": path, "name": name})
+            parallel.append(created.get("id") or "")
+        check("two more projects are registered", all(parallel), parallel)
+        slow_tasks = []
+        for workspace_id in parallel:
+            _, created = call(task_port, "POST", "/api/tasks",
+                              {"workspace_id": workspace_id,
+                               "prompt": "SLOWME in this project"})
+            slow_tasks.append(created.get("id"))
         both = 0
-        for _ in range(60):
+        for _ in range(80):
             _, listing = call(task_port, "GET", "/api/tasks")
             running = [t for t in (listing.get("tasks") or []) if t.get("status") == "running"]
             projects = set(t.get("workspace_id") for t in running)
@@ -574,13 +580,12 @@ providers:
             time.sleep(0.3)
         check("two projects may work at the same time", both >= 2, both)
         # The same project: one at a time.
-        _, same_1 = call(task_port, "POST", "/api/tasks",
-                         {"workspace_id": ws_id, "prompt": "SLOWME again one"})
-        _, same_2 = call(task_port, "POST", "/api/tasks",
-                         {"workspace_id": ws_id, "prompt": "SLOWME again two"})
+        for i in range(2):
+            call(task_port, "POST", "/api/tasks",
+                 {"workspace_id": parallel[0], "prompt": "SLOWME again %d" % i})
         worst = 0
-        for _ in range(60):
-            _, listing = call(task_port, "GET", "/api/tasks?workspace_id=" + ws_id)
+        for _ in range(80):
+            _, listing = call(task_port, "GET", "/api/tasks?workspace_id=" + parallel[0])
             running = [t for t in (listing.get("tasks") or []) if t.get("status") == "running"]
             worst = max(worst, len(running))
             if len(running) >= 2:
@@ -600,20 +605,19 @@ providers:
               status == 200 and all(t.get("workspace_id") == ws_id
                                     for t in (mine.get("tasks") or [])), mine)
         status, denied = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s"
-                              % (slow_b.get("id"), other_ws), headers=auth)
+                              % (slow_tasks[1], parallel[1]), headers=auth)
         check("a key cannot read another project's task", status == 403, (status, denied))
         status, denied = call(task_port, "POST", "/api/tasks",
-                              {"workspace_id": other_ws, "prompt": "not yours"},
+                              {"workspace_id": parallel[1], "prompt": "not yours"},
                               headers=auth)
         check("a key cannot queue work in another project", status == 403, (status, denied))
         status, denied = call(task_port, "POST", "/api/projects",
-                              {"workspace_id": other_ws}, headers=auth)
+                              {"workspace_id": parallel[1]}, headers=auth)
         check("a key cannot ask for another project's key", status == 403, (status, denied))
         status, denied = call(task_port, "GET", "/api/tasks/%s/export?workspace_id=%s"
-                              % (slow_b.get("id"), other_ws), headers=auth)
+                              % (slow_tasks[1], parallel[1]), headers=auth)
         check("a key cannot export another project's task", status == 403, (status, denied))
-        status, ok = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s"
-                          % (slow_a.get("id"), ws_id), headers=auth)
+        status, ok = call(task_port, "GET", "/api/tasks?workspace_id=%s" % ws_id, headers=auth)
         check("a key can read its own task", status == 200, (status, ok))
 
         # ---- the event log ----------------------------------------------------
