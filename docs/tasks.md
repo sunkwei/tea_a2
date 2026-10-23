@@ -198,6 +198,11 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 | 看指标 | `GET /api/health` 的 `metrics`（队列长度、平均排队时长、失败率……） |
 | 看审计 | `GET /api/audit?task_id=…` |
 
+**每个 JSON 回答都是同一个形状**：`{code, message, request_id, data}`。成功时 `code=0`、
+`message="ok"`，正文在 `data` 里；失败时 `code` 是需求附录里的编号（40001 参数、40301 越权、
+40401 不存在、40901 状态冲突……），细节在 `data.error`。`request_id` 也放在 `X-Request-Id` 头里——
+报障时把这个号说出来就能在日志里找到那一次请求。
+
 **队列按项目串行**：**同一个工作区（项目）**一个时刻只跑一个任务，**不同项目可以并行**。
 这条以前只是「每轮最多起一个」，上一轮没跑完下一轮照起——现在按**记录**数，跑着的任务占着位置。
 `--max-concurrent` 可以再给一个全局上限（默认 0 = 只按项目算）。

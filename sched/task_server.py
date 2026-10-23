@@ -68,6 +68,37 @@ DEFAULT_DATA_DIR = os.path.expanduser(os.environ.get(
 # provider without a quota endpoint is worked on anyway (with a warning).
 DEFAULT_PROVIDER = os.environ.get("TEA_TASK_PROVIDER", "minimax")
 
+# The business codes of the unified envelope (the requirement's appendix).
+CODE_OK = 0
+CODE_BAD_REQUEST = 40001
+CODE_UNAUTHENTICATED = 40101
+CODE_FORBIDDEN = 40301
+CODE_NOT_FOUND = 40401
+CODE_CONFLICT = 40901
+CODE_DUPLICATE = 40902
+CODE_RATE_LIMIT = 42901
+CODE_INTERNAL = 50001
+CODE_STORAGE = 50002
+CODE_EXPORT = 50003
+
+# The string code the handlers use -> the number the envelope carries.
+ERROR_CODES = {
+    "bad_request": CODE_BAD_REQUEST,
+    "unauthenticated": CODE_UNAUTHENTICATED,
+    "forbidden": CODE_FORBIDDEN,
+    "not_found": CODE_NOT_FOUND,
+    "not_waiting": CODE_CONFLICT,
+    "not_failed": CODE_CONFLICT,
+    "already_finished": CODE_CONFLICT,
+    "no_quota": CODE_CONFLICT,
+    "task_running": CODE_CONFLICT,
+    "duplicate": CODE_DUPLICATE,
+    "rate_limited": CODE_RATE_LIMIT,
+    "io_error": CODE_STORAGE,
+    "export_failed": CODE_EXPORT,
+    "internal": CODE_INTERNAL,
+}
+
 QUEUED = "queued"
 RUNNING = "running"
 WAITING = "waiting_confirmation"
@@ -685,6 +716,9 @@ class Engine:
                 break
             # One task at a time per project.
             if self.running_count(task.get("workspace_id")):
+                # The project is working on something else: the task keeps its
+                # place and waits its turn.
+                log("  task %s waits: its project is busy" % task.get("id"))
                 continue
             wanted = task.get("provider")
             if wanted and wanted != provider:
@@ -909,7 +943,36 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def handle_one_request(self):
+        """A client that hangs up (the event stream, a closed browser tab) is
+        not an error - without this, every disconnect fills the log with a
+        traceback."""
+        try:
+            BaseHTTPRequestHandler.handle_one_request(self)
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            pass
+
+    def _request_id(self):
+        """The id of this request. It goes into the envelope and the header, so
+        a user can quote it and the log can be found."""
+        if not getattr(self, "_rid", ""):
+            self._rid = "req_" + base64.b32encode(os.urandom(5)).decode().strip("=").lower()
+        return self._rid
+
+    def _envelope(self, code, message, data):
+        return {"code": code, "message": message,
+                "request_id": self._request_id(), "data": data}
+
     def _json(self, status, payload):
+        """One answer, one shape: {code, message, request_id, data}."""
+        body = self._envelope(CODE_OK, "ok", payload)
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("X-Request-Id", self._request_id())
+        self.end_headers()
+        self.wfile.write(raw)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -919,7 +982,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _error(self, status, code, message):
-        self._json(status, {"error": {"code": code, "message": message}})
+        """An error is the same envelope with a number instead of a zero."""
+        numeric = ERROR_CODES.get(code)
+        if numeric is None:
+            numeric = {400: CODE_BAD_REQUEST, 401: CODE_UNAUTHENTICATED,
+                       403: CODE_FORBIDDEN, 404: CODE_NOT_FOUND,
+                       409: CODE_CONFLICT, 429: CODE_RATE_LIMIT}.get(status, CODE_INTERNAL)
+        body = self._envelope(numeric, message, {"error": {"code": code, "message": message}})
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Request-Id", self._request_id())
+        self.end_headers()
+        self.wfile.write(raw)
 
     def _body(self):
         length = int(self.headers.get("Content-Length", "0") or 0)

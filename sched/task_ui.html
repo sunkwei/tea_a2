@@ -257,6 +257,12 @@ function card(t) {
   return c;
 }
 
+/// The queue answers in one shape: {code, message, request_id, data}. The page
+/// only ever wants the data.
+function unwrap(d) {
+  return (d && d.data !== undefined && d.data !== null) ? d.data : d;
+}
+
 function render() {
   var groups = { queued: [], running: [], done: [] };
   state.tasks.forEach(function (t) {
@@ -300,7 +306,7 @@ function createTask() {
   fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ prompt: prompt, title: title,
                                                allow_paths: allow ? allow.split(',') : [] }) })
-    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: unwrap(d) }; }); })
     .then(function (res) {
       if (!res.ok) { window.alert('排队失败：' + ((res.d.error || {}).message || '未知错误')); return; }
       document.getElementById('new-prompt').value = '';
@@ -312,7 +318,7 @@ function createTask() {
 
 function refresh() {
   return fetch('/api/tasks').then(function (r) { return r.json(); }).then(function (d) {
-    state.tasks = d.tasks || [];
+    state.tasks = unwrap(d).tasks || [];
     state.at = Date.now();
     render();
   }).catch(function () {});
@@ -320,7 +326,7 @@ function refresh() {
 
 function health() {
   return fetch('/api/health').then(function (r) { return r.json(); }).then(function (h) {
-    state.health = h;
+    state.health = unwrap(h);
     var ok = !!h.agent_ok;
     document.getElementById('d-agent').className = 'dot ' + (ok ? 'ok' : 'bad');
     document.getElementById('m-agent').textContent = (h.agent || '') + (ok ? '' : '（连不上）');

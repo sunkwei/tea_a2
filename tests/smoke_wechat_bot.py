@@ -141,7 +141,18 @@ class MockQueue(BaseHTTPRequestHandler):
         pass
 
     def _json(self, payload, status=200):
-        body = json.dumps(payload, ensure_ascii=False).encode()
+        # The queue answers in one shape: {code, message, request_id, data}.
+        body = json.dumps({"code": 0, "message": "ok", "request_id": "req_mock",
+                           "data": payload}, ensure_ascii=False).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _error(self, status, code, message):
+        body = json.dumps({"code": 40401, "message": message, "request_id": "req_mock",
+                           "data": {"error": {"code": code, "message": message}}}).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -161,7 +172,7 @@ class MockQueue(BaseHTTPRequestHandler):
             if task is None:
                 return self._json({"error": {"code": "not_found", "message": "no task"}}, 404)
             return self._json(task)
-        self._json({"error": {"code": "not_found"}}, 404)
+        self._error(404, "not_found", "no such endpoint")
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
@@ -201,7 +212,7 @@ class MockQueue(BaseHTTPRequestHandler):
                 task["status"] = "running"
                 task["needs_confirmation"] = False
             return self._json(task)
-        self._json({"error": {"code": "not_found"}}, 404)
+        self._error(404, "not_found", "no such endpoint")
 
     def do_DELETE(self):  # noqa: N802
         MockQueue.calls.append(("DELETE", self.path))
@@ -280,7 +291,7 @@ class MockAgent(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         if self.path.startswith("/api/workspaces"):
             return self._json({"workspaces": MockAgent.workspaces})
-        self._json({"error": {"code": "not_found"}}, 404)
+        self._error(404, "not_found", "no such endpoint")
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))

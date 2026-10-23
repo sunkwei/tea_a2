@@ -185,19 +185,26 @@ def wait_health(port, timeout=30.0):
     return False
 
 
-def call(port, method, path, body=None, timeout=60, headers=None):
+def call(port, method, path, body=None, timeout=60, headers=None, raw=False):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     head = {"Content-Type": "application/json"} if body is not None else {}
     head.update(headers or {})
     conn.request(method, path, body=json.dumps(body) if body is not None else None,
                  headers=head)
     resp = conn.getresponse()
-    raw = resp.read()
+    payload = resp.read()
     try:
-        return resp.status, json.loads(raw or b"null")
+        parsed = json.loads(payload or b"null")
     except ValueError:
         # Not JSON (the page): hand back the text.
-        return resp.status, raw.decode("utf-8", "replace")
+        return resp.status, payload.decode("utf-8", "replace")
+    if raw:
+        return resp.status, parsed
+    # The queue answers in one shape: {code, message, request_id, data}. The
+    # checks want the data (an error puts its detail there too).
+    if isinstance(parsed, dict) and "code" in parsed and "data" in parsed:
+        return resp.status, parsed.get("data") or {}
+    return resp.status, parsed
 
 
 def wait_task_status(base_port, ws_id, task_id, wanted, timeout=90.0):
@@ -265,8 +272,12 @@ providers:
         "--provider", "minimax", "--interval", "2", "--max-per-round", "4",
         "--workspace-path", task_ws_path,
     ]
+    # The server's output goes to a file, not to a pipe: a pipe nobody reads
+    # fills up after a while, and then the server blocks on the write - the
+    # scheduler stops and the tasks never start.
+    server_log = open(os.path.join(tmp, "server.log"), "w")
     task_server = subprocess.Popen(task_server_cmd,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+                                   stdout=server_log, stderr=subprocess.STDOUT, universal_newlines=True)
 
     failures = []
     checks = []
@@ -626,6 +637,22 @@ providers:
               status == 200 and all(t.get("id") for t in (plain.get("tasks") or [])),
               (status, plain))
 
+        # ---- the unified envelope ---------------------------------------------
+        status, envelope = call(task_port, "GET", "/api/tasks", raw=True)
+        check("every answer has the same shape",
+              status == 200 and envelope.get("code") == 0
+              and envelope.get("message") == "ok" and "data" in envelope
+              and str(envelope.get("request_id") or "").startswith("req_"), envelope)
+        status, missing = call(task_port, "GET", "/api/tasks/t_nope", raw=True)
+        check("an error has the same shape",
+              status == 404 and missing.get("code") == 40401
+              and missing.get("message") and "data" in missing
+              and str(missing.get("request_id") or "").startswith("req_"), missing)
+        check("the error says what went wrong",
+              "no task" in (missing.get("message") or ""), missing.get("message"))
+        check("the error keeps the machine-readable code",
+              (missing.get("data") or {}).get("error", {}).get("code") == "not_found", missing)
+
         # ---- the event log ----------------------------------------------------
         _, events = call(task_port, "GET", "/api/tasks/%s/events?workspace_id=%s"
                          % (first.get("id"), ws_id))
@@ -737,7 +764,8 @@ providers:
         except Exception:
             task_server.kill()
         task_server = subprocess.Popen(task_server_cmd,
-                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+                                       stdout=open(os.path.join(tmp, "server2.log"), "w"),
+                                       stderr=subprocess.STDOUT, universal_newlines=True)
         wait_health(task_port)
         status, body = call(task_port, "GET", "/api/tasks/t_stale01?workspace_id=" + ws_id)
         check("a task that was running when the server started is marked failed",

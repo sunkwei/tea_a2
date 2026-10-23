@@ -443,9 +443,17 @@ class Queue:
         except urllib.error.URLError as exc:
             raise ILinkError("cannot reach the task server %s: %s" % (url, exc.reason)) from None
         try:
-            return json.loads(raw) if raw else {}
+            body = json.loads(raw) if raw else {}
         except ValueError:
             return {}
+        # The queue answers in one shape: {code, message, request_id, data}.
+        if isinstance(body, dict) and "code" in body and "data" in body:
+            if body.get("code"):
+                detail = ((body.get("data") or {}).get("error") or {}).get("message") \
+                    or body.get("message") or "failed"
+                raise ILinkError("task server: %s" % detail, status=status)
+            return body.get("data") or {}
+        return body
 
     def health(self):
         return self._request("GET", "/api/health", timeout=10)
