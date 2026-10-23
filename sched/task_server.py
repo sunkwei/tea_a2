@@ -46,6 +46,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 
+import task_order
+
 try:
     # Python 3.7+
     from http.server import ThreadingHTTPServer
@@ -315,6 +317,58 @@ class Agent:
                 yield json.loads(payload)
             except ValueError:
                 continue
+
+
+def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
+             not_before_text="", key="", meta=None):
+    """A task record, from the fields a task order (or the API) carries."""
+    return {
+        "id": "t_" + os.urandom(6).hex(),
+        "workspace_id": workspace_id,
+        "prompt": str(body.get("prompt") or "").strip(),
+        "title": str(body.get("title") or "").strip(),
+        "provider": str(body.get("provider") or "").strip(),
+        "model": str(body.get("model") or "").strip(),
+        "allow_paths": list(allow_paths or []),
+        "session_id": "",
+        "status": QUEUED,
+        "progress": 0,
+        "note": "",
+        "steps": [],
+        "needs_confirmation": False,
+        "question": "",
+        "error": "",
+        "result": "",
+        "meta": meta if isinstance(meta, dict) else {},
+        "priority": priority,
+        "attempt": 1,
+        "not_before": not_before,
+        "not_before_text": not_before_text,
+        "idempotency_key": key,
+        "pending_message": "",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "started_at": "",
+        "finished_at": "",
+    }
+
+
+def resolve_workspace_id(agent, wanted):
+    """A path or a workspace id -> the id. "" = the queue's own workspace."""
+    text = (wanted or "").strip()
+    if not text:
+        return ""
+    workspaces = agent.workspaces() or []
+    for ws in workspaces:
+        if ws.get("id") == text:
+            return text
+    path = os.path.abspath(os.path.expanduser(text))
+    for ws in workspaces:
+        if os.path.abspath(ws.get("path") or "") == path:
+            return ws.get("id", "")
+    known = ", ".join("%s (%s)" % (w.get("id", "?"), w.get("path", ""))
+                      for w in workspaces) or "(agent 没有工作区)"
+    raise OrderError("agent 里没有这个工作区：%s；已知的：%s" % (text, known))
 
 
 class Store:
@@ -1146,6 +1200,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._audit()
         if path == "/api/projects":
             return self._projects()
+        if path == "/api/task-order-template":
+            return self._task_order_template()
         if path.startswith("/api/tasks/"):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
@@ -1255,6 +1311,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._forbid("task %s" % task_id)
         full = self._one("include").lower() in ("full", "1", "true")
         self._json(200, self.app.decorate(task, full=full))
+
+    def _task_order_template(self):
+        """The task order template, as a download.
+
+        The queue's web page offers it: fill it in, hand it back, the work is
+        queued - every setting a task can have is in that file.
+        """
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "task-order.template")
+        try:
+            with open(path, encoding="utf-8") as f:
+                body = f.read().encode("utf-8")
+        except OSError:
+            return self._error(404, "not_found",
+                               "the task order template is missing next to the server")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="task-order.template"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _projects(self):
         """The projects (workspaces) the queue knows about.
@@ -1484,35 +1562,9 @@ class Handler(BaseHTTPRequestHandler):
                                    "'not_before' is not a time I understand: %r "
                                    "(try '+5' for five hours from now, or '23:30')"
                                    % str(wanted)[:40])
-        task = {
-            "id": "t_" + os.urandom(6).hex(),
-            "workspace_id": workspace_id,
-            "prompt": prompt,
-            "title": str(body.get("title") or "").strip(),
-            "provider": str(body.get("provider") or "").strip(),
-            "model": str(body.get("model") or "").strip(),
-            "allow_paths": allow_paths,
-            "session_id": "",
-            "status": QUEUED,
-            "progress": 0,
-            "note": "",
-            "steps": [],
-            "needs_confirmation": False,
-            "question": "",
-            "error": "",
-            "result": "",
-            "meta": body.get("meta") if isinstance(body.get("meta"), dict) else {},
-            "priority": priority,
-            "attempt": 1,
-            "not_before": not_before,
-            "not_before_text": not_before_text,
-            "idempotency_key": key,
-            "pending_message": "",
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-            "started_at": "",
-            "finished_at": "",
-        }
+        task = new_task(body, workspace_id, allow_paths=allow_paths, priority=priority,
+                        not_before=not_before, not_before_text=not_before_text, key=key,
+                        meta=body.get("meta") if isinstance(body.get("meta"), dict) else {})
         self.app.store.create(task)
         self.app.publish("task_created", task)
         self.app.store.audit("submit", task["id"], {"prompt": prompt[:200], "key": key})
@@ -1882,6 +1934,56 @@ def pick_workspace(agent, wanted):
     return workspaces[0].get("id")
 
 
+def submit_order(app, args):
+    """Read a task order file and queue it.
+
+    The order is a text file the user fills in (see task-order.template). It
+    carries every setting a task can have, so a task can be handed over as a
+    file instead of a curl.
+    """
+    try:
+        with open(args.submit_order, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as exc:
+        print("cannot read the task order: %s" % exc, file=sys.stderr)
+        return 2
+    try:
+        body = task_order.parse_order(text)
+    except task_order.OrderError as exc:
+        print("the task order has a problem:\n%s" % exc, file=sys.stderr)
+        return 2
+    if not body.get("prompt"):
+        print("the task order has no 'prompt' - what should be done?", file=sys.stderr)
+        return 2
+    not_before, not_before_text = "", ""
+    if body.get("not_before"):
+        not_before, not_before_text = parse_not_before(str(body["not_before"]))
+        if not not_before:
+            print("'not_before' is not a time I understand: %r" % body["not_before"],
+                  file=sys.stderr)
+            return 2
+    agent = Agent(args.agent)
+    try:
+        workspace_id = resolve_workspace_id(agent, body.get("workspace_id"))
+    except (AgentError, task_order.OrderError) as exc:
+        print("cannot pick the workspace: %s" % exc, file=sys.stderr)
+        return 2
+    if not workspace_id:
+        workspace_id = app.default_workspace()
+    allow_paths = [os.path.abspath(os.path.expanduser(p))
+                   for p in (body.get("allow_paths") or []) if str(p).strip()]
+    task = new_task(body, workspace_id, allow_paths=allow_paths,
+                    priority=int(body.get("priority") or 0),
+                    not_before=not_before, not_before_text=not_before_text,
+                    key=str(body.get("idempotency_key") or ""),
+                    meta=body.get("meta") if isinstance(body.get("meta"), dict) else {})
+    app.store.create(task)
+    log("queued task %s (%s)" % (task["id"], task["title"] or task["prompt"][:40]))
+    if task["not_before"]:
+        log("  it may start at %s (%s)" % (task["not_before"], task["not_before_text"]))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="The task queue: enqueue, run and watch tasks through the agent's API.")
@@ -1920,6 +2022,8 @@ def main(argv=None):
     parser.add_argument("--max-per-round", type=int, default=4,
                         help="how many queued tasks one round may start (the per-project rule still "
                              "holds: two tasks of the same project never run together)")
+    parser.add_argument("--submit-order", metavar="FILE",
+                        help="queue the task described by this task order file")
     parser.add_argument("--submit", metavar="PROMPT",
                         help="put a task in the queue and exit (no server needed)")
     parser.add_argument("--title", default="", help="title for --submit")
@@ -1931,6 +2035,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     app = App(args)
+
+    if args.submit_order:
+        return submit_order(app, args)
 
     if args.submit:
         agent = Agent(args.agent)

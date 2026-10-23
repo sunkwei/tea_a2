@@ -48,6 +48,7 @@ python3 tests/smoke_single_file.py                        # 内嵌证书 + 静�
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
 python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果/串行/幂等/事件/导出
+python3 tests/smoke_task_order.py                          # 任务单：解析/报错/命令行排队/模板可下载
 python3 tests/smoke_utf8_truncation.py                    # 文件被截断在字符中间：轮次不崩/结果是合法 UTF-8
 python3 tests/smoke_invalid_utf8.py                       # 内容不是 UTF-8 的文件与命令输出：轮次不崩/字节被替换
 python3 tests/smoke_utf8_roundtrip.py                     # 往返：模型的坏字节不丢事件、压缩不切坏字符、落盘合法

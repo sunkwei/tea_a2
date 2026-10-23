@@ -791,6 +791,47 @@ providers:
         check("the error keeps the machine-readable code",
               (missing.get("data") or {}).get("error", {}).get("code") == "not_found", missing)
 
+        # ---- a task order, handed over as a file ---------------------------
+        order = os.path.join(tmp, "build.order")
+        with open(order, "w", encoding="utf-8") as f:
+            f.write("title: 从任务单来的活儿\n"
+                    "prompt: |\n"
+                    "  把这个跑一遍。\n"
+                    "workspace: %s\n"
+                    "allow_paths:\n"
+                    "  - /tmp\n"
+                    "not_before: +5\n"
+                    "tags:\n"
+                    "  - 文档\n" % ws_dir)
+        result = subprocess.run(
+            [sys.executable, SERVER, "--submit-order", order, "--data-dir", data_dir,
+             "--agent", "http://127.0.0.1:%d" % agent_port, "--no-serve"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+            timeout=60)
+        check("a task order is queued from the command line",
+              "queued task" in result.stdout, result.stdout[-200:])
+        _, listing = call(task_port, "GET", "/api/tasks?workspace_id=" + ws_id)
+        orders = [t for t in (listing.get("tasks") or [])
+                  if t.get("title") == "从任务单来的活儿"]
+        check("the task from the order is in the queue", len(orders) == 1, len(orders))
+        if orders:
+            one = orders[0]
+            check("the order's prompt came through",
+                  "把这个跑一遍" in (one.get("prompt") or ""), one.get("prompt"))
+            check("the order's schedule came through",
+                  one.get("not_before_text") == "+5" and one.get("not_before"),
+                  (one.get("not_before"), one.get("not_before_text")))
+            check("the order's extra directory came through",
+                  "/tmp" in (one.get("allow_paths") or []), one.get("allow_paths"))
+            check("the order's tags came through",
+                  "文档" in ((one.get("meta") or {}).get("tags") or []), one.get("meta"))
+
+        # ---- the template is downloadable from the page ----------------------
+        status, template = call(task_port, "GET", "/api/task-order-template")
+        check("the task order template can be downloaded",
+              status == 200 and "prompt:" in (template if isinstance(template, str) else ""),
+              (status, str(template)[:80]))
+
         # ---- the event log ----------------------------------------------------
         _, events = call(task_port, "GET", "/api/tasks/%s/events?workspace_id=%s"
                          % (first.get("id"), ws_id))

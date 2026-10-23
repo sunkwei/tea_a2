@@ -561,6 +561,47 @@ def main():
                   (created[0][2].get("meta") or {}).get("attachments") == ["inbox/evil.sh"],
                   created[0][2].get("meta"))
 
+        # ---- in: a task order the user sends ------------------------------
+        order_text = ("title: 微信来的任务单\n"
+                      "prompt: |\n"
+                      "  把这个跑一遍。\n"
+                      "not_before: +5\n"
+                      "tags:\n"
+                      "  - 文档\n").encode("utf-8")
+        order_key = os.urandom(16)
+        MockCDN.files["download-order"] = wechat_bot.aes_encrypt(order_text, order_key)
+        raw_order = {"message_type": 1, "from_user_id": "u1", "context_token": "ctx-1",
+                     "create_time_ms": int(time.time() * 1000),
+                     "item_list": [{"type": 4, "file_item": {
+                         "media": {"encrypt_query_param": "download-order",
+                                   "aes_key": base64.b64encode(order_key.hex().encode()).decode()},
+                         "file_name": "build.order", "len": str(len(order_text))}}]}
+        MockQueue.calls = []
+        answer = bot.handle_message(raw_order, "", wechat_bot.files_of(raw_order), "u1")
+        check("the bot says it got the task order", "任务单" in answer, answer)
+        created = [c for c in MockQueue.calls if c[0] == "POST" and c[1] == "/api/tasks"]
+        check("the task order becomes one task", len(created) == 1, MockQueue.calls)
+        if created:
+            body = created[0][2]
+            check("the order's prompt is the task",
+                  "把这个跑一遍" in (body.get("prompt") or ""), body.get("prompt"))
+            check("the order's schedule came through", body.get("not_before") == "+5", body)
+            check("the order's title came through", body.get("title") == "微信来的任务单", body)
+
+        # ---- a broken task order says what is wrong -----------------------
+        bad_key = os.urandom(16)
+        MockCDN.files["download-bad"] = wechat_bot.aes_encrypt(b"titel: x\nprompt: y\n", bad_key)
+        raw_bad = {"message_type": 1, "from_user_id": "u1", "context_token": "ctx-1",
+                   "item_list": [{"type": 4, "file_item": {
+                       "media": {"encrypt_query_param": "download-bad",
+                                 "aes_key": base64.b64encode(bad_key.hex().encode()).decode()},
+                       "file_name": "bad.order", "len": "20"}}]}
+        MockQueue.calls = []
+        answer = bot.handle_message(raw_bad, "", wechat_bot.files_of(raw_bad), "u1")
+        check("a broken task order says what is wrong",
+              "不认识的键" in answer, answer)
+        created = [c for c in MockQueue.calls if c[0] == "POST" and c[1] == "/api/tasks"]
+        check("a broken task order is not queued", not created, MockQueue.calls)
         # ---- in: the other two key formats work too ----------------------
         for label, key_text in (("hex", in_key.hex()),
                                 ("base64 of the raw bytes", base64.b64encode(in_key).decode())):

@@ -41,6 +41,10 @@
   .row1 { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
   .title { font-weight: 600; font-size: 15px; }
   .tid { color: var(--faint); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .dl { font-size: 12px; color: var(--dim); text-decoration: none; border-bottom: 1px dashed var(--line); }
+  .dl:hover { color: var(--accent); border-color: var(--accent); }
+  .hint { margin: 6px 0 0; font-size: 12px; color: var(--faint); line-height: 1.6; }
+  .hint code { font-family: ui-monospace, Menlo, Consolas, monospace; }
   .pill { font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); color: var(--dim); }
   .pill.queued { color: var(--dim); } .pill.running { color: var(--accent); border-color: var(--accent); }
   .pill.done { color: var(--ok); border-color: var(--ok); }
@@ -105,7 +109,11 @@
       <input id="new-allow" type="text" spellcheck="false"
              placeholder="允许访问的目录（逗号分隔，可留空）">
       <button class="primary" id="new-go">排队</button>
+      <a class="dl" id="dl-order" href="/api/task-order-template"
+         download="task-order.template">下载任务单模板</a>
     </div>
+    <p class="hint">任务单是一个文本文件：填好交给队列（<code>--submit-order</code>），
+      一次能带全所有设置（工作区、额外目录、provider、优先级、定时、标签…）。</p>
   </div>
   <h2>排队中 <span class="n" id="n-queued">0</span></h2>
   <div id="s-queued"></div>

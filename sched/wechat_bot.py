@@ -46,6 +46,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import task_order
+
 DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
 DEFAULT_AGENT = "http://127.0.0.1:8282"
 DEFAULT_TASKS = "http://127.0.0.1:8283"
@@ -471,7 +473,7 @@ class Queue:
         return key
 
     def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
-               meta=None, key="", not_before=""):
+               meta=None, key="", not_before="", model="", priority=0, extra=None):
         body = {"prompt": prompt}
         if workspace_id:
             body["workspace_id"] = workspace_id
@@ -487,6 +489,13 @@ class Queue:
             # "not before": the queue may not start the task before this time
             # ("+5" = five hours from now, "23:30" = today at 23:30).
             body["not_before"] = not_before
+        if model:
+            body["model"] = model
+        if priority:
+            body["priority"] = priority
+        for key_name, value in (extra or {}).items():
+            if value not in (None, "", [], {}):
+                body[key_name] = value
         # The same key means the same task: a command that is repeated (or a
         # request that times out and is sent again) must not queue the work
         # twice.
@@ -627,6 +636,16 @@ def split_schedule(text):
     if not match:
         return (text or "").strip(), ""
     return (text or "")[:match.start()].strip(), match.group(1)
+
+
+def is_task_order(name):
+    """Does this file say it is a task order?
+
+    A task order is a text file with the work in it ("*.order", or a name that
+    says 任务单). Anything else the user sends is an ordinary attachment.
+    """
+    base = os.path.basename(name or "").lower()
+    return base.endswith(".order") or "任务单" in base
 
 
 def text_of(raw):
@@ -858,6 +877,54 @@ class WeChatBot:
             saved.append((kind, path))
         return saved
 
+    def queue_order(self, path, user_id):
+        """A task order the user sent: queue what it says."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError as exc:
+            return "任务单读不了：%s" % exc
+        except UnicodeDecodeError:
+            return "任务单不是文本文件，读不了。"
+        try:
+            body = task_order.parse_order(text)
+        except task_order.OrderError as exc:
+            return "任务单有问题：\n%s" % exc
+        if not body.get("prompt"):
+            return "任务单里没有 prompt（要做什么），我不懂该干什么。"
+        workspace_id = self.ensure_workspace()
+        note = ""
+        wanted = str(body.pop("workspace_id", "") or "")
+        if wanted:
+            found = ""
+            for ws in self.agent.workspaces() or []:
+                if ws.get("id") == wanted or \
+                        os.path.abspath(ws.get("path") or "") == os.path.abspath(os.path.expanduser(wanted)):
+                    found = ws.get("id", "")
+                    break
+            if found:
+                workspace_id = found
+            else:
+                note = "（工作区 %s 不在 agent 里，用了微信自己的工作区）" % wanted
+        try:
+            task = self.queue.create(
+                body["prompt"], workspace_id=workspace_id,
+                title=body.get("title") or "", provider=body.get("provider") or "",
+                allow_paths=body.get("allow_paths") or None,
+                meta=body.get("meta") or None,
+                key=body.get("idempotency_key") or "",
+                not_before=body.get("not_before") or "",
+                model=body.get("model") or "", priority=int(body.get("priority") or 0),
+                extra={"tags": body.get("tags")} if body.get("tags") else None)
+        except ILinkError as exc:
+            return "排队失败：%s" % exc
+        task_id = task.get("id", "?")
+        self.owner[task_id] = user_id
+        when = task.get("starts_at_local") or ""
+        if when:
+            return "任务单收到，已排队 %s（%s 之后开工）%s" % (task_id, when, note)
+        return "任务单收到，已排队 %s%s" % (task_id, note)
+
     def send_file_to_user(self, user_id, path, name=None):
         """One file to the user: encrypt, upload to the CDN, send."""
         with open(path, "rb") as f:
@@ -909,6 +976,10 @@ class WeChatBot:
         saved = self.receive_files(raw)
         if not saved:
             return "文件没能取下来，再发一次？"
+        # A task order is not an attachment: it says what to do and how.
+        for kind, path in saved:
+            if kind == "file_item" and is_task_order(path):
+                return self.queue_order(path, user_id)
         root = os.path.abspath(os.path.expanduser(self.args.workspace_path))
         rel_files = [os.path.relpath(p, root) for kind, p in saved if kind == "file_item"]
         rel_images = [os.path.relpath(p, root) for kind, p in saved if kind != "file_item"]

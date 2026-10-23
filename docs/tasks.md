@@ -201,6 +201,52 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 | 导出结果 | `GET /api/tasks/{id}/export?format=zip`（`manifest.json` / `final_answer.md` / `conversation.jsonl` / `events.jsonl` / `artifacts/`） |
 | 看指标 | `GET /api/health` 的 `metrics`（队列长度、平均排队时长、失败率……） |
 | 看审计 | `GET /api/audit?task_id=…` |
+| 拿任务单模板 | `GET /api/task-order-template`（网页上就是那个「下载任务单模板」） |
+| 交一份任务单 | `python3 sched/task_server.py --submit-order <文件>`，或把 `*.order` 文件发给微信 bot |
+
+### 任务单：一个文件交一份活儿
+
+不想敲 curl，就填一份**任务单**（文本文件，模板在 `sched/task-order.template`，队列的网页上
+也有「下载任务单模板」）。它带的是**一个任务能有的全部设置**：
+
+```
+title: 把 README 的构建例子跑一遍
+prompt: |
+  把 tea_a2 的 README 里的构建例子真的跑一遍，
+  遇到问题就记下来，最后给我一份清单。
+workspace: /home/sunkw/work/git/tea_a2
+allow_paths:
+  - /tmp
+provider: minimax
+model: MiniMax-M3.1-Flash
+priority: 0
+not_before: +5
+tags:
+  - 文档
+business_id: DOC-2026-1023
+meta:
+  owner: sunwei
+```
+
+格式很简单（**不是 YAML**：标准库没有 yaml 解析器，而队列跑在没有 pip 的设备上）：
+
+- 一行一个「键: 值」，`#` 是注释，空行忽略；
+- 键下面的缩进行是它的续行（`prompt` 的正文就写在这里）；
+- 列表可以缩进多行写（`- 每一项`），也可以用逗号分隔；
+- 值后面可以用 ` # 注释` 注释掉；
+- **不认识的键会报错**（带着行号）——任务单里的笔误不能悄悄丢掉一个设置。
+
+怎么交：
+
+```bash
+python3 sched/task_server.py --submit-order 我的任务单.txt     # 命令行
+```
+
+或者**把文件发给微信 bot**（文件名以 `.order` 结尾，或名字里有「任务单」）：bot 读它、排队，
+任务单有问题就把错处念给你听。
+
+队列的记录里会留下 `not_before`（绝对时间）、`not_before_text`（你写的那句）、`starts_at_local`
+（界面显示用）。
 
 **每个 JSON 回答都是同一个形状**：`{code, message, request_id, data}`。成功时 `code=0`、
 `message="ok"`，正文在 `data` 里；失败时 `code` 是需求附录里的编号（40001 参数、40301 越权、
