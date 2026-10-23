@@ -23,6 +23,7 @@ import http.client
 import json
 import os
 import random
+import select
 import socket
 import subprocess
 import sys
@@ -659,6 +660,87 @@ providers:
         check("the counts belong to the caller's project",
               status == 200 and sum((own.get("counts") or {}).values())
               == len(own.get("tasks") or []), (status, own.get("counts")))
+
+        # ---- the operator sees everything, a key sees its own project ------
+        # The operator is the person on the machine: no key, so no project to
+        # narrow down.  The web page on the same machine is the operator.
+        status, other = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s"
+                             % (slow_tasks[1], parallel[1]))
+        check("the operator sees another project's task",
+              status == 200 and other.get("prompt") == "SLOWME in this project",
+              (status, other.get("prompt")))
+        status, whole = call(task_port, "GET", "/api/tasks")
+        projects = set(t.get("workspace_id") for t in (whole.get("tasks") or []))
+        check("the operator sees every project's tasks",
+              status == 200 and len(projects) > 1, sorted(projects))
+
+        # ---- the event stream is a project stream, not a broadcast ----------
+        # The stream carries the prompt with the event, so a key that hears
+        # every project learns what the other projects are doing.  The
+        # operator (no key) hears everything - that is the point of it.
+        marker = "STREAMMARK %d" % int(time.time() * 1000)
+        operator_sink, key_sink = [], []
+
+        def collect_stream(headers, sink, seconds=4.0):
+            """Read the SSE stream on a raw socket.
+
+            A plain readline() with a socket timeout poisons the connection
+            on the first timeout, so the wait is done with select() and the
+            bytes are read raw - the chunk framing does not matter here, we
+            only look for names.
+            """
+            sock = socket.create_connection(("127.0.0.1", task_port), timeout=10)
+            request = "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n" % task_port
+            for name, value in (headers or {}).items():
+                request += "%s: %s\r\n" % (name, value)
+            request += "\r\n"
+            sock.sendall(request.encode("utf-8"))
+            sock.setblocking(False)
+            deadline = time.time() + seconds
+            while time.time() < deadline:
+                if not select.select([sock], [], [], 0.2)[0]:
+                    continue
+                try:
+                    chunk = sock.recv(65536)
+                except (BlockingIOError, socket.timeout):
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                sink.append(chunk.decode("utf-8", "replace"))
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+        operator_thread = threading.Thread(target=collect_stream, args=({}, operator_sink))
+        key_thread = threading.Thread(target=collect_stream, args=(auth, key_sink))
+        operator_thread.start()
+        key_thread.start()
+        time.sleep(0.8)
+        # The trigger: a task of the *other* project, waiting for its time so
+        # that no work starts - only the event matters here.
+        _, streamed = call(task_port, "POST", "/api/tasks",
+                           {"workspace_id": parallel[1], "prompt": marker,
+                            "not_before": "+1d"})
+        streamed_id = streamed.get("id") or ""
+        time.sleep(2.0)
+        operator_thread.join(timeout=8)
+        key_thread.join(timeout=8)
+        operator_text = "".join(operator_sink)
+        key_text = "".join(key_sink)
+        check("the operator's event stream carries every project",
+              "200 OK" in operator_text and streamed_id in operator_text
+              and marker in operator_text, len(operator_sink))
+        check("a key's event stream carries only its own project",
+              "200 OK" in key_text and streamed_id not in key_text
+              and marker not in key_text, len(key_sink))
+        status, foreign_audit = call(task_port, "GET", "/api/audit", headers=auth)
+        check("a key does not read another project's prompt in the audit log",
+              status == 200 and marker not in json.dumps(foreign_audit), status)
+        call(task_port, "DELETE", "/api/tasks/%s?workspace_id=%s"
+             % (streamed_id, parallel[1]))
 
         # ---- "not before": a task that waits for its time --------------------
         # '+5' is five hours from now, '23:30' is today at 23:30 (and if that
