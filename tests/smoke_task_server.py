@@ -93,6 +93,10 @@ class Provider(BaseHTTPRequestHandler):
             body = {}
         messages = body.get("messages") or []
         last = messages[-1] if messages else {}
+        if isinstance(last.get("content"), str) and "SLOWME" in last["content"]:
+            # A task that takes a while: the queue must not start the next one
+            # in the same project, but another project may work in parallel.
+            time.sleep(2.0)
         if isinstance(last.get("content"), str) and "FAILME" in last["content"]:
             # A task that cannot be done: the agent's turn fails.
             self.send_response(500)
@@ -545,6 +549,72 @@ providers:
               one.get("id") and again.get("id") == one.get("id"), (one.get("id"),
                                                                   again.get("id")))
         call(task_port, "DELETE", "/api/tasks/%s?workspace_id=%s" % (one.get("id"), ws_id))
+
+        # ---- the queue is serial per project ---------------------------------
+        # Two projects: each works on one task at a time, but the two may run
+        # at the same time. The second project is registered with the agent.
+        other_dir = os.path.join(tmp, "other-workspace")
+        os.makedirs(other_dir, exist_ok=True)
+        _, other = call(agent_port, "POST", "/api/workspaces",
+                        {"path": other_dir, "name": "second"})
+        other_ws = other.get("id") or ""
+        check("a second project is registered", bool(other_ws), other)
+        _, slow_a = call(task_port, "POST", "/api/tasks",
+                         {"workspace_id": ws_id, "prompt": "SLOWME in the first project"})
+        _, slow_b = call(task_port, "POST", "/api/tasks",
+                         {"workspace_id": other_ws, "prompt": "SLOWME in the second project"})
+        both = 0
+        for _ in range(60):
+            _, listing = call(task_port, "GET", "/api/tasks")
+            running = [t for t in (listing.get("tasks") or []) if t.get("status") == "running"]
+            projects = set(t.get("workspace_id") for t in running)
+            both = max(both, len(projects))
+            if len(running) >= 2:
+                break
+            time.sleep(0.3)
+        check("two projects may work at the same time", both >= 2, both)
+        # The same project: one at a time.
+        _, same_1 = call(task_port, "POST", "/api/tasks",
+                         {"workspace_id": ws_id, "prompt": "SLOWME again one"})
+        _, same_2 = call(task_port, "POST", "/api/tasks",
+                         {"workspace_id": ws_id, "prompt": "SLOWME again two"})
+        worst = 0
+        for _ in range(60):
+            _, listing = call(task_port, "GET", "/api/tasks?workspace_id=" + ws_id)
+            running = [t for t in (listing.get("tasks") or []) if t.get("status") == "running"]
+            worst = max(worst, len(running))
+            if len(running) >= 2:
+                break
+            time.sleep(0.3)
+        check("one project works on one task at a time", worst <= 1, worst)
+
+        # ---- the project key --------------------------------------------------
+        status, key_answer = call(task_port, "POST", "/api/projects",
+                                  {"workspace_id": ws_id})
+        key = key_answer.get("key") or ""
+        check("the operator can ask for a project's key",
+              status == 200 and len(key) > 10, (status, key_answer))
+        auth = {"Authorization": "Bearer " + key}
+        status, mine = call(task_port, "GET", "/api/tasks", headers=auth)
+        check("a key sees only its own project",
+              status == 200 and all(t.get("workspace_id") == ws_id
+                                    for t in (mine.get("tasks") or [])), mine)
+        status, denied = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s"
+                              % (slow_b.get("id"), other_ws), headers=auth)
+        check("a key cannot read another project's task", status == 403, (status, denied))
+        status, denied = call(task_port, "POST", "/api/tasks",
+                              {"workspace_id": other_ws, "prompt": "not yours"},
+                              headers=auth)
+        check("a key cannot queue work in another project", status == 403, (status, denied))
+        status, denied = call(task_port, "POST", "/api/projects",
+                              {"workspace_id": other_ws}, headers=auth)
+        check("a key cannot ask for another project's key", status == 403, (status, denied))
+        status, denied = call(task_port, "GET", "/api/tasks/%s/export?workspace_id=%s"
+                              % (slow_b.get("id"), other_ws), headers=auth)
+        check("a key cannot export another project's task", status == 403, (status, denied))
+        status, ok = call(task_port, "GET", "/api/tasks/%s?workspace_id=%s"
+                          % (slow_a.get("id"), ws_id), headers=auth)
+        check("a key can read its own task", status == 200, (status, ok))
 
         # ---- the event log ----------------------------------------------------
         _, events = call(task_port, "GET", "/api/tasks/%s/events?workspace_id=%s"

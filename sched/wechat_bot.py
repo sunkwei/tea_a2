@@ -406,11 +406,17 @@ class State:
 
 
 class Queue:
-    """The task server's API - the queue the bot drives."""
+    """The task server's API - the queue the bot drives.
+
+    The bot works in ONE project (its own workspace), so it carries that
+    project's key: the queue then hands it nothing but its own tasks, even if
+    the machine has other projects in the queue.
+    """
 
     def __init__(self, base=DEFAULT_TASKS, timeout=30):
         self.base = base.rstrip("/")
         self.timeout = timeout
+        self.key = ""
 
     def _request(self, method, path, body=None, timeout=None, headers=None):
         url = self.base + path
@@ -419,6 +425,8 @@ class Queue:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             head["Content-Type"] = "application/json"
+        if self.key:
+            head["Authorization"] = "Bearer " + self.key
         head.update(headers or {})
         req = urllib.request.Request(url, data=data, headers=head, method=method)
         try:
@@ -441,6 +449,18 @@ class Queue:
 
     def health(self):
         return self._request("GET", "/api/health", timeout=10)
+
+    def project_key(self, workspace_id):
+        """The key of our own project (the local operator may ask for one)."""
+        try:
+            answer = self._request("POST", "/api/projects", {"workspace_id": workspace_id})
+        except ILinkError as exc:
+            log("no key for the workspace: %s" % exc)
+            return ""
+        key = str(answer.get("key") or "")
+        if key:
+            self.key = key
+        return key
 
     def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
                meta=None, key=""):
@@ -672,6 +692,10 @@ class WeChatBot:
             self.workspace_id = resolve_workspace(self.agent, self.args.workspace_path,
                                                   self.args.workspace_name)
             log("wechat workspace: %s (%s)" % (self.args.workspace_path, self.workspace_id))
+            # The key of our own project: from now on the queue only tells us
+            # about our own tasks.
+            if not self.queue.key:
+                self.queue.project_key(self.workspace_id)
         return self.workspace_id
 
     # -- login ------------------------------------------------------------

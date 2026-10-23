@@ -31,6 +31,7 @@ install is not an option.
 """
 
 import argparse
+import base64
 import calendar
 import json
 import os
@@ -333,6 +334,62 @@ class Store:
             pass
         return out[-limit:]
 
+    # ---- the projects and their keys -------------------------------------
+    def _projects_path(self):
+        return os.path.join(self.root, "projects.json")
+
+    def project_key(self, workspace_id):
+        """The key of a project (a workspace). It is minted on first use.
+
+        The key is the credential: a caller that presents it may work on that
+        project - its tasks, its events, its files. A key of another project
+        gets nothing (403). Without a key the caller is the local operator,
+        which is what the web page on the same machine is.
+        """
+        if not workspace_id:
+            return ""
+        with self.lock:
+            projects = self._read_projects()
+            entry = projects.get(workspace_id)
+            if not entry:
+                entry = {"key": base64.b32encode(os.urandom(20)).decode().strip("=")}
+                projects[workspace_id] = entry
+                self._write_projects(projects)
+            return entry.get("key") or ""
+
+    def project_of_key(self, key):
+        """The project a key belongs to ("" when the key is unknown)."""
+        if not key:
+            return ""
+        with self.lock:
+            for workspace_id, entry in self._read_projects().items():
+                if entry.get("key") == key:
+                    return workspace_id
+        return ""
+
+    def projects(self):
+        with self.lock:
+            return dict(self._read_projects())
+
+    def _read_projects(self):
+        try:
+            with open(self._projects_path(), encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                return loaded
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    def _write_projects(self, projects):
+        try:
+            fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".projects-")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(projects, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._projects_path())
+        except OSError:
+            pass
+
     # ---- idempotency ---------------------------------------------------
     def find_by_idempotency(self, key, workspace_id=None):
         """The task a repeated submission with the same key must return."""
@@ -545,27 +602,30 @@ class Engine:
         return percent, window
 
     # ---- how many tasks may run at the same time --------------------------
-    def running_count(self):
+    def running_tasks(self):
         """The tasks that are running right now - ours and everybody else's.
 
-        The rule is one RUNNING task at a time (the queue is serial). It has to
-        be counted from the *records*, not from this process's threads: a task
-        that is still running when the next round comes up must keep the slot.
+        Counted from the *records*, not from this process's threads: a task
+        that is still running when the next round comes up must keep its slot.
+        A record that says "running" but was not touched for a while is a
+        leftover from a crashed process - it does not hold a slot for ever.
         """
         mine = set(self.running)
-        count = 0
+        out = []
         for task in self.store.list(status=RUNNING):
-            if task.get("id") in mine:
-                count += 1
-                continue
-            # A record that says "running" but was not touched for a while is
-            # a leftover from a crashed process - it must not hold the slot
-            # for ever.
-            stamp = parse_iso(task.get("updated_at") or task.get("started_at") or "")
-            if stamp is not None and time.time() - stamp > self.args.stale_after:
-                continue
-            count += 1
-        return count
+            if task.get("id") not in mine:
+                stamp = parse_iso(task.get("updated_at") or task.get("started_at") or "")
+                if stamp is not None and time.time() - stamp > self.args.stale_after:
+                    continue
+            out.append(task)
+        return out
+
+    def running_count(self, workspace_id=None):
+        """How many tasks are running (in one project, or in all of them)."""
+        tasks = self.running_tasks()
+        if workspace_id:
+            tasks = [t for t in tasks if t.get("workspace_id") == workspace_id]
+        return len(tasks)
 
     # ---- one round --------------------------------------------------------
     def round(self):
@@ -594,12 +654,12 @@ class Engine:
                 return 0
             log("quota of %r: %s%% left - going to work" % (provider, left))
 
-        # The queue is serial: at most --max-concurrent tasks run at the same
-        # time (one by default). The check is against the records, so a task
-        # that is still running keeps its slot when the next round comes.
-        busy = self.running_count()
-        if busy >= self.args.max_concurrent:
-            log("%d task(s) already running - waiting" % busy)
+        # The queue is serial *per project*: a project (a workspace, which is
+        # what an "agent" is here) works on one task at a time, while other
+        # projects may run in parallel. --max-concurrent caps the total; 0
+        # means "only the per-project rule".
+        if self.args.max_concurrent and self.running_count() >= self.args.max_concurrent:
+            log("%d task(s) already running - waiting" % self.running_count())
             return 0
 
         # Highest priority first, then the queue order (FIFO). A task that
@@ -611,8 +671,11 @@ class Engine:
         for task in queued:
             if started >= self.args.max_per_round:
                 break
-            if self.running_count() >= self.args.max_concurrent:
+            if self.args.max_concurrent and self.running_count() >= self.args.max_concurrent:
                 break
+            # One task at a time per project.
+            if self.running_count(task.get("workspace_id")):
+                continue
             wanted = task.get("provider")
             if wanted and wanted != provider:
                 log("  task %s wants provider %r, not %r - leaving it alone"
@@ -868,6 +931,34 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return default
 
+    def _key(self):
+        """The project key the caller presents ("" = the local operator)."""
+        raw = self.headers.get("Authorization") or ""
+        if raw.lower().startswith("bearer "):
+            raw = raw[7:].strip()
+        if not raw:
+            raw = self.headers.get("X-Project-Key") or ""
+        return raw.strip()
+
+    def _project_of_caller(self):
+        """The project the caller's key belongs to ("" = operator / no key)."""
+        return self.app.store.project_of_key(self._key())
+
+    def _forbid(self, what):
+        return self._error(403, "forbidden",
+                           "this key does not open %s" % what)
+
+    def _check_project(self, task):
+        """A task belongs to a project: a key of another project gets nothing."""
+        if task is None:
+            return True
+        caller = self._project_of_caller()
+        if not caller:
+            return True              # the local operator
+        if caller == (task.get("workspace_id") or ""):
+            return True
+        return False
+
     def _one(self, name, default=""):
         values = self._query().get(name) or []
         return values[0] if values else default
@@ -896,6 +987,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._events()
         if path == "/api/audit":
             return self._audit()
+        if path == "/api/projects":
+            return self._projects()
         if path.startswith("/api/tasks/"):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
@@ -912,6 +1005,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path == "/api/tasks":
             return self._create()
+        if path == "/api/projects":
+            return self._project_key()
         if path.startswith("/api/tasks/"):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
@@ -972,6 +1067,10 @@ class Handler(BaseHTTPRequestHandler):
                    "created_from": self._one("created_from"),
                    "created_to": self._one("created_to"),
                    "tag": self._one("tag"), "business_id": self._one("business_id")}
+        caller = self._project_of_caller()
+        if caller:
+            # A key sees its own project and nothing else.
+            filters["workspace_id"] = caller
         everything = self.app.store.list(**filters)
         total = len(everything)
         if page_size and page_size > 0:
@@ -991,8 +1090,41 @@ class Handler(BaseHTTPRequestHandler):
         task = self.app.store.load(workspace_id, task_id)
         if task is None:
             return self._error(404, "not_found", "no task %r" % task_id)
+        if not self._check_project(task):
+            return self._forbid("task %s" % task_id)
         full = self._one("include").lower() in ("full", "1", "true")
         self._json(200, self.app.decorate(task, full=full))
+
+    def _projects(self):
+        """The projects (workspaces) the queue knows about.
+
+        The keys are not here: a caller that may see the list may not open
+        somebody else's project.
+        """
+        out = []
+        for workspace_id in self.app.store.projects():
+            out.append({"workspace_id": workspace_id,
+                        "name": self.app.workspace_name(workspace_id)})
+        out.sort(key=lambda p: p["workspace_id"])
+        self._json(200, {"projects": out})
+
+    def _project_key(self):
+        """The key of a project - for the local operator only.
+
+        A caller that already carries a key may not ask for another one: that
+        would make the key worthless.
+        """
+        if self._key():
+            return self._forbid("another project's key")
+        body = self._body()
+        if body is None:
+            return self._error(400, "bad_request", "the request body is not JSON")
+        workspace_id = str(body.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return self._error(400, "bad_request", "'workspace_id' is required")
+        key = self.app.store.project_key(workspace_id)
+        self.app.store.audit("project_key", "", {"workspace_id": workspace_id})
+        self._json(200, {"workspace_id": workspace_id, "key": key})
 
     def _task_events(self, task_id):
         """The task's event log, optionally only what came after the last one
@@ -1001,6 +1133,8 @@ class Handler(BaseHTTPRequestHandler):
         task = self.app.store.load(workspace_id, task_id)
         if task is None:
             return self._error(404, "not_found", "no task %r" % task_id)
+        if not self._check_project(task):
+            return self._forbid("task %s" % task_id)
         since = self._int("since_event_id", 0)
         events = self.app.store.events(task_id, since)
         self._json(200, {"task_id": task_id, "events": events,
@@ -1020,6 +1154,8 @@ class Handler(BaseHTTPRequestHandler):
         task = self.app.store.load(workspace_id, task_id)
         if task is None:
             return self._error(404, "not_found", "no task %r" % task_id)
+        if not self._check_project(task):
+            return self._forbid("task %s" % task_id)
         fmt = (self._one("format") or "json").lower()
         with_artifacts = self._one("include_artifacts").lower() not in ("0", "false", "no")
         session = self.app.agent.session(task.get("session_id") or "")
@@ -1112,6 +1248,9 @@ class Handler(BaseHTTPRequestHandler):
                 one = one.strip()
                 if one:
                     allow_paths.append(os.path.abspath(os.path.expanduser(one)))
+        caller = self._project_of_caller()
+        if caller and workspace_id != caller:
+            return self._forbid("project %s" % workspace_id)
         if body.get("workspace_id"):
             # A task that names a workspace nobody has would sit in the queue and
             # fail later, with a much less obvious reason. Check it now - unless
@@ -1179,6 +1318,8 @@ class Handler(BaseHTTPRequestHandler):
         # The record knows its own workspace - use it, the caller may not have
         # said which one.
         owner = task.get("workspace_id") or workspace_id
+        if not self._check_project(task):
+            return self._forbid("task %s" % task_id)
         if task.get("status") == RUNNING:
             self.app.cancel_task(owner, task_id)
         if not self.app.store.delete(owner, task_id):
@@ -1194,6 +1335,8 @@ class Handler(BaseHTTPRequestHandler):
         if task is None:
             return self._error(404, "not_found", "no task %r" % task_id)
         workspace_id = task.get("workspace_id") or workspace_id
+        if not self._check_project(task):
+            return self._forbid("task %s" % task_id)
         if action == "start":
             return self._start(workspace_id, task)
         if action == "cancel":
@@ -1404,6 +1547,15 @@ class App:
             "failure_rate": (round(failed / float(finished), 3) if finished else 0.0),
         }
 
+    def workspace_name(self, workspace_id):
+        try:
+            for ws in self.agent.workspaces():
+                if ws.get("id") == workspace_id:
+                    return ws.get("name") or ""
+        except AgentError:
+            pass
+        return ""
+
     def workspace_path(self, workspace_id):
         if not workspace_id:
             return ""
@@ -1517,8 +1669,9 @@ def main(argv=None):
                         help="only work while at least this much of the window is left (%%)")
     parser.add_argument("--allow-without-quota", action="store_true",
                         help="work even when the provider does not report a quota")
-    parser.add_argument("--max-concurrent", type=int, default=1,
-                        help="how many tasks may run at the same time (1 = the queue is serial)")
+    parser.add_argument("--max-concurrent", type=int, default=0,
+                        help="how many tasks may run at the same time in total "
+                             "(0 = only the per-project rule: one per project)")
     parser.add_argument("--quota-interval", type=float, default=60.0,
                         help="how long the provider's quota answer is reused (the queue polls "
                              "every --interval seconds; the quota endpoint is a real call)")
