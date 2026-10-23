@@ -1101,10 +1101,22 @@ class Handler(BaseHTTPRequestHandler):
         The keys are not here: a caller that may see the list may not open
         somebody else's project.
         """
+        known = self.app.store.projects()
         out = []
-        for workspace_id in self.app.store.projects():
+        try:
+            workspaces = self.app.agent.workspaces() or []
+        except AgentError:
+            workspaces = []
+        for ws in workspaces:
+            workspace_id = ws.get("id") or ""
+            if not workspace_id:
+                continue
             out.append({"workspace_id": workspace_id,
-                        "name": self.app.workspace_name(workspace_id)})
+                        "name": ws.get("name") or "",
+                        "has_key": bool(known.get(workspace_id))})
+        for workspace_id in known:
+            if not any(p["workspace_id"] == workspace_id for p in out):
+                out.append({"workspace_id": workspace_id, "name": "", "has_key": True})
         out.sort(key=lambda p: p["workspace_id"])
         self._json(200, {"projects": out})
 
