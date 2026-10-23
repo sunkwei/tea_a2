@@ -1,6 +1,8 @@
 #include "agent.h"
 
+#include <set>
 #include <sstream>
+#include <string>
 
 #include "command.h"
 #include "env.h"
@@ -117,6 +119,49 @@ bool looks_like_context_overflow(const std::string& lowered) {
     if (lowered.find(kMarkers[i]) != std::string::npos) return true;
   }
   return false;
+}
+
+/// What the request that failed looked like. A provider that answers 400
+/// usually says what it disliked - but not always ("invalid params, 400
+/// (2013)" on MiniMax says nothing), and then the size of the request is the
+/// only clue left.
+struct RequestStats {
+  std::size_t messages = 0;
+  std::size_t tool_calls = 0;
+  std::size_t bytes = 0;
+  int repairs = 0;
+};
+
+/// Tool-call ids have to be unique inside a session. A provider may reuse an
+/// id (or send none at all, and we fall back to "call_1"), and two answers to
+/// the same call are a request no provider accepts - MiniMax rejects the whole
+/// conversation with "invalid params, 400 (2013)" (verified 2026-10-23).
+/// The ids are ours to choose: the provider only has to see the same id on the
+/// call and on its answer.
+void make_tool_call_ids_unique(const Session* session, std::vector<ToolCall>* calls) {
+  std::set<std::string> used;
+  if (session) {
+    for (std::size_t i = 0; i < session->messages.size(); ++i) {
+      const Message& m = session->messages[i];
+      for (std::size_t k = 0; k < m.tool_calls.size(); ++k) used.insert(m.tool_calls[k].id);
+      if (!m.tool_call_id.empty()) used.insert(m.tool_call_id);
+    }
+  }
+  for (std::size_t i = 0; i < calls->size(); ++i) {
+    ToolCall& call = (*calls)[i];
+    if (call.id.empty()) call.id = "call_" + std::to_string(i + 1);
+    if (used.insert(call.id).second) continue;
+    const std::string base = call.id;
+    int n = 2;
+    std::string candidate = base + "_" + std::to_string(n);
+    while (!used.insert(candidate).second) {
+      ++n;
+      candidate = base + "_" + std::to_string(n);
+    }
+    call.id = candidate;
+    LOG_WARN("llm: the provider reused the tool-call id '", base,
+             "'; renamed it to '", candidate, "' so the history keeps one answer per call");
+  }
 }
 
 bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provider) {
@@ -998,6 +1043,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     request.api_key = provider_info->api_key;
     request.tools = tools_for_request();
     request.stream = options.stream;
+    // What the request looked like, for the log line a failed call leaves
+    // behind: a provider that answers 400 usually says what it disliked, but
+    // not always - the size of the request then is the only clue.
+    RequestStats request_stats;
 
     // Per-provider headers, with ${session_id} substituted.
     request.headers = provider_info->headers;
@@ -1081,6 +1130,31 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       for (std::size_t i = 0; i < context.size(); ++i) {
         wire_messages.push_back(context[i].to_wire(echo_reasoning, &image_urls));
       }
+      // A provider maps every tool result back to the call it answers, and the
+      // mapping has to be one-to-one. MiniMax rejects the whole request when
+      // it is not - "invalid params, 400 (2013)", an error that says nothing
+      // about the cause (verified 2026-10-23). The repair drops what no
+      // provider accepts, so a history that got broken somewhere (an
+      // interrupted turn, a provider that reused an id) does not kill the turn.
+      const ToolCallRepair repair = repair_tool_calls(&wire_messages);
+      if (repair.changed()) {
+        LOG_WARN("llm: repaired the tool-call structure of the request (", repair.summary(), ")");
+        request_stats.repairs += 1;
+      }
+      request_stats.messages = wire_messages.size();
+      request_stats.tool_calls = 0;
+      request_stats.bytes = 0;
+      for (std::size_t i = 0; i < wire_messages.size(); ++i) {
+        const nlohmann::json& m = wire_messages[i];
+        auto calls = m.find("tool_calls");
+        if (calls != m.end() && calls->is_array()) {
+          request_stats.tool_calls += calls->size();
+        }
+        auto content = m.find("content");
+        if (content != m.end() && content->is_string()) {
+          request_stats.bytes += content->get<std::string>().size();
+        }
+      }
       request.messages = wire_messages;
 
       chat = llm_chat(request, options.stream ? on_delta : DeltaCallback(), cancel);
@@ -1138,10 +1212,22 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     if (!chat.ok) {
       out.error = chat.error.empty() ? "the model request failed" : chat.error;
       out.detail = chat.detail;
+      // A bare "HTTP 400: invalid params, 400 (2013)" leaves the operator
+      // guessing, so the request that was rejected is described too.
+      LOG_WARN("llm: the request was rejected - ", request_stats.messages, " messages, ",
+               request_stats.tool_calls, " tool calls, ~", request_stats.bytes, " bytes",
+               request_stats.repairs ? " (the tool-call structure was repaired first)" : "",
+               "; the provider said: ", chat.detail.empty() ? chat.error : chat.detail);
       nlohmann::json event = nlohmann::json::object();
       event["type"] = "error";
       event["message"] = out.error;
       if (!out.detail.empty()) event["detail"] = out.detail;
+      nlohmann::json stats = nlohmann::json::object();
+      stats["messages"] = request_stats.messages;
+      stats["tool_calls"] = request_stats.tool_calls;
+      stats["bytes"] = request_stats.bytes;
+      if (request_stats.repairs) stats["repaired"] = request_stats.repairs;
+      event["request"] = stats;
       emit(event);
       break;
     }
@@ -1165,6 +1251,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     out.output_tokens += iter_output;
     out.generation_ms += iter_gen_ms;
     if (out.ttft_ms == 0) out.ttft_ms = chat.ttft_ms;
+
+    // The ids go into the session, so they have to be unique in it (see
+    // make_tool_call_ids_unique). The tool answers below use the same ids, and
+    // the trajectory records them too - so rename first, record after.
+    make_tool_call_ids_unique(session, &chat.tool_calls);
 
     // Trajectory: what this iteration produced and what it cost. `has_usage`
     // decides whether the token counts are provider facts or local estimates.

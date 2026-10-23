@@ -1,6 +1,8 @@
 #include "message.h"
 
 #include <algorithm>
+#include <map>
+#include <set>
 
 #include "util.h"
 
@@ -72,6 +74,166 @@ nlohmann::json Message::to_wire(bool include_reasoning,
 
   j["content"] = content;
   return j;
+}
+
+// ---------------------------------------------------------------------------
+// The tool-call structure of a request
+// ---------------------------------------------------------------------------
+namespace {
+
+/// The string field `key` of `j`, or an empty string.
+std::string field(const nlohmann::json& j, const char* key) {
+  auto it = j.find(key);
+  if (it == j.end() || !it->is_string()) return std::string();
+  return it->get<std::string>();
+}
+
+}  // namespace
+
+bool ToolCallRepair::changed() const {
+  return orphan_results || duplicate_results || duplicate_calls || unanswered_calls ||
+         nameless_calls || idless_calls;
+}
+
+std::string ToolCallRepair::summary() const {
+  std::string out;
+  struct Item {
+    const char* label;
+    std::size_t count;
+  };
+  const Item items[] = {
+      {"orphan tool results", orphan_results}, {"duplicate tool results", duplicate_results},
+      {"duplicate tool calls", duplicate_calls}, {"unanswered tool calls", unanswered_calls},
+      {"tool calls without a name", nameless_calls}, {"tool calls without an id", idless_calls},
+  };
+  for (std::size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i) {
+    if (!items[i].count) continue;
+    if (!out.empty()) out += ", ";
+    out += std::to_string(items[i].count) + " " + items[i].label;
+  }
+  return out;
+}
+
+ToolCallRepair repair_tool_calls(nlohmann::json* messages) {
+  ToolCallRepair report;
+  if (!messages || !messages->is_array()) return report;
+  const std::size_t count = messages->size();
+  if (count == 0) return report;
+
+  // Per message: which of its tool calls have to go, and whether the message
+  // itself (a tool result) has to go.
+  std::vector<std::vector<bool> > drop_call(count);
+  std::vector<bool> drop_message(count, false);
+  // The calls that are still waiting for an answer, and the ones that got one.
+  std::map<std::string, std::size_t> declared;  // id -> message index
+  std::set<std::string> answered;
+
+  for (std::size_t i = 0; i < count; ++i) {
+    nlohmann::json& m = (*messages)[i];
+    if (!m.is_object()) continue;
+    const std::string role = field(m, "role");
+    if (role == "assistant") {
+      auto calls = m.find("tool_calls");
+      if (calls == m.end() || !calls->is_array()) continue;
+      drop_call[i].assign(calls->size(), false);
+      for (std::size_t k = 0; k < calls->size(); ++k) {
+        nlohmann::json& call = (*calls)[k];
+        if (!call.is_object()) {
+          // Not a call at all - nothing can answer it.
+          drop_call[i][k] = true;
+          ++report.idless_calls;
+          continue;
+        }
+        const std::string id = field(call, "id");
+        std::string name;
+        auto fn = call.find("function");
+        if (fn != call.end() && fn->is_object()) name = field(*fn, "name");
+        if (id.empty()) {
+          // Nothing can answer a call without an id.
+          drop_call[i][k] = true;
+          ++report.idless_calls;
+          continue;
+        }
+        if (name.empty()) {
+          // A call without a function name is not a call at all; providers
+          // reject the whole request for it ("invalid params, 400 (2013)" on
+          // MiniMax).
+          drop_call[i][k] = true;
+          ++report.nameless_calls;
+          continue;
+        }
+        if (declared.find(id) != declared.end()) {
+          // The same id twice: only the first declaration can be answered.
+          drop_call[i][k] = true;
+          ++report.duplicate_calls;
+          continue;
+        }
+        declared[id] = i;
+      }
+      continue;
+    }
+    if (role == "tool") {
+      const std::string id = field(m, "tool_call_id");
+      if (id.empty() || declared.find(id) == declared.end()) {
+        // No waiting call with that id: the result answers nothing.
+        drop_message[i] = true;
+        ++report.orphan_results;
+        continue;
+      }
+      if (answered.find(id) != answered.end()) {
+        // A second answer to the same call. MiniMax rejects the whole request
+        // for this ("invalid params, 400 (2013)").
+        drop_message[i] = true;
+        ++report.duplicate_results;
+        continue;
+      }
+      answered.insert(id);
+    }
+  }
+
+  // A call that never got an answer would make the provider reject the
+  // request ("tool call and result not match" on MiniMax). It happens when a
+  // turn was interrupted between the call and its result.
+  for (std::size_t i = 0; i < count; ++i) {
+    nlohmann::json& m = (*messages)[i];
+    if (!m.is_object()) continue;
+    if (field(m, "role") != "assistant") continue;
+    auto calls = m.find("tool_calls");
+    if (calls == m.end() || !calls->is_array()) continue;
+    for (std::size_t k = 0; k < calls->size(); ++k) {
+      if (k < drop_call[i].size() && drop_call[i][k]) continue;
+      nlohmann::json& call = (*calls)[k];
+      if (!call.is_object()) continue;
+      const std::string id = field(call, "id");
+      if (id.empty() || answered.find(id) == answered.end()) {
+        drop_call[i][k] = true;
+        ++report.unanswered_calls;
+      }
+    }
+  }
+
+  // Rebuild: drop the broken calls, then the broken messages.
+  for (std::size_t i = 0; i < count; ++i) {
+    nlohmann::json& m = (*messages)[i];
+    if (!m.is_object()) continue;
+    auto calls = m.find("tool_calls");
+    if (calls == m.end() || !calls->is_array()) continue;
+    if (i >= drop_call.size() || drop_call[i].empty()) continue;
+    nlohmann::json kept = nlohmann::json::array();
+    for (std::size_t k = 0; k < calls->size(); ++k) {
+      if (k < drop_call[i].size() && drop_call[i][k]) continue;
+      kept.push_back((*calls)[k]);
+    }
+    if (kept.empty()) m.erase("tool_calls");
+    else *calls = kept;
+  }
+  nlohmann::json kept_messages = nlohmann::json::array();
+  for (std::size_t i = 0; i < count; ++i) {
+    if (i < drop_message.size() && drop_message[i]) continue;
+    kept_messages.push_back((*messages)[i]);
+  }
+  *messages = kept_messages;
+  return report;
 }
 
 nlohmann::json Message::to_store() const {

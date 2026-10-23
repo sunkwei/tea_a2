@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.10.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/health` | 探活、版本（`0.10.3`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
@@ -112,7 +112,7 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 | `queue_unconsumed` | 轮次结束时仍未采纳的排队消息（`items[]`），客户端应放回输入框 |
 | `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` / `trajectory_id` |
 | `stopped` | 被 `/api/chat/stop` 中断 |
-| `error` | `message` / `detail` |
+| `error` | `message` / `detail`，外加 `request`（被拒请求的规模：`messages` / `tool_calls` / `bytes`，修过结构时还有 `repaired`） |
 | `ping` | 空闲心跳（15s），用于判断链路存活 |
 | `resync` | 回放缓冲溢出：重新拉一次 `/api/sessions/{sid}`，再从 `oldest_seq` 接着收 |
 

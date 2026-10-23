@@ -34,6 +34,7 @@ python3 tests/smoke_web_tools.py                          # 网页工具（本�
 python3 tests/smoke_provider_usage.py                      # 订阅额度查询：声明/归一化/错误处理
 node tests/ui_usage.mjs                                   # 顶栏额度徽标 + 设置页按 provider 查询（需 google-chrome）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
+python3 tests/smoke_tool_call_structure.py               # 工具调用结构：重复/孤儿/没答复的调用都先修好再发
 python3 tests/smoke_tool_images.py                        # toolkit_load_image：磁盘图片进对话/上限/拒绝
 node tests/ui_tool_images.mjs                             # 加载的图片在对话里可见（含刷新后，需 google-chrome）
 python3 tests/smoke_console_level.py                      # 控制台只回声 WARN/ERROR、日志文件仍是 INFO
@@ -89,6 +90,15 @@ node tests/ui_status.mjs                                  # 连接状态灯：�
 `tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
 覆盖：工具按 provider 声明才出现在工具表、未声明时强制调用被拒且不外呼、端点卡住时按
 `web_tool_timeout_ms` 超时而不是拖住整轮、`/api/chat/stop` 能中断传输中的请求。
+
+`tests/smoke_tool_call_structure.py` 覆盖「请求里的工具调用结构」：provider 要把每条工具结果
+对回它答复的那次调用，而且必须一对一。MiniMax 对不是一对一的历史整个请求都拒
+（`HTTP 400`、`invalid params, 400 (2013)`——2026-10-23 在 api.minimax.cn 实测），报错里一个字都
+看不出原因；别的 provider 也会拒，只是措辞不同（`tool call id is invalid`、`tool result's tool
+id(x) not found`、`tool call and result not match`）。测试用一个按 MiniMax 规则办事的假 provider
+盯住三件事：**同一个调用被答复两次**、**没有对应调用的结果**、**没有答复的调用**——发出去之前
+都要先修好（`src/message.cpp` 的 `repair_tool_calls`），轮次照常跑完；provider 复用了工具调用 id
+时（我们退回 `call_1` 这类名字时也会撞车）要改名，不能让历史里出现两份答复。
 
 `tests/smoke_tool_images.py` 覆盖 `toolkit_load_image`：视觉模型的工具表里有它、纯文本模型没有；
 工具结果本身是文本（不是几百 KB 的 base64），图片作为 follow-up user 消息进入**下一次请求**，

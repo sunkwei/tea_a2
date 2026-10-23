@@ -56,6 +56,45 @@ struct Message {
   static Message make(const std::string& role, const std::string& content);
 };
 
+/// What `repair_tool_calls` had to change. The agent logs it: a history that
+/// had to be fixed is worth a warning, because it means something upstream (an
+/// interrupted turn, a provider that reused a tool-call id) left the
+/// conversation in a shape that no provider accepts.
+struct ToolCallRepair {
+  std::size_t orphan_results = 0;     // a tool result without a waiting call
+  std::size_t duplicate_results = 0;  // a second answer to the same call
+  std::size_t duplicate_calls = 0;    // the same call id declared twice
+  std::size_t unanswered_calls = 0;   // a call that never got an answer
+  std::size_t nameless_calls = 0;     // a call without a function name
+  std::size_t idless_calls = 0;       // a call without an id
+  bool changed() const;
+  /// "2 duplicate tool results, 1 unanswered tool call" - for the log.
+  std::string summary() const;
+};
+
+/// Make the tool-call structure of a wire message list acceptable to a
+/// provider.
+///
+/// A provider maps every tool result back to the call it answers, and the
+/// mapping has to be one-to-one. MiniMax rejects the *whole* request when it
+/// is not:
+///     HTTP 400 {"error":{"message":"invalid params, 400 (2013)"}}
+/// (verified 2026-10-23 against api.minimax.cn) - an error that says nothing
+/// about the cause, so the turn dies with a mystery. The other providers word
+/// the same problem differently ("tool call id is invalid", "tool result's
+/// tool id(x) not found", "tool call and result not match"), but they reject
+/// the request as well.
+///
+/// The rules the repair enforces:
+///   * a tool call has an id and a function name;
+///   * an id is declared at most once;
+///   * every tool result answers a call that is still waiting for an answer;
+///   * a call that never got an answer is dropped from its assistant message.
+///
+/// Nothing else is touched: text, reasoning, images and the order of the
+/// messages stay as they are.
+ToolCallRepair repair_tool_calls(nlohmann::json* messages);
+
 /// One entry of a session's task list. A complex job is decomposed into steps,
 /// the agent keeps this list current with `toolkit_todo`, and the same list is
 /// what the Web UI (and the exported HTML) shows as progress - so "where is it

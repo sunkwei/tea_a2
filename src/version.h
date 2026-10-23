@@ -11,11 +11,11 @@
 #include <string>
 
 #define TEA_AGENT_NAME "tea_agent"
-#define TEA_AGENT_VERSION_STRING "0.10.2"
+#define TEA_AGENT_VERSION_STRING "0.10.3"
 
 namespace tea {
 
-/// The version this binary was built from, e.g. "0.10.2".
+/// The version this binary was built from, e.g. "0.10.3".
 const char* version_string();
 
 /// The commit this binary was built from, e.g. "b0575d01c748", with "-dirty"

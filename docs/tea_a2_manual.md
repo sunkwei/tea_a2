@@ -168,7 +168,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.10.2","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.10.3","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -888,6 +888,7 @@ HTTP 引擎、轨迹开关等。
 | `409 config_missing` | 还没配置。先 `POST /api/config/quickstart` 或上传配置 |
 | `400 vision_unsupported` | 模型没声明 `supports_vision: true`，图片发不过去。换模型，或改成文字描述 |
 | `409 turn_running` | 轮次正在跑，改名 / 删除 / 改任务列表会被拒。等它结束 |
+| `HTTP 400: invalid params, 400 (2013)`（MiniMax） | provider 对不上历史里的工具调用：同一个调用被答复了两次、结果没有对应的调用、调用没有答复。**发出去之前会自动修好**（日志里有一行 `repaired the tool-call structure`）；还是被拒就看日志里 `the request was rejected - N messages, ...` 那行——请求有多大、provider 原话是什么都在里面 |
 | `409 no_active_turn` | 这个会话没有在跑的轮次。直接 `POST /api/chat` 就行，不用 `/api/chat/queue` |
 | `400 images_not_queued` | 排队路径不收图片（图片必须在请求时解码落盘）。等这一轮结束，或用 `interrupt` 顶掉 |
 | `429 too_many_subscribers` | 跟着看的浏览器超过 `TEA_AGENT_MAX_SUBSCRIBERS`（默认 8） |

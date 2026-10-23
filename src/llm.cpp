@@ -461,8 +461,12 @@ ChatResult llm_chat(const ChatRequest& req, const DeltaCallback& on_delta,
              result.usage.present ? (" tokens=" + std::to_string(result.usage.total_tokens)) : "",
              cache_note);
   } else if (!result.cancelled) {
+    // The provider's own words go into the log as well: the status alone
+    // ("HTTP 400: invalid params, 400 (2013)") says nothing about the cause,
+    // while the body carries the reason and the request id to quote.
     LOG_WARN("llm: ", req.provider, "/", req.model, " failed in ", result.elapsed_ms,
-             "ms: ", result.error);
+             "ms: ", result.error,
+             result.detail.empty() ? "" : (" | the provider said: " + truncate_utf8(result.detail, 400)));
   }
   return result;
 }
