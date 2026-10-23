@@ -31,21 +31,23 @@ std::string endpoint(const std::string& api_url, const char* suffix) {
   return base + suffix;
 }
 
+/// The provider's own text. It ends up in an error event, so it has to be
+/// valid UTF-8 - a gateway that re-encodes can put a stray byte in there.
 std::string extract_error_message(const nlohmann::json& j) {
   if (!j.is_object()) return std::string();
   auto err = j.find("error");
   if (err != j.end() && !err->is_null()) {
-    if (err->is_string()) return err->get<std::string>();
+    if (err->is_string()) return sanitize_utf8(err->get<std::string>());
     if (err->is_object()) {
       auto m = err->find("message");
-      if (m != err->end() && m->is_string()) return m->get<std::string>();
-      return err->dump();
+      if (m != err->end() && m->is_string()) return sanitize_utf8(m->get<std::string>());
+      return dump_json(*err);
     }
   }
   const char* keys[] = {"message", "detail", "msg"};
   for (std::size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
     auto it = j.find(keys[i]);
-    if (it != j.end() && it->is_string()) return it->get<std::string>();
+    if (it != j.end() && it->is_string()) return sanitize_utf8(it->get<std::string>());
   }
   return std::string();
 }
@@ -139,18 +141,18 @@ struct DeltaAccumulator {
       ToolCall& call = calls[index];
       auto id = it->find("id");
       if (id != it->end() && id->is_string()) {
-        const std::string v = id->get<std::string>();
+        const std::string v = sanitize_utf8(id->get<std::string>());
         if (!v.empty()) call.id = v;
       }
       auto name = it->find("name");
       if (name != it->end() && name->is_string() && call.name.empty()) {
-        call.name = name->get<std::string>();
+        call.name = sanitize_utf8(name->get<std::string>());
       }
       auto fn = it->find("function");
       if (fn != it->end() && fn->is_object()) {
         auto fname = fn->find("name");
         if (fname != fn->end() && fname->is_string()) {
-          const std::string v = fname->get<std::string>();
+          const std::string v = sanitize_utf8(fname->get<std::string>());
           if (!v.empty()) call.name = v;
         }
         auto args = fn->find("arguments");
@@ -232,7 +234,12 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
 
         nlohmann::json ev;
         try {
-          ev = nlohmann::json::parse(event_payload);
+          // The parser refuses bytes that are not valid UTF-8, so a provider
+          // that re-encodes (or a gateway in between) would cost us the whole
+          // event - the answer would silently lose a piece. Clean the bytes
+          // first: one odd byte becomes U+FFFD and the rest of the event
+          // survives.
+          ev = nlohmann::json::parse(sanitize_utf8(event_payload));
         } catch (const std::exception&) {
           continue;
         }
@@ -277,26 +284,27 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
     std::string detail = res.body;
     if (!detail.empty()) {
       try {
-        const nlohmann::json j = nlohmann::json::parse(detail);
+        const nlohmann::json j = nlohmann::json::parse(sanitize_utf8(detail));
         const std::string message = extract_error_message(j);
         if (!message.empty()) result.error += ": " + message;
       } catch (const std::exception&) {
         // Not JSON; keep the raw body as detail only.
       }
     }
-    result.detail = truncate_utf8(detail, 4096);
+    result.detail = truncate_utf8(sanitize_utf8(detail), 4096);
     return result;
   }
 
   if (saw_stream_error) {
     result.error = stream_error;
-    result.detail = truncate_utf8(sse_buf, 2048);
+    result.detail = truncate_utf8(sanitize_utf8(sse_buf), 2048);
     return result;
   }
 
   if (!req.stream) {
     try {
-      const nlohmann::json j = nlohmann::json::parse(res.body);
+      // Same as above: clean the bytes before the parser sees them.
+      const nlohmann::json j = nlohmann::json::parse(sanitize_utf8(res.body));
       auto choices = j.find("choices");
       if (choices != j.end() && choices->is_array() && !choices->empty()) {
         const nlohmann::json& choice = (*choices)[0];
@@ -311,7 +319,7 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
       if (usage != j.end() && !usage->is_null()) parse_usage_into(&result.usage, *usage);
     } catch (const std::exception& e) {
       result.error = std::string("cannot parse provider response: ") + e.what();
-      result.detail = truncate_utf8(res.body, 4096);
+      result.detail = truncate_utf8(sanitize_utf8(res.body), 4096);
       return result;
     }
   } else if (!sse_buf.empty()) {

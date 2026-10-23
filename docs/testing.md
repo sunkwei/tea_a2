@@ -50,6 +50,7 @@ python3 tests/smoke_concurrency.py                        # 并发写：锁 + �
 python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果
 python3 tests/smoke_utf8_truncation.py                    # 文件被截断在字符中间：轮次不崩/结果是合法 UTF-8
 python3 tests/smoke_invalid_utf8.py                       # 内容不是 UTF-8 的文件与命令输出：轮次不崩/字节被替换
+python3 tests/smoke_utf8_roundtrip.py                     # 往返：模型的坏字节不丢事件、压缩不切坏字符、落盘合法
 bash scripts/test-all.sh                                  # 整套测试：并行 + 共用一个浏览器（~100 s）
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
@@ -351,6 +352,14 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 中间带坏字节的文件（`broken \xe4 byte`）和一个打印原始字节的命令各跑一轮：轮次不崩、每个事件帧
 都是合法 JSON、坏字节变成 U+FFFD 而可读文字原样保留、发给 provider 的请求体是合法 UTF-8、落盘的
 会话文件也是合法 UTF-8。
+
+`tests/smoke_utf8_roundtrip.py` 钉住「往返」：nlohmann 的**解析器也拒绝**非法 UTF-8
+（`parse_error.101: ill-formed UTF-8 byte`），所以 provider 吐出一个坏字节时，整个 SSE 事件会被
+丢掉——模型的回答少了一块而没人知道。现在解析前先清洗字节（坏字节变 U+FFFD，事件保住）。测试用一个
+会吐坏字节的 mock provider，再加一个「历史长到要压缩」的场景：压缩的 transcript 会按 4000 字节
+逐条切、按 60000 字节整体切，两处都必须切在字符边界上——否则摘要请求里会混进半个字符。断言：事件帧
+都是合法 JSON、provider 收到的请求都是合法 UTF-8、落盘的会话文件是合法 UTF-8、请求里没有 U+FFFD
+（说明没有字符被切坏）。
 
 `tests/smoke_utf8_truncation.py` 钉住同一个问题的另一半：`toolkit_file` 按字节截断时如果切在多字节
 字符中间，结果就不是合法 UTF-8。读现在停在字符边界上，尾读会丢掉开头的半个字符。

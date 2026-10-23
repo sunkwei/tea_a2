@@ -25,7 +25,8 @@ const UsageType kUsageTypes[] = {
 
 std::string trim_error(const std::string& s, size_t max_len = 300) {
   std::string out = trim(s);
-  if (out.size() > max_len) out = out.substr(0, max_len) + "...";
+  // On a character boundary: the text ends up in a JSON response.
+  if (out.size() > max_len) out = truncate_utf8(out, max_len) + "...";
   return out;
 }
 

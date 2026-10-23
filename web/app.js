@@ -123,6 +123,18 @@
 
   /* ---------- 2) 通用小工具 ---------- */
   function $(id) { return document.getElementById(id); }
+  /// Cut a string to `n` characters without splitting a character.
+  /// String.slice() counts UTF-16 units, so it can cut an emoji (or any
+  /// character outside the BMP) in half - and a lone surrogate that is sent to
+  /// the server comes back as a broken character.
+  function clipChars(text, n) {
+    var s = String(text == null ? '' : text);
+    if (s.length <= n) return s;
+    var chars = Array.from ? Array.from(s) : s.split('');
+    if (chars.length <= n) return s;
+    return chars.slice(0, n).join('');
+  }
+
   function el(tag, cls, text) {
     var n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -389,7 +401,7 @@
     if (args.command) return String(args.command);
     if (args.path) return [args.op || args.action || args.operation || '', args.path].join(' ').trim();
     if (!Object.keys(args).length) return '';
-    try { return JSON.stringify(args).slice(0, 160); } catch (e) { return ''; }
+    try { return clipChars(JSON.stringify(args), 160); } catch (e) { return ''; }
   }
   function toolIconSvg(name, status) {
     if (status === 'running') return '<span class="spinner"></span>';
@@ -2098,7 +2110,7 @@
       ready = Promise.resolve(state.session);
     } else {
       ready = api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions',
-        { method: 'POST', body: { title: text.slice(0, 24) || '图片' } })
+        { method: 'POST', body: { title: clipChars(text, 24) || '图片' } })
         .then(function (s) {
           state.session = s;
           state.draft = false;                      // 草稿落地成了真正的会话

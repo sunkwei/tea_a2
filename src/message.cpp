@@ -119,7 +119,10 @@ Message Message::from_store(const nlohmann::json& j) {
   auto get_str = [&](const char* key) -> std::string {
     auto it = j.find(key);
     if (it == j.end() || !it->is_string()) return std::string();
-    return it->get<std::string>();
+    // A session written by an older version can hold bytes that are not valid
+    // UTF-8 (the JSON parser accepts them). Clean them on the way in, so the
+    // message is well-formed everywhere it goes.
+    return sanitize_utf8(it->get<std::string>());
   };
   m.role = get_str("role");
   m.content = get_str("content");

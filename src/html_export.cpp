@@ -697,7 +697,9 @@ std::string preview_line(const std::string& text, std::size_t max_chars) {
     bytes += step;
     ++seen;
   }
-  return esc(flat.substr(0, bytes)) + "…";
+  // On a character boundary: the export is a document, and half a character
+  // in it is not readable.
+  return esc(truncate_utf8(flat, bytes)) + "…";
 }
 
 std::string message_html(const Workspace& ws, const Message& m, std::size_t* image_budget,
@@ -958,7 +960,7 @@ std::string export_file_name(const std::string& session_title) {
     if (base.front() == '-') base.erase(0, 1);
     if (!base.empty() && base.back() == '-') base.pop_back();
   }
-  if (base.size() > 48) base.resize(48);
+  if (base.size() > 48) base = truncate_utf8(base, 48);
   if (base.empty()) base = "session";
 
   std::string digits;

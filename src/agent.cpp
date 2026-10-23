@@ -576,7 +576,9 @@ bool Agent::compact_history(Workspace& workspace, Session* session, const std::s
   for (std::size_t i = session->summary_upto; i < split; ++i) {
     const Message& m = session->messages[i];
     std::string content = m.content;
-    if (content.size() > 4000) content = content.substr(0, 4000) + " ... [truncated]";
+    // The cut has to land on a character boundary: the transcript goes into the
+    // prompt, and a half character there is invalid UTF-8 in the request.
+    if (content.size() > 4000) content = truncate_utf8(content, 4000) + " ... [truncated]";
     transcript << "[" << m.role;
     if (!m.name.empty()) transcript << " " << m.name;
     if (!m.tool_calls.empty()) {
@@ -589,9 +591,13 @@ bool Agent::compact_history(Workspace& workspace, Session* session, const std::s
   }
   std::string segment = transcript.str();
   if (segment.size() > kTranscriptLimit) {
+    // The window can start in the middle of a multi-byte character; drop the
+    // leading fragment instead of sending a broken one.
+    std::string tail = segment.substr(segment.size() - kTranscriptLimit);
+    trim_utf8_edges(&tail, true);
     segment = std::string(
                   "Note: the oldest part of this segment was dropped before summarisation.\n") +
-              segment.substr(segment.size() - kTranscriptLimit);
+              tail;
   }
 
   const ProviderInfo* provider_info = config_->provider(provider);
