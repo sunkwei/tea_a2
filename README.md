@@ -52,6 +52,8 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 - **零外部库**：nlohmann/json、cpp-httplib、yaml-cpp、mbedTLS 全部 vendored 在 `3rd/`，不依赖 vcpkg / conan / 系统开发包。
 - **不依赖 OpenSSL / zlib / Python / Perl**：TLS 由 mbedTLS 承担；构建期没有任何脚本语言参与。
 - **跨平台同一套代码**：路径、文件 I/O、进程、SIGPIPE 都按平台封装，没有 `std::filesystem`。
+- **内置网页终端**：这台机器上的**真实 shell**（Linux 上是 bash、Windows 上是 PowerShell），跑在
+  pty / ConPTY 上；浏览器里直接敲命令，**不经过模型**，也不经过 agent 的工具边界。
 ## ⚠️ 安全须知
 
 **这个程序由 tea_agent 项目创建 0.1 版本；之后版本由 a2 自己进化完成，模型使用 deepseek-flash **
@@ -64,6 +66,8 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 - 只应部署在受信任的网段，或通过隧道访问。
 - 文件工具默认限制在工作区内；`--allow-outside-workspace`（或设置页的「全局」）会取消这个限制，
   慎用——放宽后任何能访问这个端口的人都能读写整台机器上的文件。
+- 网页里的「终端」是这台机器的真实 shell，等同于把 `toolkit_exec` 交给每一个能访问这个端口的人。
+  不需要时用 `TEA_AGENT_SHELL=off` 把它关掉（页面上的入口会一起消失）。
 
 ---
 

@@ -17,6 +17,9 @@ src/
                             并发写用进程级锁 + 原子替换（见 [并发](workspace.md#并发同一个工作区可以同时跑好几轮)）
   html_export.{h,cpp}       会话 → 自包含 HTML（内联 CSS/图片、可导入的 JSON 区块）
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源
+  shell.{h,cpp}             网页终端的会话/缓冲/能力探测（不经过模型）
+  shell_posix.cpp            Linux/macOS：pty（posix_openpt + fork + exec）
+  shell_win32.cpp            Windows：ConPTY（CreatePseudoConsole）+ PowerShell
   http.{h,cpp}              传输分派（socket+TLS / WinHTTP，自动回退）
   http_socket.cpp           HTTP/1.1 over TCP（+ 可选 TLS）
   http_winhttp.cpp          Windows WinHTTP 后端

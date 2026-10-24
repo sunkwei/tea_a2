@@ -45,6 +45,14 @@
         <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.4h4.2l1.3 1.6H14v5.6H2z"/></svg>
         <span>文件</span>
       </button>
+      <!-- 终端：这台机器上的 shell。没有模型参与，浏览器直接驱动它。
+           服务端说这台机器没有终端时（或者用 TEA_AGENT_SHELL=off 关掉了），
+           这个入口就不出现。 -->
+      <button class="nav-row hidden" type="button" data-view="shell" id="nav-shell"
+              title="这台机器上的 shell（Linux 上是 bash，Windows 上是 PowerShell）">
+        <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.6 3.4h10.8v9.2H2.6z"/><path d="M4.8 6.4l1.6 1.6-1.6 1.6M8.2 10.2h3.2"/></svg>
+        <span>终端</span>
+      </button>
       <button class="nav-row" type="button" data-view="memory">
         <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.4l1.5 3.6 3.6 1.5-3.6 1.5L8 12.6 6.5 9 2.9 7.5 6.5 6z"/></svg>
         <span>记忆</span>
@@ -223,6 +231,30 @@
             </div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- 终端 -->
+    <section class="view hidden" id="view-shell">
+      <div class="shell-wrap">
+        <div class="shell-head">
+          <span class="shell-title">终端</span>
+          <span class="shell-meta" id="shell-meta"></span>
+          <span class="page-actions">
+            <button class="btn" id="shell-new" type="button"
+                    title="关掉现在的 shell，开一个新的（旧的会话会结束）">新会话</button>
+            <button class="btn" id="shell-clear" type="button" title="清屏：只清画面，不动 shell 里的东西">清屏</button>
+            <button class="btn danger" id="shell-stop" type="button" title="结束这个 shell">结束</button>
+          </span>
+        </div>
+        <!-- 画面：每一行由 app.js 按终端规则渲染。下面的输入框不显示，只负责
+             收键盘（和粘贴），键盘事件变成字节送回服务端。 -->
+        <div class="shell-screen" id="shell-screen">
+          <div class="shell-rows" id="shell-rows"></div>
+          <textarea id="shell-input" class="shell-input" autocomplete="off" autocorrect="off"
+                    autocapitalize="off" spellcheck="false" aria-label="终端输入"></textarea>
+        </div>
+        <div class="shell-note" id="shell-note"></div>
       </div>
     </section>
 

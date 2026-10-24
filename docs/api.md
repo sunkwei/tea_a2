@@ -47,6 +47,27 @@
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
 
+## 终端（这台机器上的 shell）
+
+这组接口**不经过模型**：浏览器直接驱动这台机器上的一个 shell（Linux/macOS 上是
+bash / `$SHELL`，Windows 上是 PowerShell），它跑在一个真正的终端上（pty / ConPTY），
+所以行编辑、历史、颜色、Ctrl+C 都和命令行里一样。
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `GET` | `/api/shell` | 这台机器能不能给终端：`available` / `platform` / `backend`（`pty` / `conpty`）/ `shell` / `reason`（不能的时候为什么） |
+| `GET` | `/api/shell/sessions` | 当前所有会话 |
+| `POST` | `/api/shell/session` | 开一个会话：`{"workspace_id":"…","cols":100,"rows":30}`；工作区给了就以它为当前目录。返回 `id` |
+| `GET` | `/api/shell/session/{id}` | 会话状态：shell、当前目录、行列、pid、是否还在跑、退出码 |
+| `POST` | `/api/shell/session/{id}/input` | 把用户敲的东西送进去：`{"data":"…"}`（普通文本，控制字符用 JSON 转义）或 `{"data_b64":"…"}`（原始字节） |
+| `GET` | `/api/shell/session/{id}/output?cursor=&wait=` | 读输出：`data_b64` 是从 `cursor` 之后的字节，`cursor` 是新的游标；`wait=20000` 表示没有输出就等到超时（长轮询，空闲时零流量）；`ended` / `exit_code` 说明 shell 有没有自己退出；`resync` 表示缓冲区丢过字节，客户端要重画 |
+| `POST` | `/api/shell/session/{id}/resize` | 改终端大小：`{"cols":120,"rows":40}` |
+| `DELETE` | `/api/shell/session/{id}` | 结束这个会话（shell 会被关掉） |
+
+环境变量 `TEA_AGENT_SHELL=off` 可以把整个功能关掉（`GET /api/shell` 会说为什么）；
+`TEA_AGENT_SHELL_BIN` 指定用哪个程序当 shell（默认 Windows 上是 `powershell.exe`，
+有 PowerShell 7 时优先用它；POSIX 上是 `$SHELL`）。
+
 #### token 用量与「缓存命中率」：为什么有的提供方一开始拿不到
 
 指标栏的「缓存命中率」来自 provider 自己报的数字，不是本地估算。但**只有流式响应里带了

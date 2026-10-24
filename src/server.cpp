@@ -26,6 +26,7 @@
 #include "html_export.h"
 #include "http.h"
 #include "log.h"
+#include "shell.h"
 #include "trajectory.h"
 #include "usage.h"
 #include "util.h"
@@ -678,6 +679,10 @@ struct ApiServer::Impl {
   /// joining under the lock would freeze every other request for as long as
   /// the old worker is still stuck (e.g. in a long tool call).
   std::vector<std::shared_ptr<ChatTurn>> retired;
+
+  /// The shells this server hands out (the web terminal). Independent of the
+  /// agent: no model, no tools, no sessions.
+  ShellRegistry shells;
 
 
 
@@ -3300,6 +3305,212 @@ void ApiServer::Impl::install_routes() {
     send_json(res, j);
   });
 
+  // ---- shell (a real terminal on this machine) ---------------------------
+  //
+  // No model and no agent are involved: the browser drives a shell (bash on
+  // Linux, PowerShell on Windows) that runs on this device. The output is
+  // read with a cursor, so a browser that reloads - or opens the page on
+  // another machine - picks up where it left off.
+  svr.Get("/api/shell", [this](const httplib::Request&, httplib::Response& res) {
+    const ShellCapability cap = shell_capability();
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["available"] = cap.available;
+    j["platform"] = cap.platform;
+    j["backend"] = cap.backend;
+    j["shell"] = cap.shell;
+    j["reason"] = cap.reason;
+    send_json(res, j);
+  });
+
+  svr.Get("/api/shell/sessions", [this](const httplib::Request&, httplib::Response& res) {
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["sessions"] = shells.list_json();
+    send_json(res, j);
+  });
+
+  svr.Post("/api/shell/session", [this](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const std::string shell = json_string(body, "shell");
+    int cols = 80;
+    int rows = 24;
+    if (body.contains("cols") && body["cols"].is_number_integer()) {
+      cols = body["cols"].get<int>();
+    }
+    if (body.contains("rows") && body["rows"].is_number_integer()) {
+      rows = body["rows"].get<int>();
+    }
+    // The shell starts in the workspace the browser is looking at, so "ls"
+    // means the project and not the server's own directory.
+    std::string cwd;
+    const std::string workspace_id = json_string(body, "workspace_id");
+    if (!workspace_id.empty()) {
+      WorkspaceEntry copy;
+      bool found = false;
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        const WorkspaceEntry* entry = registry->find(workspace_id);
+        if (entry) {
+          copy = *entry;
+          found = true;
+        }
+      }
+      if (found && !copy.path.empty() && path_is_dir(copy.path)) cwd = copy.path;
+    }
+    std::string id;
+    std::string err;
+    if (!shells.create(shell, cwd, cols, rows, &id, &err)) {
+      send_error(res, 400, "shell_unavailable", err);
+      return;
+    }
+    std::shared_ptr<ShellSession> session = shells.find(id);
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["id"] = id;
+    if (session) j["session"] = session->status_json();
+    send_json(res, j);
+  });
+
+  svr.Get(R"(/api/shell/session/([^/]+))",
+          [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    std::shared_ptr<ShellSession> session = shells.find(id);
+    if (!session) {
+      send_error(res, 404, "not_found", "no such shell session: " + id);
+      return;
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["id"] = id;
+    j["session"] = session->status_json();
+    send_json(res, j);
+  });
+
+  // What the user typed. `data` is plain text (the browser sends the keys it
+  // got, control characters included); `data_b64` is the same thing for a
+  // client that has raw bytes.
+  svr.Post(R"(/api/shell/session/([^/]+)/input)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    std::shared_ptr<ShellSession> session = shells.find(id);
+    if (!session) {
+      send_error(res, 404, "not_found", "no such shell session: " + id);
+      return;
+    }
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    std::string data;
+    const std::string b64 = json_string(body, "data_b64");
+    if (!b64.empty()) {
+      if (!base64_decode(b64, &data)) {
+        send_error(res, 400, "bad_request", "'data_b64' is not valid base64");
+        return;
+      }
+    } else {
+      data = json_string(body, "data");
+    }
+    std::string err;
+    if (!session->write(data, &err)) {
+      send_error(res, 409, "write_failed", err);
+      return;
+    }
+    send_ok(res);
+  });
+
+  // The output, as bytes since `cursor`. `wait` makes the request block until
+  // there is something to read (or the timeout expires), so an idle terminal
+  // costs no traffic at all.
+  svr.Get(R"(/api/shell/session/([^/]+)/output)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    std::shared_ptr<ShellSession> session = shells.find(id);
+    if (!session) {
+      send_error(res, 404, "not_found", "no such shell session: " + id);
+      return;
+    }
+    // A shell nobody touched for an hour is closed: a forgotten tab must not
+    // keep a process (and its memory) alive forever.
+    shells.reap(60 * 60 * 1000);
+    std::size_t cursor = 0;
+    if (req.has_param("cursor")) {
+      const std::string raw = req.get_param_value("cursor");
+      try {
+        cursor = static_cast<std::size_t>(std::stoull(raw));
+      } catch (...) {
+        cursor = 0;
+      }
+    }
+    int wait_ms = 0;
+    if (req.has_param("wait")) {
+      const std::string raw = req.get_param_value("wait");
+      try {
+        wait_ms = std::stoi(raw);
+      } catch (...) {
+        wait_ms = 0;
+      }
+    }
+    if (wait_ms < 0) wait_ms = 0;
+    if (wait_ms > 30000) wait_ms = 30000;
+    if (wait_ms > 0) session->wait_for_output(cursor, wait_ms);
+
+    std::string data;
+    std::size_t next = cursor;
+    bool resync = false;
+    session->read_since(cursor, &data, &next, &resync);
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["id"] = id;
+    j["data_b64"] = base64_encode(data);
+    j["cursor"] = static_cast<long long>(next);
+    j["resync"] = resync;
+    j["ended"] = session->ended();
+    j["running"] = session->running();
+    j["exit_code"] = session->exit_code();
+    send_json(res, j);
+  });
+
+  svr.Post(R"(/api/shell/session/([^/]+)/resize)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    std::shared_ptr<ShellSession> session = shells.find(id);
+    if (!session) {
+      send_error(res, 404, "not_found", "no such shell session: " + id);
+      return;
+    }
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    int cols = 0;
+    int rows = 0;
+    if (body.contains("cols") && body["cols"].is_number_integer()) {
+      cols = body["cols"].get<int>();
+    }
+    if (body.contains("rows") && body["rows"].is_number_integer()) {
+      rows = body["rows"].get<int>();
+    }
+    if (cols <= 0 || rows <= 0) {
+      send_error(res, 400, "bad_request", "'cols' and 'rows' are required");
+      return;
+    }
+    std::string err;
+    if (!session->resize(cols, rows, &err)) {
+      send_error(res, 409, "resize_failed", err);
+      return;
+    }
+    send_ok(res);
+  });
+
+  svr.Delete(R"(/api/shell/session/([^/]+))",
+             [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    if (!shells.close(id)) {
+      send_error(res, 404, "not_found", "no such shell session: " + id);
+      return;
+    }
+    send_ok(res);
+  });
+
   // ---- fallback for unknown API routes ----------------------------------
   svr.Get(R"(/api/.*)", [](const httplib::Request& req, httplib::Response& res) {
     send_error(res, 404, "not_found", "no such endpoint: " + req.path);
@@ -3391,6 +3602,8 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
 
 void ApiServer::stop() {
   if (!impl_) return;
+  // The shells are children of this process: they have to go with it.
+  impl_->shells.close_all();
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     for (auto it = impl_->turns.begin(); it != impl_->turns.end(); ++it) {

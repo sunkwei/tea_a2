@@ -904,3 +904,29 @@ button{font-family:inherit}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}
 }
+
+/* ---------- 终端（这台机器上的 shell） ---------- */
+.shell-wrap{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:10px;padding:12px}
+.shell-head{display:flex;align-items:center;gap:12px;min-height:30px;flex-wrap:wrap}
+.shell-title{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.shell-meta{
+  font:11.5px/1.6 var(--ds-font-family-code);color:var(--dsw-alias-label-caption);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0;
+}
+.shell-screen{
+  flex:1 1 auto;min-height:0;overflow:auto;position:relative;cursor:text;
+  background:#0b0e12;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);
+  padding:10px 12px;
+  font:12.5px/1.5 var(--ds-font-family-code);color:#d7dce3;
+  -webkit-user-select:text;user-select:text;
+}
+.shell-rows{min-height:100%}
+.term-row{white-space:pre;min-height:1.5em}
+.term-row span{white-space:pre}
+/* 输入框不显示，只负责收键盘和粘贴（输入法也需要一个真的输入框） */
+.shell-input{
+  position:absolute;left:0;bottom:0;width:2px;height:2px;padding:0;border:0;
+  opacity:0;resize:none;overflow:hidden;outline:none;
+}
+.shell-note{font-size:11.5px;color:var(--dsw-alias-label-caption);min-height:16px}
+.shell-note.warn{color:var(--dsw-alias-state-warn-primary)}

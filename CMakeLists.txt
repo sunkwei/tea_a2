@@ -475,6 +475,7 @@ set(TEA_SOURCES
   src/agent.cpp
   src/html_export.cpp
   src/server.cpp
+  src/shell.cpp
   src/version.cpp
   ${TEA_WEB_ASSETS_CPP}
   ${TEA_CA_BUNDLE_CPP}
@@ -482,6 +483,11 @@ set(TEA_SOURCES
 
 if(WIN32)
   list(APPEND TEA_SOURCES src/http_winhttp.cpp)
+  # The interactive shell runs on a ConPTY (a pseudo console) here.
+  list(APPEND TEA_SOURCES src/shell_win32.cpp)
+else()
+  # ... and on a pty everywhere else.
+  list(APPEND TEA_SOURCES src/shell_posix.cpp)
 endif()
 
 # Header dependencies are declared explicitly instead of relying on the
