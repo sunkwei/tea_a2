@@ -4724,6 +4724,7 @@
       shellNote('这是这台机器上的真实 shell：它能碰这台机器上的任何东西，跟 agent 的目录边界无关。');
       shellRender();
       shellPump();
+      shellFocus();          // 开完会话就把键盘交回终端
       return shell.id;
     }, function (e) {
       shellNote('开不了 shell：' + (e && e.message ? e.message : e), true);
@@ -4818,6 +4819,17 @@
   function shellFocus() {
     var input = $('shell-input');
     if (input && state.view === 'shell') input.focus();
+  }
+
+  /// The keyboard belongs to the terminal while its view is open - but the
+  /// focus can be taken away (a click on the page, the browser deciding
+  /// otherwise). So the keys are read from the document, and only the fields
+  /// that really want them (the path box) keep them.
+  function isEditableTarget(node) {
+    if (!node) return false;
+    var tag = (node.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' ||
+           node.isContentEditable === true;
   }
 
   // ---- 文件进出 --------------------------------------------------------
@@ -5106,7 +5118,13 @@
     });
     $('logs-refresh').onclick = loadLogs;
     // ---- 终端 ----
-    $('shell-screen').addEventListener('mousedown', function () { shellFocus(); });
+    // preventDefault matters here: without it the browser moves the focus
+    // to the body right after the click (the default action of a mousedown),
+    // and every key typed afterwards goes nowhere.
+    $('shell-screen').addEventListener('mousedown', function (e) {
+      e.preventDefault();
+      shellFocus();
+    });
     $('shell-input').addEventListener('keydown', function (e) {
       if (e.isComposing) return;
       var bytes = shellKeyBytes(e);
@@ -5115,6 +5133,16 @@
       shellSend(bytes);
     });
     $('shell-input').addEventListener('paste', function (e) {
+      e.preventDefault();
+      var text = '';
+      try { text = (e.clipboardData || window.clipboardData).getData('text') || ''; } catch (err) { text = ''; }
+      if (!text) return;
+      shellSend(text.replace(/\r\n/g, '\r').replace(/\n/g, '\r'));
+    });
+    // 焦点不在输入框上时，粘贴也要能进 shell。
+    document.addEventListener('paste', function (e) {
+      if (state.view !== 'shell' || !shell.id || shell.ended) return;
+      if (isEditableTarget(e.target)) return;
       e.preventDefault();
       var text = '';
       try { text = (e.clipboardData || window.clipboardData).getData('text') || ''; } catch (err) { text = ''; }
@@ -5177,6 +5205,19 @@
       loadConfigStatus().then(function (st) { openSetupGate(st || {}, { reset: true }); });
     };
     document.addEventListener('keydown', function (e) {
+      // 终端开着的时候键盘归它——哪怕焦点已经不在它的输入框上（点一下页面
+      // 空白处就会把焦点带走）。应用自己的快捷键除外。
+      if (state.view === 'shell' && shell.id && !shell.ended && !e.isComposing &&
+          !isEditableTarget(e.target) &&
+          !((e.ctrlKey || e.metaKey) &&
+            /^[kKbB]$/.test(String(e.key || '')))) {
+        var bytes = shellKeyBytes(e);
+        if (bytes !== null) {
+          e.preventDefault();
+          shellSend(bytes);
+          return;
+        }
+      }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {   // Ctrl/Cmd+K 聚焦输入框
         e.preventDefault();
         if (state.view !== 'chat') showView('chat');

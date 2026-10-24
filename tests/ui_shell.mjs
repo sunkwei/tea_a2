@@ -180,6 +180,27 @@ try {
   check('the shell prints what was typed', printed,
     JSON.stringify((await screenText()).slice(-200)));
 
+  // ---- the keyboard stays with the terminal ---------------------------
+  // A click in the screen used to take the focus away (the browser's default
+  // action of a mousedown runs after ours), and every key typed afterwards went
+  // nowhere: the terminal showed the prompt and swallowed the keyboard.
+  const screenBox = await evalJs(`(function(){
+    var r = document.getElementById('shell-screen').getBoundingClientRect();
+    return { x: Math.round(r.left + 40), y: Math.round(r.top + 60) };
+  })()`);
+  for (const kind of ['mousePressed', 'mouseReleased']) {
+    await send('Input.dispatchMouseEvent',
+      { type: kind, x: screenBox.x, y: screenBox.y, button: 'left', clickCount: 1 });
+  }
+  await sleep(250);
+  const focused = await evalJs(`document.activeElement ? document.activeElement.id : ''`);
+  check('a click in the terminal keeps the keyboard there', focused === 'shell-input', focused);
+  await typeText('Write-Output tea-focus-probe');
+  await pressKey('Enter', { code: 'Enter', vk: 13, text: '\r' });
+  const probe = await waitFor(async () => (await screenText()).indexOf('tea-focus-probe') >= 0,
+    20000, 400);
+  check('typing after that click reaches the shell', probe, (await screenText()).slice(-200));
+
   // ---- the keys are translated the way a terminal does -----------------
   const keys = await evalJs(`(function(){
     var f = window.teaShellKeyBytes;
@@ -249,15 +270,22 @@ try {
     await send('Browser.setDownloadBehavior',
       { behavior: 'allow', downloadPath: dlDir, eventsEnabled: true });
   } catch (e) { /* the check below tells us whether it worked */ }
-  await evalJs(`(function(){
-    document.getElementById('shell-path').value = ${JSON.stringify(uploadName)};
-    document.getElementById('shell-download').click();
-    return true;
+  await evalJs(`document.getElementById('shell-path').value = ${JSON.stringify(uploadName)}; true`);
+  // A *real* click: a download that is not started by a user gesture can be
+  // blocked by the browser, and then nothing lands in the download directory.
+  const dlBox = await evalJs(`(function(){
+    var r = document.getElementById('shell-download').getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
   })()`);
-  // Chrome may number a repeated download ("name (1).txt"), so look for
-  // the first file that starts with the name.
+  for (const kind of ['mousePressed', 'mouseReleased']) {
+    await send('Input.dispatchMouseEvent',
+      { type: kind, x: dlBox.x, y: dlBox.y, button: 'left', clickCount: 1 });
+  }
+  // Chrome may number a repeated download ("name (1).txt"), and while it is
+  // being written the file is called "name.txt.crdownload".
   const downloadedFile = () => {
-    const names = fs.readdirSync(dlDir).filter((n) => n.indexOf(uploadName) === 0);
+    const names = fs.readdirSync(dlDir).filter((n) => n.indexOf(uploadName) === 0 &&
+      n.slice(-10) !== '.crdownload');
     return names.length ? path.join(dlDir, names[0]) : '';
   };
   const downloaded = await waitFor(() => downloadedFile() !== '', 40000, 500);
