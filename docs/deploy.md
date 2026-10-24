@@ -114,6 +114,16 @@ __nss_configure_lookup("hosts", "files dns");   // 仅静态构建
 
 ---
 
+## Windows 上的本地脚本
+
+三个只给 Windows 用的脚本（开发机上的日常）：
+
+| 脚本 | 干什么 |
+| --- | --- |
+| `scripts/start-local.ps1` | 起一个**能用**的实例：自己挑一个空着的端口、用你自己的 tea home（`~/.tea_agent`，配置和工作区都在里面）、把外层 Python 框架的审批闸门设成 advisory（不然每条命令都要你点确认）。`pwsh -File scripts\start-local.ps1 -Port 8283` |
+| `scripts/deploy-local.ps1` | 把构建好的二进制发布到启动路径（默认 `%USERPROFILE%\bin\a2.exe`）。目标通常**正在运行**——运行中的镜像换不掉（Windows 锁着），所以脚本会说明白，`-Stop` 会先把那个实例停掉 |
+| `scripts/make-link.ps1` | 不用管理员权限建符号链接（`CreateSymbolicLinkW` 带 `ALLOW_UNPRIVILEGED_CREATE`）。`New-Item -ItemType SymbolicLink` 和 `mklink` 都不传这个标志，所以开着 Developer Mode 也要管理员 |
+
 ## Windows 登录自启动（相当于 `systemctl --user enable`）
 
 Windows 没有用户级 systemd。最接近的三种做法，差别在于「跟不跟人走」：
