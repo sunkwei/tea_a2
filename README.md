@@ -187,6 +187,7 @@ build/bin/tea_agent --workspace . --open
 | `a2.service` | agent —— 工作区通道（内置网页 UI） | 8383 |
 | `a2_task.service` | 任务队列（Python）：排队 / 执行 / 状态 / 结果 | 8283 |
 | `a2_wechat.service` | 队列的微信前端 | — |
+| `a2_telegram.service` | 队列的 Telegram 前端 | — |
 
 单元文件在 `scripts/` 里，是**跟机器无关的模板**（路径用 `%h`，也就是运行单元的用户的主目录）。
 装的时候用 `scripts/install-units.sh [仓库路径]`：它把单元装到 `~/.config/systemd/user/` 并把仓库
@@ -205,6 +206,7 @@ build/bin/tea_agent --workspace . --open
 | [内置工具与上下文](docs/tools.md) | 每个工具、文件访问范围、上下文预算、轨迹 |
 | [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、system prompt、销毁、导出 |
 | [配置](docs/config.md) | `provider.yaml`、额度与搜索抓取、按工作区覆盖、请求头 |
+| [任务队列](docs/tasks.md) | 队列服务、微信 / Telegram 那一端、网页、使用手册、逐任务授权目录 |
 | [任务队列](docs/tasks.md) | 队列服务、微信那一端、网页、使用手册、逐任务授权目录 |
 | [源码结构](docs/source.md) | 每个文件干什么、第三方依赖 |
 | [测试与验证状态](docs/testing.md) | 怎么跑、每个测试钉住了什么、哪些平台实测过 |

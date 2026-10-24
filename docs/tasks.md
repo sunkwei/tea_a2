@@ -147,7 +147,8 @@ systemctl --user status a2_wechat
 tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=none
 ```
 
-`install-units.sh` 把 `a2` / `a2_task` / `a2_wechat` 三个单元装到 `~/.config/systemd/user/`，
+`install-units.sh` 把 `a2` / `a2_task` / `a2_wechat` / `a2_telegram` 四个单元装到
+`~/.config/systemd/user/`，
 把模板里的仓库路径换成本机的，然后 `daemon-reload`。**目标机器的目录不一样不用手改**：
 给对路径就行；实在要手改，模板里要改的只有 `ExecStart` / `WorkingDirectory` /
 `StandardOutput` 三处的仓库路径。
@@ -182,6 +183,49 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 但 openssl 每台 Linux 都有。没有 openssl 时文本通道照常工作，只是文件发不了。
 
 协议里密钥有三种写法（32 位十六进制 / base64(16 字节) / base64(十六进制串)），三种都能解。
+
+### Telegram 那一端：`sched/telegram_bot.py`
+
+Telegram 也能当队列的前端：给 bot 发一句话就是排一个任务，做完 Telegram 里会收到结果。
+命令与微信那一端**一模一样**——两边共用 `sched/channel.py`，只有协议不同。
+
+```bash
+# 1) 看看 token 对不对（BotFather 给的）
+python3 sched/telegram_bot.py --token 123456:ABC --check
+
+# 2) 先给 bot 发一句话，再问自己的 chat id
+python3 sched/telegram_bot.py --token 123456:ABC --print-chat-id
+
+# 3) 常驻（只回答名单上的人）
+python3 sched/telegram_bot.py --token 123456:ABC --allow-chat 12345 \
+        --agent http://localhost:8383 --tasks http://127.0.0.1:8283
+```
+
+**Telegram bot 是公开的**：谁找到它都能发消息，所以默认**谁都不理**——不给 `--allow-chat`
+的话它不回答任何人（日志里写着该怎么办）。名单上的人（`--allow-chat`，可重复）之外的消息
+一律忽略；确实想谁来都能用，加 `--allow-any-chat`。
+
+协议是 **Telegram Bot API**（<https://core.telegram.org/bots/api>）：HTTPS + 长轮询，
+所以只用标准库就够（设备上没有 pip 也能跑）。token 从 `--token`、环境变量
+`TEA_TELEGRAM_TOKEN` 或 `~/.tea_agent/telegram/token` 读；update 的 offset 记在
+`~/.tea_agent/telegram/state.json`（重启不会把同一条消息再答一遍）。
+
+**开机自启（systemd user unit）**：`scripts/a2_telegram.service` 是一份跟机器无关的模板：
+
+```bash
+scripts/install-units.sh [仓库路径]
+systemctl --user enable --now a2_telegram
+systemctl --user status a2_telegram
+tail -f ~/.tea_agent/logs/a2_telegram.log
+```
+
+单元里要先放好 token（`~/.tea_agent/telegram/token`），并在 `ExecStart` 后面加上
+`--allow-chat <你的 chat id>`。
+
+**文件也能两个方向走**：Telegram 发来的文件落到工作区的 `inbox/`
+（`~/.tea_agent/telegram-workspace/inbox/`），随任务交给 agent；任务做完，产出的文件
+作为**文件消息**发回 Telegram（`/files <id>` 可以再要一次）。走 Bot API 的 `getFile` /
+`sendDocument`：不用加密，也不用 openssl。
 
 ### 队列自己的 API
 
@@ -274,9 +318,9 @@ python3 sched/task_server.py --submit-order 我的任务单.txt     # 命令行
 **调度很快，但额度不打扰人**：`--interval` 默认 2 秒（以前 60 秒），而 provider 的额度接口
 **只在有排队任务时**才查——空闲时一次都不调。
 
-**微信这一端的工作区是固定的**（默认 `~/.tea_agent/wechat-workspace`，`--workspace-path`
-可改）：微信排的任务都在这个目录里做，不会去动别的项目。任务做完了，bot 通过任务服务的事件
-流知道，然后把结果发回微信。
+**聊天端的工作区是固定的**（微信默认 `~/.tea_agent/wechat-workspace`，Telegram 默认
+`~/.tea_agent/telegram-workspace`，`--workspace-path` 可改）：聊天里排的任务都在这个目录里做，
+不会去动别的项目。任务做完了，bot 通过任务服务的事件流知道，然后把结果发回聊天里。
 
 ### 网页：<http://127.0.0.1:8283/>
 

@@ -20,7 +20,7 @@ mkdir -p "$dest"
 # sed's replacement must not contain & or the delimiter.
 esc=$(printf '%s' "$repo" | sed -e 's/[&|]/\\&/g')
 
-for unit in a2 a2_task a2_wechat; do
+for unit in a2 a2_task a2_wechat a2_telegram; do
     src="scripts/$unit.service"
     [ -f "$src" ] || continue
     out="$dest/$unit.service"
@@ -30,4 +30,4 @@ done
 
 systemctl --user daemon-reload
 echo ""
-echo "now: systemctl --user enable --now a2 a2_task a2_wechat"
+echo "now: systemctl --user enable --now a2 a2_task a2_wechat a2_telegram"

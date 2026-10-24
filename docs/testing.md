@@ -52,6 +52,7 @@ python3 tests/smoke_prompt_queue.py                       # 消息插队：采�
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
 python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果/串行/幂等/事件/导出
 python3 tests/smoke_task_order.py                          # 任务单：解析/报错/命令行排队/模板可下载
+python3 tests/smoke_telegram_bot.py                        # Telegram 前端：轮询/命令/文件/白名单/offset
 python3 tests/smoke_utf8_truncation.py                    # 文件被截断在字符中间：轮次不崩/结果是合法 UTF-8
 python3 tests/smoke_invalid_utf8.py                       # 内容不是 UTF-8 的文件与命令输出：轮次不崩/字节被替换
 python3 tests/smoke_utf8_roundtrip.py                     # 往返：模型的坏字节不丢事件、压缩不切坏字符、落盘合法
@@ -129,6 +130,10 @@ data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/image
 下一轮迭代采纳它并出现在后续请求里、落盘为 user 消息；模型已经流式输出完最终答案时入队，
 本轮会继续一次迭代而不是结束；按 id 取消 / 全部取消；停止轮次后未采纳的消息通过
 `queue_unconsumed` 原样退回且不进入会话；没有进行中的轮次返回 409；带图片 / 空消息返回 400。
+
+`tests/smoke_telegram_bot.py` 覆盖 Telegram 这一端（Bot API 是假的，任务队列也是假的）：
+任务，`/tasks` `/status` `/result` `/start` `/cancel` `/answer` `/del` `/quota` `/retry` 都摸到
+队列的 API；`/tasks@botname`（群里发的那种）也认；**名单外的 chat 一句都不回**（bot 是公开的，
 
 `tests/smoke_agent_doc.py` 覆盖工作区经验文件：打开工作区即生成带模板的 `agent.md` 与
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的

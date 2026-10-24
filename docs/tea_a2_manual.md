@@ -13,8 +13,8 @@ README 讲的是「这是什么、为什么这么设计」；[HTTP 接口](api.m
 | 起服务、改端口、换模型、看日志 | [1. 起服务](#1-起服务) |
 | 用 curl 让 agent 干活 | [2. agent 的 HTTP 命令](#2-agent-的-http-命令) |
 | 排队、查进度、取消、重做 | [3. 任务队列的命令](#3-任务队列的命令) |
-| 定时做一件活儿（`not_before`、微信 `/at`） | [3.2.1](#321-定时做一件活儿) · [4](#4-微信端的命令) |
-| 在微信里排队 | [4. 微信端的命令](#4-微信端的命令) |
+| 定时做一件活儿（`not_before`、微信 `/at`） | [3.2.1](#321-定时做一件活儿) · [4](#4-聊天端的命令) |
+| 在微信 / Telegram 里排队 | [4. 聊天端的命令](#4-聊天端的命令) |
 | 写脚本调 agent | [5. 给脚本用的客户端](#5-给脚本用的客户端) |
 | 构建、测试、装成服务 | [6. 脚本](#6-脚本) |
 | 改配置、换 provider | [7. 配置的命令](#7-配置的命令) |
@@ -103,8 +103,8 @@ WARNING 顶出屏幕。排查时 `--console-level debug` 就能在终端跟着�
 
 `TEA_AGENT_HOME` 与 `--tea-home` 同时给，以**命令行**为准。
 
-队列和微信端另有一组自己的环境变量，见 [3.8](#38-队列的命令行小抄) 与
-[4](#4-微信端的命令)。
+队列和聊天端（微信 / Telegram）另有一组自己的环境变量，见
+[3.8](#38-队列的命令行小抄) 与 [4](#4-聊天端的命令)。
 
 ### 1.4 ⚠️ 安全须知
 
@@ -667,7 +667,13 @@ TEA_AGENT_URL=http://127.0.0.1:8383 python3 sched/task_server.py --submit "..."
 
 ---
 
-## 4. 微信端的命令
+## 4. 聊天端的命令
+
+队列有两个聊天前端：**微信**（[4.1](#41-微信端的命令)）和 **Telegram**
+（[4.2](#42-telegram-端的命令)）。发一句话就是排一个任务，做完聊天里会收到结果。
+两边的命令一模一样（它们共用 `sched/channel.py`）。
+
+### 4.1 微信端的命令
 
 微信是队列的另一个前端：发一句话就是排一个任务，做完微信里会收到结果。
 
@@ -697,7 +703,7 @@ python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0
 默认 `http://127.0.0.1:8283`）、`TEA_TASK_PROVIDER`（用谁的额度）、
 `TEA_WECHAT_CDN`（微信 CDN 的地址）。
 
-### 微信里的命令
+#### 微信里的命令
 
 | 说的话 | 做的事 |
 | --- | --- |
@@ -732,6 +738,63 @@ python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0
 产出的文件作为**文件消息**发回微信。文件走微信 CDN，**AES-128-ECB + PKCS7 加密**，
 加解密用 `openssl` 命令行（`openssl enc -aes-128-ecb -K <hex> -nosalt`）。没有 openssl 时
 文本通道照常工作，只是文件发不了。
+
+### 4.2 Telegram 端的命令
+
+Telegram 也是队列的前端：给 bot 发一句话就是排一个任务，做完 Telegram 里会收到结果。
+
+```bash
+# 1) 看看 token 对不对（BotFather 给的）
+python3 sched/telegram_bot.py --token 123456:ABC --check
+
+# 2) 先在 Telegram 里给 bot 发一句话，再问自己的 chat id
+python3 sched/telegram_bot.py --token 123456:ABC --print-chat-id
+
+# 3) 常驻（只回答名单上的人）
+python3 sched/telegram_bot.py --token 123456:ABC --allow-chat 12345 \
+        --agent http://localhost:8383 --tasks http://127.0.0.1:8283
+```
+
+| 参数 | 作用 | 默认 |
+| --- | --- | --- |
+| `--token <t>` | bot token（也可以用 `TEA_TELEGRAM_TOKEN` 或 `~/.tea_agent/telegram/token`） | |
+| `--token-file <path>` | token 放哪个文件 | `<state-dir>/token` |
+| `--allow-chat <id>` | 哪个 chat 可以用这个 bot（可重复） | 没有人 |
+| `--allow-any-chat` | 谁都能用（**bot 是公开的，想清楚再开**） | 关 |
+| `--print-chat-id` | 打印等着 bot 的消息来自哪些 chat，然后退出 | |
+| `--check` | 检查 token（我是谁），然后退出 | |
+| `--api-url <url>` | Bot API 的地址 | `https://api.telegram.org` |
+| `--agent <url>` | agent 的 HTTP API | `http://127.0.0.1:8282` |
+| `--tasks <url>` | 队列的 HTTP API | `http://127.0.0.1:8283` |
+| `--state-dir <path>` | token 与 update offset 放哪 | `~/.tea_agent/telegram` |
+| `--workspace-path <path>` | Telegram 任务在哪个工作区做 | `~/.tea_agent/telegram-workspace` |
+| `--workspace-name <name>` | 它在 agent 里叫什么 | `Telegram` |
+| `--provider <name>` | 用谁的额度 | 队列的 |
+| `--allow-path <dir>` | Telegram 任务能额外碰哪个目录（可重复） | |
+| `--poll-timeout <s>` | 一次长轮询等多久 | `30` |
+
+Telegram 里的命令与微信里的**完全一样**（见上面的表）。在 Telegram 客户端里敲 `/` 会看到
+命令菜单（bot 启动时自己注册）；在群里用 `/tasks@你的bot` 也认。
+
+**默认谁都不能用**：Telegram bot 是公开的——谁找到它都能发消息。所以没有 `--allow-chat`
+时它**谁都不理**（日志里写着该怎么办），名单外的人发来的消息直接忽略。确实想谁来都能用，
+加 `--allow-any-chat`。
+
+**文件也能两个方向走**：Telegram 发来的文件落到工作区的 `inbox/`
+（`~/.tea_agent/telegram-workspace/inbox/`），随任务交给 agent；任务做完，产出的文件作为
+**文件消息**发回 Telegram（`/files <id>` 可以再要一次）。走的是 Bot API 的 `getFile` /
+`sendDocument`：不用加密，也不用 openssl。
+
+**开机自启**：`scripts/a2_telegram.service` 是跟机器无关的模板，装法与微信那一端一样：
+
+```bash
+scripts/install-units.sh [仓库路径]
+systemctl --user enable --now a2_telegram
+tail -f ~/.tea_agent/logs/a2_telegram.log
+```
+
+单元要先放好 token（`~/.tea_agent/telegram/token`），并在 `ExecStart` 后面加上
+`--allow-chat <你的 chat id>`。
 
 ---
 

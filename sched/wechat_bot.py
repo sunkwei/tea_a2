@@ -46,11 +46,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import channel
 import task_order
 
+# The queue and the agent are the ones every chat front end talks to; the
+# WeChat side only adds the protocol on top (sched/channel.py).
 DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
-DEFAULT_AGENT = "http://127.0.0.1:8282"
-DEFAULT_TASKS = "http://127.0.0.1:8283"
+DEFAULT_AGENT = channel.DEFAULT_AGENT
+DEFAULT_TASKS = channel.DEFAULT_TASKS
 DEFAULT_STATE_DIR = os.path.expanduser("~/.tea_agent/wechat")
 DEFAULT_WORKSPACE_PATH = os.path.expanduser("~/.tea_agent/wechat-workspace")
 # The WeChat CDN: the media (images, video, files, voice) live there, encrypted
@@ -73,26 +76,32 @@ ITEM_FILE = 4
 # for a file nor dropped on the floor.
 MEDIA_ITEM_KEYS = ("file_item", "image_item", "video_item", "voice_item")
 # The magic bytes of the pictures we know.
-IMAGE_MAGIC = (b"\xff\xd8\xff", b"\x89PNG", b"GIF8", b"RIFF", b"BM")
+IMAGE_MAGIC = channel.IMAGE_MAGIC
 # The media_type the upload API wants for a plain file.
 MEDIA_FILE = 3
 # A file bigger than this is not worth sending (and WeChat may refuse it).
-MAX_FILE_BYTES = 32 * 1024 * 1024
+MAX_FILE_BYTES = channel.MAX_FILE_BYTES
 # How many files one task may send back.
-MAX_FILES_PER_TASK = 5
+MAX_FILES_PER_TASK = channel.MAX_FILES_PER_TASK
 
+# The shared half of every chat front end - the commands, the workspace, the
+# inbox, the notifications - lives in sched/channel.py. These names stay here
+# so the old imports keep working.
+log = channel.log
+Queue = channel.Queue
+Agent = channel.Agent
+safe_file_name = channel.safe_file_name
+looks_like_image = channel.looks_like_image
+image_ext = channel.image_ext
+idempotency_key = channel.idempotency_key
+split_schedule = channel.split_schedule
+is_task_order = channel.is_task_order
+fmt_task = channel.fmt_task
+resolve_workspace = channel.resolve_workspace
 
-def log(message):
-    print("%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
-
-
-class ILinkError(Exception):
-    """The iLink server answered, but not with what we asked for."""
-
-    def __init__(self, message, errcode=0, status=0):
-        super().__init__(message)
-        self.errcode = errcode
-        self.status = status
+# The iLink protocol's error is the channel error: one class for everything
+# that answers badly on the way out.
+ILinkError = channel.ChannelError
 
 
 def _openssl(args, data):
@@ -168,17 +177,6 @@ def decode_aes_key(encoded):
 def encode_aes_key(key):
     """The key as the CDN media reference wants it: base64 of the hex string."""
     return base64.b64encode(key.hex().encode("ascii")).decode("ascii")
-
-
-def safe_file_name(name):
-    """A file name we can put on disk: no directories, no surprises."""
-    base = os.path.basename((name or "").replace("\\", "/")).strip()
-    base = re.sub(r"[^0-9A-Za-z._\-\u4e00-\u9fff ]", "_", base)
-    base = base.lstrip(".") or "file.bin"
-    if len(base) > 80:
-        stem, dot, ext = base.rpartition(".")
-        base = (stem[:60] + dot + ext[:15]) if dot else base[:80]
-    return base
 
 
 class ILink:
@@ -407,247 +405,6 @@ class State:
         return self.data.get("cursor", "")
 
 
-class Queue:
-    """The task server's API - the queue the bot drives.
-
-    The bot works in ONE project (its own workspace), so it carries that
-    project's key: the queue then hands it nothing but its own tasks, even if
-    the machine has other projects in the queue.
-    """
-
-    def __init__(self, base=DEFAULT_TASKS, timeout=30):
-        self.base = base.rstrip("/")
-        self.timeout = timeout
-        self.key = ""
-
-    def _request(self, method, path, body=None, timeout=None, headers=None):
-        url = self.base + path
-        data = None
-        head = {}
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            head["Content-Type"] = "application/json"
-        if self.key:
-            head["Authorization"] = "Bearer " + self.key
-        head.update(headers or {})
-        req = urllib.request.Request(url, data=data, headers=head, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", "replace")
-            message = raw
-            try:
-                message = (json.loads(raw).get("error") or {}).get("message") or raw
-            except ValueError:
-                pass
-            raise ILinkError("task server: HTTP %s: %s" % (exc.code, message[:200]), status=exc.code) from None
-        except urllib.error.URLError as exc:
-            raise ILinkError("cannot reach the task server %s: %s" % (url, exc.reason)) from None
-        try:
-            body = json.loads(raw) if raw else {}
-        except ValueError:
-            return {}
-        # The queue answers in one shape: {code, message, request_id, data}.
-        if isinstance(body, dict) and "code" in body and "data" in body:
-            if body.get("code"):
-                detail = ((body.get("data") or {}).get("error") or {}).get("message") \
-                    or body.get("message") or "failed"
-                raise ILinkError("task server: %s" % detail, status=status)
-            return body.get("data") or {}
-        return body
-
-    def health(self):
-        return self._request("GET", "/api/health", timeout=10)
-
-    def project_key(self, workspace_id):
-        """The key of our own project (the local operator may ask for one)."""
-        try:
-            answer = self._request("POST", "/api/projects", {"workspace_id": workspace_id})
-        except ILinkError as exc:
-            log("no key for the workspace: %s" % exc)
-            return ""
-        key = str(answer.get("key") or "")
-        if key:
-            self.key = key
-        return key
-
-    def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
-               meta=None, key="", not_before="", model="", priority=0, extra=None):
-        body = {"prompt": prompt}
-        if workspace_id:
-            body["workspace_id"] = workspace_id
-        if title:
-            body["title"] = title
-        if provider:
-            body["provider"] = provider
-        if allow_paths:
-            body["allow_paths"] = list(allow_paths)
-        if meta:
-            body["meta"] = meta
-        if not_before:
-            # "not before": the queue may not start the task before this time
-            # ("+5" = five hours from now, "23:30" = today at 23:30).
-            body["not_before"] = not_before
-        if model:
-            body["model"] = model
-        if priority:
-            body["priority"] = priority
-        for key_name, value in (extra or {}).items():
-            if value not in (None, "", [], {}):
-                body[key_name] = value
-        # The same key means the same task: a command that is repeated (or a
-        # request that times out and is sent again) must not queue the work
-        # twice.
-        headers = {"Idempotency-Key": key} if key else None
-        return self._request("POST", "/api/tasks", body, headers=headers)
-
-    def list(self, workspace_id=None, status=None):
-        query = {}
-        if workspace_id:
-            query["workspace_id"] = workspace_id
-        if status:
-            query["status"] = status
-        path = "/api/tasks" + ("?" + urllib.parse.urlencode(query) if query else "")
-        return self._request("GET", path)
-
-    def get(self, task_id, workspace_id=None):
-        query = {"workspace_id": workspace_id} if workspace_id else {}
-        path = "/api/tasks/%s" % urllib.parse.quote(task_id)
-        if query:
-            path += "?" + urllib.parse.urlencode(query)
-        return self._request("GET", path)
-
-    def delete(self, task_id, workspace_id=None):
-        query = {"workspace_id": workspace_id} if workspace_id else {}
-        path = "/api/tasks/%s" % urllib.parse.quote(task_id)
-        if query:
-            path += "?" + urllib.parse.urlencode(query)
-        return self._request("DELETE", path)
-
-    def retry(self, task_id, workspace_id=None):
-        """Try a failed task again."""
-        return self.action(task_id, "retry", workspace_id=workspace_id)
-
-    def events(self, task_id, since_event_id=0, workspace_id=None):
-        """The task's event log."""
-        query = {"workspace_id": workspace_id or "", "since_event_id": since_event_id}
-        path = "/api/tasks/%s/events?%s" % (urllib.parse.quote(task_id),
-                                            urllib.parse.urlencode(query))
-        return self._request("GET", path)
-
-    def action(self, task_id, action, body=None, workspace_id=None):
-        query = {"workspace_id": workspace_id} if workspace_id else {}
-        path = "/api/tasks/%s/%s" % (urllib.parse.quote(task_id), action)
-        if query:
-            path += "?" + urllib.parse.urlencode(query)
-        return self._request("POST", path, body or {})
-
-    def events(self, workspace_id=None, timeout=3600):
-        """The queue's event stream (SSE), as (event, data) pairs.
-
-        The key goes with the request: without it the stream answers as the
-        local operator and hands the bot every project's events - the bot
-        works in one project and must not hear the others.
-        """
-        query = {"workspace_id": workspace_id} if workspace_id else {}
-        url = self.base + "/api/events" + ("?" + urllib.parse.urlencode(query) if query else "")
-        head = {}
-        if self.key:
-            head["Authorization"] = "Bearer " + self.key
-        req = urllib.request.Request(url, headers=head, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            for raw_line in resp:
-                line = raw_line.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                try:
-                    yield json.loads(line[5:].strip())
-                except ValueError:
-                    continue
-
-
-class Agent:
-    """The agent, just enough of it: the workspace list (and the registry)."""
-
-    def __init__(self, base=DEFAULT_AGENT, timeout=15):
-        self.base = base.rstrip("/")
-        self.timeout = timeout
-
-    def _request(self, method, path, body=None):
-        url = self.base + path
-        data = None
-        headers = {}
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            raise ILinkError("agent: HTTP %s" % exc.code, status=exc.code) from None
-        except urllib.error.URLError as exc:
-            raise ILinkError("cannot reach the agent %s: %s" % (url, exc.reason)) from None
-        try:
-            return json.loads(raw) if raw else {}
-        except ValueError:
-            return {}
-
-    def workspaces(self):
-        return self._request("GET", "/api/workspaces").get("workspaces") or []
-
-    def register_workspace(self, path, name=""):
-        return self._request("POST", "/api/workspaces", {"path": path, "name": name})
-
-
-def resolve_workspace(agent, path, name=""):
-    """The id of the workspace at `path` - registering it if the agent does not
-    know it yet. The WeChat side always works in the same one directory."""
-    path = os.path.abspath(os.path.expanduser(path))
-    os.makedirs(path, exist_ok=True)
-    for ws in agent.workspaces():
-        if os.path.abspath(ws.get("path") or "") == path:
-            return ws.get("id", "")
-    created = agent.register_workspace(path, name)
-    return created.get("id", "")
-
-
-def idempotency_key(user_id, text):
-    """A key that says "this is the same work".
-
-    The queue keeps one task per key, so a command that is repeated (or a
-    request that is sent again because the answer was lost) does not queue the
-    work twice. The key is stable for the same text within a short window.
-    """
-    stamp = int(time.time() // 300)      # five minutes
-    raw = ("%s|%s|%s" % (user_id, text.strip(), stamp)).encode("utf-8")
-    return base64.b32encode(hashlib.sha256(raw).digest()[:8]).decode("ascii").rstrip("=")
-
-
-# A message may end with "@<time>" to say when the work may start: "把 README
-# 跑一遍 @23:30" is the task "把 README 跑一遍", not before 23:30.
-_SCHEDULE_TAIL = re.compile(r"\s*@(\+\d+[hmd]?|\d{1,2}:\d{2})\s*$")
-
-
-def split_schedule(text):
-    """('把 README 跑一遍 @23:30') -> ('把 README 跑一遍', '23:30')."""
-    match = _SCHEDULE_TAIL.search(text or "")
-    if not match:
-        return (text or "").strip(), ""
-    return (text or "")[:match.start()].strip(), match.group(1)
-
-
-def is_task_order(name):
-    """Does this file say it is a task order?
-
-    A task order is a text file with the work in it ("*.order", or a name that
-    says 任务单). Anything else the user sends is an ordinary attachment.
-    """
-    base = os.path.basename(name or "").lower()
-    return base.endswith(".order") or "任务单" in base
-
-
 def text_of(raw):
     """The text of an incoming message."""
     parts = []
@@ -677,45 +434,10 @@ def files_of(raw):
     return [info for kind, info in media_of(raw) if kind == "file_item"]
 
 
-def looks_like_image(data):
-    """Is this a picture we can look at?"""
-    return bool(data) and any(data.startswith(magic) for magic in IMAGE_MAGIC)
-
-
-def image_ext(data):
-    """The file extension that goes with the picture we got."""
-    if data.startswith(b"\x89PNG"):
-        return ".png"
-    if data.startswith(b"GIF8"):
-        return ".gif"
-    if data.startswith(b"RIFF"):
-        return ".webp"
-    if data.startswith(b"BM"):
-        return ".bmp"
-    return ".jpg"
-
-
-def fmt_task(task):
-    """One line about a task."""
-    status = task.get("status", "?")
-    line = "%s  %s  %d%%  %s" % (task.get("id", "?"), status, int(task.get("progress") or 0),
-                                 task.get("title") or (task.get("prompt") or "")[:30])
-    position = int(task.get("queue_position") or 0)
-    if position:
-        line += "  [队列第 %d 位]" % position
-    when = task.get("starts_at_local") or ""
-    if when:
-        line += "  [%s 之后才能开工]" % when
-    note = task.get("note") or ""
-    if note:
-        line += "  — " + note[:60]
-    if task.get("needs_confirmation"):
-        line += "  [等你回答：" + (task.get("question") or "") + "]"
-    return line
-
-
-class WeChatBot:
+class WeChatBot(channel.TaskChannel):
     """The bot: poll WeChat, drive the queue, answer the user."""
+
+    META_USER_KEY = "wechat_user_id"
 
     HELP = ("用法：\n"
             "· 任何一句话 = 排一个任务（额度够就自动开工）\n"
@@ -735,25 +457,12 @@ class WeChatBot:
             "· /help 这条说明")
 
     def __init__(self, args):
-        self.args = args
+        channel.TaskChannel.__init__(self, args)
         self.state = State(os.path.join(args.state_dir, "credentials.json"))
         self.ilink = ILink(args.base_url, cdn_base=getattr(args, "cdn_url", CDN_BASE_URL))
-        self.queue = Queue(args.tasks)
-        self.agent = Agent(args.agent)
-        self.workspace_id = ""
-        self.owner = {}          # task id -> the WeChat user who queued it
 
-    # -- the workspace ----------------------------------------------------
-    def ensure_workspace(self):
-        if not self.workspace_id:
-            self.workspace_id = resolve_workspace(self.agent, self.args.workspace_path,
-                                                  self.args.workspace_name)
-            log("wechat workspace: %s (%s)" % (self.args.workspace_path, self.workspace_id))
-            # The key of our own project: from now on the queue only tells us
-            # about our own tasks.
-            if not self.queue.key:
-                self.queue.project_key(self.workspace_id)
-        return self.workspace_id
+    def channel_name(self):
+        return "wechat"
 
     # -- login ------------------------------------------------------------
     def login(self, verify_code=""):
@@ -798,27 +507,6 @@ class WeChatBot:
         return False
 
     # -- the files ---------------------------------------------------------
-    def inbox_dir(self):
-        """Where the files the user sends us land.
-
-        Inside the workspace on purpose: the agent works there, so a task can
-        just read the file the user sent.
-        """
-        path = os.path.join(os.path.abspath(os.path.expanduser(self.args.workspace_path)), "inbox")
-        os.makedirs(path, exist_ok=True)
-        return path
-
-    def inbox_path(self, name):
-        """A free path in the inbox for that name (no overwriting)."""
-        path = os.path.join(self.inbox_dir(), name)
-        stem, dot, ext = name.rpartition(".")
-        attempt = 1
-        while os.path.exists(path):
-            path = os.path.join(self.inbox_dir(),
-                                ("%s-%d%s" % (stem, attempt, dot + ext)) if dot else name)
-            attempt += 1
-        return path
-
     def fetch_media(self, kind, info):
         """The bytes of one media item, decrypted. None if it did not work."""
         media = info.get("media") or {}
@@ -857,8 +545,13 @@ class WeChatBot:
         return safe_file_name(name or "file.bin")
 
     def receive_files(self, raw):
-        """Download the media the user sent. Returns [(kind, path)]."""
-        saved = []
+        """Download the media the user sent. Returns [(kind, name, bytes)].
+
+        Only the fetching happens here; putting the bytes on disk is the
+        shared half's job (sched/channel.py), so every chat front end does it
+        the same way.
+        """
+        got = []
         for kind, info in media_of(raw):
             data = self.fetch_media(kind, info)
             if data is None:
@@ -870,62 +563,20 @@ class WeChatBot:
             if want_md5 and hashlib.md5(data).hexdigest() != want_md5:
                 log("the %s's md5 does not match - it was changed on the way" % kind)
             name = self.media_name(kind, info, data)
-            path = self.inbox_path(name)
-            with open(path, "wb") as f:
-                f.write(data)
-            log("received %s: %s (%d bytes)" % (kind.replace("_item", ""), name, len(data)))
-            saved.append((kind, path))
-        return saved
+            got.append((channel.KIND_FILE if kind == "file_item" else channel.KIND_MEDIA,
+                        name, data))
+        return got
 
-    def queue_order(self, path, user_id):
-        """A task order the user sent: queue what it says."""
-        try:
-            with open(path, encoding="utf-8") as f:
-                text = f.read()
-        except OSError as exc:
-            return "任务单读不了：%s" % exc
-        except UnicodeDecodeError:
-            return "任务单不是文本文件，读不了。"
-        try:
-            body = task_order.parse_order(text)
-        except task_order.OrderError as exc:
-            return "任务单有问题：\n%s" % exc
-        if not body.get("prompt"):
-            return "任务单里没有 prompt（要做什么），我不懂该干什么。"
-        workspace_id = self.ensure_workspace()
-        note = ""
-        wanted = str(body.pop("workspace_id", "") or "")
-        if wanted:
-            found = ""
-            for ws in self.agent.workspaces() or []:
-                if ws.get("id") == wanted or \
-                        os.path.abspath(ws.get("path") or "") == os.path.abspath(os.path.expanduser(wanted)):
-                    found = ws.get("id", "")
-                    break
-            if found:
-                workspace_id = found
-            else:
-                note = "（工作区 %s 不在 agent 里，用了微信自己的工作区）" % wanted
-        try:
-            task = self.queue.create(
-                body["prompt"], workspace_id=workspace_id,
-                title=body.get("title") or "", provider=body.get("provider") or "",
-                allow_paths=body.get("allow_paths") or None,
-                meta=body.get("meta") or None,
-                key=body.get("idempotency_key") or "",
-                not_before=body.get("not_before") or "",
-                model=body.get("model") or "", priority=int(body.get("priority") or 0),
-                extra={"tags": body.get("tags")} if body.get("tags") else None)
-        except ILinkError as exc:
-            return "排队失败：%s" % exc
-        task_id = task.get("id", "?")
-        self.owner[task_id] = user_id
-        when = task.get("starts_at_local") or ""
-        if when:
-            return "任务单收到，已排队 %s（%s 之后开工）%s" % (task_id, when, note)
-        return "任务单收到，已排队 %s%s" % (task_id, note)
+    def handle_message(self, raw, text, media, user_id):
+        """A message that may carry files (or pictures) as well as text."""
+        if not media:
+            return self.handle(text, user_id)
+        attachments = self.receive_files(raw)
+        if not attachments:
+            return "文件没能取下来，再发一次？"
+        return self.handle_attachments(text, attachments, user_id)
 
-    def send_file_to_user(self, user_id, path, name=None):
+    def send_file(self, user_id, path, name=None):
         """One file to the user: encrypt, upload to the CDN, send."""
         with open(path, "rb") as f:
             data = f.read()
@@ -950,202 +601,7 @@ class WeChatBot:
         self.ilink.send_items(user_id, self.state.context_for(user_id), [item], self.state.token)
         return len(data)
 
-    def send_task_files(self, user_id, task):
-        """The files a finished task produced, as file messages."""
-        sent = 0
-        root = os.path.abspath(os.path.expanduser(self.args.workspace_path))
-        for art in (task.get("artifacts") or [])[:MAX_FILES_PER_TASK]:
-            rel = str(art.get("path") or "")
-            if not rel:
-                continue
-            path = os.path.join(root, rel)
-            if not os.path.isfile(path):
-                continue
-            try:
-                self.send_file_to_user(user_id, path, os.path.basename(path))
-                sent += 1
-            except ILinkError as exc:
-                log("cannot send %s: %s" % (rel, exc))
-        return sent
-
     # -- the command mapping ----------------------------------------------
-    def handle_message(self, raw, text, media, user_id):
-        """A message that may carry files (or pictures) as well as text."""
-        if not media:
-            return self.handle(text, user_id)
-        saved = self.receive_files(raw)
-        if not saved:
-            return "文件没能取下来，再发一次？"
-        # A task order is not an attachment: it says what to do and how.
-        for kind, path in saved:
-            if kind == "file_item" and is_task_order(path):
-                return self.queue_order(path, user_id)
-        root = os.path.abspath(os.path.expanduser(self.args.workspace_path))
-        rel_files = [os.path.relpath(p, root) for kind, p in saved if kind == "file_item"]
-        rel_images = [os.path.relpath(p, root) for kind, p in saved if kind != "file_item"]
-        parts = []
-        if rel_files:
-            parts.append("文件：%s" % "、".join(rel_files))
-        if rel_images:
-            parts.append("图片：%s" % "、".join(rel_images))
-        listed = "；".join(parts)
-        note = "用户发来了这些文件，已经放在工作区里：%s。" % listed
-        if rel_images:
-            note += ("图片用 toolkit_load_image 看（路径相对于工作区根目录），"
-                     "看完里面的内容再办事。")
-        else:
-            note += "请看一下它们是什么，再按里面的内容办事。"
-        prompt = ("%s\n\n（%s）" % (text, note)) if text else note
-        try:
-            task = self.queue.create(
-                prompt, workspace_id=self.ensure_workspace(),
-                title=(text or (rel_files + rel_images)[0])[:40],
-                provider=self.args.provider or None,
-                allow_paths=self.args.allow_path or None,
-                meta={"wechat_user_id": user_id, "attachments": rel_files + rel_images})
-        except ILinkError as exc:
-            return "排队失败：%s" % exc
-        task_id = task.get("id", "?")
-        self.owner[task_id] = user_id
-        return ("已收到文件 %s，已排队 %s\n「%s」"
-                % (listed, task_id, (text or "看看这些文件")[:60]))
-
-    def handle(self, text, user_id):
-        """What a message means. Returns the reply."""
-        text = (text or "").strip()
-        if not text:
-            return "（没看懂：发一句话就是排一个任务，/help 有全部命令）"
-        if text in ("/help", "help", "帮助"):
-            return self.HELP
-        if text.startswith("/"):
-            return self.command(text, user_id)
-        # Anything else: a task to do. The key is derived from the user and the
-        # text, so the same command twice in a row does not queue it twice.
-        text, not_before = split_schedule(text)
-        if not text:
-            return "（没看懂：发一句话就是排一个任务，/help 有全部命令）"
-        try:
-            task = self.queue.create(
-                text, workspace_id=self.ensure_workspace(), title=text[:40],
-                provider=self.args.provider or None,
-                allow_paths=self.args.allow_path or None,
-                meta={"wechat_user_id": user_id},
-                key=idempotency_key(user_id, text),
-                not_before=not_before)
-        except ILinkError as exc:
-            return "排队失败：%s" % exc
-        task_id = task.get("id", "?")
-        self.owner[task_id] = user_id
-        when = task.get("starts_at_local") or ""
-        if when:
-            return ("已排队 %s\n「%s」\n%s 之后才能开工，额度有余量就自动做。"
-                    % (task_id, text[:60], when))
-        return ("已排队 %s\n「%s」\n额度有余量就自动开工，做完我告诉你。"
-                % (task_id, text[:60]))
-
-    def command(self, text, user_id):
-        parts = text.split()
-        cmd = parts[0].lower()
-        rest = parts[1:]
-        try:
-            if cmd in ("/tasks", "/list", "任务"):
-                listing = self.queue.list(workspace_id=self.ensure_workspace())
-                tasks = listing.get("tasks") or []
-                if not tasks:
-                    return "队列是空的。"
-                lines = [fmt_task(t) for t in tasks[-12:]]
-                return "任务（%d）：\n%s" % (len(tasks), "\n".join(lines))
-            if cmd in ("/status", "/状态"):
-                if not rest:
-                    return "用法：/status <任务id>"
-                task = self.queue.get(rest[0], workspace_id=self.ensure_workspace())
-                return fmt_task(task)
-            if cmd in ("/result", "/结果"):
-                if not rest:
-                    return "用法：/result <任务id>"
-                task = self.queue.get(rest[0], workspace_id=self.ensure_workspace())
-                out = [fmt_task(task)]
-                result = (task.get("result") or "").strip()
-                if result:
-                    out.append("最终回答：\n" + result[:1500])
-                arts = task.get("artifacts") or []
-                if arts:
-                    out.append("产出：\n" + "\n".join("· " + str(a.get("path")) for a in arts[:10]))
-                if task.get("needs_confirmation"):
-                    out.append("等你回答：" + (task.get("question") or ""))
-                return "\n".join(out)
-            if cmd in ("/files", "/文件"):
-                if not rest:
-                    return "用法：/files <任务id>"
-                task = self.queue.get(rest[0], workspace_id=self.ensure_workspace())
-                try:
-                    count = self.send_task_files(user_id, task)
-                except ILinkError as exc:
-                    return "文件发不出去：%s" % exc
-                if not count:
-                    return "这个任务没有可发的文件。"
-                return "发了 %d 个文件。" % count
-            if cmd in ("/start", "/开始"):
-                if not rest:
-                    return "用法：/start <任务id>"
-                task = self.queue.action(rest[0], "start", workspace_id=self.ensure_workspace())
-                return "开始 %s：%s" % (rest[0], task.get("status", "?"))
-            if cmd in ("/cancel", "/取消"):
-                if not rest:
-                    return "用法：/cancel <任务id>"
-                task = self.queue.action(rest[0], "cancel", workspace_id=self.ensure_workspace())
-                return "已停掉 %s：%s" % (rest[0], task.get("status", "?"))
-            if cmd in ("/del", "/delete", "/删除"):
-                if not rest:
-                    return "用法：/del <任务id>"
-                self.queue.delete(rest[0], workspace_id=self.ensure_workspace())
-                return "删掉了 %s" % rest[0]
-            if cmd in ("/answer", "/回答"):
-                if len(rest) < 2:
-                    return "用法：/answer <任务id> <你要回答的内容>"
-                task = self.queue.action(rest[0], "confirm", {"message": " ".join(rest[1:])},
-                                        workspace_id=self.ensure_workspace())
-                # The answer goes back into the queue: it does not interrupt
-                # whatever is running now.
-                return ("已回答 %s：回到队列里了（%s），前面的活儿做完它接着做。"
-                        % (rest[0], task.get("status", "?")))
-            if cmd in ("/at", "/定时", "/晚点"):
-                # /at 23:30 把 README 跑一遍
-                parts = text.split(None, 2)
-                if len(parts) < 3:
-                    return ("用法：/at <时间> <要做的活儿>\n"
-                            "时间可以是 '+5'（五小时后）或 '23:30'（今天晚上十点半，"
-                            "已经过了就尽快做）")
-                when, what = parts[1], parts[2]
-                try:
-                    task = self.queue.create(
-                        what, workspace_id=self.ensure_workspace(), title=what[:40],
-                        provider=self.args.provider or None,
-                        allow_paths=self.args.allow_path or None,
-                        meta={"wechat_user_id": user_id},
-                        key=idempotency_key(user_id, what + "@" + when),
-                        not_before=when)
-                except ILinkError as exc:
-                    return "排队失败：%s" % exc
-                task_id = task.get("id", "?")
-                self.owner[task_id] = user_id
-                started = task.get("starts_at_local") or when
-                return ("已排队 %s\n「%s」\n%s 之后才能开工。" % (task_id, what[:60], started))
-            if cmd in ("/retry", "/重试"):
-                if not rest:
-                    return "用法：/retry <任务id>"
-                task = self.queue.retry(rest[0], workspace_id=self.ensure_workspace())
-                return ("重试 %s：%s（第 %s 次）"
-                        % (rest[0], task.get("status", "?"), task.get("attempt") or 1))
-            if cmd in ("/quota", "/额度"):
-                health = self.queue.health()
-                left = health.get("quota_percent")
-                return ("额度还剩 %s%%（provider %s）" % (left, health.get("provider") or "?")) \
-                    if left is not None else "额度查不到（provider 没声明额度端点）"
-        except ILinkError as exc:
-            return "出了点问题：%s" % exc
-        return "不认识的命令：%s\n%s" % (cmd, self.HELP)
-
     # -- the loop ----------------------------------------------------------
     def reply(self, user_id, text):
         context = self.state.context_for(user_id)
@@ -1158,6 +614,10 @@ class WeChatBot:
         except ILinkError as exc:
             log("reply failed: %s" % exc)
             return False
+
+    def send_text(self, user_id, text):
+        """One text message to the user (WeChat needs the context token)."""
+        return self.reply(user_id, text)
 
     def poll_once(self):
         """One long poll. Returns the messages that came in."""
@@ -1227,49 +687,6 @@ class WeChatBot:
                 if raw.get("message_type") != MSG_TYPE_USER:
                     continue
                 self.process_message(raw)
-
-    def notify_event(self, event):
-        """Tell the user about one task event. Returns True when a message
-        went out."""
-        kind = event.get("type", "")
-        if kind not in ("task_done", "task_failed", "task_waiting_confirmation"):
-            return False
-        task = event.get("task") or {}
-        task_id = task.get("id", "")
-        user_id = self.owner.get(task_id) or (task.get("meta") or {}).get("wechat_user_id")
-        if not user_id:
-            return False
-        if kind == "task_done":
-            text = "做完了 %s\n%s" % (task_id, (task.get("note") or
-                                            (task.get("result") or "")[:300]))
-            sent = self.reply(user_id, text)
-            # The files the task produced go out with the answer: a result the
-            # user cannot open on their phone is only half an answer.
-            try:
-                count = self.send_task_files(user_id, task)
-            except ILinkError as exc:
-                log("cannot send the files: %s" % exc)
-                count = 0
-            if count:
-                log("sent %d file(s) to %s" % (count, user_id))
-            return sent
-        elif kind == "task_failed":
-            text = "%s 失败了：%s" % (task_id, task.get("error") or "未知原因")
-        else:
-            text = ("%s 在等你回答：%s\n（/answer %s 你的回答）"
-                    % (task_id, task.get("question") or "", task_id))
-        return self.reply(user_id, text)
-
-    def watch_tasks(self):
-        """Tell the user when their work is done."""
-        while True:
-            try:
-                for event in self.queue.events(workspace_id=self.ensure_workspace()):
-                    self.notify_event(event)
-            except Exception as exc:  # noqa: BLE001
-                log("task watcher: %s" % exc)
-                time.sleep(5)
-
 
 def build_parser():
     parser = argparse.ArgumentParser(description="The WeChat side of the task queue.")

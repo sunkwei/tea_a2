@@ -39,6 +39,8 @@ scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
 sched/task_server.py        任务服务（Python，可选）：任务队列 + 额度闸门 + 事件流
 sched/tea_api.py            HTTP 客户端封装（纯标准库）：Tea 说 agent，Queue 说任务队列
+sched/wechat_bot.py          微信那一端：iLink 协议（扫码登录、长轮询、CDN 媒体）
+sched/telegram_bot.py        Telegram 那一端：Bot API（长轮询、getFile/sendDocument、chat 白名单）
 CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
 cmake/toolchains/           aarch64-linux-gnu.cmake / mingw-w64-x86_64.cmake（交叉编译入口）
 cmake/version_git_hash.cmake 生成 tea_agent.buildinfo（写在二进制旁边，不动源码树）

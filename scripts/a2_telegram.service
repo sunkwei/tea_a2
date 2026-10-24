@@ -1,0 +1,41 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装：
+# 它会把这几个单元装到 ~/.config/systemd/user/ 并把仓库路径换掉。
+[Unit]
+Description=tea_a2 Telegram bot (the queue's Telegram front end)
+Documentation=file://%h/work/git/tea_a2/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# append: 不会自己建目录，日志目录不在的话单元起不来。
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+# Telegram 这一端：把 Telegram 里的话变成队列操作，做完把结果发回 Telegram。
+# 它调的是 task server（:8283）的 API，task server 再调 agent（:8383）。
+#
+# 第一次要准备两样东西：
+#   1) bot token（BotFather 给的）：写进 ~/.tea_agent/telegram/token
+#        echo 123456:ABCDEF > %h/.tea_agent/telegram/token
+#      也可以用环境变量 TEA_TELEGRAM_TOKEN。
+#   2) 自己的 chat id：先在 Telegram 里给 bot 发一句话，然后
+#        python3 %h/work/git/tea_a2/sched/telegram_bot.py --print-chat-id
+#      把它写进下面 ExecStart 的 --allow-chat <id>。
+#      （不给 --allow-chat 的话 bot 谁都不理——Telegram bot 是公开的，
+#        谁找到它都能发消息，所以默认只回答名单上的人。）
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/telegram_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+# Telegram 侧固定的工作区：手机排的活儿都在这里做，不碰别人的仓库。
+# 改目录的话记得两处都改：这里和 --workspace-path。
+# 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
+# `journalctl --user` 根本读不到（已实测），所以直接 append 到文件。
+StandardOutput=append:%h/.tea_agent/logs/a2_telegram.log
+StandardError=append:%h/.tea_agent/logs/a2_telegram.log
+
+[Install]
+WantedBy=default.target
