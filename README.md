@@ -212,6 +212,7 @@ build/bin/tea_agent --workspace . --open
 | [任务队列](docs/tasks.md) | 队列服务、微信那一端、网页、使用手册、逐任务授权目录 |
 | [源码结构](docs/source.md) | 每个文件干什么、第三方依赖 |
 | [测试与验证状态](docs/testing.md) | 怎么跑、每个测试钉住了什么、哪些平台实测过 |
+| [开发笔记](tea_a2_agent.md) | **给改这个仓库的人**：踩过的坑、命令、约定（换一台机器开发先看这个） |
 
 ## License
 
