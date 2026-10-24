@@ -227,6 +227,30 @@ try {
   check('Alt+key is ESC plus the key', keys && keys.altB === '\x1bb', JSON.stringify(keys));
   check('a plain key is itself', keys && keys.plain === 'x', JSON.stringify(keys));
 
+  // ---- the cursor -------------------------------------------------------
+  const cursor = await evalJs(`(function(){
+    var c = document.getElementById('term-cursor');
+    var t = window.teaShell.term;
+    if (!c || !t) return null;
+    return { hidden: c.classList.contains('hidden'), visible: t.cursorVisible,
+             cx: t.cx, cy: t.cy, left: c.style.left, top: c.style.top };
+  })()`);
+  check('the terminal shows a cursor', cursor && !cursor.hidden, JSON.stringify(cursor));
+  check('the cursor sits where the terminal says', cursor && cursor.visible === true,
+    JSON.stringify(cursor));
+  const hiddenByProgram = await evalJs(`(function(){
+    var t = window.teaShell.term;
+    t.feed('\\x1b[?25l');
+    return t.cursorVisible;
+  })()`);
+  check('the program can hide the cursor (CSI ?25l)', hiddenByProgram === false, hiddenByProgram);
+  const shownAgain = await evalJs(`(function(){
+    var t = window.teaShell.term;
+    t.feed('\\x1b[?25h');
+    return t.cursorVisible;
+  })()`);
+  check('and show it again (CSI ?25h)', shownAgain === true, shownAgain);
+
   // ---- the emulator draws what a terminal would draw -------------------
   const drawn = await evalJs(`(function(){
     var T = window.teaTermScreen;

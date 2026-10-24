@@ -4187,6 +4187,7 @@
     this.state = 'normal';
     this.params = '';
     this.viewOffset = 0;        // 往回翻了多少行
+    this.cursorVisible = true;  // 程序可以用 CSI ?25l 把它藏起来
     this.dirty = true;
   };
 
@@ -4433,6 +4434,14 @@
       if (nums.length > idx && nums[idx] > 0) return nums[idx];
       return def;
     };
+    if (priv && (final === 'h' || final === 'l')) {
+      // 只关心光标的可见性（?25）：别的模式先不管
+      if (body === '25') {
+        this.cursorVisible = (final === 'h');
+        this.dirty = true;
+      }
+      return;
+    }
     if (priv && final !== 'm') return;             // 私有模式：先不管
     switch (final) {
       case 'A': this.cy = Math.max(this.top, this.cy - arg(0, 1)); break;
@@ -4567,7 +4576,9 @@
     ended: false,
     pumping: false,
     size: { cols: 80, rows: 24 },
-    decoder: null
+    decoder: null,
+    charW: 8,         // 一个字符有多宽（像素），画光标要用
+    lineH: 18         // 一行有多高（像素）
   };
   // The browser tests drive the terminal through these handles: they check the
   // emulator's own state instead of guessing from the pixels.
@@ -4651,6 +4662,40 @@
     rows.innerHTML = html.join('');
     var screen = $('shell-screen');
     if (screen && shell.term.viewOffset === 0) screen.scrollTop = screen.scrollHeight;
+    shellCursorUpdate();
+  }
+
+  // ---- 光标 ------------------------------------------------------------
+  // 光标是一个会眨的方块，画在屏幕**上面**（不是画在行里：行是每次输出重建
+  // 的，动画跟着重建就会一直停在同一相位，看起来不闪）。程序用 CSI ?25l
+  // 藏它的时候（比如 PSReadLine 在重画的那一瞬间），这里也跟着藏。
+  function shellCursorUpdate() {
+    var cursor = $('term-cursor');
+    var screen = $('shell-screen');
+    var rows = $('shell-rows');
+    if (!cursor || !screen || !rows || !shell.term) return;
+    if (!shell.term.cursorVisible) {
+      cursor.classList.add('hidden');
+      return;
+    }
+    var all = shell.term.back.concat(shell.term.lines);
+    var end = Math.max(0, all.length - shell.term.viewOffset);
+    var start = Math.max(0, end - shell.term.rows);
+    var row = shell.term.back.length + shell.term.cy;
+    if (row < start || row >= end) {
+      cursor.classList.add('hidden');   // 光标滚出屏幕了
+      return;
+    }
+    var line = all[row];
+    var cell = line ? line[shell.term.cx] : null;
+    cursor.textContent = (cell && cell.c) ? cell.c : ' ';
+    var sRect = screen.getBoundingClientRect();
+    var rRect = rows.getBoundingClientRect();
+    cursor.style.left = Math.round(rRect.left - sRect.left + shell.term.cx * shell.charW) + 'px';
+    cursor.style.top = Math.round(rRect.top - sRect.top + (row - start) * shell.lineH) + 'px';
+    cursor.style.width = Math.round(shell.charW) + 'px';
+    cursor.style.height = Math.round(shell.lineH) + 'px';
+    cursor.classList.remove('hidden');
   }
 
   function shellApplyCapability(cap) {
@@ -4692,6 +4737,8 @@
     screen.removeChild(probe);
     var cw = rect.width / 80;
     if (!cw) return fallback;
+    shell.charW = cw;
+    shell.lineH = lineHeight;
     var cols = Math.max(20, Math.min(500, Math.floor((screen.clientWidth - 26) / cw)));
     var rows = Math.max(5, Math.min(200, Math.floor((screen.clientHeight - 22) / lineHeight)));
     return { cols: cols, rows: rows };

@@ -262,6 +262,9 @@
              收键盘（和粘贴），键盘事件变成字节送回服务端。 -->
         <div class="shell-screen" id="shell-screen">
           <div class="shell-rows" id="shell-rows"></div>
+          <!-- 光标：一个会眨的方块，画在画面上面（不是画在行里，行每次输出
+               都会重建，动画跟着重建就不闪了）。 -->
+          <div class="term-cursor hidden" id="term-cursor" aria-hidden="true"></div>
           <textarea id="shell-input" class="shell-input" autocomplete="off" autocorrect="off"
                     autocapitalize="off" spellcheck="false" aria-label="终端输入"></textarea>
         </div>
