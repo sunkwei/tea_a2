@@ -254,11 +254,17 @@ try {
     document.getElementById('shell-download').click();
     return true;
   })()`);
-  const downloaded = await waitFor(() => fs.existsSync(path.join(dlDir, uploadName)), 20000, 300);
+  // Chrome may number a repeated download ("name (1).txt"), so look for
+  // the first file that starts with the name.
+  const downloadedFile = () => {
+    const names = fs.readdirSync(dlDir).filter((n) => n.indexOf(uploadName) === 0);
+    return names.length ? path.join(dlDir, names[0]) : '';
+  };
+  const downloaded = await waitFor(() => downloadedFile() !== '', 40000, 500);
   check('the browser downloads the file', downloaded, fs.readdirSync(dlDir).join(','));
   if (downloaded) {
     check('the downloaded file has the right bytes',
-      fs.readFileSync(path.join(dlDir, uploadName), 'utf-8') === 'tea-ui-upload-content');
+      fs.readFileSync(downloadedFile(), 'utf-8') === 'tea-ui-upload-content');
   }
 
   // ---- clear and end --------------------------------------------------
