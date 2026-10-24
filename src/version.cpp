@@ -5,6 +5,17 @@
 namespace tea {
 namespace {
 
+/// The version this binary reports - the only hand-edited version truth in
+/// the tree. CMake parses it from here (CMakeLists.txt) to fill in
+/// project(VERSION) and the buildinfo file, so the binary, the build log and
+/// the buildinfo always say the same thing.
+///
+/// It lives in this .cpp rather than in version.h on purpose: version.h is
+/// included by six translation units, and a constant in a header is pulled
+/// into every one of them - a version bump would rebuild all six
+/// (server.cpp among them) instead of this single file.
+const char* const kVersionString = "0.11.0";
+
 /// The commit recorded in tea_agent.buildinfo next to the executable.
 ///
 /// The build writes that file (cmake/version_git_hash.cmake), so the binary
@@ -31,7 +42,7 @@ std::string read_buildinfo_commit() {
 }  // namespace
 
 const char* version_string() {
-  return TEA_AGENT_VERSION_STRING;
+  return kVersionString;
 }
 
 std::string version_git_hash() {

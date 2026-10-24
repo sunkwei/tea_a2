@@ -1,21 +1,28 @@
-// version.h -- the version string, and the accessors the binary reports.
+// version.h -- the accessors the binary reports its version with.
 //
-// This header is the ONLY hand-edited source of truth for the version. The git
-// commit is not here: it is build metadata, so the build writes it into
-// tea_agent.buildinfo *next to the binary* (cmake/version_git_hash.cmake) and
-// the binary reads that file at startup. A build therefore never modifies a
-// tracked file, and the binary itself carries no build-specific data - two
-// builds of the same commit produce the same bytes.
+// The version STRING is not here: it lives in version.cpp, next to the
+// function that returns it. version.h is included by six translation units,
+// and a constant in a header is pulled into every one of them - so bumping
+// the version would rebuild six files (server.cpp among them) instead of the
+// one that actually holds the string. CMake reads the literal from
+// version.cpp (see CMakeLists.txt), so there is still exactly one copy of it
+// in the tree.
+//
+// The git commit is not here either: it is build metadata, so the build
+// writes it into tea_agent.buildinfo *next to the binary*
+// (cmake/version_git_hash.cmake) and the binary reads that file at startup.
+// A build therefore never modifies a tracked file, and the binary itself
+// carries no build-specific data - two builds of the same commit produce
+// the same bytes.
 #pragma once
 
 #include <string>
 
 #define TEA_AGENT_NAME "tea_agent"
-#define TEA_AGENT_VERSION_STRING "0.11.0"
 
 namespace tea {
 
-/// The version this binary was built from, e.g. "0.11.0".
+/// The version this binary was built from, e.g. "0.11.0" (see version.cpp).
 const char* version_string();
 
 /// The commit this binary was built from, e.g. "b0575d01c748", with "-dirty"

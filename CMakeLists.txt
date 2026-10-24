@@ -3,32 +3,39 @@ cmake_minimum_required(VERSION 3.20)
 # ---------------------------------------------------------------------------
 # Version: one source of truth
 # ---------------------------------------------------------------------------
-# `src/version.h` is what the binary actually reports (--version, the User-Agent
-# header, /api/health), so this file parses it instead of carrying a second copy.
-# It is the only hand-edited source of truth: the git commit is build metadata and
-# is generated into the build directory (see below), so a build never modifies a
-# tracked file.
+# `src/version.cpp` is what the binary actually reports (--version, the
+# User-Agent header, /api/health), so this file parses it instead of carrying
+# a second copy. The git commit is build metadata and is generated into the
+# build directory (see below), so a build never modifies a tracked file.
 # It used to say 0.1.0 while the binary said 0.4.1, which made the configure-time
 # line `tea_agent 0.1.0: compiler=...` a lie and left the bump to be done twice
 # (and forgotten once). Splitting on the first two dots keeps the build working
 # if the string ever gains a pre-release suffix (0.8.2-rc1 -> version 0.8.2).
-set(TEA_VERSION_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/src/version.h)
-if(NOT EXISTS ${TEA_VERSION_HEADER})
-  message(FATAL_ERROR "missing ${TEA_VERSION_HEADER}; it defines TEA_AGENT_VERSION_STRING")
+#
+# The string lives in a .cpp and not in a header on purpose: it is used in
+# exactly one place, and a constant in version.h would be pulled into the six
+# translation units that include it - bumping the version would rebuild all
+# six instead of one.
+set(TEA_VERSION_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/version.cpp)
+if(NOT EXISTS ${TEA_VERSION_SOURCE})
+  message(FATAL_ERROR "missing ${TEA_VERSION_SOURCE}; it defines the version string")
 endif()
-file(READ ${TEA_VERSION_HEADER} _tea_version_header)
+file(READ ${TEA_VERSION_SOURCE} _tea_version_source)
 # Take the whole quoted literal first (it may end in -rc1), then its leading
 # major.minor.patch: project(VERSION) only accepts digits and dots.
-string(REGEX MATCH "TEA_AGENT_VERSION_STRING[ \t]+\"([^\"]*)\""
-       _tea_version_literal "${_tea_version_header}")
+string(REGEX MATCH "kVersionString[ \t]*=[ \t]*\"([^\"]*)\""
+       _tea_version_literal "${_tea_version_source}")
 set(_tea_version_raw "${CMAKE_MATCH_1}")
 string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" _tea_version_numeric "${_tea_version_raw}")
 set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
-    "cannot read the version out of ${TEA_VERSION_HEADER}; expected\n"
-    "  #define TEA_AGENT_VERSION_STRING \"0.8.2\"")
+    "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
+    "  const char* const kVersionString = \"0.11.0\"")
 endif()
+# The version is read here, at configure time: changing it has to re-run the
+# configure step, so make the file a configure dependency.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TEA_VERSION_SOURCE})
 project(tea_agent VERSION ${TEA_AGENT_VERSION} LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
@@ -628,4 +635,4 @@ if(EXISTS ${TEA_3RD}/ca-bundle/cacert.pem)
   )
 endif()
 
-message(STATUS "tea_agent ${PROJECT_VERSION} (from src/version.h): compiler=${CMAKE_CXX_COMPILER_ID} std=${CMAKE_CXX_STANDARD}")
+message(STATUS "tea_agent ${PROJECT_VERSION} (from src/version.cpp): compiler=${CMAKE_CXX_COMPILER_ID} std=${CMAKE_CXX_STANDARD}")

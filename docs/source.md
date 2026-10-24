@@ -43,8 +43,12 @@ cmake/free-running-exe.cmake   运行中也能链接：先把旧 exe 改名让�
 3rd/                        第三方依赖
 ```
 
-**版本号与 commit hash**：`src/version.h` 是唯一手改的版本真相（`TEA_AGENT_VERSION_STRING`），
+**版本号与 commit hash**：`src/version.cpp` 是唯一手改的版本真相（`kVersionString`），
 CMake 从它解析 `project(VERSION)`，所以「二进制报什么版本」和「构建日志写什么版本」不会各说各话。
+
+版本串故意放在 `.cpp` 里而不是头文件：它只被 `version_string()` 用到，而 `version.h` 有六个
+翻译单元包含——放在头文件里，改一次版本要重编六个文件（`server.cpp` 也在内），放在 `.cpp`
+里只重编一个。CMake 那边把它登记成 configure 依赖，所以改版本会触发重新配置。
 
 commit 则是**构建期元数据**，它既不在源码里、也不在二进制里：构建把它写进二进制旁边的
 `tea_agent.buildinfo`（`cmake/version_git_hash.cmake`），程序启动时读这个文件并在横幅和
