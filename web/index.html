@@ -247,6 +247,17 @@
             <button class="btn danger" id="shell-stop" type="button" title="结束这个 shell">结束</button>
           </span>
         </div>
+        <!-- 文件进出：上传落到会话的目录（或下面填的目录），下载按路径取文件。
+             路径框留空时，上传落在会话开始时的目录，下载的相对路径也从那里算。 -->
+        <div class="shell-bar">
+          <input class="ta shell-path" id="shell-path" type="text" spellcheck="false"
+                 placeholder="路径：下载填文件，上传填目标目录（留空 = 会话目录）">
+          <button class="btn" id="shell-download" type="button"
+                  title="把这个文件下载到本机">下载</button>
+          <button class="btn" id="shell-upload" type="button"
+                  title="把本机上的文件传到这个机器上">上传</button>
+          <input type="file" id="shell-file" class="hidden">
+        </div>
         <!-- 画面：每一行由 app.js 按终端规则渲染。下面的输入框不显示，只负责
              收键盘（和粘贴），键盘事件变成字节送回服务端。 -->
         <div class="shell-screen" id="shell-screen">

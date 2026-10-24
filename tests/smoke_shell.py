@@ -30,6 +30,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -94,6 +95,31 @@ class Client:
     def post(self, path, payload=None):
         return self._request("POST", path, payload if payload is not None else {})
 
+    def post_raw(self, path, payload):
+        """POST the bytes as they are (a file upload)."""
+        req = urllib.request.Request(self.base + path, data=payload,
+                                     headers={"Content-Type": "application/octet-stream"},
+                                     method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                body = r.read().decode("utf-8")
+                return r.status, (json.loads(body) if body else None)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")
+            try:
+                return e.code, json.loads(body)
+            except ValueError:
+                return e.code, {"raw": body}
+
+    def get_bytes(self, path):
+        """GET a route that answers with bytes (a download)."""
+        req = urllib.request.Request(self.base + path)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read(), r.headers.get("Content-Disposition", "")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), ""
+
     def delete(self, path):
         return self._request("DELETE", path)
 
@@ -117,7 +143,7 @@ def main():
         [binary, "--config", cfg, "--tea-home", home, "--host", "127.0.0.1",
          "--port", str(port), "--no-console", "--quiet",
          "--log-file", os.path.join(tmp, "agent.log")],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=tmp)
 
     failures = []
     checks = []
@@ -265,6 +291,50 @@ def main():
         if isinstance(body, dict):
             check("it reports the exit code", body.get("exit_code") is not None, body)
             check("it is not running any more", body.get("running") is False, body)
+
+        # ---- files in and out ------------------------------------------
+        payload = b"tea-shell-upload\x00\x01binary\xff\xfe"
+        status, body = client.post_raw(
+            "/api/shell/session/%s/upload?name=tea-upload.bin" % sid, payload)
+        check("a file can be uploaded", status == 200 and body.get("ok"), (status, body))
+        uploaded = body.get("path", "") if isinstance(body, dict) else ""
+        check("the upload lands in the session's directory",
+              os.path.basename(uploaded) == "tea-upload.bin" and
+              os.path.isfile(uploaded), uploaded)
+        check("the file has the bytes it was given",
+              os.path.isfile(uploaded) and open(uploaded, "rb").read() == payload, uploaded)
+
+        # A name with directories in it must not walk out of the directory.
+        status, body = client.post_raw(
+            "/api/shell/session/%s/upload?name=../tea-escape.bin" % sid, b"x")
+        escaped = body.get("path", "") if isinstance(body, dict) else ""
+        check("the name cannot walk out of the directory",
+              status == 200 and os.path.dirname(escaped) == os.path.dirname(uploaded), escaped)
+
+        # A named directory.
+        status, body = client.post_raw(
+            "/api/shell/session/%s/upload?name=in-sub.txt&dir=sub" % sid, b"sub")
+        sub_path = body.get("path", "") if isinstance(body, dict) else ""
+        check("the upload can go into another directory",
+              status == 200 and os.path.isfile(sub_path) and
+              os.path.basename(os.path.dirname(sub_path)) == "sub", sub_path)
+
+        # Download it again: the bytes have to come back exactly.
+        status, data, disposition = client.get_bytes(
+            "/api/shell/session/%s/file?path=%s" % (sid, quote(uploaded)))
+        check("the file can be downloaded", status == 200 and data == payload,
+              (status, data[:60]))
+        check("the download is an attachment",
+              "attachment" in (disposition or ""), disposition)
+        # A relative path is resolved against the session's directory.
+        status, data, _d = client.get_bytes(
+            "/api/shell/session/%s/file?path=tea-upload.bin" % sid)
+        check("a relative path works too", status == 200 and data == payload, (status, data[:60]))
+        status, _data, _d = client.get_bytes(
+            "/api/shell/session/%s/file?path=tea-nope.bin" % sid)
+        check("a missing file is a 404", status == 404, status)
+        status, body = client.get("/api/shell/session/%s/file" % sid)
+        check("a download without a path is refused", status == 400, (status, body))
 
         # Closing: the shell is gone, and the route says so.
         status, body = client.delete("/api/shell/session/%s" % sid)

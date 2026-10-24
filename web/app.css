@@ -921,6 +921,9 @@ button{font-family:inherit}
   -webkit-user-select:text;user-select:text;
 }
 .shell-rows{min-height:100%}
+/* 文件进出的一行：路径框 + 上传 / 下载 */
+.shell-bar{display:flex;align-items:center;gap:8px}
+.shell-path{flex:1 1 auto;min-width:0;width:auto;padding:6px 10px;font:12px/18px var(--ds-font-family-code)}
 .term-row{white-space:pre;min-height:1.5em}
 .term-row span{white-space:pre}
 /* 输入框不显示，只负责收键盘和粘贴（输入法也需要一个真的输入框） */

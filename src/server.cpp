@@ -102,6 +102,10 @@ const char* raw_mime_for(const std::string& file_path) {
 constexpr std::size_t kMaxImagesPerMessage = 4;
 constexpr std::size_t kMaxImageBytes = 8u * 1024u * 1024u;
 
+/// How big a file the terminal may upload. Bigger files go through another
+/// route (scp, the file page); this one is for "put this on the device".
+constexpr std::size_t kShellUploadLimit = 32u * 1024u * 1024u;
+
 /// ---- how many clients the process is willing to carry ----------------------
 ///
 /// Every attached SSE response owns one HTTP worker thread for as long as it
@@ -517,6 +521,58 @@ std::string rfc5987_name(const std::string& name) {
     }
   }
   return out;
+}
+
+/// Send a file to the client as an attachment (or inline), streamed from disk
+/// so that a big file never has to sit in memory. Returns false when the file
+/// cannot be opened; the caller sends the error then.
+bool stream_file_attachment(httplib::Response& res, const std::string& path,
+                             bool inline_file) {
+  const uint64_t size = file_size(path);
+  const std::string name = path_filename(path);
+  const std::string mime = raw_mime_for(path);
+  // Open before the headers go out: once they are sent, the body has to be the
+  // file itself.
+  auto file = std::make_shared<std::ifstream>();
+#ifdef _WIN32
+  file->open(utf8_to_wide(path).c_str(), std::ios::binary);
+#else
+  file->open(path.c_str(), std::ios::binary);
+#endif
+  if (!file->is_open()) return false;
+  res.set_header("Content-Disposition",
+                 std::string(inline_file ? "inline" : "attachment") +
+                     "; filename=\"" + ascii_download_name(name) +
+                     "\"; filename*=UTF-8''" + rfc5987_name(name));
+  res.set_header("Cache-Control", "no-store");
+  res.set_header("Access-Control-Allow-Origin", "*");
+  res.set_header("Access-Control-Expose-Headers",
+                 "Content-Disposition, Content-Length");
+  if (size == 0) {
+    res.set_content("", mime);
+    return true;
+  }
+  // Streamed: random access via fseek, so a 500 MB video never has to sit in
+  // memory. (Range requests are not supported; a download does not need them.)
+  res.set_content_provider(
+      static_cast<size_t>(size), mime,
+      [file](size_t offset, size_t length, httplib::DataSink& sink) {
+        file->clear();
+        file->seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+        std::vector<char> buf(64 * 1024);
+        size_t remaining = length;
+        while (remaining > 0) {
+          const size_t chunk = remaining < buf.size() ? remaining : buf.size();
+          file->read(buf.data(), static_cast<std::streamsize>(chunk));
+          const std::streamsize got = file->gcount();
+          if (got <= 0) return false;
+          if (!sink.write(buf.data(), static_cast<std::size_t>(got))) return false;
+          remaining -= static_cast<std::size_t>(got);
+        }
+        return true;
+      },
+      nullptr);
+  return true;
 }
 
 /// Quote one scalar for the YAML we generate. Single quotes are literal in YAML
@@ -1732,55 +1788,13 @@ void ApiServer::Impl::install_routes() {
             const bool inline_file = req.has_param("inline") &&
                                      (req.get_param_value("inline") == "1" ||
                                       req.get_param_value("inline") == "true");
-            const std::string name = path_filename(target);
-            res.set_header("Content-Disposition",
-                           std::string(inline_file ? "inline" : "attachment") +
-                               "; filename=\"" + ascii_download_name(name) +
-                               "\"; filename*=UTF-8''" + rfc5987_name(name));
-            res.set_header("Cache-Control", "no-store");
-            res.set_header("Access-Control-Allow-Origin", "*");
-            res.set_header("Access-Control-Expose-Headers",
-                           "Content-Disposition, Content-Length");
             const std::string mime = raw_mime_for(target);
             LOG_INFO("download: ", ws.display_path(target), " (", human_size(size), ", ",
                      mime, ")");
-            if (size == 0) {
-              res.set_content("", mime);
-              return;
-            }
-            // Streamed: random access via fseek, so a 500 MB video never has to
-            // sit in memory. (Range requests are not supported; a download does
-            // not need them.)
-            // MSVC needs the wide path (a non-ASCII name would otherwise fail);
-            // POSIX takes the narrow one.
-            auto file = std::make_shared<std::ifstream>();
-#ifdef _WIN32
-            file->open(utf8_to_wide(target).c_str(), std::ios::binary);
-#else
-            file->open(target.c_str(), std::ios::binary);
-#endif
-            if (!file->is_open()) {
+            if (!stream_file_attachment(res, target, inline_file)) {
               send_error(res, 500, "io_error", "cannot open " + rel);
               return;
             }
-            res.set_content_provider(
-                static_cast<size_t>(size), mime,
-                [file](size_t offset, size_t length, httplib::DataSink& sink) {
-                  file->clear();
-                  file->seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-                  std::vector<char> buf(64 * 1024);
-                  size_t remaining = length;
-                  while (remaining > 0) {
-                    const size_t chunk = remaining < buf.size() ? remaining : buf.size();
-                    file->read(buf.data(), static_cast<std::streamsize>(chunk));
-                    const std::streamsize got = file->gcount();
-                    if (got <= 0) return false;
-                    if (!sink.write(buf.data(), static_cast<size_t>(got))) return false;
-                    remaining -= static_cast<size_t>(got);
-                  }
-                  return true;
-                },
-                nullptr);
           });
 
   svr.Put(R"(/api/workspaces/([^/]+)/file)",
@@ -3509,6 +3523,91 @@ void ApiServer::Impl::install_routes() {
       return;
     }
     send_ok(res);
+  });
+
+  // ---- files to and from the terminal -----------------------------------
+  //
+  // Upload: the body is the file, the name is in the query. It lands in the
+  // session's directory (the one the shell started in), or in `dir` when the
+  // caller names one (absolute, or relative to that directory). The name is
+  // reduced to its last component, so "../../etc/passwd" cannot walk out.
+  svr.Post(R"(/api/shell/session/([^/]+)/upload)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    std::shared_ptr<ShellSession> session = shells.find(id);
+    if (!session) {
+      send_error(res, 404, "not_found", "no such shell session: " + id);
+      return;
+    }
+    std::string name = req.has_param("name") ? req.get_param_value("name") : "";
+    name = path_filename(name);
+    if (name.empty() || name == "." || name == "..") {
+      send_error(res, 400, "bad_request", "'name' is required");
+      return;
+    }
+    if (req.body.size() > kShellUploadLimit) {
+      send_error(res, 413, "too_large",
+                 "the file is larger than " +
+                     std::to_string(kShellUploadLimit / (1024u * 1024u)) + " MB");
+      return;
+    }
+    std::string dir = session->cwd();
+    if (dir.empty()) dir = path_absolute(".");
+    const std::string want = req.has_param("dir") ? trim(req.get_param_value("dir")) : "";
+    if (!want.empty()) {
+      dir = path_is_absolute(want) ? path_absolute(want) : path_absolute(path_join(dir, want));
+    }
+    if (!make_dirs(dir)) {
+      send_error(res, 500, "io_error", "cannot create " + dir);
+      return;
+    }
+    const std::string target = path_join(dir, name);
+    std::string err;
+    if (!write_file_atomic(target, req.body, &err)) {
+      send_error(res, 500, "io_error", "cannot write " + target + ": " + err);
+      return;
+    }
+    LOG_INFO("shell: uploaded ", name, " (", req.body.size(), " bytes) to ", target);
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["path"] = target;
+    j["name"] = name;
+    j["dir"] = dir;
+    j["bytes"] = static_cast<long long>(req.body.size());
+    send_json(res, j);
+  });
+
+  // Download: the file the path names, sent as an attachment. A relative path
+  // is resolved against the session's directory. The shell sees the whole
+  // machine, so the download does too - it is the same privilege the session
+  // already has.
+  svr.Get(R"(/api/shell/session/([^/]+)/file)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    std::shared_ptr<ShellSession> session = shells.find(id);
+    if (!session) {
+      send_error(res, 404, "not_found", "no such shell session: " + id);
+      return;
+    }
+    const std::string raw = req.has_param("path") ? req.get_param_value("path") : "";
+    if (raw.empty()) {
+      send_error(res, 400, "bad_request", "'path' is required");
+      return;
+    }
+    std::string base = session->cwd();
+    if (base.empty()) base = path_absolute(".");
+    const std::string target = path_is_absolute(raw) ? path_absolute(raw)
+                                                     : path_absolute(path_join(base, raw));
+    if (!path_is_file(target)) {
+      send_error(res, 404, "not_found",
+                 path_exists(target) ? "not a regular file" : "file not found: " + target);
+      return;
+    }
+    LOG_INFO("shell: downloading ", target, " (", human_size(file_size(target)), ")");
+    if (!stream_file_attachment(res, target, false)) {
+      send_error(res, 500, "io_error", "cannot open " + target);
+      return;
+    }
   });
 
   // ---- fallback for unknown API routes ----------------------------------

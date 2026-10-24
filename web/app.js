@@ -4820,6 +4820,90 @@
     if (input && state.view === 'shell') input.focus();
   }
 
+  // ---- 文件进出 --------------------------------------------------------
+  // 路径框留空时：上传落在会话开始时的目录，下载的相对路径也从那里算。
+  function shellPathValue() {
+    var node = $('shell-path');
+    return node ? node.value.trim() : '';
+  }
+
+  function shellUpload(file) {
+    if (!file || !shell.id) {
+      toast('先开一个 shell 会话');
+      return;
+    }
+    var dir = shellPathValue();
+    var url = apiUrl('api/shell/session/' + encodeURIComponent(shell.id) + '/upload?name=' +
+                     encodeURIComponent(file.name) +
+                     (dir ? '&dir=' + encodeURIComponent(dir) : ''));
+    file.arrayBuffer().then(function (buf) {
+      return fetch(url, {
+        method: 'POST',
+        body: buf,
+        headers: { 'Content-Type': 'application/octet-stream' }
+      });
+    }).then(function (r) {
+      return r.text().then(function (t) {
+        var data = null;
+        try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
+        if (!r.ok) {
+          var msg = (data && data.error && (data.error.message || data.error.code)) ||
+                    ('HTTP ' + r.status);
+          toast('上传失败：' + msg);
+          return;
+        }
+        toast('已上传 ' + fmtBytes(data.bytes) + ' → ' + data.path);
+        shellNote('已上传：' + data.path + '（' + fmtBytes(data.bytes) + '）');
+      });
+    }).catch(function (e) {
+      toast('上传失败：' + (e && e.message ? e.message : e));
+    });
+  }
+
+  function shellDownload() {
+    if (!shell.id) {
+      toast('先开一个 shell 会话');
+      return;
+    }
+    var p = shellPathValue();
+    if (!p) {
+      toast('先填一个文件路径');
+      return;
+    }
+    var url = apiUrl('api/shell/session/' + encodeURIComponent(shell.id) + '/file?path=' +
+                     encodeURIComponent(p));
+    fetch(url).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          var msg = 'HTTP ' + r.status;
+          try {
+            var j = JSON.parse(t);
+            if (j && j.error) msg = j.error.message || j.error.code;
+          } catch (e) { /* keep the status */ }
+          throw new Error(msg);
+        });
+      }
+      var name = p.split(/[\\/]/).pop() || 'download';
+      var disp = r.headers.get('Content-Disposition') || '';
+      var m = /filename\*=UTF-8''([^;]+)/i.exec(disp);
+      if (m) {
+        try { name = decodeURIComponent(m[1]); } catch (e) { /* keep the guess */ }
+      }
+      return r.blob().then(function (blob) { return { blob: blob, name: name }; });
+    }).then(function (d) {
+      var objUrl = URL.createObjectURL(d.blob);
+      var a = document.createElement('a');
+      a.href = objUrl;
+      a.download = d.name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(objUrl); a.remove(); }, 4000);
+      toast('已下载 ' + d.name + '（' + fmtBytes(d.blob.size) + '）');
+    }).catch(function (e) {
+      toast('下载失败：' + (e && e.message ? e.message : e));
+    });
+  }
+
   var SHELL_KEYS = {
     Enter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b',
     ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D',
@@ -5040,6 +5124,13 @@
     $('shell-new').onclick = shellNew;
     $('shell-clear').onclick = shellClear;
     $('shell-stop').onclick = shellStop;
+    $('shell-upload').onclick = function () { $('shell-file').click(); };
+    $('shell-file').onchange = function () {
+      var f = $('shell-file').files && $('shell-file').files[0];
+      $('shell-file').value = '';        // the same file can be picked again
+      if (f) shellUpload(f);
+    };
+    $('shell-download').onclick = shellDownload;
     $('access-workspace').onclick = function () { setAccessScope('workspace'); };
     $('access-global').onclick = function () { setAccessScope('global'); };
     $('logs-autoscroll').onchange = function () {

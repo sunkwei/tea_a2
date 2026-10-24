@@ -72,7 +72,7 @@ async function startAgent(env) {
   const port = await freePort();
   const proc = spawn(BIN, ['--config', path.join(tmp, 'provider.yaml'), '--tea-home', home,
     '--port', String(port), '--no-console', '--log-file', path.join(tmp, 'agent.log'),
-    '--workspace', proj], { stdio: 'ignore', env: { ...process.env, ...(env || {}) } });
+    '--workspace', proj], { stdio: 'ignore', cwd: tmp, env: { ...process.env, ...(env || {}) } });
   for (let i = 0; i < 100; i++) {
     try { if ((await getJson(port, '/api/health')).status === 200) return { proc, port }; } catch {}
     await sleep(150);
@@ -162,7 +162,13 @@ try {
   // ---- the shell really runs ------------------------------------------
   await evalJs(`document.getElementById('shell-input').focus(); true`);
   const marker = 'tea-ui-marker';
-  await typeText('Write-Output ' + marker);
+  // The command *builds* the marker, so the echoed line does not contain it:
+  // what the test looks for is what the shell printed, not the echo (the echo
+  // scrolls out of the screen when the output is long).
+  const cmd = process.platform === 'win32'
+    ? "Write-Output ('tea' + '-ui-marker')"
+    : "echo tea'-'ui-marker";
+  await typeText(cmd);
   await pressKey('Enter', { code: 'Enter', vk: 13, text: '\r' });
   // The typed line is echoed by the shell, and then the command prints it
   // again: wait for both, otherwise the test would race with the output.
@@ -170,9 +176,9 @@ try {
     const text = await screenText();
     return text.split(marker).length - 1;
   };
-  const printed = await waitFor(async () => (await countMarker()) >= 2, 30000, 400);
+  const printed = await waitFor(async () => (await countMarker()) >= 1, 30000, 400);
   check('the shell prints what was typed', printed,
-    (await screenText()).slice(-200));
+    JSON.stringify((await screenText()).slice(-200)));
 
   // ---- the keys are translated the way a terminal does -----------------
   const keys = await evalJs(`(function(){
@@ -216,6 +222,44 @@ try {
     JSON.stringify(drawn));
   check('the emulator keeps the colour', drawn && drawn.fg === 1, JSON.stringify(drawn));
   check('the emulator moves the cursor', drawn && drawn.second === 'X', JSON.stringify(drawn));
+
+  // ---- files in and out ------------------------------------------------
+  // The upload goes through the real file input, so the whole path is
+  // exercised: pick a file, the bytes go to the machine, the path comes back.
+  const uploadName = 'tea-ui-upload.txt';
+  const uploadPath = path.join(tmp, uploadName);
+  fs.writeFileSync(uploadPath, 'tea-ui-upload-content');
+  await send('DOM.enable');
+  const doc = await send('DOM.getDocument');
+  const node = await send('DOM.querySelector',
+    { nodeId: doc.result.root.nodeId, selector: '#shell-file' });
+  await send('DOM.setFileInputFiles', { files: [uploadPath], nodeId: node.result.nodeId });
+  const arrived = await waitFor(() => fs.existsSync(path.join(tmp, uploadName)), 20000, 300);
+  check('the picked file lands on the machine', arrived,
+    fs.existsSync(path.join(tmp, uploadName)) ? '' : fs.readdirSync(tmp).join(','));
+  if (arrived) {
+    check('it has the bytes it was given',
+      fs.readFileSync(path.join(tmp, uploadName), 'utf-8') === 'tea-ui-upload-content');
+  }
+
+  // Downloading: the browser has to end up with the file.
+  const dlDir = path.join(tmp, 'downloads');
+  fs.mkdirSync(dlDir, { recursive: true });
+  try {
+    await send('Browser.setDownloadBehavior',
+      { behavior: 'allow', downloadPath: dlDir, eventsEnabled: true });
+  } catch (e) { /* the check below tells us whether it worked */ }
+  await evalJs(`(function(){
+    document.getElementById('shell-path').value = ${JSON.stringify(uploadName)};
+    document.getElementById('shell-download').click();
+    return true;
+  })()`);
+  const downloaded = await waitFor(() => fs.existsSync(path.join(dlDir, uploadName)), 20000, 300);
+  check('the browser downloads the file', downloaded, fs.readdirSync(dlDir).join(','));
+  if (downloaded) {
+    check('the downloaded file has the right bytes',
+      fs.readFileSync(path.join(dlDir, uploadName), 'utf-8') === 'tea-ui-upload-content');
+  }
 
   // ---- clear and end --------------------------------------------------
   await evalJs(`document.getElementById('shell-clear').click(); true`);

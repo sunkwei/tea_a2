@@ -63,10 +63,16 @@ bash / `$SHELL`，Windows 上是 PowerShell），它跑在一个真正的终端�
 | `GET` | `/api/shell/session/{id}/output?cursor=&wait=` | 读输出：`data_b64` 是从 `cursor` 之后的字节，`cursor` 是新的游标；`wait=20000` 表示没有输出就等到超时（长轮询，空闲时零流量）；`ended` / `exit_code` 说明 shell 有没有自己退出；`resync` 表示缓冲区丢过字节，客户端要重画 |
 | `POST` | `/api/shell/session/{id}/resize` | 改终端大小：`{"cols":120,"rows":40}` |
 | `DELETE` | `/api/shell/session/{id}` | 结束这个会话（shell 会被关掉） |
+| `POST` | `/api/shell/session/{id}/upload?name=&dir=` | **上传**：请求体就是文件本身（原始字节，不 base64）。落在会话的目录（shell 启动时所在的工作区，没工作区就是服务端的当前目录），`dir` 指定别的目录（绝对路径，或相对会话目录）。文件名只取最后一段，`../..` 走不出去。上限 32 MB |
+| `GET` | `/api/shell/session/{id}/file?path=` | **下载**：把文件作为附件发回去（流式，大的文件也不占内存）。相对路径按会话的目录算，绝对路径直接用。shell 能看整个机器，下载也一样 |
 
 环境变量 `TEA_AGENT_SHELL=off` 可以把整个功能关掉（`GET /api/shell` 会说为什么）；
 `TEA_AGENT_SHELL_BIN` 指定用哪个程序当 shell（默认 Windows 上是 `powershell.exe`，
 有 PowerShell 7 时优先用它；POSIX 上是 `$SHELL`）。
+
+**权限**：shell 以**运行 tea_agent 的那个用户**的身份执行——它是运维用的入口，权限边界就是
+那个用户的权限，接口本身不做鉴权。访问控制靠部署那一侧（默认绑 `127.0.0.1`，或者自己
+在前面加一层认证）。上传与下载同理：能进这个会话的人，就能把文件放上去、拿下来。
 
 #### token 用量与「缓存命中率」：为什么有的提供方一开始拿不到
 

@@ -66,8 +66,10 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 - 只应部署在受信任的网段，或通过隧道访问。
 - 文件工具默认限制在工作区内；`--allow-outside-workspace`（或设置页的「全局」）会取消这个限制，
   慎用——放宽后任何能访问这个端口的人都能读写整台机器上的文件。
-- 网页里的「终端」是这台机器的真实 shell，等同于把 `toolkit_exec` 交给每一个能访问这个端口的人。
-  不需要时用 `TEA_AGENT_SHELL=off` 把它关掉（页面上的入口会一起消失）。
+- 网页里的「终端」是这台机器的真实 shell，**以运行 tea_agent 的那个用户的身份执行**——它是
+  运维用的入口，权限边界就是这个用户的权限，接口本身不再做鉴权，所以能访问这个端口的人
+  就能用它（和 `toolkit_exec` 一样）。不需要时用 `TEA_AGENT_SHELL=off` 把它关掉（页面上的
+  入口会一起消失）。
 
 ---
 
