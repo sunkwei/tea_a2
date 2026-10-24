@@ -5,7 +5,7 @@
 ### 跑得快：并行 + 共用一个浏览器
 
 ```bash
-bash scripts/test-all.sh              # 全部：20 个 python + 29 个浏览器测试
+bash scripts/test-all.sh              # 全部：32 个 python + 32 个浏览器测试
 bash scripts/test-all.sh ui           # 只跑浏览器测试
 bash scripts/test-all.sh smoke_todo   # 只跑名字里含 smoke_todo 的
 JOBS=4 bash scripts/test-all.sh       # 少几个并行任务
@@ -57,6 +57,7 @@ bash scripts/test-all.sh                                  # 整套测试：并�
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
+node tests/ui_workspace_delete.mjs                       # 删除工作区：确认框 + 只摘登记，文件不动（需 google-chrome）
 node tests/ui_workspace_access.mjs                        # 文件访问范围开关：受限 / 全局 / 命令行锁死（需 google-chrome）
 node tests/smoke_turn_resume.mjs                          # 断线不取消轮次：回放 / 续播 / stop 仍然有效
 node tests/ui_stream_resume.mjs                           # 关掉页面再打开，接回正在跑的那一轮（需 google-chrome）
@@ -206,6 +207,11 @@ data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/image
 相对路径在表单里就地报错（且不产生目录、不发请求）；完整路径能添加并切换（标签页标题跟着变）；
 目录不存在时给出创建提示并在确认后真的建目录；路径是个文件时报服务端原因且对话框不关；服务端
 自己也拒绝相对路径（`path must be a full path`）。
+`tests/ui_workspace_delete.mjs` 覆盖「删除工作区」：下拉里每一行都有删除按钮；确认框写明是
+哪个路径、并说清**文件不会被删**；取消不动任何东西；确认后服务端索引与下拉列表都少了这一条，
+而项目目录和其中的 `.tea_agent_run` 还在（重新添加同一路径即可接着用）；删掉正在打开的那个
+工作区时页面落到剩下的第一个，没有了就回空态；删不存在的 id 返回 404。
+
 
 `tests/smoke_turn_resume.mjs` 在 HTTP 层钉住「轮次比连接活得久」：客户端读到第 8 帧就断开，
 服务端那一轮和它对 provider 的请求都继续（事件序号还在涨）；`GET /api/chat/turn` 报

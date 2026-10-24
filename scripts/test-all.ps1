@@ -120,6 +120,7 @@ if (-not $SkipUi) {
                  'ui_sidebar.mjs', 'ui_status.mjs', 'ui_todo.mjs', 'ui_queue.mjs',
                  'ui_turn_index.mjs', 'ui_stream_guard.mjs', 'ui_stream_resume.mjs',
                  'ui_second_client.mjs', 'ui_two_clients.mjs', 'ui_workspace_add.mjs',
+                 'ui_workspace_delete.mjs',
                  'ui_agent_doc.mjs', 'ui_tool_images.mjs', 'ui_artifacts.mjs',
                  'ui_crumbs.mjs', 'ui_destroy.mjs', 'ui_files_download.mjs',
                  'ui_session_export.mjs')

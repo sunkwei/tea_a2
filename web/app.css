@@ -162,6 +162,16 @@ button{font-family:inherit}
 .dd-item.active{color:var(--dsw-alias-label-primary)}
 .dd-item .check{color:var(--dsw-alias-state-business-primary)}
 .dd-item .sub{font-size:11px;color:var(--dsw-alias-label-caption);margin-left:auto}
+/* 工作区下拉里的一行：左边是切换，右边是删除。两个并排的按钮（button 里再套
+   button 是非法 HTML，浏览器会把它拆开，点删除就会顺手切工作区）。 */
+.dd-row{display:flex;align-items:center;gap:2px}
+.dd-row .dd-item{flex:1 1 auto;min-width:0}
+.dd-del{
+  flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;
+  color:var(--dsw-alias-label-caption);cursor:pointer;font-size:12px;line-height:22px;
+  border-radius:var(--dsw-radius-sm);
+}
+.dd-del:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-state-error-primary)}
 .dd-item.static{cursor:default}
 .dd-sep{height:.5px;background:var(--dsw-alias-border-l1);margin:4px 6px}
 .switch{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dsw-alias-label-tertiary);cursor:pointer}

@@ -2562,19 +2562,91 @@
     var dd = $('ws-dropdown');
     clear(dd);
     state.workspaces.forEach(function (w) {
-      var it = btn('dd-item' + (state.workspace && state.workspace.id === w.id ? ' active' : ''), w.name, function () {
+      var active = state.workspace && state.workspace.id === w.id;
+      // 「切换」和「删除」是两个并排的按钮：<button> 里再套 <button> 是非法 HTML，
+      // 浏览器会把它拆开，点击也就串了（点删除会顺手切工作区）。
+      var row = el('div', 'dd-row');
+      var it = btn('dd-item' + (active ? ' active' : ''), w.name, function () {
         closeDropdowns();
         // 正在跟随一轮时切工作区：先离开（服务端照跑），别拦着人。
         if (!state.workspace || state.workspace.id !== w.id) selectWorkspace(w.id);
       });
       it.appendChild(el('span', 'sub', w.exists === false ? '路径不存在' : (w.sessions || 0) + ' 会话'));
-      dd.appendChild(it);
+      row.appendChild(it);
+      var del = btn('dd-del', '✕', function (e) {
+        e.stopPropagation();
+        closeDropdowns();
+        deleteWorkspaceDialog(w);
+      });
+      del.title = '删除工作区：' + w.name;
+      del.setAttribute('aria-label', '删除工作区 ' + w.name);
+      row.appendChild(del);
+      dd.appendChild(row);
     });
     dd.appendChild(el('div', 'dd-sep'));
     dd.appendChild(btn('dd-item', '＋ 添加工作区…', function () {
       closeDropdowns();
       openAddWorkspace(false);   // 只是打开一个对话框，不影响正在跑的轮次
     }));
+  }
+  /* 删除工作区 = 只把它从索引（workspaces.json）里摘掉。项目目录和其中的
+     .tea_agent_run（会话、记忆、agent.md）都不动，之后重新添加同一路径即可继续用。
+     真要删文件的是设置页的「销毁」，那是另一件事（连 tea home 一起清掉）。 */
+  function deleteWorkspaceDialog(w) {
+    var body = el('div');
+    body.appendChild(el('div', 'desc', '从工作区列表中删除「' + w.name + '」？'));
+    var row = el('div', 'field');
+    row.appendChild(el('label', null, '路径'));
+    row.appendChild(el('span', 'mono', w.path || ''));
+    body.appendChild(row);
+    body.appendChild(el('div', 'desc',
+      '只删除登记信息：项目目录和其中的 .tea_agent_run（会话、记忆等）都不会被删除，' +
+      '以后重新添加同一个路径就能接着用。'));
+    openDialog('删除工作区', body, [
+      { label: '取消', onClick: closeDialog },
+      {
+        label: '删除', primary: true, onClick: function () {
+          closeDialog();
+          removeWorkspace(w);
+        }
+      }
+    ]);
+  }
+  function removeWorkspace(w) {
+    var wasCurrent = !!(state.workspace && state.workspace.id === w.id);
+    return api('api/workspaces/' + encodeURIComponent(w.id), { method: 'DELETE' }).then(function () {
+      toast('已删除工作区：' + w.name);
+      if (wasCurrent) {
+        // 当前工作区没了：先离开正在跟随的轮次（服务端照跑），再把界面清空。
+        if (state.streaming) detachStream();
+        state.workspace = null; state.sessions = []; state.session = null;
+        state.messages = []; state.live = null; state.streamError = null;
+        state.draft = false;
+        state.trajectory = []; state.lastTrajectoryId = null;
+        state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
+        state.turnSteps = 0; state.turnStartAt = 0;
+        clearQueue(); clearForkPoint(true);
+        setTopicUrl(null); setTabSession(null);
+        saveLS();
+      }
+      // 列表以服务端为准（顺序、路径是否存在、会话数都可能变了）。
+      return api('api/workspaces').then(function (d) {
+        state.workspaces = d.workspaces || [];
+        state.indexPath = d.index_path || state.indexPath;
+        renderWorkspaceMenu(); renderWorkspaceChip();
+        if (!wasCurrent) return;
+        renderSessions(); renderChat(); renderCrumbs();
+        var next = state.workspaces[0];
+        if (next) return selectWorkspace(next.id, true);   // silent：不刷「已切换」的提示
+        // 一个都不剩：回到「还没有工作区」的空态。
+        renderSettings(); renderMetrics();
+      }, function () {
+        // 列表刷新失败：删除本身已经生效了（下拉里那条可能还留着，再点一次会
+        // 提示「找不到」，不会误删别的东西）。
+      });
+    }, function (e) {
+      toast('删除失败：' + ((e && e.message) ? e.message : '未知错误'));
+    });
   }
   /* 会话索引：标题 + 相对时间 + 消息条数，当前会话高亮，行内改名/删除。
      排序在 loadSessions 里做（最新的在前），这里只负责渲染。 */
