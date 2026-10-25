@@ -104,12 +104,12 @@ bool PtySession::spawn(const std::string& shell, const std::string& cwd, int col
   }
   if (grantpt(master) != 0) {
     *err = "cannot grant access to the pseudo terminal: " + errno_text();
-    close(master);
+    ::close(master);
     return false;
   }
   if (unlockpt(master) != 0) {
     *err = "cannot unlock the pseudo terminal: " + errno_text();
-    close(master);
+    ::close(master);
     return false;
   }
   char slave_path[PATH_MAX];
@@ -117,7 +117,7 @@ bool PtySession::spawn(const std::string& shell, const std::string& cwd, int col
   const int name_rc = ptsname_r(master, slave_path, sizeof(slave_path));
   if (name_rc != 0 || slave_path[0] == '\0') {
     *err = "cannot find the pseudo terminal's name: " + std::string(std::strerror(name_rc));
-    close(master);
+    ::close(master);
     return false;
   }
 
@@ -132,7 +132,7 @@ bool PtySession::spawn(const std::string& shell, const std::string& cwd, int col
   const pid_t child = fork();
   if (child < 0) {
     *err = "cannot start the shell: " + errno_text();
-    close(master);
+    ::close(master);
     return false;
   }
   if (child == 0) {
@@ -148,8 +148,8 @@ bool PtySession::spawn(const std::string& shell, const std::string& cwd, int col
     if (dup2(slave, STDIN_FILENO) < 0) _exit(127);
     if (dup2(slave, STDOUT_FILENO) < 0) _exit(127);
     if (dup2(slave, STDERR_FILENO) < 0) _exit(127);
-    if (slave > STDERR_FILENO) close(slave);
-    close(master);
+    if (slave > STDERR_FILENO) ::close(slave);
+    ::close(master);
     if (!cwd.empty() && chdir(cwd.c_str()) != 0) {
       // Staying in the old directory is better than not starting at all.
     }
@@ -245,7 +245,7 @@ bool PtySession::send_raw(const std::string& data, std::string* err) {
   std::size_t sent = 0;
   const int64_t deadline = now_ms() + 5000;
   while (sent < data.size()) {
-    const ssize_t n = write(master_, data.data() + sent, data.size() - sent);
+    const ssize_t n = ::write(master_, data.data() + sent, data.size() - sent);
     if (n > 0) {
       sent += static_cast<std::size_t>(n);
       continue;
@@ -304,7 +304,7 @@ void PtySession::terminate_raw() {
     child_pid_.store(-1);
   }
   if (master_ >= 0) {
-    close(master_);
+    ::close(master_);
     master_ = -1;
   }
 }
