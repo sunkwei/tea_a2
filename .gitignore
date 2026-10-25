@@ -14,6 +14,7 @@ cmake-build-*/
 .vscode/
 .idea/
 *.swp
+*.bak
 Thumbs.db
 desktop.ini
 
