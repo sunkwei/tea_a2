@@ -5,7 +5,7 @@
 **A tiny C++ agent runtime for embedded devices — one self-contained binary that exposes a local
 HTTP/SSE API, so a larger agent can drive real work on the device.**
 
-把大模型 agent 的「手和脚」放到设备上：设备只跑 `tea_a2`，推理与决策留在远端。
+把大模型 agent 的「手和脚」放到设备上;
 
 <br/>
 
@@ -43,8 +43,8 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 
 | 模式 | 说明 |
 | --- | --- |
-| **被控端（主要用途）** | 设备上只跑 `tea_a2`，上层 agent 通过 `/api/chat` 下发任务，用 SSE 收结果和工具执行过程 |
-| **独立运行** | 设备或开发机上直接打开内置 Web UI，人机对话；配置里直接填 LLM 的 `api_url` / `api_key` |
+| **主控/被控** | 设备上跑 `tea_a2`，上层 agent (也可以是级联的 tea_a2) 通过 `/api/chat` 下发任务，用 SSE 收结果和工具执行过程 |
+| **独立运行** | 设备或开发机上直接打开内置 Web UI，人机对话 |
 
 设计上的取舍都是为「一个文件丢上设备就能跑」：
 
@@ -56,7 +56,7 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
   pty / ConPTY 上；浏览器里直接敲命令，**不经过模型**，也不经过 agent 的工具边界。
 ## ⚠️ 安全须知
 
-**这个程序由 tea_agent 项目创建 0.1 版本；之后版本由 a2 自己进化完成，模型使用 deepseek-flash **
+**这个程序由 tea_agent 项目创建 0.1 版本；之后版本由 a2 自己进化完成，模型使用 deepseek-flash**
 
 **这个程序没有任何认证机制。** `toolkit_exec` 可以执行任意系统命令，所以：
 
