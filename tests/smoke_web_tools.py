@@ -131,19 +131,32 @@ class MockProvider(BaseHTTPRequestHandler):
         if self.path == "/v1/tools/search":
             payload = self._read_json()
             MockProvider.records["search"].append(
-                {"payload": payload, "auth": self.headers.get("Authorization")}
+                {
+                    "payload": payload,
+                    "auth": self.headers.get("Authorization"),
+                    # Which mock served it: the chat provider and the search
+                    # provider are two different servers.
+                    "port": self.server.server_address[1],
+                }
             )
             self._send_json(SEARCH_RESPONSE)
             return
         if self.path == "/v1/tools/fetch":
             payload = self._read_json()
             MockProvider.records["fetch"].append(
-                {"payload": payload, "auth": self.headers.get("Authorization")}
+                {
+                    "payload": payload,
+                    "auth": self.headers.get("Authorization"),
+                    "port": self.server.server_address[1],
+                }
             )
             self._send_json(FETCH_RESPONSE)
             return
         if self.path == "/v1/chat/completions":
             payload = self._read_json()
+            # The key tells which provider the turn ran on.
+            payload["_auth"] = self.headers.get("Authorization")
+            payload["_port"] = self.server.server_address[1]
             MockProvider.records["chat"].append(payload)
             self._send_chat(self._chat_body(payload))
             return
@@ -318,6 +331,302 @@ def drive_turn(port, workspace_id, provider, message="smoke", stop_after=None):
     return events
 
 
+# The `search:` section of provider.yaml: an independent provider for the web
+# tools. The chat can run on a provider without web access at all and still
+# search the web - the searches are billed to the search provider's account.
+#
+#   chat_only : a chat provider without any web capability
+#   chat_own  : a chat provider that can search itself
+#   searcher  : the provider the `search:` section points at
+#
+# The chat providers and the search provider are two DIFFERENT mock servers,
+# so "which server answered" is observable.
+SEARCH_CONFIG = """version: 1
+providers:
+  chat_only:
+    api_url: http://127.0.0.1:%(chat)d
+    api_key: sk-chat-only
+    default_model: mock-chat
+    models:
+      mock-chat:
+        max_context_tokens: 32768
+        max_output_tokens: 4096
+        supports_tools: true
+  chat_own:
+    api_url: http://127.0.0.1:%(chat)d
+    api_key: sk-chat-own
+    default_model: mock-chat
+    supports_search: true
+    supports_fetch: true
+    models:
+      mock-chat:
+        max_context_tokens: 32768
+        max_output_tokens: 4096
+        supports_tools: true
+  searcher:
+    api_url: http://127.0.0.1:%(search)d
+    api_key: sk-search
+    default_model: mock-chat
+    supports_search: true
+    supports_fetch: true
+    models:
+      mock-chat:
+        max_context_tokens: 32768
+        max_output_tokens: 4096
+        supports_tools: true
+%(search_section)ssettings:
+  stream: true
+  web_tool_timeout_ms: 3000
+  web_tool_connect_timeout_ms: 2000
+"""
+
+
+def start_agent(binary, tmp, config_path, ws_dir, port, log_path):
+    return subprocess.Popen(
+        [
+            binary,
+            "--config",
+            config_path,
+            "--tea-home",
+            os.path.join(tmp, "home"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--no-console",
+            "--log-file",
+            log_path,
+            "--workspace",
+            ws_dir,
+        ]
+    )
+
+
+def stop_agent(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def first_workspace(port):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/api/workspaces")
+    workspaces = json.loads(conn.getresponse().read())["workspaces"]
+    return workspaces[0]["id"]
+
+
+def api_providers(port):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/api/providers")
+    return json.loads(conn.getresponse().read())
+
+
+def tool_results_of(events):
+    return {e["name"]: e for e in events if e.get("type") == "tool_result"}
+
+
+def run_search_section_agent(binary, tmp, name, search_section, chat_port, search_port, failures):
+    """Start one agent with the given `search:` section and return its port."""
+    ws_dir = os.path.join(tmp, "ws_" + name)
+    os.makedirs(ws_dir)
+    config_path = os.path.join(tmp, "provider_%s.yaml" % name)
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(
+            SEARCH_CONFIG
+            % {
+                "chat": chat_port,
+                "search": search_port,
+                "search_section": search_section,
+            }
+        )
+    port = free_port()
+    proc = start_agent(
+        binary, tmp, config_path, ws_dir, port, os.path.join(tmp, "log_%s.txt" % name)
+    )
+    if not wait_health(port):
+        failures.append("%s: the agent did not become healthy" % name)
+        stop_agent(proc)
+        return None, None
+    return port, proc
+
+
+def search_provider_phases(binary, chat_port, search_port, failures):
+    """Phases for the independent search provider (the `search:` section)."""
+    tmp = tempfile.mkdtemp(prefix="tea_webtools_search_")
+    try:
+        # ---- phase 2: a chat without web access still gets the tools -----
+        port, proc = run_search_section_agent(
+            binary, tmp, "fallback", "search:\n  provider: searcher\n", chat_port, search_port,
+            failures,
+        )
+        if port is None:
+            return
+        try:
+            workspace_id = first_workspace(port)
+
+            # The API tells the UI which provider serves the web tools.
+            sp = api_providers(port).get("search_provider", {})
+            if sp.get("provider") != "searcher":
+                failures.append("phase 2: /api/providers does not report the search provider: %r" % sp)
+            if not sp.get("supports_search") or not sp.get("supports_fetch"):
+                failures.append("phase 2: the search provider's capabilities are missing: %r" % sp)
+            if sp.get("error"):
+                failures.append("phase 2: the search provider reports an error: %r" % sp)
+
+            before_chat = len(MockProvider.records["chat"])
+            before_search = len(MockProvider.records["search"])
+            before_fetch = len(MockProvider.records["fetch"])
+            events = drive_turn(port, workspace_id, "chat_only")
+            results = tool_results_of(events)
+            for tool in ("toolkit_search", "toolkit_fetch"):
+                r = results.get(tool)
+                if r is None or not r.get("ok"):
+                    failures.append(
+                        "phase 2: %s failed on a chat provider without web access: %r"
+                        % (tool, (r or {}).get("output", "<missing>")[:200])
+                    )
+            for chat in MockProvider.records["chat"][before_chat:]:
+                offered = {t["function"]["name"] for t in chat.get("tools", [])}
+                for tool in ("toolkit_search", "toolkit_fetch"):
+                    if tool not in offered:
+                        failures.append(
+                            "phase 2: the search provider did not advertise %s to the chat" % tool
+                        )
+            calls = MockProvider.records["search"][before_search:]
+            if not calls:
+                failures.append("phase 2: no search request reached the search provider")
+            else:
+                call = calls[-1]
+                if call["port"] != search_port:
+                    failures.append(
+                        "phase 2: the search request went to port %s instead of the search "
+                        "provider (%s)" % (call["port"], search_port)
+                    )
+                if call["auth"] != "Bearer sk-search":
+                    failures.append("phase 2: the search request used the wrong key: %r" % call["auth"])
+            calls = MockProvider.records["fetch"][before_fetch:]
+            if not calls:
+                failures.append("phase 2: no fetch request reached the search provider")
+            else:
+                call = calls[-1]
+                if call["port"] != search_port or call["auth"] != "Bearer sk-search":
+                    failures.append(
+                        "phase 2: the fetch did not go to the search provider: %r" % call
+                    )
+
+            # ---- phase 2b: a chat that can search keeps its own searches --
+            before_search = len(MockProvider.records["search"])
+            before_fetch = len(MockProvider.records["fetch"])
+            events = drive_turn(port, workspace_id, "chat_own")
+            results = tool_results_of(events)
+            r = results.get("toolkit_search")
+            if r is None or not r.get("ok"):
+                failures.append(
+                    "phase 2b: the chat provider's own search failed: %r"
+                    % (r or {}).get("output", "<missing>")[:200]
+                )
+            calls = MockProvider.records["search"][before_search:]
+            if not calls:
+                failures.append("phase 2b: no search request was sent")
+            else:
+                call = calls[-1]
+                if call["port"] != chat_port or call["auth"] != "Bearer sk-chat-own":
+                    failures.append(
+                        "phase 2b: the chat provider did not serve its own search: %r" % call
+                    )
+            calls = MockProvider.records["fetch"][before_fetch:]
+            if not calls:
+                failures.append("phase 2b: no fetch request was sent")
+            else:
+                call = calls[-1]
+                if call["port"] != chat_port or call["auth"] != "Bearer sk-chat-own":
+                    failures.append(
+                        "phase 2b: the chat provider did not serve its own fetch: %r" % call
+                    )
+        finally:
+            stop_agent(proc)
+
+        # ---- phase 3: `always: true` routes every call to the search
+        # provider, even when the chat could have served it --------------
+        port, proc = run_search_section_agent(
+            binary, tmp, "always", "search:\n  provider: searcher\n  always: true\n", chat_port,
+            search_port, failures,
+        )
+        if port is not None:
+            try:
+                workspace_id = first_workspace(port)
+                before_search = len(MockProvider.records["search"])
+                before_fetch = len(MockProvider.records["fetch"])
+                events = drive_turn(port, workspace_id, "chat_own")
+                results = tool_results_of(events)
+                for tool in ("toolkit_search", "toolkit_fetch"):
+                    r = results.get(tool)
+                    if r is None or not r.get("ok"):
+                        failures.append(
+                            "phase 3: %s failed: %r" % (tool, (r or {}).get("output", "<missing>")[:200])
+                        )
+                calls = MockProvider.records["search"][before_search:]
+                if not calls:
+                    failures.append("phase 3: no search request was sent")
+                else:
+                    call = calls[-1]
+                    if call["port"] != search_port or call["auth"] != "Bearer sk-search":
+                        failures.append(
+                            "phase 3: 'always: true' did not route the search to the search "
+                            "provider: %r" % call
+                        )
+                calls = MockProvider.records["fetch"][before_fetch:]
+                if not calls:
+                    failures.append("phase 3: no fetch request was sent")
+                else:
+                    call = calls[-1]
+                    if call["port"] != search_port or call["auth"] != "Bearer sk-search":
+                        failures.append(
+                            "phase 3: 'always: true' did not route the fetch to the search "
+                            "provider: %r" % call
+                        )
+            finally:
+                stop_agent(proc)
+
+        # ---- phase 4: a broken `search:` section is reported, not ignored -
+        port, proc = run_search_section_agent(
+            binary, tmp, "broken", "search:\n  provider: ghost\n", chat_port, search_port, failures
+        )
+        if port is not None:
+            try:
+                sp = api_providers(port).get("search_provider", {})
+                if "ghost" not in (sp.get("error") or ""):
+                    failures.append(
+                        "phase 4: the unknown search provider was not reported: %r" % sp
+                    )
+                workspace_id = first_workspace(port)
+                before_chat = len(MockProvider.records["chat"])
+                events = drive_turn(port, workspace_id, "chat_only")
+                results = tool_results_of(events)
+                r = results.get("toolkit_search")
+                if r is None or r.get("ok"):
+                    failures.append("phase 4: the search tool should have failed: %r" % (r or {}))
+                elif "search:" not in r.get("output", ""):
+                    failures.append(
+                        "phase 4: the failure does not mention the search: section: %r"
+                        % r.get("output", "")[:200]
+                    )
+                for chat in MockProvider.records["chat"][before_chat:]:
+                    offered = {t["function"]["name"] for t in chat.get("tools", [])}
+                    for tool in ("toolkit_search", "toolkit_fetch"):
+                        if tool in offered:
+                            failures.append(
+                                "phase 4: %s was advertised although no provider can serve it"
+                                % tool
+                            )
+            finally:
+                stop_agent(proc)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     binary = (
         sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO_ROOT, "build", "bin", "tea_agent")
@@ -329,6 +638,12 @@ def main():
     mock = ThreadingHTTPServer(("127.0.0.1", 0), MockProvider)
     threading.Thread(target=mock.serve_forever, daemon=True).start()
     mock_port = mock.server_address[1]
+
+    # A second mock on its own port: the search provider is a *different*
+    # provider, so "which server answered the search" has to be observable.
+    search_mock = ThreadingHTTPServer(("127.0.0.1", 0), MockProvider)
+    threading.Thread(target=search_mock.serve_forever, daemon=True).start()
+    search_port = search_mock.server_address[1]
 
     tmp = tempfile.mkdtemp(prefix="tea_webtools_")
     agent_port = free_port()
@@ -558,6 +873,9 @@ settings:
             call = MockProvider.records["fetch"][0]
             if call["payload"].get("url") != "https://example.com/doc":
                 failures.append("fetch payload wrong: %r" % call["payload"])
+
+        # ---- the independent search provider (the `search:` section) ------
+        search_provider_phases(binary, mock_port, search_port, failures)
     finally:
         proc.terminate()
         try:
@@ -565,6 +883,7 @@ settings:
         except subprocess.TimeoutExpired:
             proc.kill()
         mock.shutdown()
+        search_mock.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:

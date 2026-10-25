@@ -178,6 +178,22 @@ provider、注释和 `settings:` 原样保留，配置随即热加载生效，�
 --help                # 全部参数
 ```
 
+### 对话和搜索可以分家（`search:` 段）
+
+网页搜索/抓取工具（`toolkit_search` / `toolkit_fetch`）默认跟着「这一轮用的 provider」走：
+provider 声明了 `supports_search` 才看得见。这对大多数场景够了，但**对话用的 provider 和
+搜索用的 provider 往往不是同一个账号**——本地模型没有联网能力，而搜索是按次计费的
+（DeepSeek：各 5 元 / 1000 次成功请求）。在 `provider.yaml` 顶层加一个 `search:` 段就能拆开：
+
+```yaml
+search:
+  provider: DeepSeek      # providers: 里的一个名字：搜索请求发给它、用它的 key
+```
+
+配好之后，用一个没有任何 web 能力的 provider（比如本机 vLLM）对话，模型照样能搜网页。
+默认是**回退**（这一轮的 provider 自己能搜就还是用它）；写 `always: true` 就所有 web 调用
+都走 search provider。细节见 [配置](docs/config.md)。
+
 **控制台默认只打印 WARNING / ERROR。** 服务是长期挂在终端里的，每次请求的 `INFO`
 （`chat:`、`server:`、`toolkit_*` …）都往终端刷会把真正要紧的告警顶出屏幕；而排查问题时
 又确实需要这些细节。所以两个阈值是分开的：

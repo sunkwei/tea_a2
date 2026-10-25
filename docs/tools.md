@@ -13,6 +13,8 @@
 | `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
 | `toolkit_todo` | 把复杂任务分解成阶段列表并维护进度：`list` `set`/`replace` `add` `update` `clear`。列表存在会话里、每轮注入 system prompt、每次变更通过 SSE 的 `todo` 事件推给 UI |
 | `toolkit_task` | 汇报**排队任务**的进度：`op=update progress=0-100 note=…`，需要人确认时 `needs_confirmation=true question=…`。任务队列在 Python 侧（`sched/task_server.py`），agent 这边只报数：任务服务从这一轮的事件流里读走这些参数 |
+| `toolkit_search` | 网页搜索：结构化结果（标题 / URL / 日期 / 摘要）。**provider 级能力**——对话用的 provider 声明 `supports_search: true` 才出现在工具表里；另外配了独立搜索 provider（`provider.yaml` 顶层 `search:` 段）时也会出现，请求发给那个 provider（用它的 key）。见 [config.md](config.md) |
+| `toolkit_fetch` | 抓取单个网页 → Markdown 正文。同样是 provider 级能力（`supports_fetch`），也走独立搜索 provider |
 | `toolkit_fleet` | 管理一队设备（学校机群）：`status` `devices` `report` `collect` `exec` `upgrade` `ask`。**只在配了 `fleet_url` 时才出现在工具表里**——和 provider 不支持就不给 `toolkit_search` 一个规矩：不让模型去试一个它用不了的工具。详见 [fleet.md](fleet.md) |
 
 相对路径基于工作区根目录；默认**禁止越出工作区**，判定前会解析符号链接，所以工作区里的软链

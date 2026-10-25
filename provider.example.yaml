@@ -163,6 +163,35 @@ providers:
 # that still carries the legacy `roles:` block gets a warning at startup (roles
 # came from the Python implementation and never mapped onto anything here).
 
+# The independent search provider (optional).
+#
+# The web tools (toolkit_search / toolkit_fetch) are provider-scoped: they only
+# appear when the provider the conversation runs on declares them. That couples
+# two things that are usually NOT the same account: the chat may run on a cheap
+# local model with no web access at all, while the searches are billed to the
+# DeepSeek account (5 CNY / 1000 successful calls, each).
+#
+# The `search:` section names the provider that serves the web tools, no matter
+# which provider the conversation runs on:
+#
+#   search:
+#     provider: DeepSeek      # an entry of the `providers:` list above
+#
+# With that in place a chat on `local` (or any provider without the flags)
+# still gets toolkit_search / toolkit_fetch - the requests go to the search
+# provider, with the search provider's key.
+#
+#   * By default the turn's own provider wins when it CAN serve the tool; the
+#     search provider is the fallback. `always: true` inverts that: every web
+#     call goes to the search provider, even when the chat could have served
+#     it (one account, one bill).
+#   * `supports_search` / `supports_fetch` are inherited from the named
+#     provider; set them in the section to override.
+#   * `search_path` / `fetch_path` override the endpoints (path relative to
+#     api_url, or a full URL).
+#   * A section naming a provider that does not exist, or a provider without an
+#     api_key, is reported at startup and the web tools stay switched off.
+
 settings:
   max_iterations: 50           # tool-calling round trips per user message
   max_tool_output: 131072      # bytes of tool output fed back to the model

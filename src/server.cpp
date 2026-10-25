@@ -1668,6 +1668,18 @@ void ApiServer::Impl::install_routes() {
     }
     j["providers"] = list;
 
+    // The independent search provider (the `search:` section of provider.yaml).
+    // It is what makes the web tools available on a chat provider that has no
+    // web access of its own, so the UI needs to know about it.
+    nlohmann::json search_provider = nlohmann::json::object();
+    search_provider["configured"] = config->search.configured;
+    search_provider["provider"] = config->search.provider;
+    search_provider["supports_search"] = config->search.supports_search;
+    search_provider["supports_fetch"] = config->search.supports_fetch;
+    search_provider["always"] = config->search.always;
+    if (!config->search.error.empty()) search_provider["error"] = config->search.error;
+    j["search_provider"] = search_provider;
+
     nlohmann::json settings = nlohmann::json::object();
     settings["max_iterations"] = config->settings.max_iterations;
     settings["max_tool_output"] = config->settings.max_tool_output;

@@ -32,6 +32,10 @@ providers:
         supports_tools: true
         supports_reasoning: false
 
+search:                        # 可选：独立的搜索 provider（见下「独立的 search provider」）
+  provider: DeepSeek           # providers: 里的一个名字：web 工具发给它、用它的 key
+  # always: true               # 强制所有 web 调用都走它（默认是「回退」）
+
 settings:
   max_iterations: 50           # 单条消息最多几轮工具调用
   max_tool_output: 131072      # 回填给模型的工具输出上限（字节）
@@ -139,6 +143,52 @@ settings:
 响应要用），一次卡住的搜索会让整轮对话停十分钟，而且中途无法取消。现在 web 工具用独立的
 有界超时，用户点停止会立即中断传输（返回 `cancelled by user`）。预算用尽后这两个工具会从
 工具表里消失，模型不会继续空转重试——否则它会把 `max_iterations` 全部耗在重试上，既慢又费钱。
+
+### 独立的 search provider（`search:` 段）
+
+上面那种写法把「对话用哪个 provider」和「搜索用哪个 provider」绑死了。可这两件事通常
+**不是同一个账号**：对话可能跑在本地模型上（根本没有联网能力），而搜索是要花钱的
+（DeepSeek 按成功请求计费）。`search:` 段就是专门拆开这两件事的：
+
+```yaml
+providers:
+  local:                       # 对话跑这里，没有任何 web 能力
+    api_url: http://127.0.0.1:11434/v1
+    api_key: not-needed
+    default_model: qwen2.5-coder:7b
+    models:
+      qwen2.5-coder:7b:
+        supports_tools: true
+  DeepSeek:                    # 搜索跑这里
+    api_url: https://api.deepseek.com
+    api_key: sk-...
+    supports_search: true
+    supports_fetch: true
+    models:
+      deepseek-chat:
+        supports_tools: true
+
+search:
+  provider: DeepSeek           # ← providers: 里的一个名字
+```
+
+配好之后，用 `local` 对话时模型照样能看到 `toolkit_search` / `toolkit_fetch`；请求发给
+`DeepSeek` 的 `POST /v1/tools/search`，用的是 **DeepSeek 的 key**（不是 local 的）。
+
+规则：
+
+- **默认是「回退」**：这一轮自己的 provider 能搜就用它（便宜、同一套凭据），不能搜才走
+  `search:` 段里那个。写 `always: true` 就反过来——**所有** web 调用都走 search provider，
+  即使对话用的 provider 自己能搜（一个账号、一份账单）。
+- `supports_search` / `supports_fetch` 默认继承被指向的那个 provider；在 `search:` 段里写
+  可以覆盖。
+- `search_path` / `fetch_path` 覆盖端点（相对 `api_url` 的路径，或完整 URL）。
+- 指向一个不存在的 provider、或那个 provider 没有 `api_key`，启动时会有 WARN，
+  `GET /api/providers` 的 `search_provider.error` 里也能看到；web 工具保持关闭。
+- 也可以写成 `search_provider:`（同一个东西的另一种拼法）。
+
+`search:` 段是 provider.yaml 的**顶层**段（和 `providers:`、`settings:` 平级），
+不是某个 provider 块里的字段。
 
 ### 订阅额度（provider 级可选能力）
 

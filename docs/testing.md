@@ -96,9 +96,12 @@ node tests/ui_fork.mjs                                    # 分叉：选中编�
 node tests/ui_status.mjs                                  # 连接状态灯：抖动容忍 / 自愈 / 可点（需 google-chrome）
 ```
 
-`tests/smoke_web_tools.py` 用一个假的 provider 同时模拟 chat 与 `/v1/tools/{search,fetch}`，
-覆盖：工具按 provider 声明才出现在工具表、未声明时强制调用被拒且不外呼、端点卡住时按
-`web_tool_timeout_ms` 超时而不是拖住整轮、`/api/chat/stop` 能中断传输中的请求。
+`tests/smoke_web_tools.py` 用两个假的 provider（**两个端口**，好分辨请求是谁应的）同时模拟
+chat 与 `/v1/tools/{search,fetch}`，覆盖：工具按 provider 声明才出现在工具表、未声明时强制
+调用被拒且不外呼、端点卡住时按 `web_tool_timeout_ms` 超时而不是拖住整轮、`/api/chat/stop`
+能中断传输中的请求；以及独立的 search provider（`provider.yaml` 顶层 `search:` 段）：对话
+provider 不能搜时工具照样出现、请求发给 search provider 并用它的 key、`always: true` 时连
+「自己能搜」的 provider 也让位、段写错（provider 不存在）时报错且不给工具。
 
 `tests/smoke_tool_call_structure.py` 覆盖「请求里的工具调用结构」：provider 要把每条工具结果
 对回它答复的那次调用，而且必须一对一。MiniMax 对不是一对一的历史整个请求都拒

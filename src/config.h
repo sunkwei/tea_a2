@@ -220,6 +220,38 @@ struct Settings {
 /// the file cannot be read or parsed; `settings` is then left untouched.
 bool apply_settings_yaml(Settings* settings, const std::string& yaml_path, std::string* err);
 
+/// The independent search provider: the provider that serves the web tools
+/// (toolkit_search / toolkit_fetch) no matter which provider the conversation
+/// itself runs on.
+///
+/// It lives in its own `search:` section of provider.yaml, because the two
+/// things are paid for separately and are usually not the same account: the
+/// chat can run on a cheap local model while the searches are billed to the
+/// DeepSeek account. Declaring the capability on the chat provider instead
+/// forces the two to be the same provider - which is exactly what one wants
+/// to avoid when the chat provider has no web access at all.
+struct SearchProviderConfig {
+  /// The section is present.
+  bool configured = false;
+  /// Name of the provider entry (under `providers:`) that serves the tools.
+  std::string provider;
+  /// Effective capabilities of that provider. Declared in the `search:`
+  /// section, or inherited from the provider entry it names.
+  bool supports_search = false;
+  bool supports_fetch = false;
+  /// Send EVERY web call through the search provider, even when the turn's
+  /// own provider could serve the tool. Off (the default) => the turn's own
+  /// provider wins and the search provider is the fallback.
+  bool always = false;
+  /// Endpoint overrides for the web tools. Empty => the provider entry's own
+  /// path, else the default /v1/tools/{search,fetch} path.
+  std::string search_path;
+  std::string fetch_path;
+  /// Why the section cannot be used (unknown provider, no api_key, ...).
+  /// Empty when it is fine.
+  std::string error;
+};
+
 struct AppConfig {  std::string path;      // provider.yaml that was loaded
   std::string extra_path;  // tea_agent.yaml, if present
   std::string tea_home;  // $HOME/.tea_agent
@@ -228,6 +260,8 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   Settings settings;
   std::string active_provider;
   std::string active_model;
+  /// The independent search provider (the `search:` section of provider.yaml).
+  SearchProviderConfig search;
   std::vector<std::string> warnings;
   std::string error;
   bool loaded = false;
@@ -246,6 +280,26 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   const ProviderInfo* provider(const std::string& name) const;
   const ProviderInfo* active_provider_info() const;
   const ModelInfo* active_model_info() const;
+
+  /// The provider entry the `search:` section names (null when the section is
+  /// absent, or names a provider that does not exist).
+  const ProviderInfo* search_provider_info() const;
+
+  /// Which provider serves a web-tool call for a turn that runs on
+  /// `turn_provider`.
+  ///
+  /// The turn's own provider wins when it can serve the tool - that is the
+  /// cheap, local case, and the behaviour everybody had before. Otherwise the
+  /// independent search provider takes over: that is the whole point of the
+  /// `search:` section, the conversation can run on a provider that has no web
+  /// access at all.
+  ///
+  /// `out` receives a COPY of the chosen provider with the effective endpoint
+  /// paths applied, so the caller does not have to know where the call goes.
+  /// `via_search_provider` says whether the `search:` section was used.
+  /// False with `err` set when nothing can serve the tool.
+  bool resolve_web_tool(const ProviderInfo* turn_provider, bool want_search, ProviderInfo* out,
+                         bool* via_search_provider, std::string* err) const;
 
   /// Choose the active provider/model. Empty arguments keep the current value.
   bool set_active(const std::string& provider, const std::string& model, std::string* err);

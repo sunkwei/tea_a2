@@ -188,6 +188,7 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
   error.clear();
   providers.clear();
   provider_order.clear();
+  search = SearchProviderConfig();
   loaded = false;
   file_missing = false;
 
@@ -480,6 +481,61 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
     }
   }
 
+  // ---- the independent search provider ----------------------------------
+  // The `search:` section names the provider that serves the web tools
+  // (toolkit_search / toolkit_fetch), independently of the provider the
+  // conversation runs on. It exists because the two are usually different
+  // accounts: the chat may run on a local model with no web access at all,
+  // while the searches are billed to the DeepSeek account.
+  {
+    // `search_provider:` is accepted as a spelling of the same thing; the
+    // section is short enough that people reach for either name.
+    const YAML::Node search_node = root["search"] ? root["search"] : root["search_provider"];
+    if (search_node && search_node.IsMap()) {
+      search.configured = true;
+      search.provider = trim(ystr(search_node, "provider"));
+      if (search.provider.empty()) {
+        search.error =
+            "the 'search:' section needs a 'provider:' naming an entry of the 'providers:' list";
+        warnings.push_back(search.error);
+      } else {
+        auto it = providers.find(search.provider);
+        if (it == providers.end()) {
+          search.error = "the 'search:' section names provider '" + search.provider +
+                         "', which is not defined in this file";
+          warnings.push_back(search.error);
+        } else {
+          const ProviderInfo& p = it->second;
+          // The section may declare the capabilities itself; otherwise they
+          // are inherited from the provider entry it names. A section that
+          // says nothing and names a provider without the flags is a mistake
+          // worth a warning, not a silent "no web tools".
+          search.supports_search = yhas(search_node, "supports_search")
+                                       ? ybool(search_node, "supports_search", false)
+                                       : p.supports_search;
+          search.supports_fetch = yhas(search_node, "supports_fetch")
+                                      ? ybool(search_node, "supports_fetch", false)
+                                      : p.supports_fetch;
+          search.always = ybool(search_node, "always", false);
+          // Endpoint overrides: the section wins over the provider entry.
+          search.search_path = trim(ystr(search_node, "search_path"));
+          if (search.search_path.empty()) search.search_path = p.search_path;
+          search.fetch_path = trim(ystr(search_node, "fetch_path"));
+          if (search.fetch_path.empty()) search.fetch_path = p.fetch_path;
+          if (!search.supports_search && !search.supports_fetch) {
+            search.error = "the search provider '" + search.provider +
+                           "' declares neither supports_search nor supports_fetch";
+            warnings.push_back(search.error +
+                               " (add 'supports_search: true' to the 'search:' section)");
+          } else if (!p.has_key()) {
+            search.error = "the search provider '" + search.provider + "' has no api_key";
+            warnings.push_back(search.error + "; the web tools cannot be used");
+          }
+        }
+      }
+    }
+  }
+
   apply_settings(settings, root["settings"]);
 
   // Optional C++-specific overrides that do not belong in provider.yaml.
@@ -565,6 +621,64 @@ const ModelInfo* AppConfig::active_model_info() const {
   const ProviderInfo* p = active_provider_info();
   if (!p) return nullptr;
   return p->find_model(active_model);
+}
+
+const ProviderInfo* AppConfig::search_provider_info() const {
+  if (!search.configured || search.provider.empty()) return nullptr;
+  return provider(search.provider);
+}
+
+bool AppConfig::resolve_web_tool(const ProviderInfo* turn_provider, bool want_search,
+                                 ProviderInfo* out, bool* via_search_provider,
+                                 std::string* err) const {
+  if (via_search_provider) *via_search_provider = false;
+  if (!out) return false;
+  const char* what = want_search ? "web search" : "page fetching";
+  const char* flag = want_search ? "supports_search" : "supports_fetch";
+
+  const ProviderInfo* sp = search_provider_info();
+  const bool sp_capable =
+      sp != nullptr && (want_search ? search.supports_search : search.supports_fetch);
+  // Can the turn's own provider serve the tool? That is the cheap, local
+  // case, and the behaviour everybody had before the search: section existed.
+  const bool turn_can =
+      turn_provider && (want_search ? turn_provider->supports_search : turn_provider->supports_fetch);
+
+  // The search provider serves the call when it is the only one that can
+  // (the conversation runs on a provider without web access - the case the
+  // section exists for), or when the operator asked for it explicitly with
+  // `always: true` (one account, one bill, one set of credentials).
+  if (sp_capable && (search.always || !turn_can)) {
+    if (!sp->has_key()) {
+      if (err) *err = "the search provider '" + sp->name + "' has no api_key configured";
+      return false;
+    }
+    *out = *sp;
+    if (want_search) {
+      out->supports_search = true;
+      out->search_path = search.search_path;
+    } else {
+      out->supports_fetch = true;
+      out->fetch_path = search.fetch_path;
+    }
+    if (via_search_provider) *via_search_provider = true;
+    return true;
+  }
+
+  if (turn_can) {
+    *out = *turn_provider;
+    return true;
+  }
+
+  if (err) {
+    if (turn_provider) {
+      *err = "provider '" + turn_provider->name + "' does not support " + what + " (set " + flag +
+             ": true in provider.yaml, or point the 'search:' section at a provider that does)";
+    } else {
+      *err = "no provider is active for this turn";
+    }
+  }
+  return false;
 }
 
 bool AppConfig::set_active(const std::string& provider_name, const std::string& model_name,

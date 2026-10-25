@@ -38,7 +38,7 @@
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
 | `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
-| `GET` | `/api/providers` | provider 清单与能力标记（`supports_search` / `supports_fetch` / `supports_usage`），**不含 key** |
+| `GET` | `/api/providers` | provider 清单与能力标记（`supports_search` / `supports_fetch` / `supports_usage`），**不含 key**；另有 `search_provider` 对象：独立搜索 provider（`provider.yaml` 顶层 `search:` 段）的名字、能力与错误信息 |
 | `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
 | `GET` | `/api/providers/{name}/models` | 问这个 provider 现在提供哪些模型：服务端用 provider 自己的 key 去问 `GET {api_url}/v1/models`（key 不下发）。返回每个模型的默认配置、来源、新增了哪些、哪些已经不再提供。上游失败返回 502 与原因 |
 | `POST` | `/api/providers/{name}/models` | 把确认后的模型列表写进 `provider.yaml`：`{"models":[{"id":…,"max_context_tokens":…,"max_output_tokens":…,"supports_tools":…,"supports_reasoning":…,"supports_vision":…}]}`。**只改这个 provider 的 `models:` 块**（别的 provider、注释、settings 块原样保留），先校验再替换 |

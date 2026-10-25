@@ -76,8 +76,12 @@ class ToolRegistry {
   /// `settings` decides whether the fleet tool is advertised at all: a
   /// device that is not part of a fleet has no fleet_url, and a model that
   /// is shown a tool it cannot use only wastes a turn on it.
+  /// `config` carries the independent search provider (the `search:` section
+  /// of provider.yaml): when the turn's own provider cannot search, the web
+  /// tools are still advertised as long as that one can.
   nlohmann::json openai_tools(const ProviderInfo* provider = nullptr,
-                              const Settings* settings = nullptr) const;
+                              const Settings* settings = nullptr,
+                              const AppConfig* config = nullptr) const;
   bool has(const std::string& name) const;
 
   ToolResult execute(const std::string& name, const nlohmann::json& arguments,

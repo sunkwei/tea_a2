@@ -1205,19 +1205,66 @@ int64_t web_tool_output_limit(const ToolContext& ctx) {
   return 131072;
 }
 
+/// Which provider serves one web-tool call.
+///
+/// The turn's own provider when it can serve the tool, otherwise the
+/// independent search provider from the `search:` section of provider.yaml -
+/// that is the whole point of the section: the conversation can run on a
+/// provider without web access and still search the web.
+///
+/// `out` receives a copy of that provider (with the effective endpoint paths
+/// applied), so the caller never has to know where the call ends up.
+bool resolve_web_provider(const ToolContext& ctx, bool want_search, ProviderInfo* out,
+                          bool* via_search_provider, std::string* err) {
+  if (ctx.config) {
+    return ctx.config->resolve_web_tool(ctx.provider, want_search, out, via_search_provider, err);
+  }
+  // No configuration loaded: the turn's provider is all there is.
+  if (!ctx.provider) {
+    if (err) *err = "no provider is active for this turn";
+    return false;
+  }
+  const bool capable =
+      want_search ? ctx.provider->supports_search : ctx.provider->supports_fetch;
+  if (!capable) {
+    if (err) {
+      *err = "provider '" + ctx.provider->name + "' does not support " +
+             (want_search ? "web search" : "page fetching") + " (set " +
+             (want_search ? "supports_search" : "supports_fetch") + ": true in provider.yaml)";
+    }
+    return false;
+  }
+  *out = *ctx.provider;
+  return true;
+}
+
+/// Can a web tool be offered to the model at all? The turn's own provider can
+/// serve it, or the independent search provider (the `search:` section of
+/// provider.yaml) can.
+bool web_tool_available(const ProviderInfo* provider, const AppConfig* config, bool want_search) {
+  if (provider && (want_search ? provider->supports_search : provider->supports_fetch)) return true;
+  if (!config) return false;
+  const ProviderInfo* sp = config->search_provider_info();
+  if (!sp) return false;
+  if (!(want_search ? config->search.supports_search : config->search.supports_fetch)) return false;
+  // Without a key every call would fail with a 401, so the tool stays out of
+  // the schema (the load-time warning says why).
+  return sp->has_key();
+}
+
 ToolResult tool_search(const nlohmann::json& args, const ToolContext& ctx) {
   ToolResult result;
-  if (!ctx.provider) {
-    result.output = "error: no provider is active for this turn";
+  // The turn's own provider, or - when it cannot search - the independent
+  // search provider from the `search:` section of provider.yaml.
+  ProviderInfo wp;
+  bool via_search = false;
+  std::string err;
+  if (!resolve_web_provider(ctx, true, &wp, &via_search, &err)) {
+    result.output = "error: " + err;
     return result;
   }
-  if (!ctx.provider->supports_search) {
-    result.output = "error: provider '" + ctx.provider->name +
-                    "' does not support web search (set supports_search: true in provider.yaml)";
-    return result;
-  }
-  if (!ctx.provider->has_key()) {
-    result.output = "error: provider '" + ctx.provider->name + "' has no api_key configured";
+  if (!wp.has_key()) {
+    result.output = "error: provider '" + wp.name + "' has no api_key configured";
     return result;
   }
   const std::string budget_error = web_tool_charge(ctx);
@@ -1262,15 +1309,18 @@ ToolResult tool_search(const nlohmann::json& args, const ToolContext& ctx) {
   if (!localization.empty()) payload["localization"] = localization;
   if (need_content) payload["need_content"] = true;
 
-  const std::string url =
-      tool_endpoint_url(*ctx.provider, ctx.provider->search_path, "/v1/tools/search");
+  const std::string url = tool_endpoint_url(wp, wp.search_path, "/v1/tools/search");
   if (url.empty()) {
-    result.output = "error: provider '" + ctx.provider->name + "' has no usable api_url";
+    result.output = "error: provider '" + wp.name + "' has no usable api_url";
     return result;
   }
-  LOG_INFO("toolkit_search: ", sanitize_for_terminal(query), " (count=", count, ")");
+  LOG_INFO("toolkit_search: ", sanitize_for_terminal(query), " (count=", count, ")",
+           via_search ? (" via " + wp.name) : "");
   const Settings st = ctx.config ? ctx.config->settings : Settings();
-  const WebToolResponse resp = web_tool_post(url, ctx.provider->api_key, payload, st, ctx.cancel);
+  const WebToolResponse resp = web_tool_post(url, wp.api_key, payload, st, ctx.cancel);
+  // Which provider actually served the call: the turn's own one, or the
+  // independent search provider from the `search:` section.
+  result.meta["provider"] = wp.name;
   result.meta["url"] = url;
   result.meta["status"] = resp.status;
   result.meta["elapsed_ms"] = resp.elapsed_ms;
@@ -1329,17 +1379,17 @@ ToolResult tool_search(const nlohmann::json& args, const ToolContext& ctx) {
 
 ToolResult tool_fetch(const nlohmann::json& args, const ToolContext& ctx) {
   ToolResult result;
-  if (!ctx.provider) {
-    result.output = "error: no provider is active for this turn";
+  // The turn's own provider, or - when it cannot fetch - the independent
+  // search provider from the `search:` section of provider.yaml.
+  ProviderInfo wp;
+  bool via_search = false;
+  std::string err;
+  if (!resolve_web_provider(ctx, false, &wp, &via_search, &err)) {
+    result.output = "error: " + err;
     return result;
   }
-  if (!ctx.provider->supports_fetch) {
-    result.output = "error: provider '" + ctx.provider->name +
-                    "' does not support page fetching (set supports_fetch: true in provider.yaml)";
-    return result;
-  }
-  if (!ctx.provider->has_key()) {
-    result.output = "error: provider '" + ctx.provider->name + "' has no api_key configured";
+  if (!wp.has_key()) {
+    result.output = "error: provider '" + wp.name + "' has no api_key configured";
     return result;
   }
   const std::string budget_error = web_tool_charge(ctx);
@@ -1374,16 +1424,16 @@ ToolResult tool_fetch(const nlohmann::json& args, const ToolContext& ctx) {
 
   nlohmann::json payload = nlohmann::json::object();
   payload["url"] = url;
-  const std::string endpoint =
-      tool_endpoint_url(*ctx.provider, ctx.provider->fetch_path, "/v1/tools/fetch");
+  const std::string endpoint = tool_endpoint_url(wp, wp.fetch_path, "/v1/tools/fetch");
   if (endpoint.empty()) {
-    result.output = "error: provider '" + ctx.provider->name + "' has no usable api_url";
+    result.output = "error: provider '" + wp.name + "' has no usable api_url";
     return result;
   }
-  LOG_INFO("toolkit_fetch: ", sanitize_for_terminal(url));
+  LOG_INFO("toolkit_fetch: ", sanitize_for_terminal(url),
+           via_search ? (" via " + wp.name) : "");
   const Settings st = ctx.config ? ctx.config->settings : Settings();
-  const WebToolResponse resp =
-      web_tool_post(endpoint, ctx.provider->api_key, payload, st, ctx.cancel);
+  const WebToolResponse resp = web_tool_post(endpoint, wp.api_key, payload, st, ctx.cancel);
+  result.meta["provider"] = wp.name;
   result.meta["url"] = url;
   result.meta["endpoint"] = endpoint;
   result.meta["status"] = resp.status;
@@ -1835,7 +1885,8 @@ ToolRegistry::ToolRegistry() {
         "phrase\" for phrase matching, -word or -\"phrase\" to exclude, lang:zh,en for "
         "language filters, after:2025-01-01 / before:2026-06-01 for date filters; operators "
         "combine. The provider bills every call, so keep count small. Only available when the "
-        "current provider declares supports_search. 按查询词搜索网页并返回结构化结果。";
+        "current provider declares supports_search, or when a search provider is configured for "
+        "this installation. 按查询词搜索网页并返回结构化结果。";
     def.parameters = nlohmann::json::parse(R"JSON({
       "type": "object",
       "properties": {
@@ -1870,8 +1921,8 @@ ToolRegistry::ToolRegistry() {
     def.description =
         "Fetch one web page and return its title and Markdown body. Use after toolkit_search "
         "picked a URL, or when a specific page must be read in full. The provider bills every "
-        "call. Only available when the current provider declares supports_fetch. 抓取单个网页,"
-        "返回 Markdown 正文。";
+        "call. Only available when the current provider declares supports_fetch, or when a search "
+        "provider is configured for this installation. 抓取单个网页,返回 Markdown 正文。";
     def.parameters = nlohmann::json::parse(R"JSON({
       "type": "object",
       "properties": {
@@ -1972,14 +2023,18 @@ ToolRegistry::ToolRegistry() {
 }
 
 nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider,
-                                           const Settings* settings) const {
+                                           const Settings* settings,
+                                           const AppConfig* config) const {
   nlohmann::json arr = nlohmann::json::array();
   for (std::size_t i = 0; i < defs_.size(); ++i) {
     const ToolDef& def = defs_[i];
-    // Provider-scoped web tools are opt-in: without the provider that can
+    // Provider-scoped web tools are opt-in: without a provider that can
     // actually serve them they would only produce "unknown tool" round trips.
-    if (def.name == "toolkit_search" && !(provider && provider->supports_search)) continue;
-    if (def.name == "toolkit_fetch" && !(provider && provider->supports_fetch)) continue;
+    // The turn's own provider counts, and so does the independent search
+    // provider from the `search:` section - that is how a chat on a provider
+    // without web access still gets the web tools.
+    if (def.name == "toolkit_search" && !web_tool_available(provider, config, true)) continue;
+    if (def.name == "toolkit_fetch" && !web_tool_available(provider, config, false)) continue;
     // The fleet tool needs a fleet service to talk to. Without one the model
     // would only learn about it by calling it and failing.
     if (def.name == "toolkit_fleet" && !(settings && !settings->fleet_url.empty())) continue;

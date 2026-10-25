@@ -464,7 +464,7 @@ int main(int argc, char** argv) {
     // provider-scoped, and showing the unfiltered set here misleads debugging.
     banner += "  Tools       : ";
     const nlohmann::json advertised =
-        tools.openai_tools(config.active_provider_info(), &config.settings);
+        tools.openai_tools(config.active_provider_info(), &config.settings, &config);
     for (std::size_t i = 0; i < advertised.size(); ++i) {
       if (i) banner += ", ";
       banner += advertised[i]["function"]["name"].get<std::string>();
@@ -474,6 +474,18 @@ int main(int argc, char** argv) {
                 " provider-scoped tool(s) hidden for this provider)";
     }
     banner += "\n";
+    // The independent search provider: the web tools can be served by another
+    // provider than the one the chat runs on (the `search:` section).
+    if (config.search.configured) {
+      banner += "  Search      : " + config.search.provider;
+      if (!config.search.error.empty()) {
+        banner += " (unusable: " + config.search.error + ")";
+      } else {
+        banner += std::string(" (web tools, ") + (config.search.always ? "always" : "fallback") +
+                  ")";
+      }
+      banner += "\n";
+    }
     banner += "  Workspaces  : " + std::to_string(registry.entries().size()) + " registered (index: " +
               registry.index_path() + ")\n";
     for (std::size_t i = 0; i < registry.entries().size(); ++i) {

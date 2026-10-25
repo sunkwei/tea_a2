@@ -165,6 +165,43 @@ UTF-8）。但 JPEG 结尾是 `FF D9`，而 `0xD9` 正是 2 字节序列的前�
 
 ---
 
+## 网页搜索与抓取（provider 级能力）
+
+DeepSeek 的 `POST /v1/tools/{search,fetch}` 不是 OpenAI 标准协议，探测不了，所以**按 provider
+声明**（`supports_search` / `supports_fetch`），默认全关——每次成功调用都按次计费
+（各 5 元 / 1000 次）。
+
+### 独立的 search provider（0.12.2 起）
+
+`provider.yaml` 顶层多了一个 `search:` 段，指定**哪个 provider 提供 web 工具**：
+
+```yaml
+search:
+  provider: DeepSeek      # providers: 里的一个名字
+  always: false           # true = 所有 web 调用都走它（默认是「回退」）
+```
+
+为什么要有它：对话用哪个 provider 和搜索用哪个 provider **通常不是同一个账号**——本地模型
+没有联网能力，而搜索要花钱。以前只能把能力挂在对话用的 provider 上，等于把两件事绑死。
+
+- 解析与生效：`AppConfig::resolve_web_tool()`（config.cpp）——**本轮 provider 自己能搜就先用它**
+  （便宜、同一套凭据），不能搜才走 `search:` 段；`always: true` 反过来。
+- 工具表：`ToolRegistry::openai_tools()` 多收一个 `AppConfig*`，两个 web 工具在
+  「本轮 provider 能」**或**「search provider 能（有 key）」时才出现。
+- 调用：`tool_search` / `tool_fetch` 走解析出来的那个 provider——URL、key、端点路径全跟着换，
+  工具结果 meta 里记 `provider`。
+- 段写错（provider 不存在 / 没有 api_key）→ 启动时 WARN + 横幅 `Search : X (unusable: …)`，
+  `/api/providers` 的 `search_provider.error` 里也有；web 工具保持关闭。
+
+### 坑
+
+- `search:` 段是**全局**的（一个文件一份），所以「不支持搜索的 provider 不给工具」这种断言
+  只能在**单独的 agent 实例**里测——`tests/smoke_web_tools.py` 为此起了第二个 agent。
+- 测「请求到底是谁应的」时，mock 要能分辨来源：两个 mock 端口，records 里记 port、
+  chat 记录里塞 `_auth`/`_port`。
+
+---
+
 ## 机群（多级协同）
 
 学校场景：一台服务器 + 40 台设备，服务器和设备上都跑 `a2.service`。
