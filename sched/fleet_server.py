@@ -222,6 +222,8 @@ class Handler(BaseHTTPRequestHandler):
         labels = body.get("labels") or query.get("labels")
         if isinstance(groups, str):
             groups = [g for g in groups.split(",") if g]
+        # An empty name is the default group, like in the engine.
+        groups = [g or fleet.DEFAULT_GROUP for g in (groups or [])]
         if isinstance(names, str):
             names = [n for n in names.split(",") if n]
         if isinstance(labels, dict):

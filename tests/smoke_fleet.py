@@ -242,6 +242,45 @@ def test_ledger(tmp):
     check("a label selects", [d.name for d in ledger.select(labels={"room": "B"})] == ["class-01"])
     check("an empty selector means everything enabled", len(ledger.select()) == 3)
 
+    # No group in the ledger => the default group. A ledger that is nothing
+    # but a list of addresses therefore still has groups: exactly one.
+    plain = os.path.join(tmp, "plain.json")
+    with open(plain, "w", encoding="utf-8") as f:
+        json.dump({"devices": [
+            {"name": "ip-1", "host": "10.0.0.1"},
+            {"name": "ip-2", "host": "10.0.0.2"},
+        ]}, f)
+    plain_ledger = fleet.Ledger(plain).load()
+    check("a device with no group is in the default group",
+          all(d.group == fleet.DEFAULT_GROUP for d in plain_ledger.devices),
+          str([d.group for d in plain_ledger.devices]))
+    check("the default group selects all of them",
+          len(plain_ledger.select(groups=[fleet.DEFAULT_GROUP])) == 2)
+    check("no group at all selects all of them",
+          len(plain_ledger.select()) == 2)
+    check("an empty group name means the default group",
+          len(plain_ledger.select(groups=[""])) == 2)
+    check("another group does not select them",
+          len(plain_ledger.select(groups=["lab"])) == 0)
+
+    # A ledger that mixes both: the ungrouped ones are in the default group,
+    # and asking for another group leaves them out.
+    mixed = os.path.join(tmp, "mixed.json")
+    with open(mixed, "w", encoding="utf-8") as f:
+        json.dump({"devices": [
+            {"name": "lab-1", "host": "10.0.0.1", "group": "lab"},
+            {"name": "free-1", "host": "10.0.0.2"},
+        ]}, f)
+    mixed_ledger = fleet.Ledger(mixed).load()
+    check("a grouped device keeps its group",
+          mixed_ledger.devices[0].group == "lab")
+    check("an ungrouped device is in the default group",
+          mixed_ledger.devices[1].group == fleet.DEFAULT_GROUP)
+    check("asking for a group leaves the ungrouped ones out",
+          [d.name for d in mixed_ledger.select(groups=["lab"])] == ["lab-1"])
+    check("the default group picks the ungrouped ones",
+          [d.name for d in mixed_ledger.select(groups=[fleet.DEFAULT_GROUP])] == ["free-1"])
+
     # A broken ledger must be refused with a message, not a traceback.
     bad = os.path.join(tmp, "bad.json")
     with open(bad, "w", encoding="utf-8") as f:

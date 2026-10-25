@@ -61,6 +61,11 @@ DEFAULT_TIMEOUT = float(os.environ.get("TEA_FLEET_TIMEOUT", "15"))
 # and they are all on the same LAN, so this is high enough to finish in
 # seconds and low enough not to look like a flood.
 DEFAULT_CONCURRENCY = int(os.environ.get("TEA_FLEET_CONCURRENCY", "8"))
+# The group a device is in when the ledger does not say. A ledger that is
+# nothing but a list of addresses therefore has exactly one group, and
+# "no group" is the same thing as "the default group" - not a group with
+# an empty name that nothing can select.
+DEFAULT_GROUP = "default"
 
 
 class FleetError(Exception):
@@ -100,12 +105,12 @@ def read_token_file(path=None):
 class Device(object):
     """One device in the inventory."""
 
-    def __init__(self, name, host, port=None, group="", token=None, labels=None,
+    def __init__(self, name, host, port=None, group=None, token=None, labels=None,
                  enabled=True, probe=None):
         self.name = name
         self.host = host
         self.port = port or DEFAULT_PORT
-        self.group = group or ""
+        self.group = group or DEFAULT_GROUP
         self.token = token
         self.labels = labels or {}
         self.enabled = enabled
@@ -145,7 +150,7 @@ class Device(object):
             name=name,
             host=host,
             port=int(raw.get("port") or DEFAULT_PORT),
-            group=str(raw.get("group") or ""),
+            group=str(raw.get("group") or DEFAULT_GROUP),
             token=raw.get("token"),
             labels=raw.get("labels") or {},
             enabled=bool(raw.get("enabled", True)),
@@ -214,7 +219,9 @@ class Ledger(object):
         daily collection wants, and a batch job that names nothing should
         still do something.
         """
-        groups = set(g or "" for g in (groups or []))
+        # An empty name means the default group, so `--group ""` and
+        # `--group default` pick the same devices.
+        groups = set(g or DEFAULT_GROUP for g in (groups or []))
         names = set(names or [])
         out = []
         for d in self.devices:
