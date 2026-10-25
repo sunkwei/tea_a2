@@ -20,7 +20,7 @@ mkdir -p "$dest"
 # sed's replacement must not contain & or the delimiter.
 esc=$(printf '%s' "$repo" | sed -e 's/[&|]/\\&/g')
 
-for unit in a2 a2_task a2_wechat a2_telegram; do
+for unit in a2 a2_task a2_wechat a2_telegram a2_fleet a2_fleet_collect; do
     src="scripts/$unit.service"
     [ -f "$src" ] || continue
     out="$dest/$unit.service"
@@ -28,6 +28,14 @@ for unit in a2 a2_task a2_wechat a2_telegram; do
     echo "wrote $out"
 done
 
+# The timer is not a .service file, but it needs the same path rewrite.
+if [ -f "scripts/a2_fleet_collect.timer" ]; then
+    out="$dest/a2_fleet_collect.timer"
+    sed -e "s|%h/work/git/tea_a2|$esc|g" scripts/a2_fleet_collect.timer > "$out"
+    echo "wrote $out"
+fi
+
 systemctl --user daemon-reload
 echo ""
 echo "now: systemctl --user enable --now a2 a2_task a2_wechat a2_telegram"
+echo "     systemctl --user enable --now a2_fleet a2_fleet_collect.timer   # the fleet"

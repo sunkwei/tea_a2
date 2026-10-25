@@ -10,6 +10,8 @@
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `GET` | `/api/health` | 探活、版本（`0.12.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
+| `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
@@ -48,6 +50,68 @@
 | `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
+
+## 机群通道（服务器管 40 台设备）
+
+`--api-token <secret>`（或环境变量 `TEA_AGENT_API_TOKEN`）打开的通道，供学校服务器
+统一管理设备。**没配令牌时 `/api/exec` 根本不存在**（404），默认安装不多出任何
+新的攻击面。详见 [fleet.md](fleet.md)。
+
+### 设备侧
+
+```bash
+curl -X POST http://device:8282/api/exec \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"command": "apt-get -y upgrade", "timeout_ms": 600000, "cwd": ""}'
+```
+
+```json
+{"ok": true, "exit_code": 0, "output": "...", "elapsed_ms": 4210,
+ "timed_out": false, "truncated": false, "shell": "sh"}
+```
+
+`command` 必填；`timeout_ms` 默认 60000、上限 600000；`cwd` 相对路径按 `tea_home`
+解析，绝对路径照用。输出上限是 `max_tool_output`。
+
+### 机群服务侧（服务器上，`sched/fleet_server.py`，默认 127.0.0.1:8290）
+
+所有路由都要带 `Authorization: Bearer <token>`（或 `X-Api-Token`）。响应用统一信封
+`{code, message, request_id, data}`。
+
+| 方法 | 路径 | 干什么 |
+| --- | --- | --- |
+| `GET` | `/api/fleet/health` | 服务还在吗 |
+| `GET` | `/api/fleet/devices` | 台账（可带 `groups` / `devices` / `labels` 过滤） |
+| `GET` | `/api/fleet/status` | 最近一次采集的结果 |
+| `GET` | `/api/fleet/report` | 今天的日报（`data.markdown`） |
+| `GET` | `/api/fleet/history` | 某天的原始记录（`?day=`） |
+| `GET` | `/api/fleet/audit` | 审计日志（`?limit=`） |
+| `GET` | `/api/fleet/jobs` | 最近的任务 |
+| `GET` | `/api/fleet/job/{id}` | 一个任务的进度 |
+| `POST` | `/api/fleet/collect` | 现在采集一次 |
+| `POST` | `/api/fleet/exec` | 批量执行命令，**返回 job id，异步跑** |
+| `POST` | `/api/fleet/upgrade` | 批量升级，同上 |
+| `POST` | `/api/fleet/ask` | 让**设备自己的 a2** 回答一个 prompt |
+
+`exec` / `upgrade` 的请求体：
+
+```jsonc
+{
+  "command": "systemctl restart nginx",   // exec 用；upgrade 用 "package"
+  "groups": ["classroom-a"],              // 可选：选哪些设备
+  "devices": ["class-a-01"],              // 可选
+  "labels": {"room": "3-201"},            // 可选
+  "canary": 1,                            // 先试几台；它们失败就别动其余的
+  "batch_size": 5,                        // 一批几台
+  "pause_s": 30,                          // 批与批之间停几秒
+  "max_failure_rate": 0.2,                // 失败率超过这个就停
+  "verify": "systemctl is-active nginx",  // 升完要过的检查
+  "rollback": "apt-get install -y nginx=1.20.1-1",  // 失败时的回滚
+  "dry_run": false
+}
+```
+
+---
 
 ## 终端（这台机器上的 shell）
 

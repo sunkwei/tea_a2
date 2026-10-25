@@ -13,6 +13,7 @@
 | `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
 | `toolkit_todo` | 把复杂任务分解成阶段列表并维护进度：`list` `set`/`replace` `add` `update` `clear`。列表存在会话里、每轮注入 system prompt、每次变更通过 SSE 的 `todo` 事件推给 UI |
 | `toolkit_task` | 汇报**排队任务**的进度：`op=update progress=0-100 note=…`，需要人确认时 `needs_confirmation=true question=…`。任务队列在 Python 侧（`sched/task_server.py`），agent 这边只报数：任务服务从这一轮的事件流里读走这些参数 |
+| `toolkit_fleet` | 管理一队设备（学校机群）：`status` `devices` `report` `collect` `exec` `upgrade` `ask`。**只在配了 `fleet_url` 时才出现在工具表里**——和 provider 不支持就不给 `toolkit_search` 一个规矩：不让模型去试一个它用不了的工具。详见 [fleet.md](fleet.md) |
 
 相对路径基于工作区根目录；默认**禁止越出工作区**，判定前会解析符号链接，所以工作区里的软链
 也无法把工具带出去。这个边界可以在网页上开关——见下面的「文件访问范围」。

@@ -39,6 +39,21 @@ long long arg_int(const nlohmann::json& args, const char* key, long long def) {
   return def;
 }
 
+double arg_double(const nlohmann::json& args, const char* key, double def) {
+  if (!args.is_object()) return def;
+  auto it = args.find(key);
+  if (it == args.end() || it->is_null()) return def;
+  if (it->is_number()) return it->get<double>();
+  if (it->is_string()) {
+    try {
+      return std::stod(it->get<std::string>());
+    } catch (const std::exception&) {
+      return def;
+    }
+  }
+  return def;
+}
+
 bool arg_bool(const nlohmann::json& args, const char* key, bool def) {
   if (!args.is_object()) return def;
   auto it = args.find(key);
@@ -1401,6 +1416,165 @@ ToolResult tool_fetch(const nlohmann::json& args, const ToolContext& ctx) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// toolkit_fleet -- the school server's hands on its 40 devices
+// ---------------------------------------------------------------------------
+
+/// One JSON request to the fleet service. The fleet service holds the device
+/// inventory, the daily collection and the batch jobs; this tool only asks.
+ToolResult tool_fleet(const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  if (!ctx.config) {
+    result.output = "error: no configuration is active";
+    return result;
+  }
+  const Settings& st = ctx.config->settings;
+  if (st.fleet_url.empty()) {
+    result.output =
+        "error: no fleet service is configured (set fleet_url in the settings, or "
+        "TEA_AGENT_FLEET_URL)";
+    return result;
+  }
+
+  std::string base = st.fleet_url;
+  while (!base.empty() && base.back() == '/') base.pop_back();
+
+  const std::string action = arg_str(args, "action", "status");
+  nlohmann::json payload = nlohmann::json::object();
+  std::string path = "/api/fleet/status";
+  std::string method = "GET";
+
+  if (action == "status") {
+    path = "/api/fleet/status";
+  } else if (action == "devices") {
+    path = "/api/fleet/devices";
+  } else if (action == "report") {
+    path = "/api/fleet/report";
+  } else if (action == "collect") {
+    // Collect now. It is a fleet-wide sweep, so it takes a while - the
+    // fleet service answers when the devices have all answered.
+    path = "/api/fleet/collect";
+    method = "POST";
+    payload = nlohmann::json::object();
+  } else if (action == "exec" || action == "upgrade") {
+    path = action == "exec" ? "/api/fleet/exec" : "/api/fleet/upgrade";
+    method = "POST";
+    payload = nlohmann::json::object();
+    const std::string package = arg_str(args, "package");
+    const std::string command = arg_str(args, "command");
+    if (action == "upgrade") {
+      if (package.empty()) {
+        result.output = "error: 'package' is required for an upgrade";
+        return result;
+      }
+      payload["package"] = package;
+    } else {
+      if (command.empty()) {
+        result.output = "error: 'command' is required";
+        return result;
+      }
+      payload["command"] = command;
+    }
+    // The selectors: which devices the job touches.
+    if (args.contains("groups") && args["groups"].is_array()) {
+      payload["groups"] = args["groups"];
+    }
+    if (args.contains("devices") && args["devices"].is_array()) {
+      payload["devices"] = args["devices"];
+    }
+    if (args.contains("labels") && args["labels"].is_object()) {
+      payload["labels"] = args["labels"];
+    }
+    // The rollout policy. The defaults are the careful ones: one canary
+    // device, small batches, and a pause between them.
+    payload["canary"] = arg_int(args, "canary", action == "upgrade" ? 1 : 0);
+    payload["batch_size"] = arg_int(args, "batch_size", action == "upgrade" ? 5 : 0);
+    payload["pause_s"] = arg_int(args, "pause_s", action == "upgrade" ? 30 : 0);
+    payload["max_failure_rate"] = arg_double(args, "max_failure_rate", 0.0);
+    payload["timeout_s"] = arg_int(args, "timeout_s", action == "upgrade" ? 600 : 120);
+    const std::string verify = arg_str(args, "verify");
+    if (!verify.empty()) payload["verify"] = verify;
+    const std::string rollback = arg_str(args, "rollback");
+    if (!rollback.empty()) payload["rollback"] = rollback;
+    if (arg_bool(args, "dry_run", false)) payload["dry_run"] = true;
+  } else if (action == "ask") {
+    // The multi-level path: the DEVICE's own agent answers, with the
+    // device's own provider and its own context.
+    const std::string prompt = arg_str(args, "prompt");
+    if (prompt.empty()) {
+      result.output = "error: 'prompt' is required";
+      return result;
+    }
+    path = "/api/fleet/ask";
+    method = "POST";
+    payload = nlohmann::json::object();
+    payload["prompt"] = prompt;
+    if (args.contains("groups") && args["groups"].is_array()) payload["groups"] = args["groups"];
+    if (args.contains("devices") && args["devices"].is_array()) payload["devices"] = args["devices"];
+    payload["timeout_s"] = arg_int(args, "timeout_s", 300);
+  } else {
+    result.output = "error: unknown action '" + action +
+                    "' (status, devices, report, collect, exec, upgrade, ask)";
+    return result;
+  }
+
+  HttpRequest req;
+  req.method = method;
+  req.url = base + path;
+  if (method == "POST") {
+    req.body = dump_json(payload);
+    req.content_type = "application/json";
+  }
+  if (!st.fleet_token.empty()) {
+    req.headers.push_back(HttpHeader{"Authorization", "Bearer " + st.fleet_token});
+  }
+  // A fleet job on 40 devices is not a web request: it needs minutes, not
+  // the seconds an LLM call gets.
+  req.connect_timeout_ms = 10000;
+  req.read_timeout_ms = 900000;
+
+  LOG_INFO("toolkit_fleet: ", method, " ", path);
+  const HttpResponse resp = http_perform(req);
+  result.meta["url"] = req.url;
+  result.meta["status"] = resp.status;
+  result.meta["elapsed_ms"] = resp.elapsed_ms;
+  if (!resp.ok) {
+    result.output = "error: the fleet service did not answer: " +
+                    (resp.error.empty() ? ("HTTP " + std::to_string(resp.status)) : resp.error);
+    return result;
+  }
+  if (resp.status != 200) {
+    // The service answers errors in the envelope shape; show the message.
+    std::string message = resp.body;
+    try {
+      nlohmann::json parsed = nlohmann::json::parse(resp.body);
+      if (parsed.contains("message") && parsed["message"].is_string()) {
+        message = parsed["message"].get<std::string>();
+      }
+    } catch (const std::exception&) {
+      // not JSON: the raw body is the message
+    }
+    result.output = "error: the fleet service refused the request (HTTP " +
+                    std::to_string(resp.status) + "): " + truncate_utf8(message, 2000);
+    return result;
+  }
+  // The envelope's data is what the model wants; the wrapper is noise.
+  std::string body = resp.body;
+  try {
+    nlohmann::json parsed = nlohmann::json::parse(resp.body);
+    if (parsed.contains("data")) {
+      body = dump_json(parsed["data"]);
+    }
+  } catch (const std::exception&) {
+    // not JSON: pass it through as it is
+  }
+  bool truncated = false;
+  result.output = limit_output(body, static_cast<std::size_t>(st.max_tool_output), &truncated);
+  result.truncated = truncated;
+  result.ok = true;
+  return result;
+}
+
 }  // namespace
 
 nlohmann::json ToolDef::to_openai() const {
@@ -1710,9 +1884,95 @@ ToolRegistry::ToolRegistry() {
     })JSON");
     defs_.push_back(def);
   }
+  {
+    ToolDef def;
+    def.name = "toolkit_fleet";
+    def.description =
+        "Manage the group of devices this server looks after (the school fleet). Actions: "
+        "status (how every device is), devices (the inventory), report (today's report), "
+        "collect (ask every device how it is, now), exec (run a command on the selected "
+        "devices), upgrade (upgrade a package on them), ask (let each device's OWN agent "
+        "answer a prompt - they think with their own context). The exec and upgrade actions "
+        "take a rollout policy: canary (try this many devices first and stop if they fail), "
+        "batch_size (devices per batch), pause_s (seconds between batches), max_failure_rate "
+        "(stop the run when the failure rate is over this), verify (a command that must "
+        "succeed afterwards) and rollback (a command that undoes the change). "
+        "运维机群：查看设备状态、下发批量命令、滚动升级。";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["status", "devices", "report", "collect", "exec", "upgrade", "ask"],
+          "description": "What to do."
+        },
+        "command": {
+          "type": "string",
+          "description": "The command to run on the devices (action=exec)."
+        },
+        "package": {
+          "type": "string",
+          "description": "The package to upgrade (action=upgrade). The package manager is detected on the device."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "The question to ask the devices' own agents (action=ask)."
+        },
+        "groups": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Only the devices in these groups. Empty = every device."
+        },
+        "devices": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Only these devices, by name."
+        },
+        "labels": {
+          "type": "object",
+          "description": "Only the devices with these labels, e.g. room=A."
+        },
+        "canary": {
+          "type": "integer",
+          "description": "Try this many devices first; if they fail, leave the rest alone. Default 1 for an upgrade, 0 otherwise."
+        },
+        "batch_size": {
+          "type": "integer",
+          "description": "How many devices per batch. Default 5 for an upgrade, 0 (all at once) otherwise."
+        },
+        "pause_s": {
+          "type": "integer",
+          "description": "Seconds to wait between batches. Default 30 for an upgrade."
+        },
+        "max_failure_rate": {
+          "type": "number",
+          "description": "Stop the run when the failure rate is over this (0 = never stop)."
+        },
+        "timeout_s": {
+          "type": "integer",
+          "description": "How long one command may take on one device. Default 600 for an upgrade, 120 otherwise."
+        },
+        "verify": {
+          "type": "string",
+          "description": "A command that must succeed after the change; a device that fails it counts as failed."
+        },
+        "rollback": {
+          "type": "string",
+          "description": "A command that undoes the change, run on the devices that failed."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Show what would happen without touching a device."
+        }
+      },
+      "required": ["action"]
+    })JSON");
+    defs_.push_back(def);
+  }
 }
 
-nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider) const {
+nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider,
+                                           const Settings* settings) const {
   nlohmann::json arr = nlohmann::json::array();
   for (std::size_t i = 0; i < defs_.size(); ++i) {
     const ToolDef& def = defs_[i];
@@ -1720,6 +1980,9 @@ nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider) const {
     // actually serve them they would only produce "unknown tool" round trips.
     if (def.name == "toolkit_search" && !(provider && provider->supports_search)) continue;
     if (def.name == "toolkit_fetch" && !(provider && provider->supports_fetch)) continue;
+    // The fleet tool needs a fleet service to talk to. Without one the model
+    // would only learn about it by calling it and failing.
+    if (def.name == "toolkit_fleet" && !(settings && !settings->fleet_url.empty())) continue;
     arr.push_back(def.to_openai());
   }
   return arr;
@@ -1745,6 +2008,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     else if (name == "toolkit_agent_doc") result = tool_agent_doc(arguments, ctx);
     else if (name == "toolkit_search") result = tool_search(arguments, ctx);
     else if (name == "toolkit_fetch") result = tool_fetch(arguments, ctx);
+    else if (name == "toolkit_fleet") result = tool_fleet(arguments, ctx);
     else {
       result.ok = false;
       result.output = "error: unknown tool '" + name + "'";

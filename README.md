@@ -60,6 +60,12 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 
 **这个程序没有任何认证机制。** `toolkit_exec` 可以执行任意系统命令，所以：
 
+- 机群通道（`--api-token` 打开的 `/api/exec`）是**唯一**带令牌的部分，而且**默认关闭**：
+  不配 `--api-token` 时这个路由根本不存在（404）。但只要用了 `--host 0.0.0.0`，
+  设备上的其它 API（`/api/chat` 之类）也一起暴露了——`toolkit_exec` 能执行任意命令。
+  要么把设备放在受控的 VLAN 里，要么在前面加一层反向代理（nginx + token / mTLS）。
+  见 [多级协同与机群运维](docs/fleet.md)。
+
 - 默认绑定 `127.0.0.1`，只允许本机访问——请保持这个默认值。
 - 用 `--host 0.0.0.0` 或放到公网之前，必须自己在前面加一层认证（反向代理 + mTLS / token 校验 /
   VPN），否则等同于把设备的 shell 暴露出去。
@@ -211,6 +217,7 @@ provider、注释和 `settings:` 原样保留，配置随即热加载生效，�
 | [构建与跨平台编译](docs/build.md) | 依赖、本机构建、交叉编译（aarch64 / Windows）、产物校验 |
 | [部署](docs/deploy.md) | 嵌入式设备、静态单文件、TLS 证书、Windows 自启、systemd 单元 |
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |
+| [多级协同与机群运维](docs/fleet.md) | **一台服务器管 40 台设备**：台账、每日采集、灰度升级、审计、让设备自己的 a2 判断 |
 | [内置工具与上下文](docs/tools.md) | 每个工具、文件访问范围、上下文预算、轨迹 |
 | [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、system prompt、销毁、导出 |
 | [配置](docs/config.md) | `provider.yaml`、额度与搜索抓取、按工作区覆盖、请求头 |

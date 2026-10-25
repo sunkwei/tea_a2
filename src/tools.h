@@ -73,7 +73,11 @@ class ToolRegistry {
   /// Tools advertised to the model. Provider-scoped extras (toolkit_search /
   /// toolkit_fetch) only appear when `provider` declares support for them;
   /// a null pointer yields the portable core set.
-  nlohmann::json openai_tools(const ProviderInfo* provider = nullptr) const;
+  /// `settings` decides whether the fleet tool is advertised at all: a
+  /// device that is not part of a fleet has no fleet_url, and a model that
+  /// is shown a tool it cannot use only wastes a turn on it.
+  nlohmann::json openai_tools(const ProviderInfo* provider = nullptr,
+                              const Settings* settings = nullptr) const;
   bool has(const std::string& name) const;
 
   ToolResult execute(const std::string& name, const nlohmann::json& arguments,

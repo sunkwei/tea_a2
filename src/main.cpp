@@ -96,6 +96,8 @@ void print_usage() {
                   "  --host <addr>              bind address (default 127.0.0.1)\n"
                   "  --port <n>                 listen port (default 8282)\n"
                   "  --web-dir <path>           serve the UI from disk instead of the embedded copy\n"
+                  "  --api-token <secret>       enable the fleet channel (/api/exec, /api/status) and\n"
+                  "                             require this token for it (env: TEA_AGENT_API_TOKEN)\n"
                   "  --open                     open the web UI in the default browser\n"
                   "                             (each SSE stream keeps one HTTP thread; the pool grows\n"
                   "                              on demand - see the environment variables below)\n"
@@ -328,6 +330,20 @@ int main(int argc, char** argv) {
     config.cli_allow_outside_workspace = true;
   }
 
+  // The fleet channel's endpoint. The settings files decide (tea_agent.yaml,
+  // a workspace's settings.yaml); the environment overrides them, so a unit
+  // file does not have to carry the URL.
+  if (const char* env = std::getenv("TEA_AGENT_FLEET_URL")) {
+    if (*env) config.settings.fleet_url = env;
+  }
+  if (const char* env = std::getenv("TEA_AGENT_FLEET_TOKEN")) {
+    if (*env) config.settings.fleet_token = env;
+  }
+  if (!config.settings.fleet_url.empty()) {
+    LOG_INFO("fleet: endpoint ", config.settings.fleet_url,
+             (config.settings.fleet_token.empty() ? " (no token)" : " (with token)"));
+  }
+
   // HTTP backend: the CLI flag wins, otherwise the settings files decide
   // (tea_agent.yaml, plus a workspace's settings.yaml). Persisting
   // `http_engine: socket` is the cure for a machine where WinHTTP cannot reach
@@ -384,6 +400,13 @@ int main(int argc, char** argv) {
   ServerOptions options;
   options.host = args.get("host", "127.0.0.1");
   options.web_dir = args.get("web-dir");
+  // The fleet channel's secret. The flag wins; the environment is what a
+  // systemd unit sets, so the token does not have to sit in a unit file.
+  options.api_token = args.get("api-token");
+  if (options.api_token.empty()) {
+    const char* env = std::getenv("TEA_AGENT_API_TOKEN");
+    if (env && *env) options.api_token = env;
+  }
   try {
     options.port = std::stoi(args.get("port", "8282"));
   } catch (const std::exception&) {
@@ -440,7 +463,8 @@ int main(int argc, char** argv) {
     // List what the active provider actually advertises: web tools are
     // provider-scoped, and showing the unfiltered set here misleads debugging.
     banner += "  Tools       : ";
-    const nlohmann::json advertised = tools.openai_tools(config.active_provider_info());
+    const nlohmann::json advertised =
+        tools.openai_tools(config.active_provider_info(), &config.settings);
     for (std::size_t i = 0; i < advertised.size(); ++i) {
       if (i) banner += ", ";
       banner += advertised[i]["function"]["name"].get<std::string>();

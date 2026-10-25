@@ -23,6 +23,7 @@
 
 #include "agent.h"
 #include "archive.h"
+#include "command.h"
 #include "env.h"
 #include "html_export.h"
 #include "http.h"
@@ -203,6 +204,28 @@ void send_ok(httplib::Response& res) {
   nlohmann::json body = nlohmann::json::object();
   body["ok"] = true;
   send_json(res, body);
+}
+
+/// Compare two secrets without leaking how many characters matched.
+/// A plain == returns as soon as the first byte differs, and the time it
+/// takes is a (weak) oracle for the token itself.
+bool secret_equals(const std::string& a, const std::string& b) {
+  if (a.size() != b.size()) return false;
+  unsigned char diff = 0;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+  }
+  return diff == 0;
+}
+
+/// The secret the caller presented, if any. Two spellings: the standard
+/// Authorization header and a plain X-Api-Token header (easier to write from
+/// a shell script that talks to a device).
+std::string request_token(const httplib::Request& req) {
+  const std::string auth = req.get_header_value("Authorization");
+  const std::string prefix = "Bearer ";
+  if (starts_with(auth, prefix)) return trim(auth.substr(prefix.size()));
+  return trim(req.get_header_value("X-Api-Token"));
 }
 
 bool parse_json_body(const httplib::Request& req, nlohmann::json* out, httplib::Response& res) {
@@ -768,6 +791,8 @@ struct ApiServer::Impl {
   bool listen_ok = false;
   int64_t started_ms = 0;
   std::string web_dir;
+  /// The shared secret for /api/exec (see ServerOptions::api_token).
+  std::string api_token;
 
   std::mutex mu;  // guards registry access and `turns`
   std::map<std::string, std::shared_ptr<ChatTurn>> turns;
@@ -1195,6 +1220,107 @@ void ApiServer::Impl::install_routes() {
     // Where the mutable state lives; the settings page shows it next to
     // "销毁" so it is obvious what that button is about to delete.
     j["tea_home"] = config->tea_home;
+    send_json(res, j);
+  });
+
+  // ---- fleet channel -----------------------------------------------------
+  //
+  // Two routes a server-side fleet manager needs on every device:
+  //
+  //   GET  /api/status  a structured snapshot (version, uptime, os, cpu, mem,
+  //                     disk, the model in use, how many workspaces there are)
+  //   POST /api/exec    run one command here and get stdout+exit code back
+  //
+  // /api/exec deliberately does NOT go through the model: the point of the
+  // fleet is that "restart this service on 40 devices" costs 40 HTTP calls
+  // and nothing else - no tokens, no model, no waiting for an LLM to decide
+  // that `systemctl restart` is what it meant.
+  //
+  // Both routes are guarded by the shared token. With no token configured
+  // /api/exec does not exist (404) and /api/status is open like /api/health -
+  // a default install therefore grows no new reachable surface.
+  svr.Get("/api/status", [this](const httplib::Request& req, httplib::Response& res) {
+    if (!api_token.empty() && !secret_equals(request_token(req), api_token)) {
+      send_error(res, 401, "unauthorized",
+                 "this device's fleet channel needs the API token (Authorization: Bearer <token>)");
+      return;
+    }
+    const EnvironmentInfo& env = machine_environment();
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["name"] = env.hostname;
+    j["version"] = std::string(tea::version_string());
+    j["git_hash"] = tea::version_git_hash();
+    j["uptime_s"] = static_cast<double>(now_ms() - started_ms) / 1000.0;
+    j["provider"] = config->active_provider;
+    j["model"] = config->active_model;
+    j["config_loaded"] = config->loaded;
+    j["tea_home"] = config->tea_home;
+    j["os"] = env.os_name;
+    j["os_version"] = env.os_version;
+    j["arch"] = env.arch;
+    j["timezone"] = env.timezone;
+    j["cpu_count"] = env.cpu_count;
+    j["memory_total_bytes"] = static_cast<long long>(env.memory_total_bytes);
+    j["disk_free_bytes"] = static_cast<long long>(free_space_bytes(config->tea_home));
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      j["workspaces"] = static_cast<long long>(registry->entries().size());
+    }
+    j["active_turns"] = static_cast<long long>(active_turn_count());
+    // The fleet manager reads this to know whether it may use /api/exec here.
+    j["exec_enabled"] = !api_token.empty();
+    send_json(res, j);
+  });
+
+  svr.Post("/api/exec", [this](const httplib::Request& req, httplib::Response& res) {
+    if (api_token.empty()) {
+      // No token => no fleet channel. 404, not 403: the route is not part of
+      // this build's surface at all.
+      send_error(res, 404, "not_found",
+                 "this device has no fleet channel (start it with --api-token <token>)");
+      return;
+    }
+    if (!secret_equals(request_token(req), api_token)) {
+      send_error(res, 401, "unauthorized",
+                 "the fleet channel needs the API token (Authorization: Bearer <token>)");
+      return;
+    }
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const std::string command = json_string(body, "command");
+    if (trim(command).empty()) {
+      send_error(res, 400, "bad_request", "'command' is required");
+      return;
+    }
+    CommandOptions options;
+    options.command = command;
+    options.tmp_dir = system_temp_dir();
+    options.shell = json_string(body, "shell");
+    int timeout_ms = static_cast<int>(json_int(body, "timeout_ms", 60000));
+    if (timeout_ms < 1000) timeout_ms = 1000;
+    if (timeout_ms > 600000) timeout_ms = 600000;
+    options.timeout_ms = timeout_ms;
+    options.max_output_bytes = static_cast<std::size_t>(config->settings.max_tool_output);
+    // A relative cwd is resolved against the tea home (the process cwd is
+    // whatever the unit happened to use); an absolute one is taken as given,
+    // because a fleet job may well run in /opt/something.
+    const std::string cwd = json_string(body, "cwd");
+    if (!cwd.empty()) {
+      options.cwd = path_is_absolute(cwd) ? path_absolute(cwd)
+                                           : path_join(config->tea_home, cwd);
+    }
+    LOG_INFO("fleet: exec \"", sanitize_for_terminal(command), "\"");
+    const CommandResult run = run_command(options);
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = run.ok && run.exit_code == 0 && !run.timed_out;
+    j["exit_code"] = run.exit_code;
+    j["output"] = run.output;
+    j["elapsed_ms"] = run.elapsed_ms;
+    j["timed_out"] = run.timed_out;
+    j["truncated"] = run.output_truncated;
+    j["shell"] = run.shell_used;
+    if (!run.ok) j["error"] = run.error;
     send_json(res, j);
   });
 
@@ -3880,6 +4006,7 @@ ApiServer::~ApiServer() { stop(); }
 bool ApiServer::start(const ServerOptions& options, std::string* err) {
   options_ = options;
   impl_->web_dir = options.web_dir;
+  impl_->api_token = options.api_token;
   impl_->started_ms = now_ms();
   // Route registration builds std::regex objects; on an old libstdc++ (GCC <= 6)
   // one of those used to throw and take the whole process down with no

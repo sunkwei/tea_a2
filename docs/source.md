@@ -40,6 +40,10 @@ tests/e2e.ps1              端到端测试（155 项）；tests/sse_probe.mjs �
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
 sched/task_server.py        任务服务（Python，可选）：任务队列 + 额度闸门 + 事件流
+sched/fleet.py               机群引擎（Python，可选）：设备台账 + 并发采集 + 批量作业
+                              （灰度/分批/失败阈值/回滚）+ 审计日志 + 每日快照与报表
+sched/fleet_server.py        机群管控服务（Python，可选）：把上面的引擎变成 HTTP API，
+                              供服务器级 a2（toolkit_fleet）、机器人和定时任务调用
 sched/tea_api.py            HTTP 客户端封装（纯标准库）：Tea 说 agent，Queue 说任务队列
 sched/wechat_bot.py          微信那一端：iLink 协议（扫码登录、长轮询、CDN 媒体）
 sched/telegram_bot.py        Telegram 那一端：Bot API（长轮询、getFile/sendDocument、chat 白名单）

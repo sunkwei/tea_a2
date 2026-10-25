@@ -53,6 +53,9 @@ node tests/ui_shell.mjs                                  # 网页终端：入口
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
 python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果/串行/幂等/事件/导出
+python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）
+                                                          # + 审计 + 机群服务 API + 真二进制的 /api/status 与 /api/exec
+                                                          # + 多级链路（服务器 a2 → toolkit_fleet → 机群服务 → 设备 a2）
 python3 tests/smoke_task_order.py                          # 任务单：解析/报错/命令行排队/模板可下载
 python3 tests/smoke_telegram_bot.py                        # Telegram 前端：轮询/命令/文件/白名单/offset
 python3 tests/smoke_utf8_truncation.py                    # 文件被截断在字符中间：轮次不崩/结果是合法 UTF-8

@@ -24,6 +24,11 @@ struct ServerOptions {
   /// empty (or when a file is missing) the assets embedded in the binary are
   /// used instead.
   std::string web_dir;
+  /// Shared secret for the machine-level ops routes (/api/exec, /api/status).
+  /// Empty means those routes are switched off entirely: an unauthenticated
+  /// "run this command" endpoint on a device that may be reachable from the
+  /// network is not something to ship by default.
+  std::string api_token;
 };
 
 class ApiServer {

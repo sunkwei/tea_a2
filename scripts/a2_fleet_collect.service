@@ -1,0 +1,21 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装。
+[Unit]
+Description=tea_a2 daily fleet collection (ask every device how it is)
+Documentation=file://%h/work/git/tea_a2/docs/fleet.md
+
+[Service]
+Type=oneshot
+# 每天 07:10 采集一次：一天的报告在早上就能看到，而不是等到晚上。
+# 采集本身只读，不改设备，所以它跑在哪台设备坏了的时候都不影响别人。
+# 令牌从 ~/.tea_agent/fleet/device-token 读（和设备上 --api-token 收的是同一个）。
+# 采集是只读的：它只问设备「你怎么样」，不改任何东西。
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/fleet.py collect
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+# 40 台设备最多几分钟；十分钟还没完就当它卡住了。
+TimeoutStartSec=600
+StandardOutput=append:%h/.tea_agent/logs/a2_fleet_collect.log
+StandardError=append:%h/.tea_agent/logs/a2_fleet_collect.log

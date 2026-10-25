@@ -95,6 +95,8 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (yhas(node, "web_tool_max_calls_per_turn"))
     s.web_tool_max_calls_per_turn =
         static_cast<int>(yint(node, "web_tool_max_calls_per_turn", s.web_tool_max_calls_per_turn));
+  if (yhas(node, "fleet_url")) s.fleet_url = ystr(node, "fleet_url", s.fleet_url);
+  if (yhas(node, "fleet_token")) s.fleet_token = ystr(node, "fleet_token", s.fleet_token);
   if (yhas(node, "allow_outside_workspace"))
     s.allow_outside_workspace = ybool(node, "allow_outside_workspace", s.allow_outside_workspace);
   if (yhas(node, "stream")) s.stream = ybool(node, "stream", s.stream);

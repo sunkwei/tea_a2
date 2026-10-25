@@ -928,7 +928,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   int web_tool_calls = 0;
   // toolkit_search/toolkit_fetch only appear when this turn's provider
   // declares them; the underlying protocol is provider-specific.
-  nlohmann::json tools_json = tools_->openai_tools(provider_info);
+  nlohmann::json tools_json = tools_->openai_tools(provider_info, &config_->settings);
   // A caller that drives its own policy can hand the agent exactly the tools it
   // wants - or none at all (an empty list turns the turn into a plain
   // conversation with the model).

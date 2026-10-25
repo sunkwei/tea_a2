@@ -152,6 +152,14 @@ struct Settings {
   /// retrying would otherwise burn the whole max_iterations budget, which is
   /// both slow and (the provider bills per call) expensive.
   int web_tool_max_calls_per_turn = 10;
+  /// Where the fleet manager lives (the server-side service that keeps the
+  /// device inventory and runs the batch jobs). Empty => the `toolkit_fleet`
+  /// tool is not advertised at all, so a device that is not part of a fleet
+  /// never shows the model a tool it cannot use.
+  std::string fleet_url;
+  /// Bearer token for that service. Kept next to the URL so one place holds
+  /// everything the fleet channel needs.
+  std::string fleet_token;
   bool allow_outside_workspace = false;
   /// `--allow-outside-workspace` was given on the command line. Not a YAML key:
   /// it is a floor applied *after* every settings file is layered, so a workspace

@@ -1,0 +1,15 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装。
+[Unit]
+Description=Daily tea_a2 fleet collection (the machine status of every device)
+
+[Timer]
+# 每天 07:10 采集一次。Persistent=true 让它错过一次（比如服务器那时关机了）
+# 之后开机时补跑一次 - 报告里空一天比永远空着好。
+OnCalendar=*-*-* 07:10:00
+Persistent=true
+# 错过的就跳过，不要为了补跑而在开机时堆一串采集。
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,35 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装：
+# 它会把这几个单元装到 ~/.config/systemd/user/ 并把仓库路径换掉。
+[Unit]
+Description=tea_a2 fleet service (the control plane for the school devices)
+Documentation=file://%h/work/git/tea_a2/docs/fleet.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# append: 不会自己建目录，日志目录不在的话单元起不来。
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+# 这是「管控平面」：它拿着 40 台设备的台账，负责每日采集和批量作业。
+#
+# 两个令牌，两个文件（都是 600）：
+#   ~/.tea_agent/fleet/token        调用本服务的人要带的（服务器上的 a2、机器人）
+#   ~/.tea_agent/fleet/device-token  本服务访问设备时带的
+# 设备清单在 ~/.tea_agent/fleet/devices.json；台账里的 defaults.token 也能
+# 代替第二个文件。
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/fleet_server.py --host 127.0.0.1 --port 8290
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+# 令牌放在文件里，不在单元文件里：单元文件通常是可以被读到的。
+# TEA_FLEET_TOKEN 也可以用环境变量给，但 systemd 的 Environment= 一样会写进
+# unit 的 dump，所以文件更安全。
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:%h/.tea_agent/logs/a2_fleet.log
+StandardError=append:%h/.tea_agent/logs/a2_fleet.log
+
+[Install]
+WantedBy=default.target
