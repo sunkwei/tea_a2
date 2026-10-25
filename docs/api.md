@@ -38,6 +38,8 @@
 | `GET` | `/api/tools` | 工具定义与 JSON Schema |
 | `GET` | `/api/providers` | provider 清单与能力标记（`supports_search` / `supports_fetch` / `supports_usage`），**不含 key** |
 | `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
+| `GET` | `/api/providers/{name}/models` | 问这个 provider 现在提供哪些模型：服务端用 provider 自己的 key 去问 `GET {api_url}/v1/models`（key 不下发）。返回每个模型的默认配置、来源、新增了哪些、哪些已经不再提供。上游失败返回 502 与原因 |
+| `POST` | `/api/providers/{name}/models` | 把确认后的模型列表写进 `provider.yaml`：`{"models":[{"id":…,"max_context_tokens":…,"max_output_tokens":…,"supports_tools":…,"supports_reasoning":…,"supports_vision":…}]}`。**只改这个 provider 的 `models:` 块**（别的 provider、注释、settings 块原样保留），先校验再替换 |
 | **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}` |
 | `POST` | `/api/chat/stop` | 中断当前轮次（对所有人）。**必须带 `{"session_id":"…"}`**，否则 `cancelled` 一直是 false |
 | `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
@@ -441,6 +443,61 @@ settings:
 trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; limits 1 turns / 8388608 bytes)
 ```
 
+
+---
+
+### 查模型：问 provider 有哪些模型，回填 provider.yaml
+
+`provider.yaml` 里的 `models:` 块是手写的：provider 上了新模型、模型改了上下文窗口，
+都得人去改文件。设置页每个 provider 上的「**更新模型**」按钮做这件事：
+
+1. `GET /api/providers/{name}/models` —— 服务端拿 provider 自己的 key 去问
+   `GET {api_url}/v1/models`（跟聊天接口同一个地址推导规则：`…/v1` → `…/v1/models`，
+   裸域名 → `…/v1/models`）。回答的形状不统一，tea_a2 都读：
+
+   | 上游的回答 | 怎么读 |
+   | --- | --- |
+   | `{"data":[{"id":…}]}`（OpenAI 系） | `id` 就是模型名 |
+   | `{"models":[{"name":…}]}`（Ollama） | `name` 就是模型名 |
+   | `{"model-name":{…}}`（一张裸表） | 键就是模型名 |
+   | `{"data":["a","b"]}` | 字符串就是模型名 |
+
+   模型名之外的数字，各家放在不同的地方，tea_a2 挨个找：`context_length` /
+   `max_context_tokens` / `context_window` / `max_input_tokens` / `max_model_len`
+   （上下文），`max_completion_tokens` / `max_output_tokens`（输出上限），
+   `supported_parameters` / `capabilities` / `modalities`（工具、思考、视觉）。
+   找不到就看内置表（`deepseek-chat`、`gpt-4o` 这类常见模型），再不行就按名字猜
+   （`-reasoner` 会思考，`-vl` 能看图），最后留空由人来填。
+
+   回答长这样：
+
+   ```json
+   {"ok":true,"provider":"DeepSeek","url":"https://api.deepseek.com/v1/models",
+    "models":[{"id":"deepseek-chat","max_context_tokens":128000,"max_output_tokens":8192,
+               "supports_tools":true,"supports_reasoning":false,"supports_vision":false,
+               "note":"","source":"provider","in_config":true}],
+    "current":[{"id":"deepseek-chat","max_context_tokens":128000,"…":"…"}],
+    "added":["deepseek-v3.2"],"removed":["deepseek-coder"],
+    "warnings":["provider.yaml lists models the provider does not offer: deepseek-coder"]}
+   ```
+
+   `source` 说明这个模型的数字是**从哪来的**：`provider`（上游说的）、`config`
+   （provider.yaml 里本来就有的）、`builtin`（内置表）、`guess`（按名字猜的）、
+   `default`（都不知道）。`added` 是新出现的模型，`removed` 是文件里有、但上游已经
+   不提供的模型。
+
+2. 用户在对话框里改完，确认之后 `POST /api/providers/{name}/models`，body 是
+   `{"models":[…]}`——**要写进去的最终列表**（顺序 = 顺序，第一个就是默认模型）。
+
+   写入只动这个 provider 的 `models:` 块：别的 provider、注释、`settings:` 块
+   原样保留（provider.yaml 是给人看的文件，不能因为点了一次按钮就重排它）。
+   写完先校验（拿临时文件试加载），通过才替换并热加载配置；轮次正在跑时 409。
+
+   请求里没带的字段沿用文件里原来的值：采样参数（`temperature` / `top_p`）和
+   `reasoning_effort` 是用户自己调过的，不该被一次列表更新抹掉。
+
+> 提供方没有这个接口时（返回 404、不是 JSON、或者空列表），`GET` 会得到 502 和
+> 一句人话原因，界面照实显示——不会静默地把列表清空。
 
 ---
 

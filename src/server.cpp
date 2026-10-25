@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -26,6 +27,8 @@
 #include "html_export.h"
 #include "http.h"
 #include "log.h"
+#include "model_discovery.h"
+#include "provider_yaml.h"
 #include "shell.h"
 #include "trajectory.h"
 #include "usage.h"
@@ -225,6 +228,44 @@ std::string json_string(const nlohmann::json& j, const char* key, const std::str
   auto it = j.find(key);
   if (it == j.end() || !it->is_string()) return def;
   return it->get<std::string>();
+}
+
+int64_t json_int(const nlohmann::json& j, const char* key, int64_t def = 0) {
+  if (!j.is_object()) return def;
+  auto it = j.find(key);
+  if (it == j.end() || !it->is_number()) return def;
+  if (it->is_number_integer()) return it->get<int64_t>();
+  return static_cast<int64_t>(it->get<double>());
+}
+
+double json_double(const nlohmann::json& j, const char* key, double def = 0.0) {
+  if (!j.is_object()) return def;
+  auto it = j.find(key);
+  if (it == j.end() || !it->is_number()) return def;
+  return it->get<double>();
+}
+
+bool json_bool(const nlohmann::json& j, const char* key, bool def = false) {
+  if (!j.is_object()) return def;
+  auto it = j.find(key);
+  if (it == j.end() || !it->is_boolean()) return def;
+  return it->get<bool>();
+}
+
+/// One model, as the settings page needs it: the name, the configuration
+/// tea_a2 would write for it, and where the numbers came from.
+nlohmann::json model_to_json(const DiscoveredModel& m) {
+  nlohmann::json j = nlohmann::json::object();
+  j["id"] = m.id;
+  j["max_context_tokens"] = m.max_context_tokens;
+  j["max_output_tokens"] = m.max_output_tokens;
+  j["supports_tools"] = m.supports_tools;
+  j["supports_reasoning"] = m.supports_reasoning;
+  j["supports_vision"] = m.supports_vision;
+  j["note"] = m.note;
+  j["source"] = m.source;
+  j["in_config"] = m.in_config;
+  return j;
 }
 
 // ---------------------------------------------------------------------------
@@ -1535,6 +1576,192 @@ void ApiServer::Impl::install_routes() {
       return;
     }
     send_json(res, quota.to_json());
+  });
+
+  // ---- the model list of a provider --------------------------------------
+  //
+  // The "更新模型" button in the settings page: ask the provider what it
+  // offers right now, show the list together with the configuration tea_a2
+  // would write for every model, and - once the user confirmed it - put the
+  // result into provider.yaml.
+  //
+  // The query is made by the server with the provider's own key: the browser
+  // never sees it, and the answer never has to travel through the client to
+  // be written back.
+  svr.Get(R"(/api/providers/([^/]+)/models)", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string name = req.matches[1];
+    const ProviderInfo* p = config->provider(name);
+    if (!p) {
+      send_error(res, 404, "not_found", "no provider named '" + name + "'");
+      return;
+    }
+    ModelDiscovery discovery;
+    if (!discover_provider_models(*p, &discovery)) {
+      send_error(res, 502, "models_failed", discovery.error);
+      return;
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["provider"] = p->name;
+    j["url"] = discovery.url;
+    nlohmann::json models = nlohmann::json::array();
+    for (std::size_t i = 0; i < discovery.models.size(); ++i) {
+      models.push_back(model_to_json(discovery.models[i]));
+    }
+    j["models"] = models;
+    nlohmann::json current = nlohmann::json::array();
+    for (std::size_t i = 0; i < discovery.current.size(); ++i) {
+      current.push_back(model_to_json(discovery.current[i]));
+    }
+    j["current"] = current;
+    j["added"] = discovery.added;
+    j["removed"] = discovery.removed;
+    j["warnings"] = discovery.warnings;
+    send_json(res, j);
+  });
+
+  // Write the confirmed model list into provider.yaml. Only the `models:`
+  // block of this one provider is rewritten - the other providers, the
+  // comments and the settings block stay exactly as they were.
+  svr.Post(R"(/api/providers/([^/]+)/models)", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string name = req.matches[1];
+    const ProviderInfo* p = config->provider(name);
+    if (!p) {
+      send_error(res, 404, "not_found", "no provider named '" + name + "'");
+      return;
+    }
+    // The config is reloaded below, which frees the provider table: keep the
+    // name, not the pointer.
+    const std::string provider_name = p->name;
+
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    auto it = body.find("models");
+    if (it == body.end() || !it->is_array()) {
+      send_error(res, 400, "bad_request", "'models' must be an array of model objects");
+      return;
+    }
+    if (it->size() > 512) {
+      send_error(res, 400, "too_many_models",
+                 "a provider with more than 512 models is not a provider");
+      return;
+    }
+
+    std::vector<ModelInfo> models;
+    std::set<std::string> seen;
+    for (std::size_t i = 0; i < it->size(); ++i) {
+      const nlohmann::json& e = (*it)[i];
+      const std::string at = "model #" + std::to_string(i + 1);
+      if (!e.is_object()) {
+        send_error(res, 400, "bad_request", at + " is not an object");
+        return;
+      }
+      ModelInfo m;
+      m.name = trim(json_string(e, "id"));
+      if (m.name.empty()) {
+        send_error(res, 400, "bad_request", at + " has no id");
+        return;
+      }
+      if (m.name.size() > 200) {
+        send_error(res, 400, "bad_request", at + " has an implausibly long name");
+        return;
+      }
+      if (!seen.insert(m.name).second) {
+        send_error(res, 400, "bad_request", "model '" + m.name + "' is listed twice");
+        return;
+      }
+      m.max_context_tokens = json_int(e, "max_context_tokens", 0);
+      m.max_output_tokens = json_int(e, "max_output_tokens", 0);
+      if (m.max_context_tokens < 0 || m.max_output_tokens < 0 ||
+          m.max_context_tokens > 100000000LL || m.max_output_tokens > 100000000LL) {
+        send_error(res, 400, "bad_request",
+                   "model '" + m.name + "' has an implausible token limit");
+        return;
+      }
+      m.supports_tools = json_bool(e, "supports_tools", true);
+      m.supports_reasoning = json_bool(e, "supports_reasoning", false);
+      m.supports_vision = json_bool(e, "supports_vision", false);
+      m.note = trim(json_string(e, "note"));
+      // What the file already says about this model is kept: the sampling
+      // parameters and the reasoning effort are the user's own tuning, not
+      // something a provider can answer. A field the request does not carry is
+      // left alone as well - the settings page sends all of them, but a
+      // partial request must not silently reset the flags.
+      const ModelInfo* existing = p->find_model(m.name);
+      if (existing) {
+        m.max_context_tokens = existing->max_context_tokens;
+        m.max_output_tokens = existing->max_output_tokens;
+        m.supports_tools = existing->supports_tools;
+        m.supports_reasoning = existing->supports_reasoning;
+        m.supports_vision = existing->supports_vision;
+        m.note = existing->note;
+        m.reasoning_effort = existing->reasoning_effort;
+        m.has_temperature = existing->has_temperature;
+        m.temperature = existing->temperature;
+        m.has_top_p = existing->has_top_p;
+        m.top_p = existing->top_p;
+      }
+      if (e.contains("max_context_tokens")) {
+        m.max_context_tokens = json_int(e, "max_context_tokens", 0);
+      }
+      if (e.contains("max_output_tokens")) {
+        m.max_output_tokens = json_int(e, "max_output_tokens", 0);
+      }
+      if (e.contains("supports_tools")) {
+        m.supports_tools = json_bool(e, "supports_tools", true);
+      }
+      if (e.contains("supports_reasoning")) {
+        m.supports_reasoning = json_bool(e, "supports_reasoning", false);
+      }
+      if (e.contains("supports_vision")) {
+        m.supports_vision = json_bool(e, "supports_vision", false);
+      }
+      if (e.contains("note")) {
+        m.note = trim(json_string(e, "note"));
+      }
+      if (e.contains("reasoning_effort")) {
+        m.reasoning_effort = trim(json_string(e, "reasoning_effort", "auto"));
+      }
+      if (e.contains("temperature")) {
+        m.has_temperature = true;
+        m.temperature = json_double(e, "temperature", 0.7);
+      }
+      if (e.contains("top_p")) {
+        m.has_top_p = true;
+        m.top_p = json_double(e, "top_p", 0.9);
+      }
+      models.push_back(m);
+    }
+    if (models.empty()) {
+      send_error(res, 400, "bad_request",
+                 "the model list is empty; a provider needs at least one model");
+      return;
+    }
+
+    std::string yaml_text;
+    if (!read_file(config->path, &yaml_text)) {
+      send_error(res, 500, "io_error", "cannot read " + config->path);
+      return;
+    }
+    std::string patched, patch_err;
+    if (!patch_provider_models(yaml_text, provider_name, models, &patched, &patch_err)) {
+      send_error(res, 400, "patch_failed", patch_err);
+      return;
+    }
+    // The normal path: validate the result against a scratch file, replace
+    // provider.yaml and reload the config in place.
+    if (!apply_config_yaml(patched, "model list update for provider '" + provider_name + "'",
+                           res)) {
+      return;
+    }
+    const ProviderInfo* updated = config->provider(provider_name);
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["path"] = config->path;
+    j["provider"] = provider_name;
+    j["models"] = updated ? updated->models : std::vector<std::string>();
+    j["active"] = {{"provider", config->active_provider}, {"model", config->active_model}};
+    send_json(res, j);
   });
 
   svr.Get("/api/tools", [this](const httplib::Request&, httplib::Response& res) {

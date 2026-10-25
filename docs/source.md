@@ -9,6 +9,8 @@ src/
   message.{h,cpp}           消息模型（wire 格式 + 存储格式）
   llm.{h,cpp}               OpenAI 兼容客户端：SSE、tool_calls 聚合、重试
   usage.{h,cpp}             订阅额度查询：provider 专用端点 + 解析器（minimax_token_plan）
+  model_discovery.{h,cpp}   查 provider 有哪些模型（/v1/models）+ 默认配置推断
+  provider_yaml.{h,cpp}     原地改写 provider.yaml 里某个 provider 的 models: 块
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
   prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
   tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image/todo/task）

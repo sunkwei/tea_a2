@@ -69,6 +69,26 @@ providers:
 > `/api/providers` 的 `active`。
 api_key 只在日志里以掩码出现，HTTP 接口从不下发。
 
+### 查模型并回填（设置页的「更新模型」）
+
+`models:` 块是手写的：provider 上了新模型、模型改了上下文窗口，都得人去改文件。设置页每个
+provider 卡片上的「**更新模型**」按钮做这件事——服务端拿 provider 自己的 key 去问
+`GET {api_url}/v1/models`（跟聊天接口同一个地址推导规则），把每个模型的默认配置列出来，
+确认后写回这个 provider 的 `models:` 块。
+
+- **数字从哪来**：上游说的（`context_length` / `max_completion_tokens` /
+  `supported_parameters` / `modalities` …）→ provider.yaml 里本来就有的 → 内置表
+  （`deepseek-chat`、`gpt-4o` 这类常见模型）→ 按名字猜（`-reasoner` 会思考、`-vl` 能看图）。
+  界面上每个模型都标了来源。
+- **只改一个块**：别的 provider、注释、`settings:` 块原样保留——provider.yaml 是给人看的
+  文件，不能因为点了一次按钮就重排它。写完先校验再替换，配置随即热加载生效。
+- **不越权**：采样参数（`temperature` / `top_p`）和 `reasoning_effort` 是用户自己调过的，
+  一次列表更新不会抹掉它们。
+- **顺序是开关**：`models:` 里的第一个模型就是该 provider 的默认模型，所以新模型排在后面。
+
+上游没有这个接口时（404、不是 JSON、空列表），界面照实说查询失败——不会静默地把列表清空。
+接口细节见 [HTTP 接口](api.md#查模型问-provider-有哪些模型回填-provideryaml)。
+
 ### 网页搜索与抓取（provider 级可选能力）
 
 DeepSeek 对所有 API 用户开放了两个原生端点（`POST /v1/tools/search`、`POST /v1/tools/fetch`，

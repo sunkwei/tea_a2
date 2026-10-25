@@ -474,6 +474,8 @@ set(TEA_SOURCES
   src/trajectory.cpp
   src/agent.cpp
   src/html_export.cpp
+  src/model_discovery.cpp
+  src/provider_yaml.cpp
   src/server.cpp
   src/shell.cpp
   src/version.cpp

@@ -32,6 +32,8 @@ pwsh -File tests/relink-while-running.ps1 -Exe build-gcc/bin/tea_agent.exe  # �
 
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
 python3 tests/smoke_provider_usage.py                      # 订阅额度查询：声明/归一化/错误处理
+python3 tests/smoke_provider_models.py                     # 查模型 + 回填 provider.yaml：形状/默认值/只改 models 块
+node tests/ui_provider_models.mjs                          # 设置页「更新模型」：列表、改数字、写入、热加载（需 google-chrome）
 node tests/ui_usage.mjs                                   # 顶栏额度徽标 + 设置页按 provider 查询（需 google-chrome）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
 python3 tests/smoke_tool_call_structure.py               # 工具调用结构：重复/孤儿/没答复的调用都先修好再发

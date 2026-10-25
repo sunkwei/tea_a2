@@ -721,6 +721,28 @@ button{font-family:inherit}
 .badge.no{color:var(--dsw-alias-state-warn-primary)}
 .mono{font-family:var(--ds-font-family-code);font-size:12px}
 
+/* ---------- 设置页：更新模型（列出 provider 提供的模型和它的默认配置） ---------- */
+/* 模型列表一行要放得下：勾选框、名字、两个数字、三个开关、来源 */
+.dialog:has(.mdl-list){width:min(780px,95vw)}
+.mdl-list{
+  display:flex;flex-direction:column;gap:6px;margin:8px 0 4px;
+  max-height:min(52vh,420px);overflow:auto;
+}
+.mdl-row{
+  display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  padding:7px 9px;border-radius:var(--dsw-radius-md);
+  border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);
+}
+.mdl-pick{flex:none;width:14px;height:14px;margin:0}
+.mdl-name{flex:1 1 150px;min-width:0;display:flex;flex-direction:column;gap:2px}
+.mdl-name .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mdl-name .badge{margin-left:0;align-self:flex-start}
+.mdl-nums{flex:0 1 230px;display:flex;gap:6px;min-width:0}
+.mdl-nums .mdl-num{width:100%;min-width:0;font-family:var(--ds-font-family-code);font-size:12px}
+.mdl-caps{flex:none;display:flex;gap:9px;white-space:nowrap}
+.mdl-cap{display:flex;align-items:center;gap:3px;font-size:12px;color:var(--dsw-alias-label-caption)}
+.mdl-src{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-caption);white-space:nowrap}
+
 /* ---------- 设置页：文件访问范围（受限工作区 / 全局） ---------- */
 .seg{display:flex;gap:8px;padding:0 12px 12px}
 .seg-item{

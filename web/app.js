@@ -4094,6 +4094,12 @@
         r.appendChild(el('span', 'mono', pair[1] || '—'));
         card.appendChild(r);
       });
+      // 「更新模型」：问这个 provider 现在提供哪些模型，把默认配置列出来，
+      // 确认后写进 provider.yaml。查询和写入都在服务端做。
+      var mrow = el('div', 'row');
+      mrow.appendChild(el('span', 'k', '模型列表'));
+      mrow.appendChild(btn('btn', '更新模型', function () { updateModelsDialog(p); }));
+      card.appendChild(mrow);
       if (p.supports_usage || p.usage_console_url) {
         var out = el('div', 'usage-result', '');
         var r2 = el('div', 'row');
@@ -4125,6 +4131,157 @@
       try { pre.textContent = JSON.stringify(t.parameters || {}, null, 2); } catch (e) { pre.textContent = String(t.parameters); }
       card.appendChild(pre);
       tl.appendChild(card);
+    });
+  }
+
+  /* ---------- 12b) 更新模型：问 provider 现在提供哪些模型 ---------- */
+  // 「更新模型」= 问这个 provider 现在提供哪些模型，把每个模型的默认配置列出来，
+  // 用户确认后写进 provider.yaml。
+  //
+  // 两件事都在服务端做：查询用 provider 自己的 api_key（浏览器拿不到），写入也
+  // 只动这个 provider 的 models: 块——别的 provider、注释和设置块都不变。
+  var MODEL_SOURCE = {
+    provider: '提供方给的',
+    config: '本机配置里的',
+    builtin: '内置表',
+    guess: '按名字推断',
+    default: '未知'
+  };
+
+  function modelNumber(v) {
+    var n = parseInt(v, 10);
+    return isFinite(n) && n > 0 ? n : 0;
+  }
+
+  function updateModelsDialog(p) {
+    var body = el('div');
+    body.appendChild(el('div', 'desc', '正在向 ' + p.name + ' 查询模型列表…'));
+    openDialog('更新模型 · ' + p.name, body, [{ label: '关闭', onClick: closeDialog }]);
+
+    api('api/providers/' + encodeURIComponent(p.name) + '/models').then(function (d) {
+      var rows = [];
+      var current = {};
+      (d.current || []).forEach(function (m) { current[m.id] = m; });
+      var list = el('div', 'mdl-list');
+
+      function addRow(m, gone) {
+        var row = el('div', 'mdl-row');
+        var pick = el('input', 'mdl-pick');
+        pick.type = 'checkbox';
+        // 提供方已经不再提供的模型默认不勾：想留着就自己勾上。
+        pick.checked = !gone;
+        row.appendChild(pick);
+
+        var name = el('div', 'mdl-name');
+        name.appendChild(el('span', 'mono', m.id));
+        if (gone) name.appendChild(el('span', 'badge no', '提供方已不再提供'));
+        else if (!m.in_config) name.appendChild(el('span', 'badge yes', '新增'));
+        row.appendChild(name);
+
+        var nums = el('div', 'mdl-nums');
+        var ctx = el('input', 'ta mdl-num');
+        ctx.type = 'number'; ctx.min = '0'; ctx.step = '1024';
+        ctx.value = m.max_context_tokens || '';
+        ctx.placeholder = '上下文';
+        var out = el('input', 'ta mdl-num');
+        out.type = 'number'; out.min = '0'; out.step = '1024';
+        out.value = m.max_output_tokens || '';
+        out.placeholder = '输出上限';
+        nums.appendChild(ctx);
+        nums.appendChild(out);
+        row.appendChild(nums);
+
+        var caps = el('div', 'mdl-caps');
+        var boxes = {};
+        [['tools', '工具'], ['reasoning', '思考'], ['vision', '视觉']].forEach(function (pair) {
+          var lab = el('label', 'mdl-cap');
+          var box = el('input');
+          box.type = 'checkbox';
+          box.checked = pair[0] === 'tools' ? !!m.supports_tools
+            : pair[0] === 'reasoning' ? !!m.supports_reasoning : !!m.supports_vision;
+          lab.appendChild(box);
+          lab.appendChild(el('span', null, pair[1]));
+          caps.appendChild(lab);
+          boxes[pair[0]] = box;
+        });
+        row.appendChild(caps);
+        row.appendChild(el('div', 'mdl-src', MODEL_SOURCE[m.source] || '未知'));
+        list.appendChild(row);
+        rows.push({ id: m.id, pick: pick, ctx: ctx, out: out, tools: boxes.tools,
+                    reasoning: boxes.reasoning, vision: boxes.vision, note: m.note || '' });
+      }
+
+      (d.models || []).forEach(function (m) { addRow(m, false); });
+      (d.removed || []).forEach(function (id) {
+        addRow(current[id] || { id: id, max_context_tokens: 0, max_output_tokens: 0,
+                                supports_tools: true, supports_reasoning: false,
+                                supports_vision: false, source: 'config' }, true);
+      });
+
+      var content = el('div');
+      content.appendChild(el('div', 'desc',
+        '模型列表来自 ' + (d.url || '模型列表接口') + '。勾掉不要的模型，改好上下文和输出上限，' +
+        '确认后写进 provider.yaml（只改这个 provider 的 models 块）。'));
+      if (!rows.length) {
+        content.appendChild(el('div', 'empty-note', '这个 provider 没有报告任何模型'));
+      } else {
+        content.appendChild(list);
+      }
+      var err = el('div', 'form-error');
+      content.appendChild(err);
+
+      function submit() {
+        var payload = [];
+        rows.forEach(function (r) {
+          if (!r.pick.checked) return;
+          payload.push({
+            id: r.id,
+            max_context_tokens: modelNumber(r.ctx.value),
+            max_output_tokens: modelNumber(r.out.value),
+            supports_tools: r.tools.checked,
+            supports_reasoning: r.reasoning.checked,
+            supports_vision: r.vision.checked,
+            note: r.note
+          });
+        });
+        if (!payload.length) { err.textContent = '至少要留一个模型'; return; }
+        err.textContent = '';
+        api('api/providers/' + encodeURIComponent(p.name) + '/models',
+            { method: 'POST', body: { models: payload } })
+          .then(function (r) {
+            closeDialog();
+            toast('已更新 ' + p.name + ' 的模型列表（' + payload.length + ' 个）');
+            // 写完 provider.yaml 会重新加载配置，服务器上的当前模型可能变了
+            // （比如刚才那个模型被去掉了）：跟着服务器走。
+            loadProviders().then(function () {
+              var a = r && r.active;
+              if (!a || !a.model) return;
+              var still = (state.models || []).some(function (m) {
+                return m.provider === a.provider && m.model === a.model;
+              });
+              var cur = state.model;
+              var curStill = cur && (state.models || []).some(function (m) {
+                return m.provider === cur.provider && m.model === cur.model;
+              });
+              if (still && !curStill) {
+                state.model = { provider: a.provider, model: a.model };
+                renderModelChip();
+                renderModelMenu();
+              }
+            });
+          }, function (e) { err.textContent = '写入失败：' + e.message; });
+      }
+
+      openDialog('更新模型 · ' + p.name, content, [
+        { label: '取消', onClick: closeDialog },
+        { label: '写入 provider.yaml', primary: true, onClick: submit }
+      ]);
+    }, function (e) {
+      clear(body);
+      body.appendChild(el('div', 'desc', '查询失败：' + e.message));
+      body.appendChild(el('div', 'form-error',
+        '模型列表接口通常是 ' + (p.api_url || '') + ' 下的 /v1/models；' +
+        '也可能是这个 provider 根本不提供这个接口。'));
     });
   }
 
