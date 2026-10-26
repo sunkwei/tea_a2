@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.13.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/health` | 探活、版本（`0.13.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
@@ -20,7 +20,7 @@
 | `GET` | `/api/workspaces/{id}/download?path=` | 以附件形式下载文件（`Content-Disposition: attachment`），**从磁盘流式发送、无 16 MB 限制**；`&inline=1` 改为在浏览器里直接打开（视频 / PDF） |
 | `GET` / `POST` | `/api/workspaces/{id}/sessions` | 会话列表 / 新建 |
 | `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果）；另外带 `summary_upto` / `summary_bytes`——前面有多少条消息已经折成摘要 |
-| `GET` / `PUT` | `/api/sessions/{sid}/todos` | 任务列表：GET 随 `/api/sessions/{sid}` 一起返回；PUT 用 `{"items":[…]}` 整体替换，或 `{"index":n,"status":"…"}` 改一条（`index` **从 1 起算**） |
+| `GET` / `PUT` | `/api/sessions/{sid}/todos` | 任务列表：GET 随 `/api/sessions/{sid}` 一起返回；PUT 用 `{"items":[…]}` 整体替换，或 `{"index":n,"status":"…"}` 改一条（`index` **从 1 起算**）。计划在轮次结束时关掉，两轮之间 `todos` 是空的、步骤在 `todo_carry` 里；这时 PUT 改的是 `todo_carry`（改完它就变回活着的计划） |
 | `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
 | `POST` | `/api/sessions/{sid}/fork` | 从某一轮分叉出新会话：`{"message_index":N}` 是父会话里某条**用户消息**的下标，复制到该轮结束（含回答与工具结果）；省略或负数 = 复制整个会话。返回 `session`（带 `forked_from` / `fork_turn`）与复制后的 `messages`；父会话不变 |
 | `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON） |
@@ -373,7 +373,7 @@ SSE 上的对应事件：
 | `queue_adopted` | 已采纳：`id` / `content` / `iteration` / `pending`。该消息已落盘为 user 消息 |
 | `queue_unconsumed` | 轮次在采纳前结束（停止 / 报错 / 迭代上限），`items[]` 原样退回，客户端应放回输入框 |
 | `artifacts` | 本轮产出了新文件：`items[]`（`path` / `bytes` / `kind` / `tool` / `turn`）。UI 用它把下载链接补到回答下面 |
-| `todo` | 任务列表变了：`items[]`（`{id,text,status}`）、`total`、`done`。UI 用它实时更新进度条，不需要等轮次结束 |
+| `todo` | 任务列表变了：`items[]`（`{id,text,status}`）、`total`、`done`。UI 用它实时更新进度条，不需要等轮次结束。轮次结束、计划被关掉时 `items` 为空，`carried[]` 是这一轮没做完的步骤（下一轮会接回来）；下一轮接回计划时 `resumed: true` |
 | `tool_images` | `toolkit_load_image` 把图片附加进了对话：`content` 是那条 user 消息的文本，`images[]` 是 `{path, mime}`。客户端应把它插进当前对话（图片走 `/raw`），与本轮结束时回读会话的结果一致 |
 
 几条刻意的约束：

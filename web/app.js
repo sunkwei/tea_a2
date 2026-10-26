@@ -65,6 +65,8 @@
     /// 当前会话的任务列表（todo）：agent 用 toolkit_todo 维护，SSE 的 todo 事件
     /// 实时推送。done/total 用于「3/7」这样的进度显示。
     todos: [], todoDone: 0, todoTotal: 0, todoCollapsed: false,
+    /// 上一轮结束时没做完的步骤（计划已关掉，下一轮会接着做）。
+    todoCarry: [],
     /// 本会话产出的文件（工具写出的文档、生成的图表/视频等）。agent 每发现一个新
     /// 文件就发一个 artifacts 事件；这里按 turn 分组，只在这一轮的**最终回答**下面
     /// 列出下载链接。
@@ -906,6 +908,17 @@
     }
     renderTodos();
   }
+  /// 还没做完的步骤有几个（做完了的不算）。
+  function todoUnfinished(items) {
+    var n = 0;
+    (items || []).forEach(function (t) { if (t && t.status !== 'done') n++; });
+    return n;
+  }
+  /// 上一轮留下的步骤：计划在回合结束时关掉了，但这些步骤还在，下一轮会接着做。
+  function setTodoCarry(items) {
+    state.todoCarry = (items || []).filter(function (t) { return t && String(t.text || '').trim(); });
+    renderTodos();
+  }
   function renderTodos() {
     var panel = $('todo-panel');
     if (!panel) return;
@@ -913,7 +926,9 @@
     // 下一步可看。做完就收起来，下一轮不再显示（侧栏的「6/6」和会话里的记录还在，
     // 想看历史随时能翻会话）。
     var allDone = state.todoTotal > 0 && state.todoDone === state.todoTotal;
-    panel.classList.toggle('hidden', !state.todos.length || allDone);
+    // 面板在没有计划、但上一轮留下了步骤时也要露出来：那是「还剩什么」的唯一入口。
+    panel.classList.toggle('hidden',
+      (!state.todos.length || allDone) && !state.todoCarry.length);
     panel.classList.toggle('collapsed', !!state.todoCollapsed);
     $('todo-head').setAttribute('aria-expanded', state.todoCollapsed ? 'false' : 'true');
     $('todo-count').textContent = state.todoDone + '/' + state.todoTotal;
@@ -944,6 +959,40 @@
       };
       list.appendChild(li);
     });
+    // 上一轮留下的步骤
+    var left = $('todo-left');
+    if (left) {
+      left.classList.toggle('hidden', !state.todoCarry.length);
+      if (state.todoCarry.length) {
+        var box = $('todo-left-text');
+        clear(box);
+        box.appendChild(el('span', null, '上一轮结束时还有 ' + todoUnfinished(state.todoCarry) +
+          ' 个步骤没做完（下一轮会接着做）：'));
+        state.todoCarry.forEach(function (t, i) {
+          var step = el('span', 'todo-left-step ' + (t.status || 'pending'), t.text);
+          step.title = t.status === 'done' ? '已完成（点击改回未完成）' : '未完成（点击标记完成）';
+          step.onclick = function () { toggleCarry(i); };
+          box.appendChild(step);
+        });
+      }
+    }
+  }
+
+  /// 勾掉上一轮留下的一个步骤：这一步把计划接了回来（用户接管了它），
+  /// 下一轮就接着这份计划做。
+  function toggleCarry(index) {
+    if (!state.session || !state.workspace) return;
+    var copy = state.todoCarry.slice();
+    if (!copy[index]) return;
+    copy[index] = { id: copy[index].id, text: copy[index].text,
+                    status: copy[index].status === 'done' ? 'pending' : 'done' };
+    api('api/sessions/' + encodeURIComponent(state.session.id) + '/todos',
+      { method: 'PUT', body: { items: copy } }).then(function (d) {
+        setTodos(d.items || [], { keepCollapsed: true });
+        setTodoCarry(d.todo_carry || []);
+      }, function (e) {
+        toast('更新任务失败：' + e.message);
+      });
   }
   /// 手动勾选一条：先本地更新（点完立刻有反馈），再把整份列表写回服务端。
   function toggleTodo(index) {
@@ -1631,6 +1680,20 @@
     if (ev.type === 'todo') {
       // agent 改动了任务列表：实时更新进度条，不打断正在生成的回答。
       setTodos(ev.items);
+      if (ev.resumed) {
+        // 这一轮把上一轮留下的步骤接了回来：计划又是活的了。
+        setTodoCarry([]);
+        return;
+      }
+      // 回合结束时计划被关掉：把「还剩几个步骤没做完」说出来，别让用户自己发现
+      // 一个还开着的列表（下一轮会带着这些步骤继续）。
+      if (ev.carried && ev.carried.length) {
+        setTodoCarry(ev.carried);
+        toast('这一轮结束时还有 ' + todoUnfinished(ev.carried) +
+              ' 个步骤没做完，已记下，下一轮继续');
+      } else {
+        setTodoCarry([]);
+      }
       return;
     }
     if (ev.type === 'tool_images') {
@@ -1821,6 +1884,7 @@
         state.messages = d.messages || [];
         state.summaryUpto = num(d.summary_upto);
         state.summaryBytes = num(d.summary_bytes);
+        setTodoCarry(d.todo_carry || []);
         renderCrumbs();          // 标题由服务端在第一轮生成，回读后才拿得到
       }
     }, function () { }).then(loadTrajectories).then(function () {
@@ -3306,6 +3370,7 @@
       state.messages = d.messages || [];
       state.summaryUpto = num(d.summary_upto);
       state.summaryBytes = num(d.summary_bytes);
+      setTodoCarry(d.todo_carry || []);
       setTodos(d.todos || []);
       state.artifacts = d.artifacts || [];
       state.live = null; state.streamError = null;
@@ -5355,7 +5420,23 @@
       e.preventDefault();
       closeImageViewer();
     };
-    $('todo-head').onclick = function () {
+    // 丢掉上一轮留下的步骤：这一轮不想再继续了。
+  var todoLeftClear = $('todo-left-clear');
+  if (todoLeftClear) {
+    todoLeftClear.onclick = function () {
+      if (!state.session || !state.workspace) return;
+      setTodoCarry([]);
+      setTodos([], { keepCollapsed: true });
+      api('api/sessions/' + encodeURIComponent(state.session.id) + '/todos',
+        { method: 'PUT', body: { items: [] } }).then(function (d) {
+          setTodos(d.items || [], { keepCollapsed: true });
+          setTodoCarry(d.todo_carry || []);
+        }, function (e) {
+          toast('丢掉失败：' + e.message);
+        });
+    };
+  }
+  $('todo-head').onclick = function () {
       state.todoCollapsed = !state.todoCollapsed;
       renderTodos();
     };

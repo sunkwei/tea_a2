@@ -11,6 +11,10 @@ What this pins:
   * op=set writes the whole plan; op=list/add/update/clear behave as documented;
   * the list is injected into the system prompt, so a later turn (and a compacted
     one) still knows the plan;
+  * a plan belongs to the turn that made it: it is closed when the turn ends -
+    a session that is over must not keep a list that is still open. The steps
+    that were left are kept (they are the carry), the next turn takes them
+    back as its plan, and they survive a restart;
   * a change emits a `todo` SSE event with items + counts, mid-turn;
   * state is persisted in the session file and survives a restart (the API and
     the index report 3/7 without loading every session);
@@ -217,6 +221,19 @@ def todo_events(events):
     return [e for e in events if e.get("type") == "todo"]
 
 
+def plan_changes(events):
+    """The todo events a tool call caused (the resume and the close have no
+    iteration): those are the ones that report a change of the list."""
+    return [e for e in todo_events(events) if "iteration" in e]
+
+
+def plan_of(detail):
+    """The plan of a session: the live list, or - between the turns - the
+    steps the last turn left behind."""
+    items = detail.get("todos") or []
+    return items or (detail.get("todo_carry") or [])
+
+
 def main():
     binary = (sys.argv[1] if len(sys.argv) > 1
               else os.path.join(REPO_ROOT, "build", "bin", "tea_agent"))
@@ -291,27 +308,42 @@ providers:
         check("op=set accepts a list of strings", "0/4 done" in out, out[:160])
         check("every step is listed", all(t in out for t in steps), out)
         evs = todo_events(events)
-        check("a todo event is emitted", len(evs) == 1, len(evs))
+        # One event for the change, one for the plan being closed with the turn.
+        check("a todo event is emitted for the change and for the close",
+              len(evs) == 2, len(evs))
         check("the event carries the items",
               len(evs[0].get("items") or []) == 4 if evs else False, evs)
         check("the event carries counts",
               evs and evs[0].get("total") == 4 and evs[0].get("done") == 0, evs)
 
-        # ---- persisted, and in the prompt of the *next* turn ----------------
+        # ---- the plan is closed with the turn, the leftovers are kept ------
+        # A plan belongs to the turn that made it. When the turn ends the list
+        # is closed - a session that is over must not keep a list that is
+        # still open - and the steps that were left are kept as the carry.
         saved = json.load(open(session_file, encoding="utf-8"))
-        check("the list is persisted in the session file",
-              [t["text"] for t in saved.get("todos") or []] == steps, saved.get("todos"))
+        check("the plan is closed when the turn ends",
+              not (saved.get("todos") or []), saved.get("todos"))
+        check("the steps that were left are kept",
+              [t["text"] for t in saved.get("todo_carry") or []] == steps,
+              saved.get("todo_carry"))
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
-        check("GET /api/sessions exposes the list",
-              [t["text"] for t in detail.get("todos") or []] == steps, detail.get("todos"))
-        check("every step starts pending",
-              all(t["status"] == "pending" for t in detail.get("todos") or []),
-              detail.get("todos"))
+        check("GET /api/sessions reports the leftover steps",
+              [t["text"] for t in detail.get("todo_carry") or []] == steps,
+              detail.get("todo_carry"))
+        check("there is no live list between the turns",
+              not (detail.get("todos") or []), detail.get("todos"))
+        check("every leftover step starts pending",
+              all(t["status"] == "pending" for t in detail.get("todo_carry") or []),
+              detail.get("todo_carry"))
         _, index = call(port, "GET", "/api/workspaces/%s/sessions" % wid)
         entry = [s for s in index["sessions"] if s["id"] == sid][0]
-        check("the index reports total/done", entry.get("todo_total") == 4
-              and entry.get("todo_done") == 0, entry)
+        check("the index shows no progress (the plan is closed)",
+              not entry.get("todo_total") and not entry.get("todo_done"), entry)
+        evs = todo_events(events)
+        check("the clients are told which steps were left",
+              bool(evs) and [t["text"] for t in evs[-1].get("carried") or []] == steps, evs[-1:])
 
+        # ---- the next turn takes the plan over ------------------------------
         MockProvider.calls = [("c2", "toolkit_todo", {"op": "list"})]
         before = len(MockProvider.records)
         events = run_turn(port, wid, sid, "remind me")
@@ -321,6 +353,10 @@ providers:
         check("the prompt lists the steps", all(t in prompt for t in steps), prompt[-400:])
         check("the prompt says how to maintain it", "toolkit_todo" in prompt
               and "active" in prompt)
+        check("the prompt says the steps were left by the previous turn",
+              "left open" in prompt, prompt[-400:])
+        check("the plan is live again in the next turn",
+              "0/4 done" in tool_output(events), tool_output(events)[:200])
 
         # ---- progress ------------------------------------------------------
         MockProvider.calls = [
@@ -329,16 +365,16 @@ providers:
         events = run_turn(port, wid, sid, "start")
         out = tool_output(events)
         check("op=update marks a step active", "in progress" in out and "[~]" in out, out[:200])
-        evs = todo_events(events)
+        evs = plan_changes(events)
         check("the todo event reports the active step",
-              evs and [t["status"] for t in evs[0]["items"]][0] == "active", evs)
+              evs and [t["status"] for t in evs[-1]["items"]][0] == "active", evs)
 
         MockProvider.calls = [
             ("c4", "toolkit_todo", {"op": "update", "index": 1, "status": "done"}),
             ("c5", "toolkit_todo", {"op": "update", "index": 2, "status": "active"}),
         ]
         events = run_turn(port, wid, sid, "next")
-        evs = todo_events(events)
+        evs = plan_changes(events)
         check("two updates in one iteration emit two events", len(evs) == 2, len(evs))
         statuses = [t["status"] for t in evs[-1]["items"]] if evs else []
         check("the second update is reflected",
@@ -350,7 +386,7 @@ providers:
         ]
         events = run_turn(port, wid, sid, "switch")
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
-        st = [t["status"] for t in detail["todos"]]
+        st = [t["status"] for t in plan_of(detail)]
         check("only one step is active at a time",
               st.count("active") == 1 and st[1] == "pending" and st[2] == "active", st)
 
@@ -358,10 +394,10 @@ providers:
         MockProvider.calls = [("c7", "toolkit_todo", {"op": "add", "text": "写文档"})]
         events = run_turn(port, wid, sid, "one more")
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
-        check("op=add appends a step", len(detail["todos"]) == 5
-              and detail["todos"][-1]["text"] == "写文档", detail["todos"])
-        check("a new step gets an id", detail["todos"][-1].get("id") == "t5",
-              detail["todos"][-1])
+        items = plan_of(detail)
+        check("op=add appends a step", len(items) == 5
+              and items[-1]["text"] == "写文档", items)
+        check("a new step gets an id", items[-1].get("id") == "t5", items[-1])
 
         MockProvider.calls = [
             ("c8", "toolkit_todo", {"op": "update", "id": "t5", "status": "done"}),
@@ -404,8 +440,8 @@ providers:
         check("two active steps are refused",
               "only one step may be 'active'" in out, out[:160])
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
-        check("the refused plan did not replace the list", not (detail["todos"] or []),
-              detail["todos"])
+        check("the refused plan did not replace the list",
+              not [t for t in plan_of(detail) if t["text"] in ("a", "b")], plan_of(detail))
 
         MockProvider.calls = [("c11", "toolkit_todo", {"op": "update", "index": 99,
                                                       "status": "done"})]
@@ -423,7 +459,7 @@ providers:
         MockProvider.calls = [("c13", "toolkit_todo", {"op": "set", "items": steps})]
         run_turn(port, wid, sid, "new plan")
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
-        items = detail["todos"]
+        items = plan_of(detail)
         check("the new plan is there", len(items) == 4, items)
         items[0]["status"] = "done"
         status, updated = call(port, "PUT", "/api/sessions/%s/todos" % sid,
@@ -466,8 +502,11 @@ providers:
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         check("the server restarted", wait_health(port))
         _, detail = call(port, "GET", "/api/sessions/%s" % sid)
-        check("the task list survived the restart",
-              [t["text"] for t in detail.get("todos") or []] == steps, detail.get("todos"))
+        # The plan is closed between the turns, but the steps that were left
+        # survive the restart - a fresh process picks the plan up again.
+        check("the steps that were left survived the restart",
+              [t["text"] for t in detail.get("todo_carry") or []] == steps,
+              detail.get("todo_carry"))
         MockProvider.calls = [("c13", "toolkit_todo", {"op": "list"})]
         before = len(MockProvider.records)
         run_turn(port, wid, sid, "where are we?")
@@ -515,7 +554,11 @@ providers:
         worker = threading.Thread(target=run_in_background, daemon=True)
         worker.start()
         time.sleep(0.6)          # the turn is running now
-        mine = [{"id": "t1", "text": "written by somebody else", "status": "done"}]
+        # Somebody else changes the list while the turn runs. One step is done,
+        # one is still open - so the list is not finished and travels on as the
+        # carry instead of being overwritten by the turn.
+        mine = [{"id": "t1", "text": "written by somebody else", "status": "done"},
+                {"id": "t2", "text": "still open", "status": "pending"}]
         with open(session_file, encoding="utf-8") as f:
             doc = json.load(f)
         doc["todos"] = mine
@@ -525,11 +568,15 @@ providers:
         MockProvider.delay = 0.0
         with open(session_file, encoding="utf-8") as f:
             doc = json.load(f)
-        check("a task list written during the turn survives it",
-              doc.get("todos") == mine, doc.get("todos"))
+        # The list is closed with the turn (that is the rule now), but the
+        # steps are not lost: they are the carry.
+        check("a task list written during the turn is kept as the carry",
+              doc.get("todo_carry") == mine, doc.get("todo_carry"))
+        check("the live list is closed with the turn",
+              not (doc.get("todos") or []), doc.get("todos"))
         _, detail = call(port, "GET", "/api/sessions/" + sid)
-        check("the API reports the same list",
-              detail.get("todos") == mine, detail.get("todos"))
+        check("the API reports the same steps",
+              detail.get("todo_carry") == mine, detail.get("todo_carry"))
     finally:
         try:
             proc.terminate()

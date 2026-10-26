@@ -113,6 +113,23 @@ UTF-8）。但 JPEG 结尾是 `FF D9`，而 `0xD9` 正是 2 字节序列的前�
 **那条 user 消息折进摘要**、把没有问题的回答留在窗口里，模型看到的是一个它没问过的回合。
 对齐要看 `messages[keep_from]` 本身是不是 user 消息。
 
+### 计划（toolkit_todo）是**这一轮**的脚手架
+
+会话结束了，界面上还挂着一份没做完的 todo 列表——看着像「还有人没干完的活」，其实没人���做它。
+所以计划在**每一轮结束时就被关掉**（做完没做完都关）：`session.todos` 清空，没做完的步骤
+记进 `session.todo_carry`（会话文件里的一个数组），下一轮一开始把它们接回成这一轮的计划，
+跨重启也还在（`fold` 回来时 prompt 里会写「these steps were left open when the previous
+turn ended」）。
+
+坑与取舍：
+
+- **`save_todos` 与回合的 `save_session` 抢同一个列表**：回合手里的是自己的副本，别人（浏览器
+  点一下、脚本写文件）在这期间改了列表。所以回合结束时算 carry 用的是**磁盘上最新的那份**
+  （`Workspace::load_todos`），不是内存里的。
+- **`PUT /api/sessions/:id/todos` 在两轮之间改的是 carry**：计划关着的时候列表是空的，改一条
+  leftover 就是把计划接回来（`todos` 重新变成活的，carry 清空）。
+- 导出的 HTML 与导入走的是「活着的计划，否则用 carry」，所以导出的快照里进度不会丢。
+
 ### 并发写状态
 
 `workspace.cpp` 用进程级 `state_mutex()`（recursive，故意 leak）串起所有状态写入，写文件一律

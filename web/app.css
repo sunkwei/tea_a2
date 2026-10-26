@@ -620,6 +620,23 @@ button{font-family:inherit}
 .todo-item.done{color:var(--dsw-alias-label-caption)}
 .todo-item.done .todo-mark{color:var(--dsw-alias-state-success-primary)}
 .todo-item.done .todo-text{text-decoration:line-through}
+/* 上一轮留下的步骤：计划已关掉，这几行只说明「还剩什么」，下一轮会接着做。 */
+.todo-left{
+  display:flex;gap:8px;align-items:flex-start;padding:6px 8px 8px;font-size:12px;line-height:18px;
+  color:var(--dsw-alias-label-caption);border-top:.5px solid var(--dsw-alias-border-l1);
+}
+.todo-left-text{flex:1 1 auto;word-break:break-word}
+.todo-left-step{
+  display:inline-block;margin:2px 4px 2px 0;padding:1px 7px;border-radius:6px;cursor:pointer;
+  border:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);
+}
+.todo-left-step:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.todo-left-step.done{color:var(--dsw-alias-label-caption);text-decoration:line-through}
+.todo-left-clear{
+  flex:0 0 auto;cursor:pointer;font-size:12px;line-height:18px;padding:1px 8px;border-radius:6px;
+  border:.5px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);
+}
+.todo-left-clear:hover{background:var(--dsw-alias-interactive-bg-hover)}
 
 /* ---------- memory ---------- */
 /* ---------- 本轮产出（下载链接，挂在最终回答下面） ---------- */

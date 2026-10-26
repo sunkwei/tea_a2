@@ -171,7 +171,19 @@ struct Session {
   /// steps, with their progress. Persisted with the session, injected into the
   /// system prompt (so a compacted or restarted turn still knows the plan) and
   /// pushed to clients on every change.
+  ///
+  /// A plan belongs to the turn that made it: it is closed when the turn ends
+  /// (see `todo_carry` for what happens to the steps that were still open).
   std::vector<TodoItem> todos;
+  /// The steps that were still open when the last turn ended. The plan itself
+  /// is closed - a list nobody is working on any more is a stale panel - but
+  /// the work is not lost: the next turn takes these steps back as its plan
+  /// and continues where the last one stopped. It survives a restart, so a
+  /// fresh process picks the plan up again.
+  std::vector<TodoItem> todo_carry;
+  /// True when this turn's plan was taken over from `todo_carry` - the prompt
+  /// says so, so the model continues instead of starting over. Not persisted.
+  bool todo_resumed = false;
   /// Files produced during the conversation, newest last. Deduplicated by path
   /// (a file rewritten three times appears once, with its latest size).
   std::vector<SessionArtifact> artifacts;

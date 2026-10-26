@@ -2445,6 +2445,14 @@ void ApiServer::Impl::install_routes() {
             j["summary_bytes"] = session.summary.size();
             j["messages"] = messages;
             j["todos"] = todos;
+            // The steps the last turn left open (the plan itself is closed).
+            if (!session.todo_carry.empty()) {
+              nlohmann::json carry = nlohmann::json::array();
+              for (std::size_t i = 0; i < session.todo_carry.size(); ++i) {
+                carry.push_back(session.todo_carry[i].to_json());
+              }
+              j["todo_carry"] = carry;
+            }
             j["artifacts"] = artifacts;
             send_json(res, j);
           });
@@ -2592,6 +2600,16 @@ void ApiServer::Impl::install_routes() {
               }
               session.todos = next;
             } else {
+              // The plan the user is working on: the live list, or - when the
+              // plan was closed with the last turn - the steps it left. Ticking
+              // one of them takes the plan over: it becomes the live list
+              // again, and the next turn continues it.
+              bool from_carry = false;
+              if (session.todos.empty() && !session.todo_carry.empty()) {
+                session.todos = session.todo_carry;
+                session.todo_carry.clear();
+                from_carry = true;
+              }
               const std::string id = json_string(body, "id");
               const long long index = body.contains("index") && body["index"].is_number()
                                           ? body["index"].get<long long>()
@@ -2606,6 +2624,11 @@ void ApiServer::Impl::install_routes() {
                 }
               }
               if (at >= session.todos.size()) {
+                if (from_carry) {
+                  // Nothing was found: put the steps back where they were.
+                  session.todo_carry = session.todos;
+                  session.todos.clear();
+                }
                 send_error(res, 404, "not_found", "no such todo item");
                 return;
               }
@@ -2630,6 +2653,9 @@ void ApiServer::Impl::install_routes() {
             // A plan the user has ticked off completely is finished: drop it
             // instead of carrying it into the next turn.
             if (todos_finished(session.todos)) session.todos.clear();
+            // The user edits the plan, so the leftover of the last turn is
+            // theirs now: the next turn does not take it over any more.
+            session.todo_carry.clear();
             session.info.updated_at = now_iso8601();
             if (!ws.save_session(session, &err)) {
               send_error(res, 500, "io_error", err);
@@ -2647,7 +2673,12 @@ void ApiServer::Impl::install_routes() {
             for (std::size_t i = 0; i < session.todos.size(); ++i) {
               items.push_back(session.todos[i].to_json());
             }
-            send_json(res, {{"ok", true}, {"items", items}, {"total", total}, {"done", done}});
+            nlohmann::json carry = nlohmann::json::array();
+            for (std::size_t i = 0; i < session.todo_carry.size(); ++i) {
+              carry.push_back(session.todo_carry[i].to_json());
+            }
+            send_json(res, {{"ok", true}, {"items", items}, {"total", total}, {"done", done},
+                            {"todo_carry", carry}});
           });
 
   svr.Delete(R"(/api/sessions/([^/]+))",

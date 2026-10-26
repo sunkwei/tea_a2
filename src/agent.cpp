@@ -412,7 +412,12 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
     int total = 0, done = 0;
     todo_counts(session.todos, &total, &done);
     out << "\nTask list (" << done << "/" << total
-        << " done; maintained with toolkit_todo, shown to the user as live progress)\n";
+        << " done; maintained with toolkit_todo, shown to the user as live progress)";
+    if (session.todo_resumed) {
+      out << " - these steps were left open when the previous turn ended, so continue"
+             " from where it stopped";
+    }
+    out << "\n";
     for (std::size_t i = 0; i < session.todos.size(); ++i) {
       const TodoItem& t = session.todos[i];
       out << "- [" << (t.status == "done" ? "x" : (t.status == "active" ? "~" : " "))
@@ -422,8 +427,23 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
     }
     out << "Keep it current: mark a step active before starting it and done as soon as it is "
            "finished (exactly one active at a time). Do not restate the list in your answer - "
-           "the user already sees it. A plan whose steps are all done is cleared when the turn "
-           "ends, so you never have to clear it yourself.";
+           "the user already sees it. A plan belongs to this turn: it is closed when the turn "
+           "ends, so you never have to clear it yourself. If the work is not going to continue, "
+           "clear the list before you finish the turn - otherwise the steps that are still open "
+           "are handed to the next turn as a note, and the user is told they were left.";
+  }
+
+  // What the last turn left open, when this turn did not take it over (the
+  // plan is only resumed at the start of a turn, so a session that is opened
+  // but never continued still shows what was left).
+  if (!session.todo_carry.empty()) {
+    out << "\nThe previous turn ended before its plan was finished. These steps were left:\n";
+    for (std::size_t i = 0; i < session.todo_carry.size(); ++i) {
+      out << "- [" << (session.todo_carry[i].status == "active" ? "~" : " ") << "] "
+          << session.todo_carry[i].text << "\n";
+    }
+    out << "If the work is still going, continue from there. If it is not needed any more, say so "
+           "and carry on with what the user asked for now.\n";
   }
 
   // A turn that works on a queued task. The model has to know: without this it
@@ -958,6 +978,35 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     }
   }
   session->messages.push_back(user_message);
+
+  // The plan of the last turn was closed when that turn ended. If it had
+  // steps that were still open, this turn takes them back as its plan: the
+  // work continues where the last one stopped, and the model can keep marking
+  // the steps off exactly as before.
+  if (session->todos.empty() && !session->todo_carry.empty()) {
+    session->todos = session->todo_carry;
+    session->todo_carry.clear();
+    session->todo_resumed = true;
+    nlohmann::json resumed = nlohmann::json::object();
+    resumed["type"] = "todo";
+    nlohmann::json items = nlohmann::json::array();
+    int total = 0, done = 0;
+    for (std::size_t i = 0; i < session->todos.size(); ++i) {
+      items.push_back(session->todos[i].to_json());
+    }
+    todo_counts(session->todos, &total, &done);
+    resumed["items"] = items;
+    resumed["total"] = total;
+    resumed["done"] = done;
+    resumed["resumed"] = true;
+    emit(resumed);
+    std::string todo_save_err;
+    if (!workspace.save_todos(session->info.id, session->todos, &todo_save_err)) {
+      LOG_WARN("todo: cannot take the plan of the last turn over: ", todo_save_err);
+    }
+    LOG_INFO("todo: the plan of the last turn is resumed with ", total, " step(s)");
+  }
+
   // Which user turn this is (1-based): artifacts carry it, so the UI can show
   // "this turn's output" under the final answer instead of an ever-growing list.
   int turn_number = 0;
@@ -1715,6 +1764,44 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   out.elapsed_ms = now_ms() - started;
 
   session->info.updated_at = now_iso8601();
+
+  // A plan belongs to the turn that made it, so it is closed when the turn
+  // ends - whether it is finished or not. A finished plan is dead weight (it
+  // is injected into every prompt and shown as a panel), and an unfinished
+  // one is worse: the conversation is over and the list is still open, which
+  // looks like work nobody is doing any more.
+  //
+  // The steps that were still open are not dropped: they become the carry
+  // (session.todo_carry), the next turn gets them in its prompt, and the user
+  // is told how many were left. The conversation keeps the record of what was
+  // done either way.
+  bool plan_closed = false;
+  std::vector<TodoItem> carried;
+  if (session) {
+    // The list as it is on disk is the freshest one: somebody else (the
+    // browser ticking an item off, a script writing the list) may have
+    // changed it while this turn was running.
+    std::vector<TodoItem> fresh;
+    std::string fresh_err;
+    if (!workspace.load_todos(session->info.id, &fresh, &fresh_err) || fresh.empty()) {
+      fresh = session->todos;
+    }
+    int plan_total = 0, plan_done = 0;
+    todo_counts(fresh, &plan_total, &plan_done);
+    if (plan_total > 0 && plan_done < plan_total) {
+      // The whole plan travels, with its progress: the next turn takes it
+      // over as it is, so the user still sees what is done and what is not.
+      carried = fresh;
+    }
+    // The steps that are left are handed to the next turn: it takes them
+    // back as its plan and continues where this one stopped.
+    session->todo_carry = carried;
+    if (!session->todos.empty()) {
+      session->todos.clear();
+      plan_closed = true;
+    }
+  }
+
   workspace.save_session(*session, nullptr);
 
   // Close the trajectory (stamps finished_at/ok/usage, appends the final line
@@ -1722,22 +1809,30 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   trajectory.finish(out.ok, out.error, out.detail, out.iterations, out.usage,
                     out.usage_estimated);
 
-
-  // A plan that is finished when the turn ends is not carried into the next
-  // one: it is dead weight in the prompt (every turn injects it) and a stale
-  // panel in the UI. The conversation keeps the record of what was done.
-  if (session && todos_finished(session->todos)) {
-    session->todos.clear();
+  if (plan_closed) {
     nlohmann::json todo_event = nlohmann::json::object();
     todo_event["type"] = "todo";
     todo_event["items"] = nlohmann::json::array();
     todo_event["total"] = 0;
     todo_event["done"] = 0;
+    // The steps that were left: the UI says how many, the API clients can
+    // read them.
+    if (!carried.empty()) {
+      nlohmann::json items = nlohmann::json::array();
+      for (std::size_t i = 0; i < carried.size(); ++i) {
+        items.push_back(carried[i].to_json());
+      }
+      todo_event["carried"] = items;
+    }
     emit(todo_event);
     std::string todo_save_err;
     if (!workspace.save_todos(session->info.id, session->todos, &todo_save_err)) {
-      LOG_WARN("todo: cannot clear the finished task list: ", todo_save_err);
+      LOG_WARN("todo: cannot close the task list: ", todo_save_err);
     }
+    LOG_INFO("todo: the plan is closed with the turn; ",
+             carried.empty() ? "every step was done"
+                             : (std::to_string(carried.size()) +
+                                " step(s) that were left are carried over to the next turn"));
   }
 
   if (out.cancelled) {

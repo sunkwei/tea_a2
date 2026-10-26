@@ -790,6 +790,7 @@ bool Workspace::load_session(const std::string& id, Session* out, std::string* e
   out->summary.clear();
   out->summary_upto = 0;
   out->todos.clear();
+  out->todo_carry.clear();
   out->artifacts.clear();
   out->info.id = id;
   auto title_it = j.find("title");
@@ -821,6 +822,14 @@ bool Workspace::load_session(const std::string& id, Session* out, std::string* e
       SessionArtifact a = SessionArtifact::from_json(*it);
       if (a.path.empty()) continue;
       out->artifacts.push_back(a);
+    }
+  }
+  auto carry_it = j.find("todo_carry");
+  if (carry_it != j.end() && carry_it->is_array()) {
+    for (auto it = carry_it->begin(); it != carry_it->end(); ++it) {
+      TodoItem item = TodoItem::from_json(*it);
+      if (trim(item.text).empty()) continue;
+      out->todo_carry.push_back(item);
     }
   }
   auto todos_it = j.find("todos");
@@ -860,6 +869,15 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
   j["messages"] = msgs;
   if (!session.summary.empty()) j["summary"] = session.summary;
   if (session.summary_upto > 0) j["summary_upto"] = session.summary_upto;
+  // The steps the last turn left open: the next turn takes them back as its
+  // plan and continues where the last one stopped.
+  if (!session.todo_carry.empty()) {
+    nlohmann::json carry = nlohmann::json::array();
+    for (std::size_t i = 0; i < session.todo_carry.size(); ++i) {
+      carry.push_back(session.todo_carry[i].to_json());
+    }
+    j["todo_carry"] = carry;
+  }
   if (!session.artifacts.empty()) {
     nlohmann::json arts = nlohmann::json::array();
     for (std::size_t i = 0; i < session.artifacts.size(); ++i) {
@@ -930,6 +948,32 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
   }
   if (!replaced) list.push_back(info.to_json());
   return write_file_atomic(index_path, dump_json(list, 2) + "\n", err);
+}
+
+bool Workspace::load_todos(const std::string& session_id, std::vector<TodoItem>* out,
+                           std::string* err) const {
+  StateLock lock(state_mutex());
+  out->clear();
+  const std::string path = session_file_for(sessions_dir(), session_id);
+  if (!path_exists(path)) {
+    if (err) *err = "session not found: " + session_id;
+    return false;
+  }
+  bool ok = false;
+  const nlohmann::json j = read_json_file(path, &ok);
+  if (!ok || !j.is_object()) {
+    if (err) *err = "cannot read the session file: " + path;
+    return false;
+  }
+  auto todos_it = j.find("todos");
+  if (todos_it != j.end() && todos_it->is_array()) {
+    for (auto it = todos_it->begin(); it != todos_it->end(); ++it) {
+      TodoItem item = TodoItem::from_json(*it);
+      if (trim(item.text).empty()) continue;
+      out->push_back(item);
+    }
+  }
+  return true;
 }
 
 bool Workspace::save_todos(const std::string& session_id, const std::vector<TodoItem>& todos,

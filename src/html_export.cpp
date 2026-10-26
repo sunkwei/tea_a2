@@ -798,12 +798,16 @@ nlohmann::json export_session_json(const Workspace& workspace, const Session& se
     }
     j["artifacts"] = arts;  // what the session produced, for a restore
   }
-  if (!session.todos.empty()) {
+  // The plan of the session: the live list, or - between the turns - the
+  // steps the last turn left behind. Progress travels with the conversation.
+  const std::vector<TodoItem>& plan =
+      session.todos.empty() ? session.todo_carry : session.todos;
+  if (!plan.empty()) {
     nlohmann::json todos = nlohmann::json::array();
-    for (std::size_t i = 0; i < session.todos.size(); ++i) {
-      todos.push_back(session.todos[i].to_json());
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+      todos.push_back(plan[i].to_json());
     }
-    j["todos"] = todos;  // progress travels with the conversation
+    j["todos"] = todos;
   }
   if (image_data && !image_data->empty()) {
     nlohmann::json images = nlohmann::json::object();
@@ -1019,17 +1023,20 @@ std::string export_session_html(const Workspace& workspace, const Session& sessi
            "不含文件本体。</p>\n</section>\n";
   }
 
-  if (!session.todos.empty()) {
+  // The plan of the session: the live list, or the steps the last turn left.
+  const std::vector<TodoItem>& plan =
+      session.todos.empty() ? session.todo_carry : session.todos;
+  if (!plan.empty()) {
     int total = 0, done = 0;
-    todo_counts(session.todos, &total, &done);
+    todo_counts(plan, &total, &done);
     const int pct = total > 0 ? static_cast<int>(done * 100 / total) : 0;
     out << "<section class=\"todos\">\n<div class=\"todos-head\"><h2>任务</h2>"
            "<span class=\"todos-count\">"
         << done << "/" << total << " 完成 · " << pct << "%</span></div>\n"
         << "<div class=\"todos-bar\"><i style=\"width:" << pct << "%\"></i></div>\n"
         << "<ol class=\"todos-list\">\n";
-    for (std::size_t i = 0; i < session.todos.size(); ++i) {
-      const TodoItem& t = session.todos[i];
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+      const TodoItem& t = plan[i];
       out << "<li class=\"todo " << esc(t.status) << "\"><span class=\"mark\">"
           << (t.status == "done" ? "✓" : (t.status == "active" ? "●" : "○")) << "</span>"
           << "<span class=\"txt\">" << esc(t.text) << "</span></li>\n";

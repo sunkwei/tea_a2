@@ -8,6 +8,9 @@
 //     everything is finished;
 //   * the panel arrives live from the `todo` SSE event while a turn runs, and
 //     the counter/bar/items update without a reload;
+//   * a plan belongs to the turn that made it: when the turn ends the panel is
+//     closed, and the steps that were left are shown as a note (the next turn
+//     takes them back as its plan);
 //   * clicking an item ticks it (PUT), which persists across a reload;
 //   * the header collapses and expands the list;
 //   * a brand-new draft clears the panel.
@@ -124,9 +127,17 @@ try {
         });
         send({ id: 'c', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] });
       } else {
-        send({ id: 'c', choices: [{ index: 0, delta: { content: '计划已更新。' },
-          finish_reason: null }] });
-        send({ id: 'c', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+        // A slow answer: the plan lives while the turn runs, and the panel is
+        // closed when the turn ends - so the live state has to be looked at
+        // while the turn is still running.
+        setTimeout(() => {
+          send({ id: 'c', choices: [{ index: 0, delta: { content: '计划已更新。' },
+            finish_reason: null }] });
+          send({ id: 'c', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }, 2500);
+        return;
       }
       res.write('data: [DONE]\n\n');
       res.end();
@@ -201,7 +212,14 @@ providers:
           };
         }),
       sidebarChips: Array.prototype.map.call(document.querySelectorAll('.sess-todo'),
-        function (n) { return { text: n.textContent, done: n.classList.contains('done') }; })
+        function (n) { return { text: n.textContent, done: n.classList.contains('done') }; }),
+      left: (function(){
+        var l = document.getElementById('todo-left');
+        return {
+          hidden: !l || l.classList.contains('hidden'),
+          text: l ? l.textContent : ''
+        };
+      })()
     };
   })()`);
 
@@ -284,12 +302,42 @@ providers:
   check('the sidebar chip follows too', p.sidebarChips.some((c) => c.text === '1/4'),
     JSON.stringify(p.sidebarChips));
 
+  // ---- the plan is closed with the turn --------------------------------
+  // A plan belongs to the turn that made it: when the turn ends the panel is
+  // closed (no stale list above the composer), and the steps that were left
+  // are shown as a note - the next turn takes them back as its plan.
+  const closed = await waitFor(async () => {
+    const q = await panel();
+    return q.count === '0/0' && q.items.length === 0 && q.left.hidden === false;
+  }, 20000);
+  check('the plan is closed when the turn ends', closed, JSON.stringify(await panel()));
+  p = await panel();
+  check('the steps that were left are shown', p.left.text.indexOf('3 个步骤没做完') >= 0,
+    p.left.text);
+  check('the leftover steps are named',
+    p.left.text.indexOf('实现 todo 工具') >= 0 && p.left.text.indexOf('在界面上呈现') >= 0,
+    p.left.text);
+
   // ---- everything done => the list is gone -----------------------------
   // A finished task list is dead weight: above the composer, in the sidebar
   // and (every turn) in the prompt. Ticking the last box clears it.
+  //
+  // The steps the turn left are shown as a note, and they can be ticked
+  // right there: that takes the plan over, and the last tick finishes it.
   await sleep(2000);   // let the turn that just ran finish (todos are locked while it does)
-  for (const idx of [1, 2, 3]) {
-    await evalJs(`document.querySelectorAll('#todo-list .todo-item')[${idx}].click(); true`);
+  const tickNext = async () => {
+    await evalJs(`(function(){
+      var live = document.querySelectorAll('#todo-list .todo-item');
+      var left = document.querySelectorAll('#todo-left-text .todo-left-step');
+      var items = live.length ? live : left;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].className.indexOf('done') < 0) { items[i].click(); return true; }
+      }
+      return false;
+    })()`);
+  };
+  for (let i = 0; i < 3; i++) {
+    await tickNext();
     await sleep(700);
   }
   const finished = await waitFor(async () => {

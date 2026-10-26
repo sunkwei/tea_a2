@@ -156,6 +156,13 @@
               <span class="todo-chev" id="todo-chev">›</span>
             </button>
             <ol class="todo-list" id="todo-list"></ol>
+            <!-- 上一轮结束时没做完的步骤：计划已经关掉，但工作还在，下一轮会接着做。
+                 这里是唯一能看见「还剩什么」的地方，也可以一键丢掉。 -->
+            <div class="todo-left hidden" id="todo-left">
+              <span class="todo-left-text" id="todo-left-text"></span>
+              <button class="todo-left-clear" id="todo-left-clear" type="button"
+                      title="丢掉这些步骤，不再继续">丢掉</button>
+            </div>
           </div>
           <div class="composer">
             <div class="composer-body">

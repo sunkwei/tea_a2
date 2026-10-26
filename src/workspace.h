@@ -141,6 +141,11 @@ class Workspace {
   /// outside the session save, and whoever changes it writes it here.
   bool save_todos(const std::string& session_id, const std::vector<TodoItem>& todos,
                   std::string* err) const;
+  /// Read the task list as it is on disk - the freshest one. A turn holds its
+  /// own copy of the list, and somebody else (the browser ticking an item
+  /// off, a script writing the list) may have changed it meanwhile.
+  bool load_todos(const std::string& session_id, std::vector<TodoItem>* out,
+                  std::string* err) const;
   bool create_session(const std::string& title, Session* out, std::string* err) const;
   bool delete_session(const std::string& id, std::string* err) const;
   bool rename_session(const std::string& id, const std::string& title, std::string* err) const;
