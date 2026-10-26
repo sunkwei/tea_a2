@@ -104,9 +104,14 @@ UTF-8）。但 JPEG 结尾是 `FF D9`，而 `0xD9` 正是 2 字节序列的前�
    `compaction: summarisation failed (200)`）；
 3. 本地 token 估算太乐观（ASCII 4 字符/token、reasoning 打五折）。
 
-修法：迭代循环内加压力检查、思考模型摘要预算 4096 且「只回 reasoning」时用 4 倍预算重试、
-估算改 3 字符/token + reasoning 全额 + 窗口预算留 10% 余量、折叠边界对齐到 user 消息。
-（**这套修复目前不在树里**，见[进行中](#进行中红着的测试)。）
+**2026-10-26 已修**（`src/agent.cpp`）：迭代循环内加压力检查、思考模型摘要预算 4096 且
+「只回 reasoning」时用 4 倍预算重试、估算改 3 字符/token + reasoning 全额 + 硬上限留 10% 余量、
+折叠边界对齐到 user 消息、摘要彻底失败时退回丢弃最旧消息。钉住它的测试是
+`tests/smoke_compaction_overflow.py`（10/10）。
+
+**踩过的坑**：折叠边界的对齐写错过一格——`messages[keep_from - 1]` 是 user 消息时，代码会把
+**那条 user 消息折进摘要**、把没有问题的回答留在窗口里，模型看到的是一个它没问过的回合。
+对齐要看 `messages[keep_from]` 本身是不是 user 消息。
 
 ### 并发写状态
 
@@ -256,13 +261,12 @@ search:
 
 ## 进行中：红着的测试
 
-下面三个测试是**上一轮留下的规格**：测试在仓库里，但**对应的实现不在树里**（那次会话的代码没
+下面两个测试是**上一轮留下的规格**：测试在仓库里，但**对应的实现不在树里**（那次会话的代码没
 落地）。跑它们会红——这是**已知状态**，不是新回归：
 
 | 测试 | 现在 | 它钉住的东西（还没实现） |
 | --- | --- | --- |
 | `tests/smoke_port_guard.py` | 4/7 | 启动前独占端口（`SO_EXCLUSIVEADDRUSE`），被占就拒绝启动并指名占用者；`<tea_home>/tea_agent.port` 写 pid + 启动时间，退出时删掉 |
 | `tests/smoke_workspace_writable.py` | 3/6 | 工作区列表要报 `writable`；写不进去的工作区是只读，并给出原因 |
-| `tests/smoke_compaction_overflow.py` | 3/10 | 上下文超窗的那套修复（迭代内压力检查、摘要 4096 预算、只回 reasoning 时重试、token 估算） |
 
 要动手时先跑一遍它们：**它们变绿，就是那件事做完了**。

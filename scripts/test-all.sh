@@ -31,6 +31,12 @@ if [ -z "$EXE" ]; then
         if [ -x "$candidate" ]; then EXE="$candidate"; break; fi
     done
 fi
+# The path must be absolute: some tests chdir into their own temp directory
+# before they start the agent, and a relative path then points at nothing.
+case "$EXE" in
+    /*) ;;
+    *) EXE="$PWD/$EXE" ;;
+esac
 if [ ! -x "$EXE" ]; then
     echo "no binary found; build first (cmake --build build -j8)" >&2
     exit 2

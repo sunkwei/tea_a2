@@ -98,6 +98,17 @@ try {
   await send('Page.navigate', { url: `http://127.0.0.1:${agentPort}/` });
   await sleep(1800);
 
+  // The config dialog is opened from 设置 (there is no wall over the app).
+  await evalJs(`(function(){
+    var b = Array.prototype.filter.call(document.querySelectorAll('.nav-row'),
+      function (x) { return x.dataset.view === 'settings'; })[0];
+    if (b) b.click();
+    return true;
+  })()`);
+  await sleep(700);
+  await evalJs(`document.getElementById('setup-config').click(); true`);
+  await sleep(700);
+
   const gate = await evalJs(`(function(){
     var d = document.getElementById('dialog');
     var sel = document.getElementById('setup-provider');
@@ -118,7 +129,7 @@ try {
       hasPasteBox: !!document.getElementById('setup-yaml')
     };
   })()`);
-  check('the setup gate opens on a fresh install', gate && gate.open === true, JSON.stringify(gate));
+  check('the config dialog opens from the settings page', gate && gate.open === true, JSON.stringify(gate));
   check('the gate still asks for provider.yaml', gate && gate.text.indexOf('provider.yaml') >= 0,
     JSON.stringify(gate && gate.text.slice(0, 80)));
   check('the quick channel is offered', gate && gate.text.indexOf('快捷开始：只填 API key') >= 0,

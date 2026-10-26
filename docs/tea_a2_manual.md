@@ -118,8 +118,10 @@ WARNING 顶出屏幕。排查时 `--console-level debug` 就能在终端跟着�
 
 ### 1.5 第一次跑：配置模式
 
-`$HOME/.tea_agent/provider.yaml` **不存在**时，服务不会退出，而是进入「配置模式」：
-浏览器打开后会被一个不可跳过的对话框挡住。对话框里有两条路：
+`$HOME/.tea_agent/provider.yaml` **不存在**时，服务不会退出，而是进入「配置模式」。
+界面**不会**被一个对话框挡住：对话、文件、记忆、日志这几项要经过模型，暂时置灰；
+**终端**和**设置**照常可用（终端不经过模型）。到「设置」页里配置好 provider.yaml，
+那几项就都使能了。对话框里有两条路：
 
 1. **快捷开始**：下拉选 provider，粘贴 API key，回车。服务端据此生成一份只含该 provider
    的 `provider.yaml`，按与上传完全相同的流程校验、落盘（POSIX 上权限 `0600`）、热加载。
@@ -128,10 +130,20 @@ WARNING 顶出屏幕。排查时 `--console-level debug` 就能在终端跟着�
    | provider | 默认模型 | 生成的配置里还有什么 |
    | --- | --- | --- |
    | **DeepSeek** | `deepseek-flash` | 另附 `deepseek-chat` / `deepseek-reasoner` |
-   | **MiniMax** | `MiniMax-M3.1-Flash` | 额度徽标（`supports_usage`） |
+   | **MiniMax** | `MiniMax-M3.1-Flash` | 控制台链接（`usage_console_url`，**不发请求**） |
+
+   生成的配置**不查额度**（`supports_usage` 关着）：这份文件一般是一份配置发给一大片设备，
+   每台设备都去问一次订阅还剩多少，就是一个账号上成千上万个请求，最容易把账号弄进风控。
+   要徽标就把生成的 yaml 里那两行注释放开（key 得是 M Plan 订阅 key `sk-cp-`）。
+   自己上传的 `provider.yaml` 不受这条限制。
 
 2. **上传 / 粘贴完整配置**：把 `provider.yaml` 拖进对话框，或把内容粘进文本框，点
    「上传并应用」。
+
+对话框里还有一个按钮：
+
+- **「重新检测」**：让服务端**重新读一遍磁盘上的** `provider.yaml`。设备上常常是先把
+  文件写好（或从别处 scp 过来）再让它生效——光刷新网页没用：配置在服务端的内存里。
 
 命令行等价物（不用浏览器）：
 
@@ -147,6 +159,11 @@ curl -X POST http://127.0.0.1:8282/api/config/quickstart \
 curl -X POST http://127.0.0.1:8282/api/config \
      -H 'Content-Type: application/json' \
      -d '{"yaml":"version: 1\nproviders:\n  ..."}'
+
+# 重新读一遍磁盘上的 provider.yaml（文件是手写/拷过来的时候用）
+curl -X POST http://127.0.0.1:8282/api/config/reload
+# → {"ok":true,"path":"...","providers":["DeepSeek"],"active":{...}}
+#    文件不存在 → 404 config_missing；文件坏了 → 400 invalid_config（当前配置不动）
 ```
 
 两条路都是**先校验再落盘**：校验失败不会覆盖已有文件。有轮次正在跑时也会被拒绝（409）。
@@ -168,7 +185,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.12.2","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.13.0","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 

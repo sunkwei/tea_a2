@@ -22,7 +22,11 @@ What this pins:
     single-quoted scalar, so it cannot inject mapping keys);
   * bad input is refused and nothing is written: missing/blank key, control
     character in the key, unsupported provider;
-  * a second call replaces the config (this is not a one-shot).
+  * a second call replaces the config (this is not a one-shot);
+  * the generated config does **not** query the quota (supports_usage). A fleet
+    gets one key per device, and every device asking the provider for the
+    remaining quota is thousands of requests from one account - the pattern
+    that gets an account flagged. An *uploaded* provider.yaml is untouched.
 """
 
 import http.client
@@ -268,8 +272,22 @@ providers:
         check("the file points at the minimax endpoint",
               "https://api.minimax.cn/v1" in text, text[:300])
         check("the key is in the file", mm_key in text, text[:200])
-        check("the quota badge is enabled for the M Plan key",
-              ("supports_usage: true" in text and "minimax_token_plan" in text), text[:400])
+        # The generated file must not turn the quota query on: a fleet gets
+        # this file on every device, and every device asking for the quota is
+        # thousands of requests from one account. The commented-out lines in
+        # the file are how an operator opens it on a single machine.
+        active = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
+        check("the generated config does not query the quota",
+              ("supports_usage: true" not in active and "usage_type:" not in active
+               and "minimax_token_plan" not in active), text[:600])
+        check("the generated config says how to open it",
+              "supports_usage: true" in text and "minimax_token_plan" in text, text[:600])
+        _, prov2, _ = call(port, "GET", "/api/providers")
+        mm2 = (prov2.get("providers") or [{}])[0]
+        check("the provider reports no quota endpoint",
+              mm2.get("supports_usage") is False, mm2.get("supports_usage"))
+        check("the console link is still there (it sends no request)",
+              mm2.get("usage_console_url"), mm2)
         check("the model carries the 1M window", "max_context_tokens: 1000000" in text, text)
         check("the minimax key is not echoed back", mm_key not in body_text, body_text[:200])
         _, prov, _ = call(port, "GET", "/api/providers")
@@ -287,6 +305,29 @@ providers:
         text = open(config_path, encoding="utf-8").read()
         check("an explicit api_url wins over the default",
               status == 200 and "https://api.minimax.io/v1" in text, (status, text[:200]))
+
+        # ---- an uploaded provider.yaml is left alone ------------------------
+        # The restriction is on the *generated* file only: the operator wrote
+        # this one, so it is applied as it is - including the quota query.
+        uploaded = (
+            "version: 1\n"
+            "providers:\n"
+            "  minimax:\n"
+            "    api_url: https://api.minimax.cn/v1\n"
+            "    api_key: %s\n"
+            "    supports_usage: true\n"
+            "    usage_type: minimax_token_plan\n"
+            "    models:\n"
+            "      MiniMax-M3.1-Flash:\n"
+            "        max_context_tokens: 1000000\n"
+        ) % mm_key
+        status, up, _ = call(port, "POST", "/api/config", {"yaml": uploaded})
+        check("an uploaded provider.yaml is applied", status == 200 and up.get("ok") is True,
+              (status, up))
+        _, prov3, _ = call(port, "GET", "/api/providers")
+        up_provider = (prov3.get("providers") or [{}])[0]
+        check("an uploaded quota query stays on",
+              up_provider.get("supports_usage") is True, up_provider.get("supports_usage"))
     finally:
         try:
             proc.terminate()

@@ -226,6 +226,12 @@ providers:
     models: {MiniMax-M3.1-Flash: {…}}
 ```
 
+**批量部署时别默认开着**。`supports_usage: true` 意味着**每台设备**都会去问一次「订阅还剩多少」：
+一个账号上成千上万个请求，这种模式最容易把账号弄进风控。所以「只填一个 API key」的快捷通道
+（`POST /api/config/quickstart`）生成的配置里它是**关着的**（文件里注释着怎么打开），
+只有控制台链接（`usage_console_url`，不发请求）。自己上传的 `provider.yaml` 按原样生效——
+那份是你写的。
+
 ### 额度查询的通用配置
 
 MiniMax 之外还有别的形状，所以这几个键是通用的（`usage_type` 决定用哪个解析器）：
@@ -339,6 +345,7 @@ settings:
   enable_compaction: true
   compaction_trigger_ratio: 0.65   # 历史到预算的 65% 就开始做摘要
   compaction_keep_recent: 4
+  compaction_summary_max_tokens: 4096   # 摘要请求的预算：思考模型先花 reasoning 的钱
   tool_output_max_lines: 400
   system_prompt: |             # 也可以整体替换默认规则
     ...

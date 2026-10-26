@@ -82,28 +82,56 @@ try {
   await send('Page.navigate', { url: `http://127.0.0.1:${agentPort}/` });
   await sleep(2500);
 
-  // 1) the gate is visible and blocks the UI
+  // 1) the app is NOT blocked: the model-bound views are greyed out, the
+  //    terminal and 设置 stay usable, and the config dialog is opened from
+  //    设置 (there is no wall over the whole app).
   const gate = await evalJs(`(function(){
-    var d=document.getElementById('dialog');
-    return { text: d ? d.textContent : '', overlayHidden: document.getElementById('overlay').classList.contains('hidden'),
+    var off = {};
+    Array.prototype.forEach.call(document.querySelectorAll('.nav-row'), function (b) {
+      off[b.dataset.view] = b.classList.contains('off');
+    });
+    return { off: off,
+             dialogHidden: document.getElementById('overlay').classList.contains('hidden'),
              statusText: document.getElementById('status-text').textContent };
   })()`);
-  check('setup dialog shown', gate && !gate.overlayHidden && gate.text.includes('provider.yaml'),
-    JSON.stringify(gate && gate.text.slice(0, 60)));
+  check('no dialog blocks the app', gate && gate.dialogHidden === true, JSON.stringify(gate));
   check('status pill says 未配置', gate && gate.statusText === '未配置', gate && gate.statusText);
+  check('the chat view is greyed out', gate && gate.off.chat === true, JSON.stringify(gate && gate.off));
+  check('the terminal stays enabled', gate && gate.off.shell === false, JSON.stringify(gate && gate.off));
 
-  // 2) Esc / overlay click must not dismiss it
+  // 1b) the config dialog is opened from 设置
+  await evalJs(`(function(){
+    var b = Array.prototype.filter.call(document.querySelectorAll('.nav-row'),
+      function (x) { return x.dataset.view === 'settings'; })[0];
+    if (b) b.click();
+    return true;
+  })()`);
+  await sleep(600);
+  await evalJs(`document.getElementById('setup-config').click(); true`);
+  await sleep(700);
+  const opened = await evalJs(`(function(){
+    var d=document.getElementById('dialog');
+    return { text: d ? d.textContent : '', overlayHidden: document.getElementById('overlay').classList.contains('hidden') };
+  })()`);
+  check('setup dialog shown', opened && !opened.overlayHidden && opened.text.includes('provider.yaml'),
+    JSON.stringify(opened && opened.text.slice(0, 60)));
+
+  // 2) Esc / overlay click close it (it is a normal dialog now)
   await evalJs(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
   await sleep(200);
   const afterEsc = await evalJs(`document.getElementById('overlay').classList.contains('hidden')`);
-  check('Esc does not close the gate', afterEsc === false);
+  check('Esc closes the dialog', afterEsc === true);
 
+  await evalJs(`document.getElementById('setup-config').click(); true`);
+  await sleep(600);
   await evalJs(`document.getElementById('overlay').click()`);
   await sleep(200);
   const afterClick = await evalJs(`document.getElementById('overlay').classList.contains('hidden')`);
-  check('overlay click does not close the gate', afterClick === false);
+  check('overlay click closes the dialog', afterClick === true);
 
-  // 3) an invalid upload shows an error and keeps the gate open
+  // 3) an invalid upload shows an error and keeps the dialog open
+  await evalJs(`document.getElementById('setup-config').click(); true`);
+  await sleep(600);
   await evalJs(`(function(){
     var ta=document.getElementById('setup-yaml'); ta.value='providers: [broken';
     var btns=document.querySelectorAll('#dialog .actions .btn');
@@ -117,7 +145,7 @@ try {
   })()`);
   check('invalid upload reports an error', badUpload && badUpload.shown && /上传失败/.test(badUpload.text),
     badUpload && badUpload.text.slice(0, 90));
-  check('invalid upload keeps the gate open', badUpload && badUpload.overlayHidden === false);
+  check('invalid upload keeps the dialog open', badUpload && badUpload.overlayHidden === false);
 
   // 3b) upload through the real file input (what a click on the drop zone does)
   const yamlFile = path.join(tmp, 'provider.yaml');

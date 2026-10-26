@@ -123,7 +123,9 @@ build/bin/tea_agent --workspace . --open
 ```
 
 **首次运行**：如果 `$HOME/.tea_agent/provider.yaml` 不存在，服务不会退出，而是以「配置模式」
-启动——浏览器打开页面后会被一个不可跳过的对话框挡住。对话框里有两条路：
+启动。对话、文件、记忆、日志这几项**要经过模型**，所以暂时置灰；**终端**和**设置**照常
+可用（终端就是这台机器的 shell，不经过模型）——设备不是死的。到「设置」页里配置好
+provider.yaml，这几项就都使能了。配置对话框里有两条路：
 
 1. **快捷开始：只填 API key**（最省事，光标已经在这个输入框里）。下拉里选 provider、
    粘贴 key、回车即可：服务端据此生成一份只含该 provider 的 `provider.yaml`，按与上传
@@ -132,7 +134,12 @@ build/bin/tea_agent --workspace . --open
    | provider | 粘贴的 key | 默认模型 | 生成的配置里还有什么 |
    | --- | --- | --- | --- |
    | **DeepSeek** | `sk-…` | `deepseek-flash` | 另附 `deepseek-chat` / `deepseek-reasoner` 备用 |
-   | **MiniMax** | M Plan 的 `sk-cp-…` | `MiniMax-M3.1-Flash`（1M 上下文） | 额度徽章（`supports_usage` + `minimax_token_plan`），顶栏直接显示还剩多少 |
+   | **MiniMax** | M Plan 的 `sk-cp-…` | `MiniMax-M3.1-Flash`（1M 上下文） | 控制台链接（`usage_console_url`，点开看额度，**不发请求**） |
+
+   **生成的配置不查额度**（`supports_usage` 是关的）。这份文件通常是一份配置发给一大片设备：
+   每台设备都去问一次「订阅还剩多少」，就是一个账号上成千上万个请求——这种模式最容易把账号
+   弄进风控。单台机器上要这个徽章，把生成的 yaml 里那两行注释放开即可（key 得是 M Plan 订阅 key）。
+   自己**上传**的 `provider.yaml` 不受这条限制：那份是你写的，按原样生效。
 
    MiniMax 走 `https://api.minimax.cn/v1`（全球站 `https://api.minimax.io/v1` 同样可用，
    改 `api_url` 一行即可）；key 形状和说明会随下拉一起变，不用猜。
@@ -140,10 +147,15 @@ build/bin/tea_agent --workspace . --open
 2. **上传 / 粘贴完整配置**：点击（或拖入）`provider.yaml`，或直接把内容粘到文本框里，点
    「上传并应用」。
 
+对话框里还有一个按钮：
+
+- **「重新检测」**：让服务端**重新读一遍磁盘上的** `provider.yaml`。设备上常常是先把文件
+  写好（或从别处 scp 过来）再让它生效——光刷新网页没用，配置在服务端的内存里。
+
 已经配好之后想换一整套 provider，「设置」页的「模型提供方」一节里有 **重置 provider**：
 它打开的就是上面这个对话框（快捷 key 通道 + 上传 + 粘贴，一个都不少），但会先说明风险——
 现有的 `provider.yaml` 会被覆盖，**旧的 provider、模型和 API key 找不回来**——而且这个对话框
-**可以取消**（首次运行那个是不可关闭的：那时没有配置，不配就没法用）。新配置仍然先校验再落盘，
+**可以取消**。新配置仍然先校验再落盘，
 不合法就拒绝写入，不会留下半个文件；有轮次正在跑时也会被拒绝（409）。
 
 同一节里，每个 provider 还有个 **更新模型** 按钮：问这个 provider 现在提供哪些模型

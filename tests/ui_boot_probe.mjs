@@ -660,6 +660,11 @@ async function bootState(state, opts) {
       contextTitle: el('metric-context') && el('metric-context').title,
     },
     dialogOpen: el('overlay') ? !el('overlay').classList.contains('hidden') : null,
+    navOff: (() => {
+      const o = {};
+      document.querySelectorAll('.nav-row').forEach((b) => { o[b.dataset.view] = b.classList.contains('off'); });
+      return o;
+    })(),
     openedSession: requests.some((p) => /^\/api\/sessions\/[^/]+$/.test(p)),
     dialogText: el('dialog') ? el('dialog').textContent.replace(/\s+/g, ' ').trim().slice(0, 120) : '',
   };
@@ -750,9 +755,14 @@ for (const state of states) {
       /请先选择工作区/.test(r.sessionText), 'text=' + JSON.stringify(r.sessionText));
   }
   if (state === 'noprovider') {
-    check(state + ': first-run setup gate opens', r.dialogOpen === true, 'dialog=' + JSON.stringify(r.dialogText));
-    check(state + ': setup gate asks for provider.yaml', /provider\.yaml/.test(r.dialogText),
+    // 没有 provider.yaml 时不再有「挡住整个应用」的对话框：对话那几项置灰，
+    // 终端和设置照常，配置入口在设置页里。
+    check(state + ': no dialog blocks the app', r.dialogOpen === false,
       'dialog=' + JSON.stringify(r.dialogText));
+    check(state + ': the chat view is greyed out', r.navOff && r.navOff.chat === true,
+      'nav=' + JSON.stringify(r.navOff));
+    check(state + ': the terminal stays enabled', r.navOff && r.navOff.shell === false,
+      'nav=' + JSON.stringify(r.navOff));
     check(state + ': status reports the unconfigured state', r.statusText === '未配置',
       'status=' + JSON.stringify(r.statusText));
   }

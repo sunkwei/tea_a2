@@ -334,8 +334,10 @@ JSON。任何同步异常或未处理的 Promise rejection 都算失败，状态
 任何响应里；POSIX 下文件权限是 `0600`；带引号/反斜杠的 key 以单引号标量落盘且仍能解析；缺 key、
 空白 key、控制字符、未知 provider 一律 400 且不写文件；再调一次是替换而不是一次性。
 `provider: minimax` 走同一条路：写出 minimax 单 provider 的配置，默认模型 `MiniMax-M3.1-Flash`、
-1M 上下文，并打开额度徽章（`supports_usage` + `minimax_token_plan`）；显式传的 `api_url`
-仍然优先于默认端点。
+1M 上下文；显式传的 `api_url` 仍然优先于默认端点。**生成的配置不查额度**（`supports_usage`
+关着，只有注释里写着一旦要开怎么开，控制台链接仍在）：批量部署时每台设备都去问一次额度，
+就是一个账号上成千上万个请求，最容易把账号弄进风控；上传的 `provider.yaml` 不受此限
+（测试里也钉住了这一条：上传一份带 `supports_usage: true` 的，额度查询照旧开着）。
 
 `tests/ui_setup_quickstart.mjs` 在浏览器里走这条快捷通道：首次运行对话框里有 provider 下拉
 （DeepSeek / MiniMax）、`password` 类型的 key 输入框和「用 key 创建配置」按钮，光标已在输入框里，

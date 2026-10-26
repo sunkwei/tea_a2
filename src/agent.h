@@ -107,9 +107,13 @@ class Agent {
   /// session->summary_upto so they stop being sent.
   /// `force` bypasses the pressure threshold; used to recover from a provider
   /// context-overflow error, mirroring dsh's overflow trigger.
+  /// `persona_override` / `task_context` are the ones the turn uses, so the
+  /// pressure is measured on the context that is really sent.
   bool maybe_compact(Workspace& workspace, Session* session, const std::string& provider,
                      const std::string& model, const ModelInfo* model_info,
-                     std::atomic<bool>* cancel, const EventEmitter& emit, bool force = false);
+                     std::atomic<bool>* cancel, const EventEmitter& emit, bool force = false,
+                     const std::string& persona_override = std::string(),
+                     const std::string& task_context = std::string());
 
   /// Exposed so the HTTP layer can show exactly what the model receives.
   /// `persona_override` replaces the persona block when it is not empty.
@@ -127,6 +131,14 @@ class Agent {
   bool compact_history(Workspace& workspace, Session* session, const std::string& provider,
                        const std::string& model, const ModelInfo* model_info,
                        std::atomic<bool>* cancel, long long retain_tokens);
+  /// The index of the first message that stays verbatim: everything before it
+  /// is folded into the summary. The kept window starts at a user message, so
+  /// whole turns stay together. 0 => there is nothing to fold.
+  std::size_t fold_split(const Workspace& workspace, const Session& session,
+                         long long retain_tokens) const;
+  /// The fallback when no summary can be produced: drop the oldest turns so
+  /// the session keeps working (the model loses that part of the history).
+  bool drop_oldest_turns(Workspace& workspace, Session* session, long long retain_tokens);
 
   AppConfig* config_;
   ToolRegistry* tools_;

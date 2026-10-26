@@ -191,17 +191,25 @@ providers:
 
   const after = await evalJs(`({
     url: location.href,
-    gate: !!document.querySelector('#dialog .setup'),
-    gateOpen: !document.getElementById('overlay').classList.contains('hidden'),
-    gateText: document.getElementById('dialog').textContent,
+    // 销毁之后回到「没有 provider.yaml」的状态：对话那几项置灰，
+    // 终端和设置照常，配置入口在设置页里。
+    off: (function () {
+      var o = {};
+      Array.prototype.forEach.call(document.querySelectorAll('.nav-row'), function (b) {
+        o[b.dataset.view] = b.classList.contains('off');
+      });
+      return o;
+    })(),
+    statusText: document.getElementById('status-text').textContent,
     storage: localStorage.getItem('tea_agent_ui_v1')
   })`);
   check('the page is back in its first-run state',
     after && after.url.indexOf(`:${agentPort}/`) >= 0, JSON.stringify(after && after.url));
-  check('the upload gate is shown again',
-    after && after.gate === true && after.gateOpen === true
-      && after.gateText.indexOf('provider.yaml') >= 0,
-    JSON.stringify(after && [after.gate, after.gateOpen]));
+  check('the app is back in its unconfigured state',
+    after && after.off.chat === true && after.off.shell === false,
+    JSON.stringify(after && after.off));
+  check('the status pill says 未配置', after && after.statusText === '未配置',
+    after && after.statusText);
   // The page re-saves its (now empty) state on load, so the stored entry may
   // exist again - what matters is that it no longer points at deleted ids.
   let stored = null;

@@ -398,10 +398,24 @@
             <div class="doc-scripts" id="task-server-hint"></div>
           </div>
           <h3 class="sec-title">模型提供方</h3>
+          <!-- 没有 provider.yaml 时，这一节是**唯一**能配的地方：把 provider.yaml
+               上传上去，或者只填一个 API key 让服务端生成一份。配好之后，对话/
+               文件/记忆/日志这些页签就都使能了。 -->
+          <div class="doc-card setup-card hidden" id="setup-card">
+            <div class="doc-head">
+              <span class="doc-title">还没有 provider.yaml</span>
+              <span class="doc-actions">
+                <button class="btn primary" id="setup-config" type="button"
+                        title="上传 provider.yaml，或只填一个 API key 让服务端生成一份">配置 provider.yaml…</button>
+              </span>
+            </div>
+            <div class="doc-scripts">这台设备还没有模型，所以对话、文件、记忆、日志暂时用不了；
+              终端不受影响。配好之后这些页签就都使能了。</div>
+          </div>
           <!-- 「重置 provider」= 用一份新配置覆盖现在的 provider.yaml。按钮放在
                提供方这一节的标题下，因为它动的就是这一节的东西；点开的是和
                「无 provider 启动」同一个对话框，但先给出不可撤销的风险提示。 -->
-          <div class="sec-row">
+          <div class="sec-row" id="provider-reset-row">
             <span class="sec-row-text">要换一整套 provider？重置会用新配置覆盖当前的 provider.yaml。</span>
             <button class="btn" id="provider-reset" type="button"
                     title="打开与首次运行相同的配置界面；确认后覆盖现有 provider.yaml">重置 provider…</button>

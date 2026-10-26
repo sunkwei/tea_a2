@@ -11,14 +11,25 @@
   var API_BASE = new URL('.', document.baseURI).href; // 相对页面目录，兼容任意挂载前缀
   var VIEWS = ['chat', 'files', 'shell', 'memory', 'logs', 'settings'];
   var VIEW_LABEL = { chat: '对话', files: '文件', shell: '终端', memory: '记忆', logs: '日志', settings: '设置' };
+  /// 哪些页签要经过模型才能用。对话要模型，文件/记忆/日志也要（它们的内容
+  /// 来自 agent 的运行）。**终端**和**设置**不要：终端就是这台机器的 shell，
+  /// 设置里正好能配置 provider.yaml。所以没有 provider.yaml 时，前四个置灰，
+  /// 后两个照常——设备照样能用，不是死的。
+  var VIEWS_NEEDING_MODEL = { chat: 1, files: 1, memory: 1, logs: 1 };
+  function viewNeedsModel(view) { return !!VIEWS_NEEDING_MODEL[view]; }
 
   var taskServerInput = null;   // the optional task server's address (settings)
 
   var state = {
     view: 'chat', health: null, providers: null, tools: null, indexPath: '',
+    // 没有 provider.yaml：服务端起来了，但还没有模型。对话/文件/记忆/日志因此
+    // 不可用，**终端**和**设置**照常（终端不经过模型；设置里正好能配置它）。
+    setupMode: false,
     // 订阅额度（provider 声明 supports_usage 时才有）
     usage: null, usageError: '', usageAt: 0,
     workspaces: [], workspace: null, sessions: [], session: null, messages: [],
+    /// 这个会话的前 N 条消息已经折成摘要（模型看到的是摘要，UI 里还是全文）。
+    summaryUpto: 0, summaryBytes: 0,
     model: null, models: [], modelMenu: false,
     live: null, liveNode: null, liveView: null, liveFrame: 0, liveRenderFallback: 0,
     liveMdAt: 0,        // 上一次重渲染「正在增长的段落」的时间（节流用）
@@ -684,6 +695,8 @@
         md.innerHTML = mdBlockHtml(b);
         if (isLive && !state.ended && idx === blocks.length - 1) md.appendChild(el('span', 'stream-caret'));
         wrap.appendChild(md);
+      } else if (b.type === 'notice') {
+        wrap.appendChild(el('div', 'msg-notice', b.text));
       } else {
         var tc = b.tc;
         wrap.appendChild(toolRowView(tc, outputs[tc.id] || null, keyPrefix + ':t:' + tc.id, tc.status === 'running' && !outputs[tc.id]));
@@ -1144,6 +1157,12 @@
     var lastAssistant = -1;
     for (var k = state.messages.length - 1; k >= 0; k--) {
       if (state.messages[k] && state.messages[k].role === 'assistant') { lastAssistant = k; break; }
+    }
+    if (state.summaryUpto > 0) {
+      // 早期消息已经折进摘要：模型看到的是摘要，这里还是全文，标一行免得误会。
+      box.appendChild(el('div', 'msg-notice', state.summaryBytes > 0
+        ? ('此会话的前 ' + num(state.summaryUpto) + ' 条消息已压缩为摘要（模型看到的是摘要）')
+        : ('此会话的前 ' + num(state.summaryUpto) + ' 条消息已从模型的上下文里移除（没有摘要）')));
     }
     state.messages.forEach(function (m, i) {
       if (m.role === 'tool') return;                            // 工具消息只作为输出附加
@@ -1629,6 +1648,17 @@
       }
       return;
     }
+    if (ev.type === 'compaction') {
+      // 上下文压缩：长回合里也会发生（每次迭代发请求前都查压力），所以在对话里
+      // 留一行痕迹。轨迹面板里也有同一条（kind=compaction）。
+      var covered = num(ev.covered_messages);
+      var note = ev.dropped
+        ? ('上下文已压缩：没能生成摘要，已丢弃 ' + covered + ' 条旧消息')
+        : ('上下文已压缩：' + covered + ' 条旧消息已折叠为摘要');
+      state.live.blocks.push({ type: 'notice', text: note });
+      renderChat(); scrollMaybe(true);
+      return;
+    }
     if (ev.type === 'queue_adopted') {
       // 服务端在两次迭代之间采纳了队首消息：从排队条里移除，并把它作为一条普通
       // 用户消息插进对话（本轮结束后的会话回读会再确认一次）。
@@ -1743,9 +1773,11 @@
     $('ws-chip').title = '切换工作区，或添加一个新的项目目录（正在进行的轮次会在服务端继续）';
   }
   function updatePlaceholder() {
-    $('input').placeholder = state.streaming ? QUEUE_PLACEHOLDER
-      : (state.fork && state.session && state.fork.sid === state.session.id
-        ? FORK_PLACEHOLDER : INPUT_PLACEHOLDER);
+    // 配置模式：没有模型就发不出消息，直接在输入框里说清楚。
+    $('input').placeholder = state.setupMode ? SETUP_PLACEHOLDER
+      : (state.streaming ? QUEUE_PLACEHOLDER
+        : (state.fork && state.session && state.fork.sid === state.session.id
+          ? FORK_PLACEHOLDER : INPUT_PLACEHOLDER));
   }
   function finalizeStream() {
     var sid = state.session ? state.session.id : null;
@@ -1787,6 +1819,8 @@
       if (state.session && state.session.id === sid) {
         state.session = d.session || state.session;
         state.messages = d.messages || [];
+        state.summaryUpto = num(d.summary_upto);
+        state.summaryBytes = num(d.summary_bytes);
         renderCrumbs();          // 标题由服务端在第一轮生成，回读后才拿得到
       }
     }, function () { }).then(loadTrajectories).then(function () {
@@ -1830,6 +1864,7 @@
   // 队列随轮次存活——轮次结束仍未采纳的会被服务端退回（queue_unconsumed），
   // 这里再放回输入框，绝不悄悄丢掉用户已经打出来的字。
   var INPUT_PLACEHOLDER = '输入消息，Enter 发送，Shift+Enter 换行（可直接粘贴图片）';
+  var SETUP_PLACEHOLDER = '需要 provider.yaml 才能开始对话（终端等其他功能不受影响）';
   var QUEUE_PLACEHOLDER = '会话进行中：Enter 排队（下一轮采纳，采纳前可取消），Shift+Enter 换行';
   var FORK_PLACEHOLDER = '分叉模式：Enter 会新建一个从选中轮次分出的会话，当前会话保持原样';
 
@@ -2062,6 +2097,13 @@
     var text = ta.value.replace(/\s+$/, '');
     var images = state.attachments.slice();
     if (!text && !images.length) return;
+    if (state.setupMode) {
+      // 服务端会回 409 config_missing，但那样用户只看到一句英文错误。
+      // 这里直接说清楚，并且把人带到「设置」——那里就是配 provider.yaml 的地方。
+      toast('还没有 provider.yaml：先在「设置」里配置');
+      showView('settings');
+      return;
+    }
     if (!state.workspace) { toast('请先选择工作区'); return; }
     ta.value = ''; autoGrow();
     // 队列属于上一轮：新一轮开始时不可能还有可被采纳的旧条目。
@@ -2253,22 +2295,72 @@
       : '服务状态（点击重新检测）';
     var banner = $('banner');
     if (kind === 'setup') {
-      $('banner-text').textContent = '尚未配置 provider.yaml，上传后才能开始对话。';
+      $('banner-text').textContent =
+        '尚未配置 provider.yaml：对话、文件、记忆、日志暂不可用，终端和设置照常。';
       banner.classList.remove('hidden');
     } else if (kind === 'down') {
       banner.classList.remove('hidden');
     } else if (kind === 'ok') {
       banner.classList.add('hidden');
     }
+    renderSetupUi();
+  }
+
+  /* ---------- 6.4) 「没有 provider.yaml」时的界面 ---------- */
+  // 配置模式不是「整个应用不能用」：终端和设置照常，其余页签只是**要经过
+  // 模型**才能用，所以置灰。这样设备不是死的——运维该干的活（进终端看现场、
+  // 去设置里把 provider.yaml 配好）一件都不耽误。
+  function renderSetupUi() {
+    renderNavState();
+    updatePlaceholder();
+    var send = $('send');
+    if (send) {
+      // 不禁用它：禁用掉的按钮点了没有任何反馈，用户只会以为页面卡了。
+      // 点它 = 想配置模型 → 直接把配置对话框叫出来（和回车走同一条路）。
+      send.title = state.setupMode
+        ? '还没有 provider.yaml：点这里去「设置」里配置' : '发送';
+    }
+    var bannerBtn = $('banner-retry');
+    if (bannerBtn) {
+      bannerBtn.textContent = state.setupMode ? '配置 provider.yaml' : '重试';
+    }
+  }
+
+  /// 把用不了的页签置灰（没有 provider.yaml 时，对话/文件/记忆/日志都要模型）。
+  function renderNavState() {
+    Array.prototype.forEach.call(document.querySelectorAll('.nav-row'), function (b) {
+      var off = state.setupMode && viewNeedsModel(b.dataset.view);
+      b.classList.toggle('off', off);
+      b.setAttribute('aria-disabled', off ? 'true' : 'false');
+      b.title = off ? '还没有 provider.yaml：先在「设置」里配置' : '';
+    });
+  }
+
+  /// 横幅上的那个按钮：配置模式下是「去设置」，其它时候是「重试」。
+  function bannerAction() {
+    if (state.setupMode) { showView('settings'); return; }
+    recheckNow();
+  }
+
+  /// 顶栏的状态灯：配置模式下点它去设置，其它时候是重新检测。
+  function statusAction() {
+    if (state.setupMode) { showView('settings'); return; }
+    recheckNow();
   }
   function markOnline() {
     var needsSetup = state.health && state.health.config_loaded === false;
+    state.setupMode = !!needsSetup;
     if (needsSetup) {
+      // 没有模型就没有模型可选：把上一个 provider 的模型名留在顶栏上只会
+      // 让人以为还能对话。
+      state.model = null;
+      renderModelChip();
       applyStatus('setup', '未配置');
     } else {
       applyStatus('ok', '已连接' +
         (state.health && state.health.version ? ' v' + state.health.version : ''));
     }
+    renderSetupUi();
   }
   function markOffline(err) {
     if (err && err.message) $('banner-text').textContent = '无法连接到本地服务：' + err.message;
@@ -2318,7 +2410,7 @@
         state.models.push({ provider: p.name, model: m, max: num((info[m] || {}).max_context_tokens) });
       });
     });
-    if (!state.model && state.providers && state.providers.active) {
+    if (!state.model && state.providers && state.providers.active && state.providers.active.provider) {
       state.model = { provider: state.providers.active.provider, model: state.providers.active.model };
     }
     if (!state.model && state.models.length) state.model = state.models[0];
@@ -2779,10 +2871,11 @@
     setTimeout(function () { input.focus(); input.select(); }, 0);
   }
 
-  /* ---------- 6.5) 首次运行：上传 provider.yaml ---------- */
-  // 服务在找不到 provider.yaml 时会以「配置模式」启动。此时除了上传配置之外什么都做不了，
-  // 所以用一个不可关闭的对话框挡住界面，上传成功后直接刷新页面（配置在服务端已热加载）。
-  var setupGate = { open: false, busy: false };
+  /* ---------- 6.5) 配置 provider.yaml ---------- */
+  // 没有 provider.yaml 时，对话/文件/记忆/日志都用不了，终端和设置照常。
+  // 这个对话框是**设置**里的配置入口：上传 provider.yaml，或只填一个 API key
+  // 让服务端生成一份。上传成功后刷新页面（配置在服务端已热加载）。
+  var setupGate = { open: false, busy: false, reset: false };
 
   function loadConfigStatus() {
     return api('api/config/status').then(function (st) { return st; }, function () { return null; });
@@ -2793,11 +2886,12 @@
     // 通道 + 上传 + 粘贴），但**可以关闭**，而且先把风险摆在前面：现有
     // provider.yaml 会被覆盖，旧配置找不回来。
     var reset = !!(opts && opts.reset);
-    setupGate.open = !reset;
+    setupGate.open = true;
+    setupGate.reset = reset;
     var body = el('div', 'setup');
     body.appendChild(el('p', 'setup-lead', reset
       ? '重置 provider：下面这份配置会覆盖当前的 provider.yaml。'
-      : '服务已启动，但没有找到 provider.yaml。上传后即可开始对话，配置会立即生效。'));
+      : '上传后即可开始对话，配置会立即生效（不用重启服务）。'));
     if (reset) {
       var warn = el('div', 'setup-warn');
       warn.appendChild(el('div', 'setup-warn-title', '⚠ 会覆盖现有配置，且无法撤销'));
@@ -2828,7 +2922,9 @@
       minimax: {
         label: 'MiniMax（MiniMax-M3.1-Flash）',
         hint: '选择 MiniMax，粘贴 M Plan 的 key（sk-cp-…），回车即可。会生成一份只含该 provider 的' +
-              'provider.yaml（默认模型 MiniMax-M3.1-Flash，1M 上下文），顺带打开顶栏的额度徽章。',
+              'provider.yaml（默认模型 MiniMax-M3.1-Flash，1M 上下文）。生成的配置**不查额度**：' +
+              '批量部署时每台设备都去问额度，账号容易被风控；需要的话在生成的 yaml 里把' +
+              'supports_usage 打开。',
         placeholder: 'sk-cp-…'
       }
     };
@@ -2934,6 +3030,23 @@
       });
     }
 
+    /// 「重新检测」：让服务端**重新读一遍磁盘上的** provider.yaml。
+    /// 设备上没有配置文件时，运维很可能先用终端把文件写好（或者从别处
+    /// scp 过来）——这时光刷新网页没用：配置在服务端的内存里，刷新不会重读。
+    function recheckConfig() {
+      if (setupGate.busy) return;
+      setBusy(true);
+      api('api/config/reload', { method: 'POST' }).then(function () {
+        // 读到了：配置已经在服务端生效，刷新页面让界面按新配置重建。
+        $('setup-ok').classList.remove('hidden');
+        $('setup-ok').textContent = '配置已生效，正在刷新…';
+        setTimeout(function () { location.reload(); }, 400);
+      }, function (e) {
+        setBusy(false);
+        showError('还是没有可用的 provider.yaml：' + (e && e.message ? e.message : '未知错误'));
+      });
+    }
+
     /// 只用一个 key 建配置：服务端写 provider.yaml → 热加载 → 这里刷新页面。
     function quickApply() {
       if (setupGate.busy) return;
@@ -2995,11 +3108,14 @@
     var ok = el('div', 'setup-ok hidden', '配置已应用，正在刷新…'); ok.id = 'setup-ok';
     body.appendChild(ok);
 
-    openDialog(reset ? '重置 provider 配置' : '需要配置 provider.yaml', body, [
-      reset ? { label: '取消', onClick: closeDialog }
-             : { label: '重新检测', onClick: function () { location.reload(); } },
-      { label: '上传并应用', primary: true, onClick: function () { apply(ta.value); } }
-    ]);
+    var actions = [];
+    if (reset) actions.push({ label: '取消', onClick: closeDialog });
+    // 「重新检测」：让服务端重新读一遍磁盘上的 provider.yaml —— 设备上的文件
+    // 可能是运维手写好或从别处拷过来的，这时候光刷新网页没用（配置在服务端
+    // 的内存里）。
+    actions.push({ label: '重新检测', onClick: recheckConfig });
+    actions.push({ label: '上传并应用', primary: true, onClick: function () { apply(ta.value); } });
+    openDialog(reset ? '重置 provider 配置' : '配置 provider.yaml', body, actions);
     // openDialog 会重建按钮，所以把禁用状态挂在真正的那个按钮上。
     var dialog = $('dialog');
     var buttons = dialog.querySelectorAll('.actions .btn');
@@ -3010,9 +3126,6 @@
     keyInput.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); quickApply(); }
     });
-    // 挡住关闭：overlay 点击与 Esc 都不能关掉它。重置模式除外——那里是可以
-    // 取消的，不然「误点」就等于「覆盖配置」。
-    if (!reset) $('overlay').classList.add('setup-locked');
     // 打开就把光标放在最省事的那条路上：粘贴 key、回车。
     setTimeout(function () { keyInput.focus(); }, 0);
   }
@@ -3066,10 +3179,13 @@
       if (!state.workspaces.length) {
         clearForkPoint(true);
         state.workspace = null; state.sessions = []; state.session = null; state.messages = [];
+        state.summaryUpto = 0;
         state.trajectory = []; state.lastTrajectoryId = null;
         clearQueue();
         renderWorkspaceChip(); renderSessions(); renderChat(); renderSettings();
-        openAddWorkspace(true);
+        // 配置模式下浮层归配置对话框：两个对话框会互相顶掉。工作区以后从
+        // 侧栏的工作区菜单里加也一样。
+        if (!state.setupMode) openAddWorkspace(true);
         return;
       }
       // 页面落在哪个主题？地址栏的 ?s= 说了算（刷新/收藏/贴给另一个浏览器都靠它），
@@ -3140,6 +3256,7 @@
       state.draft = false;
       state.sessionEpoch++;                   // 上一个工作区的 openSession 结果作废
       state.session = null; state.messages = []; state.live = null; state.streamError = null;
+      state.summaryUpto = 0;
       clearQueue();
       state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
       state.turnSteps = 0; state.turnStartAt = 0;
@@ -3187,6 +3304,8 @@
       state.session = d.session || { id: sid };
       state.draft = false;
       state.messages = d.messages || [];
+      state.summaryUpto = num(d.summary_upto);
+      state.summaryBytes = num(d.summary_bytes);
       setTodos(d.todos || []);
       state.artifacts = d.artifacts || [];
       state.live = null; state.streamError = null;
@@ -3219,6 +3338,7 @@
     state.sessionEpoch++;                     // 在途的 openSession 结果作废，别把草稿顶掉
 
     state.session = null; state.messages = []; state.live = null; state.streamError = null;
+    state.summaryUpto = 0;
     setTodos([]);
     state.artifacts = [];
     state.stickBottom = true;
@@ -3340,10 +3460,20 @@
     d.appendChild(bar);
     $('overlay').classList.remove('hidden');
   }
-  function closeDialog() { $('overlay').classList.add('hidden'); clear($('dialog')); }
+  function closeDialog() {
+    $('overlay').classList.add('hidden');
+    clear($('dialog'));
+    setupGate.open = false;
+  }
 
   /* ---------- 8) 视图切换 ---------- */
   function showView(name) {
+    // 没有 provider.yaml 时，用不了的页签点不动（置灰，见 renderNavState）。
+    if (state.setupMode && viewNeedsModel(name)) {
+      toast('还没有 provider.yaml：先在「设置」里配置');
+      showView('settings');
+      return;
+    }
     state.view = name;
     hideTurnTip();
     closeImageViewer();
@@ -4074,11 +4204,19 @@
     var cfg = state.providers || {};
     row('配置文件', cfg.config_path);
     row('工作区索引', state.indexPath);
-    if (cfg.active) row('当前模型', cfg.active.provider + ' · ' + cfg.active.model);
+    if (cfg.active && cfg.active.provider) {
+      row('当前模型', cfg.active.provider + ' · ' + cfg.active.model);
+    }
     if (cfg.settings) {
       row('最大迭代', String(cfg.settings.max_iterations));
       row('工具输出上限', cfg.settings.max_tool_output + ' 字节');
     }
+    // 没配置时：顶上那张「配置 provider.yaml」的卡是入口，下面那行「重置
+    // provider」收起来（没有配置可覆盖）；配好了就反过来。
+    var card = $('setup-card');
+    if (card) card.classList.toggle('hidden', !state.setupMode);
+    var resetRow = $('provider-reset-row');
+    if (resetRow) resetRow.classList.toggle('hidden', state.setupMode);
     var pv = $('settings-providers');
     clear(pv);
     var ps = cfg.providers || [];
@@ -5198,7 +5336,13 @@
         if (state.streaming) queueMessage(); else sendMessage();
       }
     });
-    $('send').onclick = function () { if (state.streaming) stopStream(); else sendMessage(); };
+    $('send').onclick = function () {
+      if (state.streaming) { stopStream(); return; }
+      // 配置模式下点发送 = 想聊天 = 缺模型：把人带到「设置」去配
+      // （sendMessage 里也有同一道检查，回车走的就是它）。
+      if (state.setupMode) { toast('还没有 provider.yaml：先在「设置」里配置'); showView('settings'); return; }
+      sendMessage();
+    };
     var detachBtn = $('detach');
     if (detachBtn) detachBtn.onclick = detachStream;
     $('sidebar-hide').onclick = function () { toggleSidebar(true); };
@@ -5231,8 +5375,8 @@
     $('new-session').onclick = function () {
       newSessionDraft();          // 会先离开正在跟随的轮次（服务端照跑）
     };
-    $('banner-retry').onclick = recheckNow;
-    $('status').onclick = recheckNow;
+    $('banner-retry').onclick = bannerAction;
+    $('status').onclick = statusAction;
     $('ws-chip').onclick = function (e) {
       e.stopPropagation();
       var open = $('ws-dropdown').classList.contains('hidden');
@@ -5273,7 +5417,6 @@
       }
     });
     $('overlay').onclick = function (e) {
-      if (setupGate.open) return;                       // 首次配置必须完成，不能点掉
       if (e.target === $('overlay')) closeDialog();
     };
     $('files-save').onclick = saveFile;
@@ -5408,6 +5551,12 @@
     $('provider-reset').onclick = function () {
       loadConfigStatus().then(function (st) { openSetupGate(st || {}, { reset: true }); });
     };
+    // 没有 provider.yaml 时，「设置」页顶上那张卡就是配置入口（同一个对话框，
+    // 但没有「覆盖现有配置」的风险提示——本来就没有配置可覆盖）。
+    $('setup-config').onclick = function () {
+      loadConfigStatus().then(function (st) { openSetupGate(st || {}); },
+        function () { openSetupGate({}); });
+    };
     document.addEventListener('keydown', function (e) {
       // 终端开着的时候键盘归它——哪怕焦点已经不在它的输入框上（点一下页面
       // 空白处就会把焦点带走）。应用自己的快捷键除外。
@@ -5435,7 +5584,7 @@
         if (closeImageViewer()) return;                                  // 先关图片查看器
         if (state.fork) clearForkPoint();                                // 先撤掉分叉点
         closeDropdowns();
-        if (!setupGate.open) closeDialog();
+        closeDialog();
       }
     });
   }
@@ -5458,15 +5607,15 @@
     shellLoadCapability();      // 这台机器有没有终端，入口靠它决定显不显示
     subscribeTaskEvents();     // 后台跑完的任务也要能闪一下标签页
     var boot = function () { return Promise.all([loadProviders(), loadTools(), loadWorkspaces()]); };
-    loadHealth().then(function (h) {
-      if (h && h.config_loaded === false) {
-        // Nothing else can work yet: ask for the file instead of booting.
-        loadConfigStatus().then(function (st) { openSetupGate(st || {}); },
-          function () { openSetupGate({}); });
-        return null;
-      }
+    loadHealth().then(function () {
+      // 没有 provider.yaml 时，对话/文件/记忆/日志都不可用（它们都要经过模型），
+      // 但**终端**和**设置**照常：终端不经过模型，设置里正好能把它配好。
+      // 所以界面照常装配，只是把用不了的那几项置灰。
       return boot();
-    }, boot).catch(function () {});
+    }, boot).then(function () {
+      // 落在用不了的那一项上（上次停在对话页？）：换到终端去。
+      if (state.setupMode && viewNeedsModel(state.view)) showView('shell');
+    }).catch(function () {});
     startLogsTimer();
     startHealthTimer();
     autoGrow();

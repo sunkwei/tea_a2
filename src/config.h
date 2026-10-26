@@ -197,8 +197,12 @@ struct Settings {
   double compaction_retain_ratio = 0.16;
   /// Extra verbatim messages kept regardless of the token target.
   int compaction_retries = 1;
-  /// Token budget for the generated summary.
-  int64_t compaction_summary_max_tokens = 800;
+  /// Token budget for the generated summary. A thinking model spends the
+  /// budget on reasoning_content first, so a small budget produces an answer
+  /// with an empty content - and the compaction looks like it failed. 4096 is
+  /// enough for the thinking plus a summary; when the model still answers with
+  /// reasoning only, the request is repeated with four times the room.
+  int64_t compaction_summary_max_tokens = 4096;
   /// Keep at least this many recent messages no matter what.
   int compaction_keep_recent = 4;
 

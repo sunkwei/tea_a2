@@ -203,7 +203,8 @@ budget = 上下文窗口 − 输出预留 − (system prompt + 工具 schema + �
 ```
 
 输出预留取 `max_tokens` 或模型的 `max_output_tokens`，并限制在窗口的 1/3 以内（避免饿死历史）；
-预算有 `窗口 / 5` 的下限。`keep_turns` 是「至少保留最近 N 轮」的**硬下限**，单条消息本身超预算时
+预算有 `窗口 / 5` 的下限。**硬上限再留 10% 的窗口余量**：我们算 token 是估的，估偏了也不会
+把请求顶到 provider 的墙上。`keep_turns` 是「至少保留最近 N 轮」的**硬下限**，单条消息本身超预算时
 按头尾裁剪而不是直接溢出。日志里每次都能看到实际数字：
 
 ```
@@ -219,9 +220,19 @@ context: max=1000000 reserve_output=333333 fixed=847 budget=665820 kept=4/4 used
 
 **什么时候开始压**：不是压到窗口边界，而是到**预算的 65%**（`compaction_trigger_ratio`，
 默认 0.65）。压一次之后，逐字保留的原文只剩预算的 16%（`compaction_retain_ratio`），
-摘要本身最多 800 token。留这么宽的余量有两个原因：一是压到「刚好够」的话下一轮立刻又超，
-二是我们算 token 是**估**的（ASCII 4 字符/token、CJK 1 字符/token，工具 schema 按固定值估），
+摘要本身最多 4096 token（`compaction_summary_max_tokens`）。留这么宽的余量有两个原因：
+一是压到「刚好够」的话下一轮立刻又超，二是我们算 token 是**估**的
+（ASCII 3 字符/token、CJK 1 字符/token、`reasoning_content` 按全额算，工具 schema 按固定值估），
 估算偏乐观时真实请求会比预算大——提前压就是给这种偏差留的余量。
+
+**压力检查在回合内部也做**：一个长回合（几十次工具调用）每一步都在长上下文，只在回合开始时
+检查一次的话，等 provider 拒绝请求时这一回合已经死了。所以每次迭代发请求之前都查一次压力，
+超了就先压再发。
+
+**思考模型的摘要预算**：MiniMax-M3、DeepSeek reasoner 这类模型先把预算花在 `reasoning_content`
+上，预算太小就只回思考、正文为空——压缩看起来「失败」了，历史一条没折，原始的 400 直接把回合
+打死。所以摘要请求给 4096 token（够思考 + 写摘要），**只回 reasoning 时用 4 倍预算再问一次**。
+
 
 `keep_turns`（默认 10）是「最近 N 轮逐字保留」的**硬下限**，即使超预算也照发；
 `compaction_keep_recent`（默认 4）同理，压完至少留下这么多条消息。

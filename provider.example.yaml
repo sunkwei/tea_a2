@@ -73,6 +73,12 @@ providers:
   minimax:
     api_url: https://api.minimax.cn/v1
     api_key: sk-cp-REPLACE-ME       # the M Plan SUBSCRIPTION key (sk-cp-...)
+    # Every device that carries this file asks the provider for the quota. On a
+    # single machine that is one request now and then; on a fleet of thousands
+    # it is thousands of requests from one account, and that pattern is what
+    # gets an account flagged. Comment the two lines below out when the file
+    # goes to a fleet - the one-key quick setup generates a config with the
+    # quota query already switched off.
     supports_usage: true
     usage_type: minimax_token_plan  # which parser understands the answer
     # usage_url: https://www.minimax.cn/v1/token_plan/remains   # optional
