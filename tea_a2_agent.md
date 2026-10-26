@@ -11,6 +11,8 @@
 > [构建](#构建) ·
 > [测试](#测试) ·
 > [代码里的坑](#这套代码里的坑) ·
+> [快捷通道](#首次运行快捷通道只填一个-api-key) ·
+> [额度查询](#额度查询provider-级) ·
 > [平台差异](#平台差异) ·
 > [约定](#约定) ·
 > [进行中](#进行中红着的测试)
@@ -82,6 +84,57 @@ node tests/ui_shell.mjs             # 单个浏览器测试（需 CHROME_BIN）
 - 浏览器测试要 `TMP/TEMP` 指向仓库内，否则 node 的 `mkdtemp` 会 EPERM。
 - 预置会话的 UI 测试必须同时写 `sessions/index.json`，否则新建/分叉第一个会话时索引重建会把
   预置会话从侧栏弄丢。
+
+---
+
+## 首次运行：快捷通道（只填一个 API key）
+
+`POST /api/config/quickstart`（界面上是「设置 → 配置 → 快捷开始」）只要一个 API key，服务端就生成
+一份**只含该 provider** 的 `provider.yaml` 并落盘。生成函数在 `src/server.cpp`：
+`deepseek_config_yaml()` / `minimax_config_yaml()` / `mimo_config_yaml()`；落盘走
+`apply_config_yaml()`——先写临时文件、用一个 scratch 配置校验，通过才换名，POSIX 上权限 `0600`
+（文件里是 key）。key 不出现在任何响应里。
+
+- **默认模型 = 第一个 provider 的第一个模型**（顺序即开关），`default_model:` 只是「provider 没有
+  `models:` 列表」时的兜底。所以生成的文件里**不写** `default_model:`，也不写旧的 `roles:` 块
+  （C++ 版根本不读 `roles:`，只在启动时打一条告警）。
+- **生成的配置不查额度**（`supports_usage` 关着）——理由和那几个键的规则见下一节。
+- **小米 MiMo 有两个网关，key 决定走哪个**：`sk-…` 是按量付费 `https://api.xiaomimimo.com/v1`，
+  `tp-…` / `ttp-…` 是 Token Plan `https://token-plan-cn.xiaomimimo.com/v1`。两者**不能混用**
+  （用错就是 401），所以快捷通道按 key 的形状自己选；显式传 `api_url` 仍然优先。默认模型
+  `mimo-v2.6-flash`（1M 上下文 / 128K 输出），另附 `mimo-v2.6-pro`。
+- **MiMo 的 v2.6 模型默认开启思考**，小米要求思考模式下把上一轮的 `reasoning_content` 原样带回去，
+  所以生成的 yaml 里写 `reasoning_content: keep`。`auto` 其实也是带（只有 deepseek.com 例外），
+  写出来是为了不依赖「哪个端点要」的猜测。
+- **实测（2026-10-26，真实 Token Plan key）**：网关接受本程序发的 `max_tokens`（小米文档只写
+  `max_completion_tokens`，但 OpenAI 兼容的旧名字它也收，所以 `src/llm.cpp` 不用改）；
+  `reasoning_content` 带与不带都跑得通——小米文档说的 400 是指「历史里有的 assistant 消息带、
+  有的不带」这种不一致，而本程序按 provider 统一策略，不会混。小米文档的机器可读版：
+  <https://mimo.mi.com/llms.txt>（每页正文在 `/static/docs/....md`）。
+- 测试：`tests/smoke_config_quickstart.py`、`tests/ui_setup_quickstart.mjs`。
+
+---
+
+## 额度查询（provider 级）
+
+「订阅还剩多少」没有标准接口，每家的形状都不一样，所以按 provider **声明**而不是探测——探错了
+就是把 key 发到一个不该去的地方。完整的键表在 `docs/config.md`，这里记代码里的规则：
+
+- **`supports_usage: true`** = 这个 provider 有账号级的额度接口。**默认关**（关着就完全不查）。
+- **写了 `usage_type:` 或 `usage_url:` 会自动把额度查询打开**（`src/config.cpp`），并告警一句
+  「你写了 usage_type 却没写 supports_usage，已替你打开」。所以**生成**的 provider.yaml 里这两行
+  只能待在**注释**里；`usage_console_url` 不发请求，可以照写。**上传**的 provider.yaml 不受这条
+  限制——那是操作者写的，按原样生效。
+- **`usage_auth`**：`bearer`（默认）/ `api-key` / `none`——key 怎么送出去（`api-key: <key>` 是
+  MiMo Token Plan 的写法，`none` 是端点靠会话 cookie）。
+- **`usage_type: json_fields` + `usage_fields`**：通用形状，点的路径 → 数字
+  （`data.remainingPercent`）。另一个取值是 `minimax_token_plan`。
+- **UI 三态**：有额度接口 → 顶栏「额度 NN%」；只有 `usage_console_url` → 「额度 ↗」（点开控制台，
+  **不发请求**）；都没有 → 不显示。
+- **与 `stream_include_usage` 是两回事**：那个是「在对话响应里附带 token 用量」，这个是「另外的
+  账号接口，问还剩多少」。两个名字挨得近，所以代码里分开写了。
+- **批量部署时别默认开着**：`supports_usage: true` 意味着**每台设备**都问一次，一个账号上成千
+  上万个请求，这种模式最容易把账号弄进风控。快捷通道生成的配置一律关着。
 
 ---
 
@@ -278,12 +331,13 @@ search:
 
 ## 进行中：红着的测试
 
-下面两个测试是**上一轮留下的规格**：测试在仓库里，但**对应的实现不在树里**（那次会话的代码没
-落地）。跑它们会红——这是**已知状态**，不是新回归：
+下面三个测试是红的：前两个是**上一轮留下的规格**（测试在仓库里，但**对应的实现不在树里**，
+那次会话的代码没落地），第三个是**测试自己的顺序问题**。跑它们会红——这是**已知状态**，不是新回归：
 
 | 测试 | 现在 | 它钉住的东西（还没实现） |
 | --- | --- | --- |
 | `tests/smoke_port_guard.py` | 4/7 | 启动前独占端口（`SO_EXCLUSIVEADDRUSE`），被占就拒绝启动并指名占用者；`<tea_home>/tea_agent.port` 写 pid + 启动时间，退出时删掉 |
 | `tests/smoke_workspace_writable.py` | 3/6 | 工作区列表要报 `writable`；写不进去的工作区是只读，并给出原因 |
+| `tests/smoke_shell.py` | 28/38 | **实现是在的**（`/api/shell/session/{id}/upload` 与 `…/file` 都有），但测试先把会话 `exit` 掉了，再拿同一个 session id 去做上传/下载 → 全是 404。文件那几项要另开一个会话 |
 
-要动手时先跑一遍它们：**它们变绿，就是那件事做完了**。
+要动手时先跑一遍它们：**前两个变绿，就是那件事做完了**；第三个要改的是测试本身。
