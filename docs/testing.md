@@ -338,12 +338,19 @@ JSON。任何同步异常或未处理的 Promise rejection 都算失败，状态
 关着，只有注释里写着一旦要开怎么开，控制台链接仍在）：批量部署时每台设备都去问一次额度，
 就是一个账号上成千上万个请求，最容易把账号弄进风控；上传的 `provider.yaml` 不受此限
 （测试里也钉住了这一条：上传一份带 `supports_usage: true` 的，额度查询照旧开着）。
+`provider: mimo`（小米 MiMo）也走同一条路，钉住了三件事：**网关由 key 的形状决定**
+（`tp-…`/`ttp-…` → `token-plan-cn.xiaomimimo.com`，`sk-…` → `api.xiaomimimo.com`，两者不能混用）、
+默认模型是 `mimo-v2.6-flash`（另有 `mimo-v2.6-pro`）、生成的配置里带
+`reasoning_content: keep`（v2.6 默认思考，小米的文档要求思考模式下把上一轮的
+`reasoning_content` 带回去）。
 
 `tests/ui_setup_quickstart.mjs` 在浏览器里走这条快捷通道：首次运行对话框里有 provider 下拉
-（DeepSeek / MiniMax）、`password` 类型的 key 输入框和「用 key 创建配置」按钮，光标已在输入框里，
-完整上传路径也还在；切到 MiniMax 时提示文字和 key 占位符一起变（`sk-cp-…`）；
+（DeepSeek / MiniMax / 小米 MiMo）、`password` 类型的 key 输入框和「用 key 创建配置」按钮，
+光标已在输入框里，完整上传路径也还在；切到 MiniMax 时提示文字和 key 占位符一起变（`sk-cp-…`），
+切到 MiMo 时变成 `sk-… / tp-…`；
 空 key 就地报错且不写文件；粘贴 key 按回车后 `provider.yaml` 出现、页面自动刷新、配置对话框
-消失、状态栏变「已连接」、模型按钮显示 `deepseek-flash`。
+消失、状态栏变「已连接」、模型按钮显示 `deepseek-flash`；再打开一次对话框选 MiMo 粘一个
+`tp-…` key，文件里就换成 Token Plan 网关 + `mimo-v2.6-flash`，服务端也跟着切过去。
 
 `tests/ui_setup_flow.mjs` 起一个**没有** `provider.yaml` 的实例，再用 headless Chrome 通过
 CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、坏 YAML 报错且不落盘、文件选择器

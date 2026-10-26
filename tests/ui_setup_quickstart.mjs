@@ -2,11 +2,11 @@
 //
 // The contract pinned here:
 //   * a fresh install (no provider.yaml) opens the upload gate, and that gate
-//     offers the quick channel: a provider select (DeepSeek or MiniMax), a
-//     password field for the key, and a "用 key 创建配置" button, with the cursor
-//     already in the key field;
+//     offers the quick channel: a provider select (DeepSeek, MiniMax or Xiaomi
+//     MiMo), a password field for the key, and a "用 key 创建配置" button, with the
+//     cursor already in the key field;
 //   * picking the other provider changes the hint and the key placeholder, so the
-//     dialog says which key shape it wants (sk-... vs sk-cp-...);
+//     dialog says which key shape it wants (sk-... vs sk-cp-... vs sk-.../tp-...);
 //   * the full-upload path (drop zone + paste box) is still there;
 //   * an empty key is refused in place and nothing is written;
 //   * pasting a key and pressing Enter writes provider.yaml (DeepSeek,
@@ -134,11 +134,13 @@ try {
     JSON.stringify(gate && gate.text.slice(0, 80)));
   check('the quick channel is offered', gate && gate.text.indexOf('快捷开始：只填 API key') >= 0,
     JSON.stringify(gate && gate.text.slice(0, 200)));
-  check('it offers DeepSeek and MiniMax',
-    gate && gate.options.length === 2
+  check('it offers DeepSeek, MiniMax and MiMo',
+    gate && gate.options.length === 3
       && gate.options[0].indexOf('DeepSeek') >= 0 && gate.options[0].indexOf('deepseek-flash') >= 0
       && gate.options[1].indexOf('MiniMax') >= 0
-      && gate.options[1].indexOf('MiniMax-M3.1-Flash') >= 0, JSON.stringify(gate && gate.options));
+      && gate.options[1].indexOf('MiniMax-M3.1-Flash') >= 0
+      && gate.options[2].indexOf('MiMo') >= 0
+      && gate.options[2].indexOf('mimo-v2.6-flash') >= 0, JSON.stringify(gate && gate.options));
   check('the key field is a password field with a sk- placeholder',
     gate && gate.keyType === 'password' && gate.keyPlaceholder.indexOf('sk-') === 0,
     JSON.stringify(gate && [gate.keyType, gate.keyPlaceholder]));
@@ -165,6 +167,22 @@ try {
       && switched.hint.indexOf('MiniMax-M3.1-Flash') >= 0, JSON.stringify(switched));
   check('the key placeholder follows the provider',
     switched && switched.placeholder.indexOf('sk-cp-') === 0, JSON.stringify(switched));
+  // The same for the third channel: Xiaomi MiMo takes a pay-as-you-go key
+  // (sk-...) or a Token Plan key (tp-...), and the hint names its model.
+  const mimo = await evalJs(`(function(){
+    var sel = document.getElementById('setup-provider');
+    sel.value = 'mimo';
+    sel.dispatchEvent(new Event('change'));
+    var key = document.getElementById('setup-key');
+    var hint = document.getElementById('setup-quick-hint');
+    return { hint: hint ? hint.textContent : '', placeholder: key ? key.placeholder : '' };
+  })()`);
+  check('picking MiMo explains its key and its default model',
+    mimo && mimo.hint.indexOf('MiMo') >= 0
+      && mimo.hint.indexOf('mimo-v2.6-flash') >= 0, JSON.stringify(mimo));
+  check('the MiMo placeholder names both key shapes',
+    mimo && mimo.placeholder.indexOf('sk-') >= 0 && mimo.placeholder.indexOf('tp-') >= 0,
+    JSON.stringify(mimo));
   await evalJs(`(function(){
     var sel = document.getElementById('setup-provider');
     sel.value = 'deepseek';
@@ -239,6 +257,43 @@ try {
   check('the server is configured',
     health.config_loaded === true && health.provider === 'DeepSeek'
       && health.model === 'deepseek-flash', JSON.stringify(health));
+
+  // The same dialog, now with the MiMo channel: a Token Plan key (tp-...) has
+  // to end up in a config that points at the Token Plan gateway and defaults
+  // to mimo-v2.6-flash.
+  await evalJs(`(function(){
+    var b = Array.prototype.filter.call(document.querySelectorAll('.nav-row'),
+      function (x) { return x.dataset.view === 'settings'; })[0];
+    if (b) b.click();
+    return true;
+  })()`);
+  await sleep(700);
+  await evalJs(`document.getElementById('setup-config').click(); true`);
+  await sleep(700);
+  const mimoKey = 'tp-ui-mimo-' + Date.now();
+  await evalJs(`(function(){
+    var sel = document.getElementById('setup-provider');
+    sel.value = 'mimo';
+    sel.dispatchEvent(new Event('change'));
+    var k = document.getElementById('setup-key');
+    k.value = '${mimoKey}';
+    k.dispatchEvent(new Event('input'));
+    k.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    return true;
+  })()`);
+  await sleep(3500);
+  const mimoText = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
+  check('the MiMo key is in the file', mimoText.indexOf(mimoKey) >= 0, mimoText.slice(0, 300));
+  check('the MiMo channel picked the Token Plan gateway',
+    mimoText.indexOf('token-plan-cn.xiaomimimo.com') >= 0, mimoText.slice(0, 300));
+  check('the MiMo default model is mimo-v2.6-flash',
+    mimoText.indexOf('models:') >= 0
+      && mimoText.indexOf('mimo-v2.6-flash:') < mimoText.indexOf('mimo-v2.6-pro:'),
+    mimoText.slice(0, 500));
+  const mimoHealth = JSON.parse((await getJson(agentPort, '/api/health')).body);
+  check('the server is on MiMo now',
+    mimoHealth.config_loaded === true && mimoHealth.provider === 'mimo'
+      && mimoHealth.model === 'mimo-v2.6-flash', JSON.stringify(mimoHealth));
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });

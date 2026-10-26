@@ -291,7 +291,35 @@ providers:
     api_url: https://token-plan-cn.xiaomimimo.com/v1
     api_key: tp-…
     usage_console_url: https://platform.xiaomimimo.com/#/console/plan-manage
+    # v2.6 模型默认开启思考：小米的文档要求思考模式下把上一轮的
+    # reasoning_content 原样带回去（程序本来就带，写出来是为了不依赖端点猜测）。
+    reasoning_content: keep
+    models:
+      mimo-v2.6-flash:            # 1M 上下文 / 128K 输出
+        max_context_tokens: 1000000
+        max_output_tokens: 128000
+        supports_tools: true
+        supports_reasoning: true
+        supports_vision: true
+      mimo-v2.6-pro:
+        max_context_tokens: 1000000
+        max_output_tokens: 128000
+        supports_tools: true
+        supports_reasoning: true
+        supports_vision: true
 ```
+
+**MiMo 有两个网关，key 决定走哪个**（官方文档：<https://mimo.mi.com/docs>）：
+
+| key 形状 | 是什么 | `api_url` | 控制台 |
+| --- | --- | --- | --- |
+| `sk-…` | 按量付费 | `https://api.xiaomimimo.com/v1` | <https://platform.xiaomimimo.com/#/console/usage> |
+| `tp-…` / `ttp-…` | Token Plan 订阅（个人 / 团队） | `https://token-plan-cn.xiaomimimo.com/v1` | <https://platform.xiaomimimo.com/#/console/plan-manage> |
+
+两者不能混用：Token Plan 的 key 打到按量付费的网关上（或反过来）就是 401。
+「只填一个 API key」的快捷通道（`POST /api/config/quickstart`）**按 key 的形状自己选网关**，
+默认模型 `mimo-v2.6-flash`；也可以自己传 `api_url` 覆盖（新加坡站是
+`token-plan-sgp.xiaomimimo.com`，欧洲站是 `token-plan-ams.xiaomimimo.com`）。
 
 顶栏徽标会变成「额度 ↗」，点开就是控制台（登录后自己看额度）。
 真要把它**接进程序里**，只能用 `usage_auth: none` + `usage_headers: {Cookie: …}` 走控制台那条路，

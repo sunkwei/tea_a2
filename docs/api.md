@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.13.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/health` | 探活、版本（`0.13.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
@@ -33,7 +33,7 @@
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
 | `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件。设置页的「重置 provider」走的就是它 |
 | `POST` | `/api/config/reload` | **重新读一遍磁盘上的** `provider.yaml` 并热加载（文件是手写或从别处拷过来的时候用；光刷新网页没用，配置在服务端的内存里）。先校验再替换：文件不存在 → 404 `config_missing`，文件坏了 → 400 `invalid_config`（**当前配置不动**）；有轮次在跑时 409 |
-| `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`）；key 不会出现在任何响应里。**生成的配置不查额度**（`supports_usage` 关着）：批量部署时每台设备都去问额度会把账号弄进风控；上传的 `provider.yaml` 不受此限 |
+| `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax\|mimo","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`，小米 MiMo 默认模型 `mimo-v2.6-flash`）；key 不会出现在任何响应里。**生成的配置不查额度**（`supports_usage` 关着）：批量部署时每台设备都去问额度会把账号弄进风控；上传的 `provider.yaml` 不受此限。MiMo 的网关由 key 形状决定：`sk-…` → `api.xiaomimimo.com`，`tp-…`/`ttp-…` → `token-plan-cn.xiaomimimo.com` |
 | `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
 | `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |

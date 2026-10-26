@@ -127,10 +127,16 @@ WARNING 顶出屏幕。排查时 `--console-level debug` 就能在终端跟着�
    的 `provider.yaml`，按与上传完全相同的流程校验、落盘（POSIX 上权限 `0600`）、热加载。
    key 不会出现在任何响应里。
 
-   | provider | 默认模型 | 生成的配置里还有什么 |
-   | --- | --- | --- |
-   | **DeepSeek** | `deepseek-flash` | 另附 `deepseek-chat` / `deepseek-reasoner` |
-   | **MiniMax** | `MiniMax-M3.1-Flash` | 控制台链接（`usage_console_url`，**不发请求**） |
+   | provider | 粘贴的 key | 默认模型 | 生成的配置里还有什么 |
+   | --- | --- | --- | --- |
+   | **DeepSeek** | `sk-…` | `deepseek-flash` | 另附 `deepseek-chat` / `deepseek-reasoner` |
+   | **MiniMax** | M Plan 的 `sk-cp-…` | `MiniMax-M3.1-Flash` | 控制台链接（`usage_console_url`，**不发请求**） |
+   | **小米 MiMo** | `sk-…`（按量付费）/ `tp-…`、`ttp-…`（Token Plan） | `mimo-v2.6-flash` | 另附 `mimo-v2.6-pro`；控制台链接；`reasoning_content: keep` |
+
+   MiMo 的网关由 **key 的形状**决定：`sk-…` → `https://api.xiaomimimo.com/v1`，
+   `tp-…` / `ttp-…` → `https://token-plan-cn.xiaomimimo.com/v1`，两者不能混用（用错是 401）。
+   生成的配置还带 `reasoning_content: keep`：v2.6 模型默认思考，小米的文档要求思考模式下
+   把上一轮的 `reasoning_content` 原样带回去，程序本来就带，写进文件是为了不依赖端点猜测。
 
    生成的配置**不查额度**（`supports_usage` 关着）：这份文件一般是一份配置发给一大片设备，
    每台设备都去问一次订阅还剩多少，就是一个账号上成千上万个请求，最容易把账号弄进风控。
@@ -154,6 +160,13 @@ curl -X POST http://127.0.0.1:8282/api/config/quickstart \
      -d '{"provider":"deepseek","api_key":"sk-..."}'
 # → {"ok":true,"provider":"DeepSeek","model":"deepseek-flash",
 #    "models":["deepseek-flash","deepseek-chat","deepseek-reasoner"],"path":"..."}
+
+# 小米 MiMo：key 的形状决定网关（sk-… 按量付费，tp-…/ttp-… Token Plan）
+curl -X POST http://127.0.0.1:8282/api/config/quickstart \
+     -H 'Content-Type: application/json' \
+     -d '{"provider":"mimo","api_key":"tp-..."}'
+# → {"ok":true,"provider":"mimo","model":"mimo-v2.6-flash",
+#    "models":["mimo-v2.6-flash","mimo-v2.6-pro"],"path":"..."}
 
 # 上传完整配置
 curl -X POST http://127.0.0.1:8282/api/config \
@@ -185,7 +198,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.13.1","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.13.2","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -947,6 +960,10 @@ curl -s -X POST $B/api/config -H 'Content-Type: application/json' \
 # 快捷开始（只填 key）
 curl -s -X POST $B/api/config/quickstart -H 'Content-Type: application/json' \
   -d '{"provider":"minimax","api_key":"sk-cp-..."}'
+
+# 小米 MiMo（sk-… 按量付费 / tp-… Token Plan）
+curl -s -X POST $B/api/config/quickstart -H 'Content-Type: application/json' \
+  -d '{"provider":"mimo","api_key":"tp-..."}'
 
 # 手工编辑
 $EDITOR ~/.tea_agent/provider.yaml

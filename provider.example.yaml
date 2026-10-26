@@ -132,6 +132,34 @@ providers:
   #   api_url: https://token-plan-cn.xiaomimimo.com/v1
   #   api_key: tp-...
   #   usage_console_url: https://platform.xiaomimimo.com/#/console/plan-manage
+  #
+  # MiMo has TWO gateways and the key says which one it is (they cannot be
+  # mixed - a Token Plan key on the pay-as-you-go gateway answers 401):
+  #   sk-...            -> pay-as-you-go: https://api.xiaomimimo.com/v1
+  #   tp-... / ttp-...  -> Token Plan:    https://token-plan-cn.xiaomimimo.com/v1
+  # (Singapore: token-plan-sgp.xiaomimimo.com, Europe: token-plan-ams...)
+  #
+  # The v2.6 models think by default. In thinking mode the assistant's
+  # reasoning_content has to be sent back with the next request, otherwise the
+  # provider answers 400 as soon as the history holds a tool call:
+  # mimo:
+  #   api_url: https://api.xiaomimimo.com/v1
+  #   api_key: sk-...
+  #   usage_console_url: https://platform.xiaomimimo.com/#/console/usage
+  #   reasoning_content: keep
+  #   models:
+  #     mimo-v2.6-flash:
+  #       max_context_tokens: 1000000
+  #       max_output_tokens: 128000
+  #       supports_tools: true
+  #       supports_reasoning: true
+  #       supports_vision: true
+  #     mimo-v2.6-pro:
+  #       max_context_tokens: 1000000
+  #       max_output_tokens: 128000
+  #       supports_tools: true
+  #       supports_reasoning: true
+  #       supports_vision: true
 
   # A local OpenAI-compatible server (llama.cpp, vLLM, Ollama, LM Studio, ...).
   local:

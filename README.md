@@ -135,6 +135,7 @@ provider.yaml，这几项就都使能了。配置对话框里有两条路：
    | --- | --- | --- | --- |
    | **DeepSeek** | `sk-…` | `deepseek-flash` | 另附 `deepseek-chat` / `deepseek-reasoner` 备用 |
    | **MiniMax** | M Plan 的 `sk-cp-…` | `MiniMax-M3.1-Flash`（1M 上下文） | 控制台链接（`usage_console_url`，点开看额度，**不发请求**） |
+   | **小米 MiMo** | 按量付费 `sk-…`，或 Token Plan `tp-…` / `ttp-…` | `mimo-v2.6-flash`（1M 上下文） | 另附 `mimo-v2.6-pro`；控制台链接（MiMo 没有能用 key 查的额度接口）；`reasoning_content: keep` |
 
    **生成的配置不查额度**（`supports_usage` 是关的）。这份文件通常是一份配置发给一大片设备：
    每台设备都去问一次「订阅还剩多少」，就是一个账号上成千上万个请求——这种模式最容易把账号
@@ -143,6 +144,12 @@ provider.yaml，这几项就都使能了。配置对话框里有两条路：
 
    MiniMax 走 `https://api.minimax.cn/v1`（全球站 `https://api.minimax.io/v1` 同样可用，
    改 `api_url` 一行即可）；key 形状和说明会随下拉一起变，不用猜。
+
+   小米 MiMo 有**两个网关，key 决定走哪个**：`sk-…` 是按量付费（`https://api.xiaomimimo.com/v1`），
+   `tp-…` / `ttp-…` 是 Token Plan 订阅（`https://token-plan-cn.xiaomimimo.com/v1`）——两者不能混用，
+   用错了就是 401。生成的配置里还带 `reasoning_content: keep`：v2.6 模型默认开启思考，
+   小米的文档要求思考模式下把上一轮的 `reasoning_content` 原样带回去，程序本来就带，
+   写进文件是为了不依赖「哪个端点要」的猜测。
 
 2. **上传 / 粘贴完整配置**：点击（或拖入）`provider.yaml`，或直接把内容粘到文本框里，点
    「上传并应用」。

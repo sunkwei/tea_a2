@@ -3,8 +3,9 @@
 
 A fresh install has no provider.yaml, and typing a full YAML file on a phone or
 a headless board is painful. `POST /api/config/quickstart` builds the file from an
-API key alone (DeepSeek, default model deepseek-flash) and applies it with the
-same validate-then-swap path as an upload.
+API key alone (DeepSeek, default model deepseek-flash; MiniMax, default model
+MiniMax-M3.1-Flash; Xiaomi MiMo, default model mimo-v2.6-flash) and applies it with
+the same validate-then-swap path as an upload.
 
 What this pins:
 
@@ -26,7 +27,10 @@ What this pins:
   * the generated config does **not** query the quota (supports_usage). A fleet
     gets one key per device, and every device asking the provider for the
     remaining quota is thousands of requests from one account - the pattern
-    that gets an account flagged. An *uploaded* provider.yaml is untouched.
+    that gets an account flagged. An *uploaded* provider.yaml is untouched;
+  * MiMo picks its gateway from the key (sk-... -> pay-as-you-go, tp-.../ttp-...
+    -> Token Plan), defaults to mimo-v2.6-flash and keeps the assistant's
+    reasoning_content (the v2.6 models think by default and want it back).
 """
 
 import http.client
@@ -135,7 +139,8 @@ def main():
               and (err.get("error") or {}).get("code") == "unsupported_provider", (status, err))
         check("the refusal names the providers that are supported",
               "deepseek" in ((err.get("error") or {}).get("message") or "")
-              and "minimax" in ((err.get("error") or {}).get("message") or ""), err)
+              and "minimax" in ((err.get("error") or {}).get("message") or "")
+              and "mimo" in ((err.get("error") or {}).get("message") or ""), err)
         status, err, _ = call(port, "POST", "/api/config/quickstart",
                               {"api_key": "sk-abc\ndef"})
         check("a key with a control character is refused",
@@ -305,6 +310,75 @@ providers:
         text = open(config_path, encoding="utf-8").read()
         check("an explicit api_url wins over the default",
               status == 200 and "https://api.minimax.io/v1" in text, (status, text[:200]))
+
+        # ---- Xiaomi MiMo: the same one-key path, two gateways --------------
+        # MiMo runs two gateways and the key says which one it is: the
+        # pay-as-you-go API (sk-...) and the Token Plan subscription
+        # (tp-... / ttp-...). They cannot be mixed, so the endpoint follows
+        # the key.
+        tp_key = "tp-tokenplan-0123456789"
+        status, done, body_text = call(port, "POST", "/api/config/quickstart",
+                                       {"provider": "mimo", "api_key": tp_key})
+        check("quickstart accepts mimo", status == 200 and done.get("ok") is True, (status, done))
+        check("it reports the mimo provider", done.get("provider") == "mimo", done)
+        check("the default model is mimo-v2.6-flash",
+              done.get("model") == "mimo-v2.6-flash", done)
+        check("the catalogue offers the flash and the pro model",
+              set(done.get("models") or []) == {"mimo-v2.6-flash", "mimo-v2.6-pro"},
+              done.get("models"))
+        text = open(config_path, encoding="utf-8").read()
+        check("a Token Plan key points at the Token Plan gateway",
+              "https://token-plan-cn.xiaomimimo.com/v1" in text, text[:400])
+        check("the key is in the file", tp_key in text, text[:200])
+        check("mimo-v2.6-flash is the first model in the file",
+              text.index("models:") < text.index("mimo-v2.6-flash:"), text)
+        # MiMo has no endpoint an API key can ask for the quota with, so the
+        # generated file must not turn a quota query on - it only carries the
+        # console link, which sends no request at all.
+        active = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
+        check("the generated config does not query the quota",
+              ("supports_usage" not in active and "usage_type:" not in active
+               and "usage_url:" not in active), text[:600])
+        check("the console link is in the file",
+              "platform.xiaomimimo.com" in text, text[:600])
+        # The v2.6 models think by default and MiMo's docs ask for the
+        # assistant's reasoning_content to be passed back on the next request
+        # in thinking mode. The agent does that anyway; the file says it out
+        # loud so the behaviour does not depend on the endpoint guess.
+        check("the reasoning is echoed back to the provider",
+              "reasoning_content: keep" in active, text[:600])
+        check("the mimo key is not echoed back", tp_key not in body_text, body_text[:200])
+        _, prov, _ = call(port, "GET", "/api/providers")
+        names = [p.get("name") for p in prov.get("providers") or []]
+        check("the provider list has exactly mimo", names == ["mimo"], names)
+        mi_provider = (prov.get("providers") or [{}])[0]
+        check("the provider reports no quota endpoint",
+              mi_provider.get("supports_usage") is False, mi_provider.get("supports_usage"))
+        check("the console link is offered (it sends no request)",
+              mi_provider.get("usage_console_url"), mi_provider)
+        check("the model catalogue is exposed",
+              "mimo-v2.6-flash" in (mi_provider.get("models") or []), mi_provider.get("models"))
+        check("the mimo key is never returned by /api/providers",
+              tp_key not in json.dumps(prov), "leaked")
+        check("the model carries the 1M window", "max_context_tokens: 1000000" in text, text)
+
+        # A pay-as-you-go key (sk-...) goes to the other gateway.
+        status, done, _ = call(port, "POST", "/api/config/quickstart",
+                               {"provider": "mimo", "api_key": "sk-paygogo-0123456789"})
+        text = open(config_path, encoding="utf-8").read()
+        check("a pay-as-you-go key points at the pay-as-you-go endpoint",
+              status == 200 and "https://api.xiaomimimo.com/v1" in text, (status, text[:300]))
+        check("the Token Plan endpoint is not used for it",
+              "token-plan-cn.xiaomimimo.com" not in text, text[:300])
+
+        # an explicit endpoint still wins over the one the key implies
+        status, done, _ = call(port, "POST", "/api/config/quickstart",
+                               {"provider": "mimo", "api_key": tp_key,
+                                "api_url": "https://token-plan-sgp.xiaomimimo.com/v1"})
+        text = open(config_path, encoding="utf-8").read()
+        check("an explicit api_url wins over the default",
+              status == 200 and "https://token-plan-sgp.xiaomimimo.com/v1" in text,
+              (status, text[:300]))
 
         # ---- an uploaded provider.yaml is left alone ------------------------
         # The restriction is on the *generated* file only: the operator wrote

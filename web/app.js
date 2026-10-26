@@ -2974,8 +2974,8 @@
     // ---- 快捷通道：只填一个 API key ----
     // 完整 provider.yaml 有几行到几十行，在手机或没有编辑器的板子上手敲很痛苦。
     // 这里只问 key：服务端 /api/config/quickstart 生成一份配置（DeepSeek 默认模型
-    // deepseek-flash，MiniMax 默认模型 MiniMax-M3.1-Flash）并按上传同样的流程
-    // 校验、落盘、热加载。
+    // deepseek-flash，MiniMax 默认模型 MiniMax-M3.1-Flash，小米 MiMo 默认模型
+    // mimo-v2.6-flash）并按上传同样的流程校验、落盘、热加载。
     var QUICK = {
       deepseek: {
         label: 'DeepSeek（deepseek-flash）',
@@ -2990,6 +2990,14 @@
               '批量部署时每台设备都去问额度，账号容易被风控；需要的话在生成的 yaml 里把' +
               'supports_usage 打开。',
         placeholder: 'sk-cp-…'
+      },
+      mimo: {
+        label: '小米 MiMo（mimo-v2.6-flash）',
+        hint: '选择小米 MiMo，粘贴 API key，回车即可。会生成一份只含该 provider 的 provider.yaml' +
+              '（默认模型 mimo-v2.6-flash，1M 上下文）。key 的开头决定走哪个网关：sk-… 是按量付费' +
+              '（api.xiaomimimo.com），tp-…/ttp-… 是 Token Plan 订阅（token-plan-cn.xiaomimimo.com），' +
+              '两者不能混用。MiMo 没有能用 key 查的额度接口，生成的配置只给一个控制台链接。',
+        placeholder: 'sk-… / tp-…'
       }
     };
     var quick = el('div', 'setup-quick');
@@ -3009,6 +3017,10 @@
     optMm.value = 'minimax';
     optMm.textContent = QUICK.minimax.label;
     providerSel.appendChild(optMm);
+    var optMi = document.createElement('option');
+    optMi.value = 'mimo';
+    optMi.textContent = QUICK.mimo.label;
+    providerSel.appendChild(optMi);
     quickRow.appendChild(providerSel);
     var keyInput = document.createElement('input');
     keyInput.type = 'password';
@@ -3025,7 +3037,8 @@
     quickRow.appendChild(quickBtn);
     quick.appendChild(quickRow);
     body.appendChild(quick);
-    // 换 provider 时提示文字和 key 的形状一起变：MiniMax 的 M Plan key 是 sk-cp-…
+    // 换 provider 时提示文字和 key 的形状一起变：MiniMax 的 M Plan key 是 sk-cp-…，
+    // 小米 MiMo 的按量付费 key 是 sk-…、Token Plan key 是 tp-…
     providerSel.onchange = function () {
       var q = QUICK[providerSel.value] || QUICK.deepseek;
       quickHint.textContent = q.hint;
@@ -3116,7 +3129,8 @@
       if (setupGate.busy) return;
       var key = String(keyInput.value || '').trim();
       if (!key) {
-        showError('请先粘贴 API key（DeepSeek 形如 sk-…，MiniMax M Plan 形如 sk-cp-…）');
+        showError('请先粘贴 API key（DeepSeek 形如 sk-…，MiniMax M Plan 形如 sk-cp-…，' +
+                  '小米 MiMo 形如 sk-… 或 tp-…）');
         keyInput.focus();
         return;
       }
