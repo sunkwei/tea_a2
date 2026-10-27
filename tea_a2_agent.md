@@ -474,6 +474,12 @@ JSON-RPC 跟它们说话，它们提供的工具就并进模型的工具表（`m
 - **函数名有 64 字符上限**（OpenAI 兼容）：`mcp__<服务器>__<工具>` 超了就截断加哈希。
 - **Windows 上 `python3` 是 Microsoft Store 的占位符**（见上面第 6 条）——测试脚本里用
   `sys.executable` 才靠谱。
+- **`CreateProcessW` 传了环境块就必须带 `CREATE_UNICODE_ENVIRONMENT`**：环境块是按 UTF-16
+  拼的，不带这个 flag 时 Windows 当成 ANSI 读，spawn 直接失败，报
+  「Windows error 87: 参数错误」（error 87 = ERROR_INVALID_PARAMETER）。
+- **YAML 里的 Windows 路径要用单引号**：`"C:\Tools\x.exe"`（双引号 + 双反斜杠）或者
+  `'C:\Tools\x.exe'`（单引号更省心）。写成 `"C:\Tools"` 里的单反斜杠会被 YAML 当成转义
+  序列（`\T` 是合法转义，`\m` 不是）→ 整个配置解析失败。
 
 ### 联调（Windows 上的 uiautomation-mcp）
 
@@ -490,6 +496,26 @@ JSON-RPC 跟它们说话，它们提供的工具就并进模型的工具表（`m
 `tests/mock_mcp_server.py` 是一个假的 MCP 服务器（echo / add / picture 三个工具，
 还能 `--crash` / `--garbage` 模拟坏掉的服务器）。`tests/smoke_mcp.py` 用它钉住整条链，
 `tests/ui_mcp.mjs` 钉住设置页上的那张卡。
+
+### 怎么在 wsl2 里验 Windows 的代码路径
+
+WSL2 能直接跑 Windows 的 exe（互操作），所以**不用切到 Windows 就能验 Windows 那条路**：
+
+```bash
+# Windows 侧的程序和文件放在 /mnt/c 下
+cd /mnt/c/temp/teatest
+cp build-win64/bin/tea_agent.exe .
+./tea_agent.exe --config 'C:\temp\teatest\provider.yaml' --port 8391 --workspace 'C:\temp\teatest\ws'
+# 进程 cwd 是 UNC 路径 → Windows 程序看不到相对路径，参数一律写 Windows 绝对路径
+```
+
+- WSL → Windows 的 HTTP：Windows 侧监听 127.0.0.1，WSL 里 `curl 127.0.0.1:端口` 就能通。
+- Windows → WSL 的 HTTP：WSL 里的服务要 `--host 0.0.0.0`（默认只听 127.0.0.1，Windows
+  那边连不上），地址用 `hostname -I` 里的地址。
+- **后台起的东西会随 shell 一起死**：要用 `setsid nohup ... &`；不然「curl 连不上」
+  其实是对面进程已经没了。
+- Windows 上没有 Python/Node 时，mock 服务器可以写成 **PowerShell**（`[Console]::In.ReadLine()`
+  读行、`[Console]::Out.WriteLine()` 写行，记得 `[Console]::OutputEncoding = UTF8`）。
 
 ---
 
