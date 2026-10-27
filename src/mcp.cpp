@@ -312,8 +312,12 @@ bool McpClient::spawn(std::string* err) {
   PROCESS_INFORMATION pi;
   ZeroMemory(&pi, sizeof(pi));
   const std::wstring workdir = cfg.cwd.empty() ? std::wstring() : utf8_to_wide(cfg.cwd);
+  // CREATE_UNICODE_ENVIRONMENT is not optional here: the environment block is
+  // built as UTF-16, and without the flag CreateProcess reads it as ANSI and
+  // fails with "Windows error 87: invalid parameter".
+  const DWORD flags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
   const BOOL ok = CreateProcessW(
-      nullptr, &wide_command[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+      nullptr, &wide_command[0], nullptr, nullptr, TRUE, flags,
       const_cast<wchar_t*>(env_block.c_str()),
       workdir.empty() ? nullptr : workdir.c_str(), &si, &pi);
   // The child has its own copies of the pipe ends now.
