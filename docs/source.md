@@ -14,6 +14,8 @@ src/
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
   prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
   tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image/todo/task）
+  mcp.{h,cpp}               MCP 客户端：起一个 MCP 服务器进程、stdio 上的 JSON-RPC
+                            （initialize / tools/list / tools/call）、把它的工具并进工具表
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆/产出文件、索引；
                             并发写用进程级锁 + 原子替换（见 [并发](workspace.md#并发同一个工作区可以同时跑好几轮)）
@@ -36,6 +38,7 @@ src/
 web/                        index.html / tokens.css / app.css / app.js（构建期嵌入）
 docs/                       文档：构建、部署、接口、工具、配置、队列、源码、测试
 tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
+tests/mock_mcp_server.py    一个假的 MCP 服务器（stdio 上的 JSON-RPC），用来测 MCP 客户端
 tests/e2e.ps1              端到端测试（155 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动

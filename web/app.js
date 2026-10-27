@@ -3564,6 +3564,11 @@
   function loadTools() {
     return api('api/tools').then(function (t) { state.tools = t; renderSettings(); }, function () {});
   }
+  // MCP 服务器的状态。单独一个接口：它要握手、要起进程，比普通的 GET 慢，
+  // 不该拖慢设置页的其他内容。
+  function loadMcp() {
+    return api('api/mcp/servers').then(function (m) { state.mcp = m; renderMcp(); }, function () {});
+  }
   function loadWorkspaces() {
     return api('api/workspaces').then(function (d) {
       state.workspaces = d.workspaces || [];
@@ -3883,7 +3888,7 @@
     }
     if (name === 'memory') loadMemory();
     if (name === 'logs') loadLogs();
-    if (name === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); }
+    if (name === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); loadMcp(); }
   }
   /* ---------- 侧边栏收起 / 展开 ---------- */
   // 窄屏或专心读回答时，左侧 260px 一直是白占的。收起后由顶栏左侧的同一个图标
@@ -4663,6 +4668,61 @@
       try { pre.textContent = JSON.stringify(t.parameters || {}, null, 2); } catch (e) { pre.textContent = String(t.parameters); }
       card.appendChild(pre);
       tl.appendChild(card);
+    });
+  }
+
+  /* ---------- 12a) MCP 服务器：状态和它提供的工具 ---------- */
+  // 每个服务器一张卡：命令、状态、工具清单。连不上的服务器把原因写出来——
+  // 「静默地没有工具」会让人以为是模型的问题。
+  function renderMcp() {
+    var box = $('settings-mcp');
+    if (!box) return;
+    clear(box);
+    var data = state.mcp || {};
+    var servers = data.servers || [];
+    var meta = $('mcp-meta');
+    if (meta) {
+      var up = servers.filter(function (s) { return s.connected; }).length;
+      meta.textContent = servers.length ? (up + '/' + servers.length + ' 已连接') : '';
+    }
+    if (!servers.length) {
+      box.appendChild(el('div', 'empty-note',
+        data.configured ? '没有配置 MCP 服务器' : '未配置（在 provider.yaml 的 mcp: 段里添加）'));
+      return;
+    }
+    servers.forEach(function (s) {
+      var card = el('div', 'tool-card');
+      var h = el('h4', null, s.name);
+      h.appendChild(el('span', 'badge ' + (s.connected ? 'yes' : 'no'),
+        s.connected ? '已连接' : (s.enabled ? '未连接' : '已禁用')));
+      card.appendChild(h);
+      var cmd = [s.command].concat(s.args || []).join(' ');
+      var r = el('div', 'row');
+      r.appendChild(el('span', 'k', '命令'));
+      r.appendChild(el('span', 'mono', cmd || '—'));
+      card.appendChild(r);
+      if (s.connected) {
+        var r2 = el('div', 'row');
+        r2.appendChild(el('span', 'k', '协议'));
+        r2.appendChild(el('span', 'mono', (s.protocol_version || '?') +
+          (s.server_name ? ' · ' + s.server_name : '')));
+        card.appendChild(r2);
+      }
+      var err = s.error || s.config_error;
+      if (err) {
+        var e = el('div', 'desc');
+        e.textContent = err;
+        card.appendChild(e);
+      }
+      var tools = s.tools || [];
+      if (tools.length) {
+        var tl = el('div', 'row');
+        tl.appendChild(el('span', 'k', '工具'));
+        tl.appendChild(el('span', 'mono', tools.length + ' 个：' +
+          tools.map(function (t) { return t.name; }).join(', ')));
+        card.appendChild(tl);
+      }
+      box.appendChild(card);
     });
   }
 
@@ -5955,9 +6015,26 @@
 
     $('destroy-run').onclick = openDestroyDialog;
     $('settings-refresh').onclick = function () {
-      loadProviders(); loadTools(); loadSystemPrompt(); loadAccess();
+      loadProviders(); loadTools(); loadSystemPrompt(); loadAccess(); loadMcp();
       loadHealth(true).catch(function () {});
     };
+    // 「刷新」= 把所有 MCP 服务器停掉再重新启动一遍。改完 provider.yaml 里的
+    // mcp: 段之后，先「重新检测配置」，再点这里。
+    var mcpRefresh = $('mcp-refresh');
+    if (mcpRefresh) {
+      mcpRefresh.onclick = function () {
+        mcpRefresh.disabled = true;
+        api('api/mcp/refresh', { method: 'POST' }).then(function (d) {
+          state.mcp = d || {};
+          renderMcp();
+          loadTools();
+          var up = (state.mcp.servers || []).filter(function (s) { return s.connected; }).length;
+          toast('MCP 服务器已重连：' + up + ' 个可用');
+        }, function (e) {
+          toast('MCP 重连失败：' + e.message);
+        }).then(function () { mcpRefresh.disabled = false; });
+      };
+    }
     // 「重置 provider」：打开和首次运行同一个配置界面（快捷 key 通道 + 上传 + 粘贴），
     // 区别是它先摆出覆盖的风险，而且可以取消。真正的覆盖发生在服务端校验通过之后。
     $('provider-reset').onclick = function () {

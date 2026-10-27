@@ -237,6 +237,45 @@ asr:
 > `http://192.168.x.x:8282` 访问设备时浏览器不给权限，界面因此也不显示按钮——这是
 > 浏览器的规矩。细节见 [配置](docs/config.md#语音输入asr-段)。
 
+### MCP：把别的程序接进来当工具
+
+`provider.yaml` 顶层可以写一个 `mcp:` 段，列出 **MCP 服务器**（Model Context Protocol）。
+这些是**独立的程序**：agent 把它们启动起来，用 stdio 上的 JSON-RPC 跟它们说话，
+它们提供的工具就变成模型可以调用的工具（名字是 `mcp__<服务器>__<工具>`）：
+
+```yaml
+mcp:
+  servers:
+    uiautomation:
+      command: uiautomation-mcp
+      args: []
+```
+
+最典型的例子是 [uiautomation-mcp](https://github.com/locomorange/uiautomation-mcp)：
+Windows 上的 UI Automation 服务器，能找按钮、点按钮、往输入框里打字、截屏——
+也就是**让模型真的去操作这台机器上的窗口**。装好之后：
+
+```powershell
+winget install Locomorange.UIAutomationMCP     # 或者直接下 release
+```
+
+```yaml
+mcp:
+  servers:
+    uiautomation:
+      command: C:\Tools\uiautomation-mcp\uiautomation-mcp.exe
+      timeout_ms: 60000          # 截屏这种慢操作要给够时间
+```
+
+细节：
+
+- 服务器是**按需启动**的：第一次用到它的工具时才拉起来，连不上就在设置页和日志里
+  写明原因，不影响别的工具。
+- 「设置 → MCP 服务器」能看到每个服务器的状态和它提供的工具，「刷新」重新连一遍。
+- 也可以不用模型，直接调一个 MCP 工具试试：
+  `curl -X POST localhost:8282/api/mcp/servers/uiautomation/call -d '{"tool":"mcp__uiautomation__SearchElements","arguments":{"name":"OK"}}'`
+- 服务器返回的图片会像 `toolkit_load_image` 那样存进工作区并附在对话里（模型能看图才行）。
+
 **控制台默认只打印 WARNING / ERROR。** 服务是长期挂在终端里的，每次请求的 `INFO`
 （`chat:`、`server:`、`toolkit_*` …）都往终端刷会把真正要紧的告警顶出屏幕；而排查问题时
 又确实需要这些细节。所以两个阈值是分开的：
@@ -279,6 +318,7 @@ asr:
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |
 | [多级协同与机群运维](docs/fleet.md) | **一台服务器管 40 台设备**：台账、每日采集、灰度升级、审计、让设备自己的 a2 判断 |
 | [内置工具与上下文](docs/tools.md) | 每个工具、文件访问范围、上下文预算、轨迹 |
+| [MCP](docs/mcp.md) | **把别的程序接进来当工具**：配置、接口、和 Windows 上的 uiautomation-mcp 联调 |
 | [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、system prompt、销毁、导出 |
 | [配置](docs/config.md) | `provider.yaml`、额度与搜索抓取、按工作区覆盖、请求头 |
 | [任务队列](docs/tasks.md) | 队列服务、微信 / Telegram 那一端、网页、使用手册、逐任务授权目录 |

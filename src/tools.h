@@ -19,6 +19,8 @@
 
 namespace tea {
 
+class McpRegistry;
+
 struct ToolDef {
   std::string name;
   std::string description;
@@ -67,6 +69,9 @@ struct ToolContext {
   /// toolkit_task tool writes the progress, the intermediate state and the
   /// "the user has to confirm this" flag into it.
   const std::string* task_id = nullptr;
+  /// The MCP servers (null => the `mcp:` section is not configured). The
+  /// `mcp__<server>__<tool>` tools are dispatched through it.
+  McpRegistry* mcp = nullptr;
 };
 
 class ToolRegistry {
@@ -83,16 +88,27 @@ class ToolRegistry {
   /// `config` carries the independent search provider (the `search:` section
   /// of provider.yaml): when the turn's own provider cannot search, the web
   /// tools are still advertised as long as that one can.
+  /// `include_mcp` = false leaves the MCP tools out. They are dynamic: asking
+  /// for them starts the MCP servers, and the start-up banner must not wait
+  /// for a handshake (a server that is not there would delay the start-up by
+  /// its whole timeout).
   nlohmann::json openai_tools(const ProviderInfo* provider = nullptr,
                               const Settings* settings = nullptr,
-                              const AppConfig* config = nullptr) const;
+                              const AppConfig* config = nullptr,
+                              bool include_mcp = true) const;
   bool has(const std::string& name) const;
+
+  /// The MCP servers whose tools join the agent's tool set. Null => no MCP
+  /// tools (the `mcp:` section is not configured).
+  void set_mcp(McpRegistry* mcp) { mcp_ = mcp; }
+  McpRegistry* mcp() const { return mcp_; }
 
   ToolResult execute(const std::string& name, const nlohmann::json& arguments,
                      const ToolContext& ctx) const;
 
  private:
   std::vector<ToolDef> defs_;
+  McpRegistry* mcp_ = nullptr;
 };
 
 }  // namespace tea

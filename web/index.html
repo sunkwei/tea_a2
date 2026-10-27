@@ -434,6 +434,25 @@
                     title="打开与首次运行相同的配置界面；确认后覆盖现有 provider.yaml">重置 provider…</button>
           </div>
           <div id="settings-providers"></div>
+          <!-- MCP 服务器是**独立的程序**：agent 把它启动起来，用 stdio 上的
+               JSON-RPC 跟它说话，它提供的工具就变成模型可以调用的工具
+               （mcp__<服务器>__<工具>）。这里列出每个服务器的状态和它提供的工具；
+               「刷新」会重新连接一遍。没在 provider.yaml 的 mcp: 段里配置时，
+               这一节是空的。 -->
+          <h3 class="sec-title">MCP 服务器</h3>
+          <div class="doc-card">
+            <div class="doc-head">
+              <span class="doc-title">Model Context Protocol</span>
+              <span class="doc-actions">
+                <span class="doc-meta" id="mcp-meta"></span>
+                <button class="btn" id="mcp-refresh" type="button"
+                        title="停掉并重新启动所有 MCP 服务器">刷新</button>
+              </span>
+            </div>
+            <div id="settings-mcp"></div>
+            <div class="doc-scripts">在 provider.yaml 的 <span class="mono">mcp:</span> 段里配置服务器
+              （命令、参数、环境变量）；改完文件后点上面的「刷新」，或重新检测配置。</div>
+          </div>
           <h3 class="sec-title">可用工具</h3>
           <div id="settings-tools"></div>
 

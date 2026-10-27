@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "config.h"
+#include "mcp.h"
 #include "tools.h"
 #include "workspace.h"
 
@@ -33,7 +34,10 @@ struct ServerOptions {
 
 class ApiServer {
  public:
-  ApiServer(AppConfig* config, ToolRegistry* tools, WorkspaceRegistry* registry);
+  /// `mcp` may be null: then the MCP routes report that no MCP server is
+  /// configured instead of failing.
+  ApiServer(AppConfig* config, ToolRegistry* tools, WorkspaceRegistry* registry,
+            McpRegistry* mcp = nullptr);
   ~ApiServer();
 
   ApiServer(const ApiServer&) = delete;

@@ -7,20 +7,21 @@
 > 一次做完一件有坑的事，就在这里加一段。
 >
 > 目录：
-> [先看这十条](#先看这十条) ·
+> [先看这十一条](#先看这十一条) ·
 > [构建](#构建) ·
 > [测试](#测试) ·
 > [代码里的坑](#这套代码里的坑) ·
 > [快捷通道](#首次运行快捷通道只填一个-api-key) ·
 > [额度查询](#额度查询provider-级) ·
-[语音输入](#语音输入sensesvoicesmall) ·
+> [语音输入](#语音输入sensesvoicesmall) ·
+> [MCP](#mcpmodel-context-protocolagent-当客户端) ·
 > [平台差异](#平台差异) ·
 > [约定](#约定) ·
 > [进行中](#进行中红着的测试)
 
 ---
 
-## 先看这十条
+## 先看这十一条
 
 1. **改完 `web/` 必须重建二进制**。Web UI 在构建期被嵌进二进制，e2e 会逐字节比对内嵌资源与
    `web/` 里的文件——只改文件不重建，那 3 项会挂，而且挂得莫名其妙。
@@ -45,6 +46,8 @@
 10. **浏览器测试需要 `CHROME_BIN`**。没装 Chrome 时 Edge 也是 Chromium：
     `set CHROME_BIN=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`；
     同时 `TMP/TEMP` 仍要指到仓库内。
+11. **接了 MCP 之后**：工具表是**每轮现算**的（`openai_tools()` 会去连服务器），所以启动
+    横幅、任何不打算用工具的地方都要 `include_mcp=false`。细节见下面的「MCP」一节。
 
 ---
 
@@ -430,6 +433,63 @@ from_zipformer2_ctc`——**没有 `from_sense_voice`**。所以用 sherpa 跑 S
   `pip install sherpa-onnx` 才能真的跑推理）——因为它做的是真的神经网络推理。
 - 模型从 ModelScope 拉（`fengge2024/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`），
   HuggingFace 那份是备选。int8 模型 239 MB，tokens.txt 316 KB。
+
+---
+
+## MCP（Model Context Protocol）：agent 当客户端
+
+`provider.yaml` 顶层 `mcp:` 段里配一组**独立的程序**，agent 把它们启动起来、用 stdio 上的
+JSON-RPC 跟它们说话，它们提供的工具就并进模型的工具表（`mcp__<服务器>__<工具>`）。
+
+### 分工
+
+| 谁 | 干什么 |
+| --- | --- |
+| `src/config.cpp` | 读 `mcp:` 段（`servers:` 可以是映射也可以是列表） |
+| `src/mcp.cpp` | 起进程、握手（initialize → notifications/initialized → tools/list）、调工具（tools/call） |
+| `src/tools.cpp` | 把 MCP 工具并进 `openai_tools()`，`mcp__` 开头的调用分发给 MCP 注册表 |
+| `src/server.cpp` | `/api/mcp/servers`、`/api/mcp/refresh`、`/api/mcp/servers/{n}/call` |
+
+### 协议（stdio）
+
+每条消息**一行 JSON**（MCP 的 stdio 传输不是 LSP 那种 `Content-Length:` 帧——但客户端
+顺手也认那种帧）。握手固定四步：`initialize` → `notifications/initialized` → `tools/list`
+→ `tools/call`。协议版本默认要 `2024-11-05`（.NET 的 ModelContextProtocol 0.3.0-preview.3
+认这个）；服务器嫌版本老会报错，客户端会自动换 `2025-06-18` / `2025-03-26` 再试。
+
+`tools/call` 的回答里 `content` 是内容块：`text` / `image`（base64）/ `resource`。
+**图片会存进工作区并附在对话里**（跟 `toolkit_load_image` 一样），所以模型得声明
+`supports_vision: true` 才看得到。
+
+### 坑（写的时候踩到的）
+
+- **服务器是按需启动的，但工具表是每轮现算的**：`openai_tools()` 会去连接服务器，
+  所以**启动横幅不能带 MCP 工具**（否则一个连不上的服务器会把启动拖慢 20 秒）。
+  `openai_tools(..., include_mcp=false)` 就是给横幅用的。
+- **连不上的服务器一分钟内不重试**（`retry_after_ms`）：不然每一轮都要等它握手超时。
+- **服务器发来的请求（sampling / roots）要回「方法未实现」**：不回的话服务器会一直等
+  一个不会来的答案（.NET SDK 会卡住）。
+- **读管道和关管道有顺序**：先杀进程（管道到头 → 读线程退出），**再 join 读线程**，
+  **最后**关句柄。反过来做就是在另一个线程阻塞的句柄上关句柄（句柄值会被复用）。
+- **函数名有 64 字符上限**（OpenAI 兼容）：`mcp__<服务器>__<工具>` 超了就截断加哈希。
+- **Windows 上 `python3` 是 Microsoft Store 的占位符**（见上面第 6 条）——测试脚本里用
+  `sys.executable` 才靠谱。
+
+### 联调（Windows 上的 uiautomation-mcp）
+
+`uiautomation-mcp` 是 .NET 写的 Windows UI Automation 服务器，只能在 Windows 上跑。
+本机（wsl2）验不了它，所以仓库里给了两个 PowerShell 脚本：
+
+- `scripts\mcp_probe.ps1`——**不经过 agent** 直接跟服务器说话（判断「服务器本身有没有问题」）
+- `scripts\mcp-check.ps1`——查正在跑的 agent 的 MCP 状态、调一个工具
+
+另外注意：**UI Automation 需要交互式桌面会话**（不能把 agent 跑成 session 0 的服务）。
+
+### 测试
+
+`tests/mock_mcp_server.py` 是一个假的 MCP 服务器（echo / add / picture 三个工具，
+还能 `--crash` / `--garbage` 模拟坏掉的服务器）。`tests/smoke_mcp.py` 用它钉住整条链，
+`tests/ui_mcp.mjs` 钉住设置页上的那张卡。
 
 ---
 

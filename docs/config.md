@@ -235,6 +235,86 @@ python3 sched/asr_server.py                   # 监听 127.0.0.1:8284
   `http://192.168.x.x:8282` 访问设备时，浏览器不给麦克风，界面因此也不显示按钮——
   这是浏览器的规矩，不是这个程序的选择。
 
+### MCP 服务器（`mcp:` 段）
+
+`mcp:` 段列出 **MCP 服务器**（Model Context Protocol）。这些是**独立的程序**：
+agent 把它们启动起来，用 stdio 上的 JSON-RPC 跟它们说话，它们提供的工具就变成模型
+可以调用的工具。
+
+```yaml
+mcp:
+  servers:
+    uiautomation:
+      command: uiautomation-mcp
+      args: []
+```
+
+工具的公开名字是 `mcp__<服务器>__<工具>`（例如 `mcp__uiautomation__SearchElements`），
+这样两个服务器里同名的工具不会打架。
+
+`mcp:` 段是 provider.yaml 的**顶层**段（和 `providers:`、`search:`、`asr:`、`settings:` 平级）。
+`servers:` 既可以写成**映射**（键是服务器的名字），也可以写成**列表**（每项自己带
+`name:`）：
+
+```yaml
+mcp:
+  servers:
+    - name: uiautomation
+      command: C:\Tools\uiautomation-mcp\uiautomation-mcp.exe
+      timeout_ms: 60000
+```
+
+每个服务器可以写的字段：
+
+| 字段 | 意思 | 默认 |
+| --- | --- | --- |
+| `command:` | 要跑的程序（不带斜杠时按 PATH 找） | 必填 |
+| `args:` | 参数（列表，或者一个按空格切的字符串） | 空 |
+| `env:` | 给子进程加的环境变量（映射） | 空 |
+| `cwd:` | 子进程的起始目录 | agent 自己的目录 |
+| `enabled:` | `false` 保留这条但不启动 | `true` |
+| `timeout_ms:` | 一次工具调用的上限 | 60000 |
+| `startup_timeout_ms:` | 握手（启动 + initialize）的上限 | 20000 |
+| `protocol_version:` | 要的 MCP 协议版本 | 2024-11-05 |
+
+**和 uiautomation-mcp 一起用**（Windows 上的 UI Automation 服务器，能找控件、点按钮、
+往输入框打字、截屏）：
+
+```powershell
+winget install Locomorange.UIAutomationMCP     # 或者从 release 下载
+```
+
+```yaml
+mcp:
+  servers:
+    uiautomation:
+      command: C:\Tools\uiautomation-mcp\uiautomation-mcp.exe
+      timeout_ms: 60000          # 截屏这种慢操作要给够时间
+```
+
+行为上的几条规则：
+
+- 服务器**按需启动**：第一次用到它的工具时才拉起来。启动横幅不等待它。
+- 连不上的服务器在「设置 → MCP 服务器」和日志里写明原因（命令找不到、握手超时、
+  回答不是 JSON……），**别的服务器照常工作**，这一轮的工具清单里只是少了它的工具。
+- 一个连不上的服务器在一分钟内不会被反复重试（不然每一轮都要等它）。
+- 服务器返回的图片会存进工作区并附在对话里（跟 `toolkit_load_image` 一样），所以
+  **模型要支持看图**才看得到。
+- 服务器发给客户端的请求（比如 sampling、roots）一律回「方法未实现」——不回的话
+  服务器会一直等一个不会来的答案。
+
+自己试一个工具（不用模型）：
+
+```bash
+curl -X POST localhost:8282/api/mcp/servers/uiautomation/call \
+  -H 'Content-Type: application/json' \
+  -d '{"tool":"mcp__uiautomation__SearchElements","arguments":{"name":"OK"}}'
+```
+
+Windows 上还有两个现成的脚本：`scripts\mcp-check.ps1`（查正在跑的 agent 的 MCP 状态、
+调一个工具）和 `scripts\mcp_probe.ps1`（**不经过 agent** 直接跟服务器说话，用来判断
+「服务器本身有没有问题」）。完整的联调步骤见 [mcp.md](mcp.md)。
+
 ### 订阅额度（provider 级可选能力）
 
 有些 provider 除了对话接口，还有一个**账号级**接口能回答「我的订阅还剩多少」。目前内置的

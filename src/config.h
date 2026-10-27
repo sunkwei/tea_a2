@@ -296,6 +296,50 @@ struct AsrConfig {
   std::string error;
 };
 
+/// One MCP (Model Context Protocol) server the agent can talk to.
+///
+/// An MCP server is a separate program: the agent starts it, speaks JSON-RPC
+/// over its stdio and calls the tools it offers. Those tools then become part
+/// of the agent's own tool set, so a model can drive a Windows desktop (or
+/// anything else that speaks MCP) with the same tools it uses for files.
+///
+/// The declaration lives in the `mcp:` section of provider.yaml, next to the
+/// `search:` and `asr:` sections: those are the other services the agent
+/// talks to, and they are all configured in the same file.
+struct McpServerConfig {
+  /// The name the tools are published under: `mcp__<name>__<tool>`.
+  std::string name;
+  /// The program to run. Resolved through PATH when it has no slash in it.
+  std::string command;
+  std::vector<std::string> args;
+  /// Extra environment variables for the child process.
+  std::map<std::string, std::string> env;
+  /// Where the child starts. Empty => the agent's own directory.
+  std::string cwd;
+  /// A disabled server is kept in the file (so it can be switched off without
+  /// deleting it) but is never started and contributes no tools.
+  bool enabled = true;
+  /// How long one tool call may take before it is given up on.
+  int timeout_ms = 60000;
+  /// How long the start-up handshake (spawn + initialize) may take.
+  int startup_timeout_ms = 20000;
+  /// The protocol version to ask for. Empty => the default the client prefers.
+  std::string protocol_version;
+  /// Why this entry cannot be used (empty when it is fine).
+  std::string error;
+};
+
+/// The `mcp:` section of provider.yaml.
+struct McpConfig {
+  /// The section is present.
+  bool configured = false;
+  /// The whole section is switched off.
+  bool enabled = true;
+  std::vector<McpServerConfig> servers;
+  /// Why the section cannot be used. Empty when it is fine.
+  std::string error;
+};
+
 struct AppConfig {  std::string path;      // provider.yaml that was loaded
   std::string extra_path;  // tea_agent.yaml, if present
   std::string tea_home;  // $HOME/.tea_agent
@@ -308,6 +352,8 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   SearchProviderConfig search;
   /// The speech-to-text service (the `asr:` section of provider.yaml).
   AsrConfig asr;
+  /// The MCP servers (the `mcp:` section of provider.yaml).
+  McpConfig mcp;
   std::vector<std::string> warnings;
   std::string error;
   bool loaded = false;

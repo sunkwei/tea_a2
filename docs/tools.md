@@ -16,6 +16,7 @@
 | `toolkit_search` | 网页搜索：结构化结果（标题 / URL / 日期 / 摘要）。**provider 级能力**——对话用的 provider 声明 `supports_search: true` 才出现在工具表里；另外配了独立搜索 provider（`provider.yaml` 顶层 `search:` 段）时也会出现，请求发给那个 provider（用它的 key）。见 [config.md](config.md) |
 | `toolkit_fetch` | 抓取单个网页 → Markdown 正文。同样是 provider 级能力（`supports_fetch`），也走独立搜索 provider |
 | `toolkit_fleet` | 管理一队设备（学校机群）：`status` `devices` `report` `collect` `exec` `upgrade` `ask`。**只在配了 `fleet_url` 时才出现在工具表里**——和 provider 不支持就不给 `toolkit_search` 一个规矩：不让模型去试一个它用不了的工具。详见 [fleet.md](fleet.md) |
+| `mcp__<服务器>__<工具>` | **MCP 服务器提供的工具**：provider.yaml 顶层 `mcp:` 段里配的独立程序，agent 启动它们并用 stdio 上的 JSON-RPC 跟它们说话，它们的工具就进入模型的工具表。服务器连不上时它的工具不会出现（原因在设置页和 `/api/mcp/servers` 里）。详见 [config.md](config.md#mcp-服务器mcp-段) |
 
 相对路径基于工作区根目录；默认**禁止越出工作区**，判定前会解析符号链接，所以工作区里的软链
 也无法把工具带出去。这个边界可以在网页上开关——见下面的「文件访问范围」。

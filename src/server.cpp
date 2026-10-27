@@ -871,6 +871,8 @@ struct ApiServer::Impl {
   AppConfig* config = nullptr;
   ToolRegistry* tools = nullptr;
   WorkspaceRegistry* registry = nullptr;
+  /// The MCP servers of the `mcp:` section (null => none configured).
+  McpRegistry* mcp = nullptr;
 
   httplib::Server server;
   std::thread listen_thread;
@@ -1046,6 +1048,9 @@ struct ApiServer::Impl {
       send_error(res, 500, "reload_failed", config->error);
       return false;
     }
+    // The `mcp:` section may have changed with the file: the servers that were
+    // running are stopped and the new ones are picked up.
+    if (mcp) mcp->configure(config->mcp);
     LOG_INFO("config: provider.yaml replaced (", origin, "; ", config->providers.size(),
              " provider(s), active=", config->active_provider, "/", config->active_model, ")");
     return true;
@@ -1498,6 +1503,8 @@ void ApiServer::Impl::install_routes() {
     // The file holds an API key and a hand-written one usually has the
     // process umask (world-readable). Same tightening as the upload path.
     restrict_file_permissions(config->path);
+    // The `mcp:` section may have changed with the file.
+    if (mcp) mcp->configure(config->mcp);
     LOG_INFO("config: reloaded from disk (", config->providers.size(), " provider(s), active=",
              config->active_provider, "/", config->active_model, ")");
     nlohmann::json j = nlohmann::json::object();
@@ -2080,8 +2087,87 @@ void ApiServer::Impl::install_routes() {
       t["parameters"] = defs[i].parameters;
       list.push_back(t);
     }
+    // The tools of the MCP servers are part of the agent's tool set, so they
+    // belong here too: the settings page shows what the model can call.
+    if (mcp) {
+      const std::vector<McpTool> mcp_tools = mcp->tools();
+      for (std::size_t i = 0; i < mcp_tools.size(); ++i) {
+        nlohmann::json t = nlohmann::json::object();
+        t["name"] = mcp_tools[i].full_name;
+        t["description"] = mcp_tool_description(mcp_tools[i]);
+        t["parameters"] = mcp_tools[i].schema;
+        t["mcp_server"] = mcp_tools[i].server;
+        list.push_back(t);
+      }
+    }
     nlohmann::json j = nlohmann::json::object();
     j["tools"] = list;
+    send_json(res, j);
+  });
+
+  // ---- MCP ----------------------------------------------------------------
+  //
+  // The `mcp:` section of provider.yaml lists the MCP servers the agent may
+  // talk to. These routes show what they offer and let a human check one by
+  // hand - the same information the model gets, without a model in the loop.
+  //
+  //   GET  /api/mcp/servers           - the state of every server and its tools
+  //   POST /api/mcp/refresh           - stop and start every server again
+  //   POST /api/mcp/servers/{n}/call  - call one tool of one server
+  svr.Get("/api/mcp/servers", [this](const httplib::Request&, httplib::Response& res) {
+    if (!mcp) {
+      nlohmann::json j = nlohmann::json::object();
+      j["configured"] = false;
+      j["enabled"] = false;
+      j["servers"] = nlohmann::json::array();
+      send_json(res, j);
+      return;
+    }
+    send_json(res, mcp->status_json());
+  });
+
+  svr.Post("/api/mcp/refresh", [this](const httplib::Request&, httplib::Response& res) {
+    if (!mcp) {
+      send_error(res, 400, "mcp_not_configured",
+                 "this build has no MCP registry; add an 'mcp:' section to provider.yaml");
+      return;
+    }
+    nlohmann::json j = mcp->refresh();
+    j["ok"] = true;
+    send_json(res, j);
+  });
+
+  svr.Post(R"(/api/mcp/servers/([^/]+)/call)", [this](const httplib::Request& req,
+                                                      httplib::Response& res) {
+    if (!mcp) {
+      send_error(res, 400, "mcp_not_configured", "no MCP registry in this build");
+      return;
+    }
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const std::string tool = trim(json_string(body, "tool"));
+    if (tool.empty()) {
+      send_error(res, 400, "bad_request",
+                 "the request needs a 'tool:' (the full name, e.g. mcp__uiautomation__TakeScreenshot)");
+      return;
+    }
+    nlohmann::json arguments = nlohmann::json::object();
+    if (body.contains("arguments") && body["arguments"].is_object()) {
+      arguments = body["arguments"];
+    }
+    McpCallResult result;
+    std::string err;
+    if (!mcp->call(tool, arguments, &result, &err)) {
+      send_error(res, 502, "mcp_call_failed", err);
+      return;
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["tool"] = tool;
+    j["is_error"] = result.is_error;
+    j["text"] = result.text;
+    j["images"] = static_cast<int>(result.images.size());
+    j["result"] = result.raw;
     send_json(res, j);
   });
 
@@ -4268,11 +4354,13 @@ void ApiServer::Impl::install_routes() {
 // ---------------------------------------------------------------------------
 // ApiServer
 // ---------------------------------------------------------------------------
-ApiServer::ApiServer(AppConfig* config, ToolRegistry* tools, WorkspaceRegistry* registry)
+ApiServer::ApiServer(AppConfig* config, ToolRegistry* tools, WorkspaceRegistry* registry,
+                     McpRegistry* mcp)
     : impl_(new Impl()) {
   impl_->config = config;
   impl_->tools = tools;
   impl_->registry = registry;
+  impl_->mcp = mcp;
 }
 
 ApiServer::~ApiServer() { stop(); }

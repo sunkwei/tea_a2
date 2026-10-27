@@ -37,6 +37,9 @@ node tests/ui_provider_models.mjs                          # 设置页「更新�
 node tests/ui_usage.mjs                                   # 顶栏额度徽标 + 设置页按 provider 查询（需 google-chrome）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
 python3 tests/smoke_asr.py                                # 语音输入：asr: 段 + 转写端点的契约（本地 mock）
+python3 tests/smoke_mcp.py                                # MCP：mcp: 段、stdio 上的 JSON-RPC、工具并进工具表、手工调工具、
+                                                          # 连不上的服务器不影响别的（本地 mock MCP 服务器）
+node tests/ui_mcp.mjs                                    # 设置页的 MCP 服务器卡片：状态/工具/刷新（需 google-chrome）
 node tests/ui_asr.mjs                                     # 麦克风按钮：录音 → 16k 单声道 WAV → 文字填进输入框（需 google-chrome）
 node tests/ui_asr_e2e.mjs                                 # 同一套流程对着**真的** SenseVoiceSmall（没装模型就跳过）
 python3 tests/smoke_tool_call_structure.py               # 工具调用结构：重复/孤儿/没答复的调用都先修好再发

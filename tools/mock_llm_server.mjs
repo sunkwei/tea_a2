@@ -28,7 +28,33 @@ function toolTurns(messages) {
   return messages.filter((m) => m.role === 'tool').length;
 }
 
-function planTurn(turn) {
+// What the last tool said. The MCP plan quotes it, so a test can see that the
+// answer of an MCP server really reached the model.
+function lastToolText(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'tool') return String(messages[i].content || '');
+  }
+  return '';
+}
+
+function planTurn(turn, tools = [], toolText = '') {
+  // An MCP server in the tool list changes the plan: the model calls the MCP
+  // tool first and then reports what it said. That is the whole MCP loop.
+  const mcpTools = tools.filter((n) => typeof n === 'string' && n.startsWith('mcp__'));
+  if (mcpTools.length) {
+    if (turn === 0) {
+      return {
+        reasoning: 'An MCP server is available, so I will call one of its tools.',
+        tool: { name: mcpTools[0], arguments: { text: 'hello from the mock model' } },
+      };
+    }
+    return {
+      content:
+        'The MCP tool answered:\n\n```text\n' + toolText + '\n```\n\nThat is what the ' +
+        'MCP server said.',
+      reasoning: 'The MCP tool has answered; I report its words.',
+    };
+  }
   switch (turn) {
     case 0:
       // Thinking mode: emit reasoning *before* the tool call. Real gateways
@@ -92,8 +118,8 @@ function checkReasoningEchoed(messages) {
   return true;
 }
 
-function sseChunks(res, turn, model, reportUsage) {
-  const plan = planTurn(turn);
+function sseChunks(res, turn, model, reportUsage, tools = [], toolText = '') {
+  const plan = planTurn(turn, tools, toolText);
   const id = `chatcmpl-mock-${Date.now()}`;
   const send = (delta, finish = null) => {
     const payload = {
@@ -293,11 +319,18 @@ const server = http.createServer((req, res) => {
         Connection: 'keep-alive',
       });
       const wantsUsage = !!(parsed.stream_options && parsed.stream_options.include_usage);
-      sseChunks(res, turn, parsed.model || 'mock-model', wantsUsage && parsed.model !== 'mock-no-usage');
+      sseChunks(
+        res,
+        turn,
+        parsed.model || 'mock-model',
+        wantsUsage && parsed.model !== 'mock-no-usage',
+        tools,
+        lastToolText(messages),
+      );
       return;
     }
 
-    const plan = planTurn(turn);
+    const plan = planTurn(turn, tools, lastToolText(messages));
     const message = { role: 'assistant', content: plan.content || null };
     if (plan.reasoning) message.reasoning_content = plan.reasoning;
     if (plan.tool) {

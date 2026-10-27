@@ -38,7 +38,10 @@
 | `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
 | `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
-| `GET` | `/api/tools` | 工具定义与 JSON Schema |
+| `GET` | `/api/tools` | 工具定义与 JSON Schema（**含 MCP 服务器提供的工具**，名字是 `mcp__<服务器>__<工具>`） |
+| `GET` | `/api/mcp/servers` | 每个 MCP 服务器的状态与它提供的工具：`{configured, enabled, servers:[{name, command, args, enabled, connected, protocol_version, server_name, tool_count, tools:[…], error}]}`。没配 `mcp:` 段时 `configured:false` |
+| `POST` | `/api/mcp/refresh` | 把所有 MCP 服务器停掉再重新启动一遍（改完 `provider.yaml` 的 `mcp:` 段后用），返回同上的状态 |
+| `POST` | `/api/mcp/servers/{name}/call` | 不用模型，直接调一个 MCP 工具：`{"tool":"mcp__<服务器>__<工具>","arguments":{…}}` → `{ok, tool, is_error, text, images, result}`。工具不存在或服务器连不上 → 502 `mcp_call_failed` |
 | `GET` | `/api/providers` | provider 清单与能力标记（`supports_search` / `supports_fetch` / `supports_usage`），**不含 key**；另有 `search_provider` 对象：独立搜索 provider（`provider.yaml` 顶层 `search:` 段）的名字、能力与错误信息 |
 | `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
 | `GET` | `/api/providers/{name}/models` | 问这个 provider 现在提供哪些模型：服务端用 provider 自己的 key 去问 `GET {api_url}/v1/models`（key 不下发）。返回每个模型的默认配置、来源、新增了哪些、哪些已经不再提供。上游失败返回 502 与原因 |
@@ -567,6 +570,27 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 > 一句人话原因，界面照实显示——不会静默地把列表清空。
 
 ---
+
+### MCP
+
+`provider.yaml` 顶层 `mcp:` 段里配的 MCP 服务器（Model Context Protocol）是独立的程序：
+agent 启动它们，用 stdio 上的 JSON-RPC 跟它们说话，它们提供的工具变成模型可以调用的
+工具（见 docs/config.md 的「MCP 服务器」一节）。这三个接口可以在没有模型的情况下检查
+它们：
+
+| 接口 | 干什么 |
+| --- | --- |
+| `GET /api/mcp/servers` | 每个服务器的状态（连上了没有、协议版本、它自称是谁）、它提供的工具、连不上时的原因 |
+| `POST /api/mcp/refresh` | 重新连接所有服务器 |
+| `POST /api/mcp/servers/{name}/call` | 直接调一个工具 |
+
+```bash
+curl -s http://127.0.0.1:8282/api/mcp/servers
+curl -s -X POST http://127.0.0.1:8282/api/mcp/refresh
+curl -s -X POST http://127.0.0.1:8282/api/mcp/servers/uiautomation/call \
+     -H 'Content-Type: application/json' \
+     -d '{"tool":"mcp__uiautomation__SearchElements","arguments":{"name":"OK"}}'
+```
 
 ### 语音输入
 

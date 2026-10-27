@@ -469,6 +469,7 @@ set(TEA_SOURCES
   src/tls.cpp
   src/command.cpp
   src/archive.cpp
+  src/mcp.cpp
   src/tools.cpp
   src/workspace.cpp
   src/llm.cpp

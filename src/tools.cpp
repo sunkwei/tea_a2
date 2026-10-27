@@ -10,6 +10,7 @@
 #include "command.h"
 #include "http.h"
 #include "log.h"
+#include "mcp.h"
 #include "util.h"
 
 namespace tea {
@@ -1658,6 +1659,75 @@ ToolResult tool_fleet(const nlohmann::json& args, const ToolContext& ctx) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// the MCP tools
+//
+// The tools of an MCP server are published as `mcp__<server>__<tool>`, so the
+// model sees them as one more tool of the agent. The result is the text the
+// server returned; an image block becomes an attachment of the conversation,
+// exactly like the one toolkit_load_image produces.
+// ---------------------------------------------------------------------------
+ToolResult tool_mcp(const std::string& name, const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  if (!ctx.mcp) {
+    result.ok = false;
+    result.output = "error: no MCP server is configured";
+    return result;
+  }
+  McpCallResult call;
+  std::string err;
+  if (!ctx.mcp->call(name, args, &call, &err)) {
+    result.ok = false;
+    result.output = "error: " + err;
+    return result;
+  }
+  result.ok = !call.is_error;
+  result.output = call.text;
+  if (call.is_error) {
+    result.output = "the MCP tool reported an error: " + result.output;
+  }
+  result.meta = nlohmann::json::object();
+  result.meta["mcp_tool"] = name;
+
+  // Images the server sent along: they are stored in the workspace and
+  // attached to the conversation, so a model that can see them gets them.
+  for (std::size_t i = 0; i < call.images.size(); ++i) {
+    std::string bytes;
+    if (!base64_decode(call.images[i].first, &bytes) || bytes.empty()) {
+      result.output += "\n(the MCP server sent an image that could not be decoded)";
+      continue;
+    }
+    const char* sniffed = sniff_image_mime(bytes);
+    if (!sniffed) {
+      result.output += "\n(the MCP server sent an image in a format this agent cannot show)";
+      continue;
+    }
+    if (!ctx.workspace) {
+      result.output +=
+          "\n(the MCP server sent an image, but this turn has no workspace to store it in)";
+      continue;
+    }
+    const std::string dir = path_join(ctx.workspace->artifacts_dir(), "images");
+    if (!make_dirs(dir)) {
+      result.output += "\n(cannot create " + dir + " to store the image the MCP server sent)";
+      continue;
+    }
+    const std::string file = path_join(dir, "mcp_" + random_hex(8) + image_extension_for(sniffed));
+    std::string write_error;
+    if (!write_file(file, bytes, false, &write_error)) {
+      result.output += "\n(cannot store the image the MCP server sent: " + write_error + ")";
+      continue;
+    }
+    ImageAttachment att;
+    att.mime = sniffed;
+    att.path = ctx.workspace->display_path(file);
+    result.images.push_back(att);
+    result.meta["path"] = att.path;
+    result.output += "\n(the MCP server also sent an image: " + att.path + ")";
+  }
+  return result;
+}
+
 }  // namespace
 
 nlohmann::json ToolDef::to_openai() const {
@@ -2057,7 +2127,8 @@ ToolRegistry::ToolRegistry() {
 
 nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider,
                                            const Settings* settings,
-                                           const AppConfig* config) const {
+                                           const AppConfig* config,
+                                           bool include_mcp) const {
   nlohmann::json arr = nlohmann::json::array();
   for (std::size_t i = 0; i < defs_.size(); ++i) {
     const ToolDef& def = defs_[i];
@@ -2072,6 +2143,13 @@ nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider,
     // would only learn about it by calling it and failing.
     if (def.name == "toolkit_fleet" && !(settings && !settings->fleet_url.empty())) continue;
     arr.push_back(def.to_openai());
+  }
+  // The tools of the MCP servers join the agent's own tool set. A server that
+  // is not reachable contributes nothing: a model that is shown a tool that
+  // cannot work only wastes a turn on it.
+  if (mcp_ && include_mcp) {
+    const nlohmann::json mcp_tools = mcp_->openai_tools();
+    for (std::size_t i = 0; i < mcp_tools.size(); ++i) arr.push_back(mcp_tools[i]);
   }
   return arr;
 }
@@ -2097,6 +2175,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     else if (name == "toolkit_search") result = tool_search(arguments, ctx);
     else if (name == "toolkit_fetch") result = tool_fetch(arguments, ctx);
     else if (name == "toolkit_fleet") result = tool_fleet(arguments, ctx);
+    else if (mcp_ && starts_with(name, "mcp__")) result = tool_mcp(name, arguments, ctx);
     else {
       result.ok = false;
       result.output = "error: unknown tool '" + name + "'";

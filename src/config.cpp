@@ -69,6 +69,79 @@ double ydouble(const YAML::Node& node, const std::string& key, double def) {
   }
 }
 
+/// Read one MCP server declaration. Shared by the two shapes of the
+/// `mcp:` section (a mapping keyed by name and a list of entries).
+void parse_mcp_server_spec(const YAML::Node& spec, McpServerConfig* out,
+                            std::vector<std::string>* warnings) {
+  if (!spec || !spec.IsMap()) {
+    out->error = "an MCP server entry is not a mapping";
+    if (warnings) warnings->push_back(out->error);
+    return;
+  }
+  out->command = trim(ystr(spec, "command"));
+  if (out->command.empty()) out->command = trim(ystr(spec, "cmd"));
+  out->cwd = trim(ystr(spec, "cwd"));
+  out->enabled = ybool(spec, "enabled", true);
+  out->timeout_ms = static_cast<int>(yint(spec, "timeout_ms", out->timeout_ms));
+  out->startup_timeout_ms =
+      static_cast<int>(yint(spec, "startup_timeout_ms", out->startup_timeout_ms));
+  out->protocol_version = trim(ystr(spec, "protocol_version"));
+  if (out->timeout_ms < 1000) out->timeout_ms = 1000;
+  if (out->timeout_ms > 600000) out->timeout_ms = 600000;
+  if (out->startup_timeout_ms < 1000) out->startup_timeout_ms = 1000;
+  if (out->startup_timeout_ms > 300000) out->startup_timeout_ms = 300000;
+
+  const YAML::Node args_node = spec["args"];
+  if (args_node && args_node.IsSequence()) {
+    for (std::size_t i = 0; i < args_node.size(); ++i) {
+      const YAML::Node a = args_node[i];
+      if (!a.IsScalar()) continue;
+      try {
+        out->args.push_back(a.as<std::string>());
+      } catch (const std::exception&) {
+        // A non-scalar argument cannot be passed to a program; skip it.
+      }
+    }
+  } else if (args_node && args_node.IsScalar()) {
+    // A single string is split on whitespace, which is what people write
+    // when they copy a command line.
+    const std::string line = trim(args_node.as<std::string>());
+    if (!line.empty()) {
+      std::string current;
+      for (std::size_t i = 0; i <= line.size(); ++i) {
+        const char c = i < line.size() ? line[i] : ' ';
+        if (c == ' ' || c == '\t') {
+          if (!current.empty()) {
+            out->args.push_back(current);
+            current.clear();
+          }
+        } else {
+          current.push_back(c);
+        }
+      }
+    }
+  }
+
+  const YAML::Node env_node = spec["env"];
+  if (env_node && env_node.IsMap()) {
+    for (YAML::const_iterator it = env_node.begin(); it != env_node.end(); ++it) {
+      const YAML::Node key_node = it->first;
+      const YAML::Node v = it->second;
+      if (!key_node.IsScalar() || !v.IsScalar()) continue;
+      try {
+        out->env[key_node.as<std::string>()] = v.as<std::string>();
+      } catch (const std::exception&) {
+        // A variable we cannot read is simply not passed on.
+      }
+    }
+  }
+
+  if (out->command.empty()) {
+    out->error = "the MCP server '" + out->name + "' has no 'command:' to run";
+    if (warnings) warnings->push_back(out->error);
+  }
+}
+
 void apply_settings(Settings& s, const YAML::Node& node) {
   if (!node || !node.IsMap()) return;
   if (yhas(node, "max_iterations")) s.max_iterations = static_cast<int>(yint(node, "max_iterations", s.max_iterations));
@@ -206,6 +279,7 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
   provider_order.clear();
   search = SearchProviderConfig();
   asr = AsrConfig();
+  mcp = McpConfig();
   loaded = false;
   file_missing = false;
 
@@ -579,6 +653,80 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
         asr.url = asr_join_endpoint(base);
         if (asr.timeout_ms < 1000) asr.timeout_ms = 1000;
         if (asr.timeout_ms > 600000) asr.timeout_ms = 600000;
+      }
+    }
+  }
+
+  // ---- the MCP servers ----------------------------------------------------
+  // The `mcp:` section lists the MCP servers the agent may talk to. Each one
+  // is a separate program the agent starts on demand; the tools it offers
+  // join the agent's own tool set (see src/mcp.cpp).
+  //
+  // Two shapes are accepted, because both read naturally:
+  //
+  //   mcp:
+  //     servers:
+  //       uiautomation:
+  //         command: uiautomation-mcp
+  //         args: ["--log", "info"]
+  //
+  //   mcp:
+  //     servers:
+  //       - name: uiautomation
+  //         command: uiautomation-mcp
+  {
+    const YAML::Node mcp_node = root["mcp"];
+    if (mcp_node && mcp_node.IsMap()) {
+      mcp.configured = true;
+      mcp.enabled = ybool(mcp_node, "enabled", true);
+      const YAML::Node servers_node = mcp_node["servers"];
+      if (!servers_node || (!servers_node.IsMap() && !servers_node.IsSequence())) {
+        mcp.error = "the 'mcp:' section needs a 'servers:' mapping or list";
+        warnings.push_back(mcp.error);
+      } else if (servers_node.IsMap()) {
+        for (YAML::const_iterator it = servers_node.begin(); it != servers_node.end(); ++it) {
+          const YAML::Node name_node = it->first;
+          const YAML::Node spec = it->second;
+          McpServerConfig server;
+          if (name_node.IsScalar()) {
+            try {
+              server.name = name_node.as<std::string>();
+            } catch (const std::exception&) {
+            }
+          }
+          parse_mcp_server_spec(spec, &server, &warnings);
+          if (server.name.empty()) {
+            const std::string msg = "an entry of the 'mcp:' server list has no name; "
+                                   "it cannot be addressed";
+            server.error = msg;
+            warnings.push_back(msg);
+          }
+          mcp.servers.push_back(server);
+        }
+      } else {
+        for (std::size_t i = 0; i < servers_node.size(); ++i) {
+          const YAML::Node spec = servers_node[i];
+          McpServerConfig server;
+          server.name = trim(ystr(spec, "name"));
+          parse_mcp_server_spec(spec, &server, &warnings);
+          if (server.name.empty()) {
+            const std::string msg =
+                "an entry of the 'mcp:' server list has no 'name:'; it cannot be addressed";
+            server.error = msg;
+            warnings.push_back(msg);
+          }
+          mcp.servers.push_back(server);
+        }
+      }
+    } else if (mcp_node && mcp_node.IsSequence()) {
+      // A bare list is read as the list of servers.
+      mcp.configured = true;
+      for (std::size_t i = 0; i < mcp_node.size(); ++i) {
+        const YAML::Node spec = mcp_node[i];
+        McpServerConfig server;
+        server.name = trim(ystr(spec, "name"));
+        parse_mcp_server_spec(spec, &server, &warnings);
+        mcp.servers.push_back(server);
       }
     }
   }

@@ -17,6 +17,7 @@
 #include "output_filter.h"
 #include "server.h"
 #include "tls.h"
+#include "mcp.h"
 #include "tools.h"
 #include "util.h"
 #include "version.h"
@@ -397,6 +398,11 @@ int main(int argc, char** argv) {
 
   // ---- tools + server ----------------------------------------------------
   ToolRegistry tools;
+  // The MCP servers of the `mcp:` section. Their tools join the agent's tool
+  // set, and the web UI shows whether they are up.
+  McpRegistry mcp;
+  mcp.configure(config.mcp);
+  tools.set_mcp(&mcp);
   ServerOptions options;
   options.host = args.get("host", "127.0.0.1");
   options.web_dir = args.get("web-dir");
@@ -418,12 +424,17 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  ApiServer server(&config, &tools, &registry);
+  ApiServer server(&config, &tools, &registry, &mcp);
   std::string start_error;
   if (!server.start(options, &start_error)) {
     LOG_ERROR("server: ", start_error);   // also echoed to the console
     return 1;
   }
+
+  // The MCP servers are started in the background: the handshake of a server
+  // that is not there takes seconds, and the agent must not wait for it at
+  // start-up. A turn that needs a tool starts the server itself.
+  std::thread mcp_warmup([&mcp]() { mcp.warm_up(); });
 
   // ---- banner ------------------------------------------------------------
   {
@@ -463,8 +474,10 @@ int main(int argc, char** argv) {
     // List what the active provider actually advertises: web tools are
     // provider-scoped, and showing the unfiltered set here misleads debugging.
     banner += "  Tools       : ";
+    // The MCP tools are left out here: asking for them starts the MCP servers,
+    // and the banner must not wait for a handshake that may never come.
     const nlohmann::json advertised =
-        tools.openai_tools(config.active_provider_info(), &config.settings, &config);
+        tools.openai_tools(config.active_provider_info(), &config.settings, &config, false);
     for (std::size_t i = 0; i < advertised.size(); ++i) {
       if (i) banner += ", ";
       banner += advertised[i]["function"]["name"].get<std::string>();
@@ -484,6 +497,26 @@ int main(int argc, char** argv) {
         banner += std::string(" (web tools, ") + (config.search.always ? "always" : "fallback") +
                   ")";
       }
+      banner += "\n";
+    }
+    // The MCP servers of the `mcp:` section: what they are and whether they
+    // answered. A server that is not there is a line in the log, not a reason
+    // to refuse to start.
+    if (config.mcp.configured) {
+      banner += "  MCP         : ";
+      bool first = true;
+      for (std::size_t i = 0; i < config.mcp.servers.size(); ++i) {
+        const McpServerConfig& s = config.mcp.servers[i];
+        if (!first) banner += ", ";
+        first = false;
+        banner += s.name;
+        if (!s.enabled) {
+          banner += " (disabled)";
+        } else if (!s.error.empty()) {
+          banner += " (unusable: " + s.error + ")";
+        }
+      }
+      if (first) banner += "(none)";
       banner += "\n";
     }
     banner += "  Workspaces  : " + std::to_string(registry.entries().size()) + " registered (index: " +
@@ -513,6 +546,9 @@ int main(int argc, char** argv) {
   LOG_INFO("shutting down");
   if (!args.has("quiet")) console_write_line("stopping...");
   server.stop();
+  // The warm-up thread holds the MCP servers; it has to be finished before the
+  // registry (and the servers) go away.
+  if (mcp_warmup.joinable()) mcp_warmup.join();
   LOG_INFO("=== ", TEA_AGENT_NAME, " stopped ===");
   return 0;
 }
