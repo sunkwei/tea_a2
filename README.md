@@ -50,13 +50,12 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 
 - **单进制**：Web UI 在构建期被嵌入二进制，没有静态资源目录、没有前端构建链、没有 CDN。
 - **零外部库**：nlohmann/json、cpp-httplib、yaml-cpp、mbedTLS 全部 vendored 在 `3rd/`，不依赖 vcpkg / conan / 系统开发包。
-- **不依赖 OpenSSL / zlib / Python / Perl**：TLS 由 mbedTLS 承担；构建期没有任何脚本语言参与。
 - **跨平台同一套代码**：路径、文件 I/O、进程、SIGPIPE 都按平台封装，没有 `std::filesystem`。
 - **内置网页终端**：这台机器上的**真实 shell**（Linux 上是 bash、Windows 上是 PowerShell），跑在
   pty / ConPTY 上；浏览器里直接敲命令，**不经过模型**，也不经过 agent 的工具边界。
 ## ⚠️ 安全须知
 
-**这个程序由 tea_agent 项目创建 0.1 版本；之后版本由 a2 自己进化完成，模型使用 deepseek-flash**
+**这个程序由 tea_agent 项目创建 0.1 版本；之后版本由 tea_a2 自己进化完成，模型使用 deepseek-flash/minimax-m3.1-flash**
 
 **这个程序没有任何认证机制。** `toolkit_exec` 可以执行任意系统命令，所以：
 
@@ -93,7 +92,6 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 | 生成器 | Ninja / Unix Makefiles / NMake / Xcode |
 | 链接库 | 系统自带：Windows `winhttp` `ws2_32` `advapi32`；POSIX `pthread` |
 
-不需要 OpenSSL、zlib、vcpkg、conan、Python、Perl。
 
 ### 构建
 
@@ -201,8 +199,7 @@ provider、注释和 `settings:` 原样保留，配置随即热加载生效，�
 
 网页搜索/抓取工具（`toolkit_search` / `toolkit_fetch`）默认跟着「这一轮用的 provider」走：
 provider 声明了 `supports_search` 才看得见。这对大多数场景够了，但**对话用的 provider 和
-搜索用的 provider 往往不是同一个账号**——本地模型没有联网能力，而搜索是按次计费的
-（DeepSeek：各 5 元 / 1000 次成功请求）。在 `provider.yaml` 顶层加一个 `search:` 段就能拆开：
+搜索用的 provider 往往不是同一个账号**——本地模型没有联网能力。在 `provider.yaml` 顶层加一个 `search:` 段就能拆开：
 
 ```yaml
 search:
@@ -229,7 +226,8 @@ search:
 
 ---
 
-## 这台机器上跑着的三个服务
+## 服务
+好吧，可以使用 user systemd service。
 
 | 单元 | 是什么 | 端口 |
 | --- | --- | --- |
