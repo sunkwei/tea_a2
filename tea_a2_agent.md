@@ -13,6 +13,7 @@
 > [代码里的坑](#这套代码里的坑) ·
 > [快捷通道](#首次运行快捷通道只填一个-api-key) ·
 > [额度查询](#额度查询provider-级) ·
+[语音输入](#语音输入sensesvoicesmall) ·
 > [平台差异](#平台差异) ·
 > [约定](#约定) ·
 > [进行中](#进行中红着的测试)
@@ -341,6 +342,94 @@ search:
   只能在**单独的 agent 实例**里测——`tests/smoke_web_tools.py` 为此起了第二个 agent。
 - 测「请求到底是谁应的」时，mock 要能分辨来源：两个 mock 端口，records 里记 port、
   chat 记录里塞 `_auth`/`_port`。
+
+---
+
+## 语音输入（SenseVoiceSmall）
+
+界面上的麦克风按钮：录音 → 转写 → **文字填进输入框**（不自动发，转写会错）。
+
+### 分工
+
+| 谁 | 干什么 |
+| --- | --- |
+| 浏览器（`web/app.js`） | 录音、解码成 PCM、重采样到 16 kHz 单声道、编码成 WAV、POST |
+| agent（`src/asr.cpp`） | 把 WAV 转成 `multipart/form-data`，转发给转写服务，取回 `text` |
+| 转写服务（`sched/asr_server.py`） | 真的跑模型（sherpa-onnx + SenseVoiceSmall int8 ONNX） |
+
+**为什么模型不在 C++ 里面**：sherpa-onnx 要拖进 onnxruntime（十几 MB），还要拖
+tokens 和 240 MB 的模型文件——这个项目的规矩是「一个文件丢上设备就能跑」。所以模型
+跑在**同机的一个小服务**里（`sched/` 里的 Python 伴生件，和任务队列一个位置），
+agent 只当通道。
+
+### 协议
+
+`asr:` 段（provider.yaml 顶层，仿 `search:` 段）说服务在哪：
+
+```yaml
+asr:
+  url: http://127.0.0.1:8284
+  model: sense-voice
+  api_key: sk-...        # 可选
+  timeout_ms: 30000
+```
+
+接口用 OpenAI 的转写那套：`POST <url>/v1/audio/transcriptions`，multipart，
+答 `{"text": "..."}`。所以**任何** OpenAI 兼容的服务都能换上去（云上的也行），
+本地那个只是默认选项。
+
+agent 自己的两个接口：`GET /api/asr/status`（配了没）和 `POST /api/asr/transcribe`
+（请求体是原始 WAV 字节）。
+
+### 整段，不是流式（做「伪实时」之前先读这段）
+
+现在这套是**整段识别**：浏览器把整段 WAV 一次性 POST，服务端一次
+`accept_waveform` + 一次 `decode_stream`，返回一个 `{"text": ...}`。
+
+**SenseVoice 在 sherpa-onnx 里没有流式形态**：`OnlineRecognizer` 的 factory 只有
+`from_nemo_ctc / from_paraformer / from_t_one_ctc / from_transducer / from_wenet_ctc /
+from_zipformer2_ctc`——**没有 `from_sense_voice`**。所以用 sherpa 跑 SenseVoice
+**只有整段这一种可能**，「边说边出字」得靠别的办法。
+
+延迟不是问题（int8 实测，比实时快 **30 倍**：10 秒音频 → 0.325 秒）：
+
+```
+ 1 s -> 0.046 s (21.5x)   5 s -> 0.168 s (29.7x)   10 s -> 0.325 s (30.8x)
+```
+
+整段的等待 = 说话时间 + 0.1~0.5 秒。
+
+**要做「伪实时」的话**（分块累加重解码：每 1 秒重发已录的音频，服务端对累计音频
+重新整段识别，返回最新文本）：
+
+- 模型代价很小：15 次增量重解码，模型总耗时 3.9 秒（比实时便宜 10 倍以上），CPU 吃得下。
+- **协议要变**：`POST /v1/audio/transcriptions` 现在是一次性契约，伪实时需要会话式接口
+  （带 session id 的 partial 端点，或 chunked multipart）。
+- 副作用：中间结果是「未完句」的猜测，文字会跳变（`系.` → `开饭时间。` →
+  `开饭时间早上9点。` → …）。做草稿输入其实整段更合适（一次拿到正确完整的句子）。
+
+交互现在也是**点一下开始/再点一下结束**（toggle），不是按住-松开；按住式要改
+`pointerdown`/`pointerup` 代替 `click`。
+
+### 坑
+
+- **浏览器只在安全上下文里给麦克风**（https 或 localhost）。`http://192.168.x.x` 上
+  `navigator.mediaDevices` 是 undefined，按钮因此不出现——**这是浏览器的规矩**，
+  不是代码的 bug。测试里用 `http://127.0.0.1` 绕开。
+- **MediaRecorder 给的是 webm/opus**，模型要 PCM。所以浏览器里要 `decodeAudioData`
+  解回采样点、重采样到 16 kHz、再自己拼 44 字节 WAV 头。**服务端不做这个转换**
+  （C++ 里塞一个音频库不值得）。
+- **浏览器测试里的假麦克风**：容器里没有声卡，`getUserMedia` 会失败。用 Chrome 的
+  `--use-fake-device-for-media-stream`（+ `--use-fake-ui-for-media-stream` 自动放行
+  权限），它给一段合成的音调，**是真的音频**，`decodeAudioData` 能解。
+  标志加在 `tests/chrome_pool.mjs` 和 `scripts/test-all.sh` 里。
+  踩过的坑：自己用 `AudioContext` + 振荡器造流，**AudioContext 是挂起的**（没有
+  用户手势），录出来只有 110 字节的头，解码直接 `EncodingError`——别自己造流。
+- **侧车服务只听 127.0.0.1**：录音不该在没有认证的情况下暴露给局域网。
+- **`sched/` 里其他文件都是纯标准库**，`asr_server.py` 是唯一的例外（它要
+  `pip install sherpa-onnx` 才能真的跑推理）——因为它做的是真的神经网络推理。
+- 模型从 ModelScope 拉（`fengge2024/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`），
+  HuggingFace 那份是备选。int8 模型 239 MB，tokens.txt 316 KB。
 
 ---
 

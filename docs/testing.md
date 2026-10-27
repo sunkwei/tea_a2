@@ -36,6 +36,9 @@ python3 tests/smoke_provider_models.py                     # 查模型 + 回填 
 node tests/ui_provider_models.mjs                          # 设置页「更新模型」：列表、改数字、写入、热加载（需 google-chrome）
 node tests/ui_usage.mjs                                   # 顶栏额度徽标 + 设置页按 provider 查询（需 google-chrome）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
+python3 tests/smoke_asr.py                                # 语音输入：asr: 段 + 转写端点的契约（本地 mock）
+node tests/ui_asr.mjs                                     # 麦克风按钮：录音 → 16k 单声道 WAV → 文字填进输入框（需 google-chrome）
+node tests/ui_asr_e2e.mjs                                 # 同一套流程对着**真的** SenseVoiceSmall（没装模型就跳过）
 python3 tests/smoke_tool_call_structure.py               # 工具调用结构：重复/孤儿/没答复的调用都先修好再发
 python3 tests/smoke_tool_images.py                        # toolkit_load_image：磁盘图片进对话/上限/拒绝
 node tests/ui_tool_images.mjs                             # 加载的图片在对话里可见（含刷新后，需 google-chrome）

@@ -226,6 +226,35 @@ providers:
 #   * A section naming a provider that does not exist, or a provider without an
 #     api_key, is reported at startup and the web tools stay switched off.
 
+# Speech-to-text (optional). The microphone button next to the composer
+# appears only when this section is present - a button that cannot work is
+# worse than no button.
+#
+# The service speaks the OpenAI transcription API: the agent posts the
+# recorded clip to <url>/v1/audio/transcriptions and reads back {"text": "..."}.
+# The repository ships a local one that runs SenseVoiceSmall (multilingual,
+# good at Chinese, ~240 MB, CPU only):
+#
+#   pip install sherpa-onnx
+#   python3 sched/asr_server.py --download    # fetch the model
+#   python3 sched/asr_server.py               # serve on 127.0.0.1:8284
+#
+#   asr:
+#     url: http://127.0.0.1:8284
+#     model: sense-voice
+#
+# Any OpenAI-compatible transcription service works, in the cloud too - then
+# add the key:
+#
+#   asr:
+#     url: https://api.example.com
+#     model: FunAudioLLM/SenseVoiceSmall
+#     api_key: sk-...
+#
+# Note: browsers only hand out the microphone in a secure context (https or
+# localhost). Opening the UI over http://<LAN-IP> therefore shows no
+# microphone button - that is the browser's rule, not this program's.
+
 settings:
   max_iterations: 50           # tool-calling round trips per user message
   max_tool_output: 131072      # bytes of tool output fed back to the model

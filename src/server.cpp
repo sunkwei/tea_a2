@@ -22,6 +22,7 @@
 #include "httplib.h"
 
 #include "agent.h"
+#include "asr.h"
 #include "archive.h"
 #include "command.h"
 #include "env.h"
@@ -1844,6 +1845,15 @@ void ApiServer::Impl::install_routes() {
     settings["command_timeout_ms"] = config->settings.command_timeout_ms;
     settings["allow_outside_workspace"] = config->settings.allow_outside_workspace;
     j["settings"] = settings;
+    // The speech-to-text service (the `asr:` section of provider.yaml). The
+    // UI needs to know before the user presses the mic button: without a
+    // service there is nothing to transcribe with.
+    nlohmann::json asr_info = nlohmann::json::object();
+    asr_info["configured"] = config->asr.configured && !config->asr.url.empty();
+    asr_info["model"] = config->asr.model;
+    if (!config->asr.error.empty()) asr_info["error"] = config->asr.error;
+    j["asr"] = asr_info;
+
     j["warnings"] = config->warnings;
     send_json(res, j);
   });
@@ -2072,6 +2082,65 @@ void ApiServer::Impl::install_routes() {
     }
     nlohmann::json j = nlohmann::json::object();
     j["tools"] = list;
+    send_json(res, j);
+  });
+
+  // ---- speech to text ----------------------------------------------------
+  // The browser records a clip and posts it here; the server forwards it to
+  // the transcription service named in the `asr:` section of provider.yaml.
+  //
+  // Two endpoints, both deliberately small:
+  //   GET  /api/asr/status     - is a service configured, and what is wrong
+  //                               with it if not (the UI shows the mic button
+  //                               only when this says "configured").
+  //   POST /api/asr/transcribe - the audio in, the transcript out.
+  //
+  // The body of the POST is the raw WAV file (Content-Type: audio/wav). The
+  // browser encodes 16 kHz mono PCM itself, which is exactly what SenseVoice
+  // wants, so nothing has to be converted on the way in.
+  svr.Get("/api/asr/status", [this](const httplib::Request&, httplib::Response& res) {
+    nlohmann::json j = nlohmann::json::object();
+    j["configured"] = config->asr.configured && !config->asr.url.empty();
+    j["url"] = config->asr.url;
+    j["model"] = config->asr.model;
+    if (!config->asr.error.empty()) j["error"] = config->asr.error;
+    send_json(res, j);
+  });
+
+  svr.Post("/api/asr/transcribe", [this](const httplib::Request& req, httplib::Response& res) {
+    if (!config->asr.configured || config->asr.url.empty()) {
+      send_error(res, 400, "asr_not_configured",
+                 config->asr.error.empty()
+                     ? "no speech-to-text service is configured; add an 'asr:' section to provider.yaml"
+                     : config->asr.error);
+      return;
+    }
+    if (req.body.empty()) {
+      send_error(res, 400, "bad_request", "the request body is empty; post the recorded audio");
+      return;
+    }
+    // A clip longer than this is a bug or an abuse, not a sentence. 16 kHz mono
+    // PCM is 32 kB per second, so this is about 5 minutes.
+    if (req.body.size() > 16u * 1024u * 1024u) {
+      send_error(res, 413, "too_large", "the audio clip is too large (max 16 MB)");
+      return;
+    }
+    if (!is_wav_file(req.body)) {
+      send_error(res, 400, "bad_request",
+                 "the audio must be a WAV file (the browser encodes 16 kHz mono PCM)");
+      return;
+    }
+    const AsrResult r = asr_transcribe(config->asr, req.body);
+    if (!r.ok) {
+      // The service is unreachable or refused: that is a gateway problem, not
+      // a bad request, so it is a 502. The message says what went wrong.
+      send_error(res, 502, "asr_failed", r.error);
+      return;
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["text"] = r.text;
+    j["elapsed_ms"] = r.elapsed_ms;
     send_json(res, j);
   });
 

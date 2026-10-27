@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "asr.h"
 #include "log.h"
 #include "usage.h"
 #include "util.h"
@@ -204,6 +205,7 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
   providers.clear();
   provider_order.clear();
   search = SearchProviderConfig();
+  asr = AsrConfig();
   loaded = false;
   file_missing = false;
 
@@ -547,6 +549,36 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
             warnings.push_back(search.error + "; the web tools cannot be used");
           }
         }
+      }
+    }
+  }
+
+  // ---- the speech-to-text service ----------------------------------------
+  // The `asr:` section points at an OpenAI-compatible transcription endpoint
+  // (POST /v1/audio/transcriptions). It is a section of its own, like
+  // `search:`, because the transcriber is usually a *different* service from
+  // the chat provider: SenseVoiceSmall usually runs on the very device that
+  // holds the microphone (sched/asr_server.py), while the conversation runs
+  // in the cloud. Coupling them would mean the device needs the chat
+  // provider's credentials just to type a sentence.
+  {
+    const YAML::Node asr_node = root["asr"];
+    if (asr_node && asr_node.IsMap()) {
+      asr.configured = true;
+      const std::string base = trim(ystr(asr_node, "url"));
+      asr.api_key = trim(ystr(asr_node, "api_key"));
+      asr.model = trim(ystr(asr_node, "model"));
+      asr.timeout_ms = static_cast<int>(yint(asr_node, "timeout_ms", asr.timeout_ms));
+      if (base.empty()) {
+        asr.error = "the 'asr:' section needs a 'url:' (the base url of the transcription service)";
+        warnings.push_back(asr.error);
+      } else if (base.rfind("http://", 0) != 0 && base.rfind("https://", 0) != 0) {
+        asr.error = "the 'asr:' url must be an http(s) URL, got '" + base + "'";
+        warnings.push_back(asr.error);
+      } else {
+        asr.url = asr_join_endpoint(base);
+        if (asr.timeout_ms < 1000) asr.timeout_ms = 1000;
+        if (asr.timeout_ms > 600000) asr.timeout_ms = 600000;
       }
     }
   }

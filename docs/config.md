@@ -190,6 +190,51 @@ search:
 `search:` 段是 provider.yaml 的**顶层**段（和 `providers:`、`settings:` 平级），
 不是某个 provider 块里的字段。
 
+### 语音输入（`asr:` 段）
+
+在 Web UI 的输入框旁边有一个麦克风按钮：点一下开始录音，再点一下结束，转写出来的文字
+**填进输入框**（不自动发送——转写会出错，人看过再发）。
+
+它需要一个**转写服务**。服务在哪由 `asr:` 段说：
+
+```yaml
+asr:
+  url: http://127.0.0.1:8284        # ← 转写服务的地址
+  model: sense-voice               # ← 模型名（本地服务会忽略它）
+  api_key: sk-...                  # ← 可选：要 key 的网关才需要
+  timeout_ms: 30000                # ← 可选，默认 30 秒
+```
+
+`asr:` 段是 provider.yaml 的**顶层**段（和 `providers:`、`search:`、`settings:` 平级）。
+没配这一段，界面上就**没有**麦克风按钮——给一个点了没反应的死按钮更糟。
+
+服务端做的事很少：把浏览器录好的音频（16 kHz 单声道 WAV）转成
+`multipart/form-data`，POST 到 `<url>/v1/audio/transcriptions`，把返回的 `text` 字段
+交回去。所以转写服务只要说 OpenAI 的转写接口那套话就行。
+
+**本地跑 SenseVoiceSmall**（仓库里带了）：
+
+```bash
+pip install sherpa-onnx                      # 唯一需要的依赖
+python3 sched/asr_server.py --download        # 拉模型（约 240 MB）到 ~/.tea_agent/asr
+python3 sched/asr_server.py                   # 监听 127.0.0.1:8284
+```
+
+然后 `asr: { url: http://127.0.0.1:8284 }`。这个服务只监听回环地址：麦克风的录音
+不该在没有认证的情况下暴露给局域网。
+
+**用云上的转写服务**：任何 OpenAI 兼容 `/v1/audio/transcriptions` 的服务都行，把
+`url` 指过去、填上 `api_key` 即可。
+
+规则：
+
+- `url` 写**基础地址**就行，路径按 `/v1/audio/transcriptions` 补；已经写全了就不动。
+- `url` 必须是 http(s)，别的协议会在启动时 WARN，配置视作没配。
+- `api_key` 走 `Authorization: Bearer`；本地服务不需要，就别写。
+- 浏览器只在**安全上下文**（https 或 localhost）里给麦克风权限。用
+  `http://192.168.x.x:8282` 访问设备时，浏览器不给麦克风，界面因此也不显示按钮——
+  这是浏览器的规矩，不是这个程序的选择。
+
 ### 订阅额度（provider 级可选能力）
 
 有些 provider 除了对话接口，还有一个**账号级**接口能回答「我的订阅还剩多少」。目前内置的

@@ -177,6 +177,12 @@
             <!-- 停止跟随这一轮，但不打断它：任务可能是另一台机器发起的，看够了就
                  走，服务端照跑；回到这个会话会重新接上 -->
             <button class="detach hidden" id="detach" type="button" title="停止跟随（不中断这一轮）">离开</button>
+            <!-- 语音输入：按住说话（或点一下开始/停止），录完转成文字填进输入框。
+                 没有配 asr: 段时这个按钮不出现（服务端说没配就别给人一个死按钮）。
+                 浏览器只在 https 或 localhost 下才给麦克风权限，所以按钮也可能
+                 因为这个原因消失——下面 renderMic() 会把原因说清楚。 -->
+            <button class="mic hidden" id="mic" type="button" title="语音输入"
+                    aria-label="语音输入"></button>
             <button class="send" id="send" type="button" title="发送"></button>
           </div>
           <!-- 指标栏：耗时 / 轮次 / 步数 / 速度 / 缓存命中率 / 上下文用量 / 本轮输出

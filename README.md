@@ -210,6 +210,33 @@ search:
 默认是**回退**（这一轮的 provider 自己能搜就还是用它）；写 `always: true` 就所有 web 调用
 都走 search provider。细节见 [配置](docs/config.md)。
 
+### 语音输入（SenseVoiceSmall）
+
+输入框旁边有个麦克风按钮：点一下开始录音，再点一下结束，转写出来的文字**填进输入框**
+（不自动发送——转写会出错，人看过再发）。
+
+转写服务在 provider.yaml 顶层的一个 `asr:` 段里配。仓库自带一个本地跑
+**SenseVoiceSmall** 的服务（多语言，中文效果好，CPU 就行，约 240 MB）：
+
+```bash
+pip install sherpa-onnx                      # 唯一的额外依赖
+python3 sched/asr_server.py --download        # 拉模型到 ~/.tea_agent/asr
+python3 sched/asr_server.py                   # 起服务（127.0.0.1:8284）
+```
+
+```yaml
+asr:
+  url: http://127.0.0.1:8284
+  model: sense-voice
+```
+
+任何 OpenAI 兼容 `/v1/audio/transcriptions` 的服务都能换上去（云上的也行，加
+`api_key:`）。没配 `asr:` 段，界面上就没有麦克风按钮。
+
+> 浏览器只在**安全上下文**（https 或 localhost）里给麦克风权限。用
+> `http://192.168.x.x:8282` 访问设备时浏览器不给权限，界面因此也不显示按钮——这是
+> 浏览器的规矩。细节见 [配置](docs/config.md#语音输入asr-段)。
+
 **控制台默认只打印 WARNING / ERROR。** 服务是长期挂在终端里的，每次请求的 `INFO`
 （`chat:`、`server:`、`toolkit_*` …）都往终端刷会把真正要紧的告警顶出屏幕；而排查问题时
 又确实需要这些细节。所以两个阈值是分开的：

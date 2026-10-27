@@ -13,6 +13,7 @@ README 讲的是「这是什么、为什么这么设计」；[HTTP 接口](api.m
 | 起服务、改端口、换模型、看日志 | [1. 起服务](#1-起服务) |
 | 用 curl 让 agent 干活 | [2. agent 的 HTTP 命令](#2-agent-的-http-命令) |
 | 排队、查进度、取消、重做 | [3. 任务队列的命令](#3-任务队列的命令) |
+| 用麦克风说话（语音输入） | [2.12](#212-语音输入) |
 | 定时做一件活儿（`not_before`、微信 `/at`） | [3.2.1](#321-定时做一件活儿) · [4](#4-聊天端的命令) |
 | 在微信 / Telegram 里排队 | [4. 聊天端的命令](#4-聊天端的命令) |
 | 写脚本调 agent | [5. 给脚本用的客户端](#5-给脚本用的客户端) |
@@ -198,7 +199,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.13.3","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.14.0","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -496,6 +497,53 @@ curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
 
 带 `messages` 就是自己拼历史；带 `tools` 就是把工具定义交给模型——**它只会返回
 工具调用，不会替你执行**，要执行得你自己来（那正是 `/api/chat` 做的事）。
+
+### 2.12 语音输入
+
+界面上的麦克风按钮（输入框旁边）把说的话变成文字**填进输入框**——不自动发送，
+转写有错还能改。
+
+它要一个转写服务，在 provider.yaml 的 `asr:` 段里配：
+
+```yaml
+asr:
+  url: http://127.0.0.1:8284
+  model: sense-voice
+```
+
+**本地跑 SenseVoiceSmall**（仓库自带，模型 ~240 MB，只在第一次需要下载）：
+
+```bash
+pip install sherpa-onnx                        # 唯一的额外依赖
+python3 sched/asr_server.py --download          # 拉模型到 ~/.tea_agent/asr
+python3 sched/asr_server.py                     # 起服务（127.0.0.1:8284）
+```
+
+服务只听回环地址：录音不该在没有认证的情况下暴露给局域网。转写服务换成任何
+OpenAI 兼容 `/v1/audio/transcriptions` 的服务都行（云上的也行），把 `url` 指过去、
+需要 key 就加 `api_key:`。
+
+命令行也能转写：
+
+```bash
+# 看服务配了没有
+curl -s $B/api/asr/status
+# {"configured":true,"url":"http://127.0.0.1:8284/v1/audio/transcriptions",...}
+
+# 转写一个 wav（请求体是原始 WAV 字节）
+curl -s -X POST $B/api/asr/transcribe -H 'Content-Type: audio/wav' \
+     --data-binary @hello.wav
+# {"ok":true,"text":"开饭时间早上9点至下午5点。","elapsed_ms":181}
+```
+
+**看不到麦克风按钮？** 三种可能：
+
+1. provider.yaml 里没有 `asr:` 段（或者 url 不是 http(s)）——查 `GET /api/asr/status`。
+2. 浏览器只在**安全上下文**里给麦克风权限：https 或 localhost。用
+   `http://192.168.x.x:8282` 访问设备时浏览器不给权限，所以按钮不出现。
+3. 浏览器不支持 `MediaRecorder`（很老的浏览器）。
+
+---
 
 ---
 

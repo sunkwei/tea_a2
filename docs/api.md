@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.13.3`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/health` | 探活、版本（`0.14.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
@@ -567,6 +567,29 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 > 一句人话原因，界面照实显示——不会静默地把列表清空。
 
 ---
+
+### 语音输入
+
+Web UI 的麦克风按钮把录好的音频交给服务端转写，转写服务在 provider.yaml 的 `asr:` 段里
+配置（见 docs/config.md）。服务端只做转发，所以这两个接口也可以直接用：
+
+| 接口 | 干什么 |
+| --- | --- |
+| `GET /api/asr/status` | 转写服务配了没有：`{configured, url, model, error}`。没配时 `error` 说明原因。 |
+| `POST /api/asr/transcribe` | 请求体是**原始 WAV 字节**（`Content-Type: audio/wav`），返回 `{ok, text, elapsed_ms}`。 |
+
+```bash
+# 转写一个 wav 文件
+curl --data-binary @hello.wav -H 'Content-Type: audio/wav' \
+     http://127.0.0.1:8282/api/asr/transcribe
+# {"ok":true,"text":"开饭时间早上9点至下午5点。","elapsed_ms":181}
+```
+
+- 音频必须是 WAV（RIFF/WAVE）。浏览器录完会在页面里解码、重采样成 16 kHz 单声道
+  再发过来——SenseVoice 正好要这个格式，服务端不用做转换。
+- 没配 `asr:` 段 → 400 `asr_not_configured`；转写服务挂了或拒绝 → 502 `asr_failed`，
+  里面是服务自己的原话（比如「model not loaded」）。
+- 不是 WAV 的请求体在**转发之前**就被拒了（400 `bad_request`），不会白跑一趟服务。
 
 ### 原语层：给脚本用的 API
 

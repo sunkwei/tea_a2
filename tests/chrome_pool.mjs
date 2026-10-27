@@ -116,10 +116,18 @@ export async function acquireBrowser(tmp, name = 'chrome', opts = {}) {
   const flags = [
     '--headless=new', '--disable-gpu', '--no-sandbox',
     '--disable-features=RendererCodeIntegrity',
+    // A container has no audio device, so getUserMedia would fail. Chrome's
+    // fake device hands out a synthetic tone instead - that is what lets the
+    // voice-input test record and decode real audio.
+    '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
   ];
   // A test that needs a wide window (the turn index rail hides itself below
   // 900px) says so.
   if (opts.windowSize) flags.push('--window-size=' + opts.windowSize);
+  // A test that wants the fake microphone to play a real recording says so.
+  if (opts.fakeAudioFile) {
+    flags.push('--use-file-for-fake-audio-capture=' + opts.fakeAudioFile);
+  }
   flags.push(`--remote-debugging-port=${cdpPort}`, `--user-data-dir=${tmp}/${name}`, 'about:blank');
   const proc = spawn(CHROME, flags, { stdio: 'ignore' });
 

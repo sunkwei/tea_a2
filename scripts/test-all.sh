@@ -81,6 +81,7 @@ if [ -n "$UI_LIST" ]; then
     CDP_PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
     "$CHROME" --headless=new --disable-gpu --no-sandbox --window-size=1440,900 \
         --disable-features=RendererCodeIntegrity \
+        --use-fake-device-for-media-stream --use-fake-ui-for-media-stream \
         "--remote-debugging-port=$CDP_PORT" "--user-data-dir=$WORK/chrome" \
         about:blank >/dev/null 2>&1 &
     CHROME_PID=$!

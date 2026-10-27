@@ -1998,6 +1998,244 @@
     });
   }
 
+  /* ---------- 语音输入（录音 → 16k 单声道 WAV → 服务端转写 → 填进输入框） ---------- */
+  // 三段式：
+  //   1) 浏览器录音。MediaRecorder 拿到的是 webm/opus，服务端不认，所以这里
+  //      用 Web Audio 解码回 PCM，再重采样成 16 kHz 单声道 —— 正是 SenseVoice
+  //      需要的格式，编码在浏览器里做，服务端只收 WAV。
+  //   2) POST /api/asr/transcribe，服务端转发给 asr: 段里配的转写服务。
+  //   3) 文字填进输入框（不自动发送）：转写可能有错，人看过再发。
+  //
+  // 前提：浏览器只在**安全上下文**（https 或 localhost）里给麦克风权限。
+  // 用 IP 直连设备（http://192.168.x.x）时 navigator.mediaDevices 是 undefined，
+  // 所以按钮只在这时可用，并且要说清楚原因，不能给一个点了没反应的死按钮。
+  var ASR_SAMPLE_RATE = 16000;
+  var ASR_MAX_SECONDS = 120;
+
+  var asr = {
+    recording: false,
+    recorder: null,
+    stream: null,
+    chunks: [],
+    startedAt: 0,
+    timer: null,
+    busy: false
+  };
+
+  /// 服务端说配了 asr: 段吗？没有就别显示按钮。
+  function asrConfigured() {
+    return !!(state.providers && state.providers.asr && state.providers.asr.configured);
+  }
+
+  /// 浏览器在这个页面里能录音吗？麦克风权限只在安全上下文里给。
+  function micAllowed() {
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia &&
+              typeof window.MediaRecorder !== 'undefined');
+  }
+
+  function renderMic() {
+    var b = $('mic');
+    if (!b) return;
+    var show = asrConfigured() && micAllowed();
+    b.classList.toggle('hidden', !show);
+    if (!show) {
+      b.classList.remove('rec');
+      b.title = '语音输入';
+      return;
+    }
+    if (asr.recording) {
+      var secs = Math.floor((Date.now() - asr.startedAt) / 1000);
+      b.classList.add('rec');
+      b.title = '正在录音 ' + secs + ' 秒（再点一下结束）';
+    } else {
+      b.classList.remove('rec');
+      b.title = asr.busy ? '正在转写…' : '语音输入（点一下开始录音，再点一下结束）';
+    }
+    b.innerHTML = asr.recording
+      ? '<svg viewBox="0 0 16 16"><rect x="4.5" y="2.5" width="7" height="11" rx="3.2" fill="currentColor" stroke="none"/></svg>'
+      : '<svg viewBox="0 0 16 16"><path d="M8 2.4a1.9 1.9 0 0 1 1.9 1.9v3.9a1.9 1.9 0 0 1-3.8 0V4.3A1.9 1.9 0 0 1 8 2.4z"/><path d="M4.3 7.7a.7.7 0 0 1 1.4 0 2.3 2.3 0 0 0 4.6 0 .7.7 0 0 1 1.4 0 3.7 3.7 0 0 1-3 3.6v1.4h1.2a.7.7 0 0 1 0 1.4H6.1a.7.7 0 0 1 0-1.4h1.2v-1.4a3.7 3.7 0 0 1-3-3.6z"/></svg>';
+  }
+
+  /// 把解码后的 PCM 重采样成 16 kHz 单声道。
+  /// 浏览器给的采样率多半是 44.1k 或 48k，SenseVoice 只吃 16k，所以这一步
+  /// 不能省。线性插值对语音足够（模型自己会做特征提取）。
+  function resampleTo16k(buffer) {
+    var target = ASR_SAMPLE_RATE;
+    var srcRate = buffer.sampleRate;
+    var channels = buffer.numberOfChannels;
+    var frames = buffer.length;
+    if (srcRate === target && channels === 1) return buffer.getChannelData(0);
+    var outLen = Math.max(1, Math.round(frames * target / srcRate));
+    var out = new Float32Array(outLen);
+    var ch0 = buffer.getChannelData(0);
+    var ch1 = channels > 1 ? buffer.getChannelData(1) : null;
+    var ratio = srcRate / target;
+    for (var i = 0; i < outLen; i++) {
+      var pos = i * ratio;
+      var idx = Math.floor(pos);
+      if (idx >= frames - 1) { out[i] = ch0[frames - 1] || 0; continue; }
+      var frac = pos - idx;
+      var a = ch0[idx] || 0;
+      var b = ch0[idx + 1] || 0;
+      if (ch1) { a = (a + (ch1[idx] || 0)) / 2; b = (b + (ch1[idx + 1] || 0)) / 2; }
+      out[i] = a + (b - a) * frac;
+    }
+    return out;
+  }
+
+  /// 16 kHz 单声道 float32 → WAV 字节（44 字节头 + 16 位 PCM）。
+  function encodeWav(samples) {
+    var n = samples.length;
+    var buf = new ArrayBuffer(44 + n * 2);
+    var view = new DataView(buf);
+    function str(off, s) { for (var i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); }
+    str(0, 'RIFF');
+    view.setUint32(4, 36 + n * 2, true);
+    str(8, 'WAVE');
+    str(12, 'fmt ');
+    view.setUint32(16, 16, true);        // PCM 块长度
+    view.setUint16(20, 1, true);         // PCM
+    view.setUint16(22, 1, true);         // 单声道
+    view.setUint32(24, ASR_SAMPLE_RATE, true);
+    view.setUint32(28, ASR_SAMPLE_RATE * 2, true);  // 字节率
+    view.setUint16(32, 2, true);         // 块对齐
+    view.setUint16(34, 16, true);        // 位深
+    str(36, 'data');
+    view.setUint32(40, n * 2, true);
+    var off = 44;
+    for (var i = 0; i < n; i++) {
+      var s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      off += 2;
+    }
+    return new Uint8Array(buf);
+  }
+
+  function stopAsrTimer() {
+    if (asr.timer) { clearInterval(asr.timer); asr.timer = null; }
+  }
+
+  function releaseMic() {
+    if (asr.stream) {
+      asr.stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+      asr.stream = null;
+    }
+    if (asr.recorder) {
+      try { asr.recorder.onstop = null; asr.recorder.ondataavailable = null; } catch (e) {}
+      asr.recorder = null;
+    }
+  }
+
+  function startRecording() {
+    if (asr.recording || asr.busy) return;
+    if (!asrConfigured()) { toast('没有配置语音识别服务（provider.yaml 的 asr: 段）'); return; }
+    if (!micAllowed()) { toast('这个页面拿不到麦克风：需要 https 或 localhost'); return; }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      asr.stream = stream;
+      asr.chunks = [];
+      var rec = new MediaRecorder(stream);
+      asr.recorder = rec;
+      rec.ondataavailable = function (e) { if (e.data && e.data.size) asr.chunks.push(e.data); };
+      rec.onstop = function () { finishRecording(); };
+      rec.start();
+      asr.recording = true;
+      asr.startedAt = Date.now();
+      renderMic();
+      // 录太久对模型没好处（也没有成本上的理由），到点自己停。
+      asr.timer = setInterval(function () {
+        if (!asr.recording) { stopAsrTimer(); return; }
+        var secs = (Date.now() - asr.startedAt) / 1000;
+        if (secs >= ASR_MAX_SECONDS) { stopRecording(); return; }
+        renderMic();
+      }, 250);
+    }, function (err) {
+      releaseMic();
+      asr.recording = false;
+      renderMic();
+      var name = err && err.name ? err.name : '';
+      if (name === 'NotAllowedError') toast('麦克风权限被拒绝了');
+      else if (name === 'NotFoundError') toast('没有找到麦克风');
+      else toast('打不开麦克风：' + (err && err.message ? err.message : '未知原因'));
+    });
+  }
+
+  function stopRecording() {
+    if (!asr.recording) return;
+    asr.recording = false;
+    stopAsrTimer();
+    renderMic();
+    if (asr.recorder && asr.recorder.state !== 'inactive') {
+      try { asr.recorder.stop(); } catch (e) { releaseMic(); }
+    } else {
+      releaseMic();
+    }
+  }
+
+  /// 录音结束 → 解码 → 16k WAV → 转发给服务端 → 文字填进输入框。
+  function finishRecording() {
+    var blob = new Blob(asr.chunks, { type: asr.chunks.length ? asr.chunks[0].type : 'audio/webm' });
+    asr.chunks = [];
+    releaseMic();
+    if (!blob.size) { toast('没有录到声音'); renderMic(); return; }
+    asr.busy = true;
+    renderMic();
+    blob.arrayBuffer().then(function (buf) {
+      // 用 Web Audio 解码：MediaRecorder 给的是压缩格式，模型要的是 PCM。
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      var ctx = new Ctx();
+      return ctx.decodeAudioData(buf).then(function (decoded) {
+        if (ctx.close) ctx.close();
+        var samples = resampleTo16k(decoded);
+        return encodeWav(samples);
+      });
+    }).then(function (wav) {
+      return fetch(apiUrl('api/asr/transcribe'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'audio/wav' },
+        body: wav
+      }).then(function (res) {
+        return res.text().then(function (t) {
+          var data = null;
+          try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
+          if (!res.ok) {
+            var msg = (data && data.error && data.error.message) || ('HTTP ' + res.status);
+            throw new Error(msg);
+          }
+          return data;
+        });
+      });
+    }).then(function (data) {
+      asr.busy = false;
+      renderMic();
+      var text = (data && data.text) ? String(data.text).trim() : '';
+      if (!text) { toast('没有识别出文字'); return; }
+      // 填进输入框而不是直接发：转写会出错，人看过再发。
+      // 插在光标处（不是末尾）——用户可能正在句子中间说话。
+      var ta = $('input');
+      var start = typeof ta.selectionStart === 'number' ? ta.selectionStart : ta.value.length;
+      var end = typeof ta.selectionEnd === 'number' ? ta.selectionEnd : start;
+      var before = ta.value.slice(0, start);
+      var after = ta.value.slice(end);
+      // 两个接缝都要看：前后都有字的时候补空格，免得粘成「你好世界」。
+      var sepBefore = (before && !/\s$/.test(before)) ? ' ' : '';
+      var sepAfter = (after && !/^\s/.test(after)) ? ' ' : '';
+      ta.value = before + sepBefore + text + sepAfter + after;
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = before.length + sepBefore.length + text.length;
+      autoGrow();
+      toast('已转写：' + text.slice(0, 40) + (text.length > 40 ? '…' : ''));
+    }).catch(function (err) {
+      asr.busy = false;
+      renderMic();
+      toast('转写失败：' + (err && err.message ? err.message : '未知原因'));
+    });
+  }
+
+  function toggleRecording() {
+    if (asr.recording) stopRecording();
+    else startRecording();
+  }
+
   /* ---------- 排队消息（会话进行中按 Enter） ---------- */
   // 一轮可能跑很久（长工具、多轮迭代）。这时按 Enter 不再被忽略或直接开第二轮，
   // 而是把消息放进该轮自己的队列：agent loop 每轮采纳一条，采纳前随时可以取消。
@@ -3315,6 +3553,7 @@
       buildModels();
       if (saved && state.models.some(function (m) { return m.provider === saved.provider && m.model === saved.model; })) state.model = saved;
       renderModelChip(); renderModelMenu(); renderSettings(); renderMetrics();
+      renderMic();
       loadUsage();
       // Providers carry max_context_tokens, so the metrics strip can resolve the
       // context window here; without this it stays "模型未配置" until a stream or a
@@ -5498,6 +5737,8 @@
       if (state.setupMode) { toast('还没有 provider.yaml：先在「设置」里配置'); showView('settings'); return; }
       sendMessage();
     };
+    var micBtn = $('mic');
+    if (micBtn) micBtn.onclick = function () { toggleRecording(); };
     var detachBtn = $('detach');
     if (detachBtn) detachBtn.onclick = detachStream;
     $('sidebar-hide').onclick = function () { toggleSidebar(true); };

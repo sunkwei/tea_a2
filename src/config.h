@@ -271,6 +271,31 @@ struct SearchProviderConfig {
   std::string error;
 };
 
+/// The speech-to-text service: an OpenAI-compatible
+/// `POST /v1/audio/transcriptions` endpoint.
+///
+/// It is a section of its own, like `search:`, because the transcriber is
+/// usually a *different* service from the chat provider: SenseVoiceSmall
+/// runs locally (sched/asr_server.py) on the device that holds the
+/// microphone, while the conversation runs in the cloud. Coupling them would
+/// mean the device needs the chat provider's key just to type a sentence.
+struct AsrConfig {
+  /// The section is present.
+  bool configured = false;
+  /// The full transcription endpoint (already resolved from the base url).
+  std::string url;
+  /// Optional bearer token, for a gateway that wants one.
+  std::string api_key;
+  /// The model name to ask for. The local sidecar ignores it; a cloud
+  /// gateway needs the right one (e.g. "FunAudioLLM/SenseVoiceSmall").
+  std::string model;
+  /// How long to wait for the service. A local model answers in under a
+  /// second; a cold cloud one may need a while.
+  int timeout_ms = 30000;
+  /// Why the section cannot be used. Empty when it is fine.
+  std::string error;
+};
+
 struct AppConfig {  std::string path;      // provider.yaml that was loaded
   std::string extra_path;  // tea_agent.yaml, if present
   std::string tea_home;  // $HOME/.tea_agent
@@ -281,6 +306,8 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   std::string active_model;
   /// The independent search provider (the `search:` section of provider.yaml).
   SearchProviderConfig search;
+  /// The speech-to-text service (the `asr:` section of provider.yaml).
+  AsrConfig asr;
   std::vector<std::string> warnings;
   std::string error;
   bool loaded = false;
