@@ -306,6 +306,8 @@ button{font-family:inherit}
 .tool-icon svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round}
 .tool-icon.ok{color:var(--dsw-alias-state-success-primary)}
 .tool-icon.fail{color:var(--dsw-alias-state-error-primary)}
+/* 被中断的工具：不是失败，是停在了半路。 */
+.tool-icon.stop{color:var(--dsw-alias-label-caption)}
 .tool-title{font-size:13px;white-space:nowrap}
 .dot{width:2px;height:2px;flex:0 0 2px;border-radius:50%;background:var(--dsw-alias-label-caption);margin:0 8px}
 .tool-summary{
@@ -343,6 +345,8 @@ button{font-family:inherit}
 /* ---------- 轨迹：每轮的结构化审计记录（默认折叠） ---------- */
 .traj-row>.tool-line .tool-summary{font-family:var(--ds-font-family-code);font-size:12px}
 .traj-badge{flex:0 0 auto;margin-left:8px;font-size:11px;color:var(--dsw-alias-state-error-primary)}
+/* 被中断的一轮不是坏了：颜色跟着状态走，别用报错的红色。 */
+.traj-badge.stop{color:var(--dsw-alias-label-caption)}
 .traj-panel{max-height:440px}
 .traj-head{
   display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;

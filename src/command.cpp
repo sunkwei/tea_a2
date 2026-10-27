@@ -1,8 +1,10 @@
 #include "command.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #include "log.h"
@@ -230,6 +232,26 @@ CommandResult run_command(const CommandOptions& opts) {
       Sleep(5);
       continue;
     }
+    if (opts.cancel && opts.cancel->load()) {
+      // The user wants the turn to stop: kill the whole process tree now.
+      res.cancelled = true;
+      if (job) {
+        TerminateJobObject(job, 1);
+      } else {
+        TerminateProcess(pi.hProcess, 1);
+      }
+      WaitForSingleObject(pi.hProcess, 5000);
+      process_done = true;
+      for (int i = 0; i < 200; ++i) {
+        DWORD left = 0;
+        if (!PeekNamedPipe(pipe_read, nullptr, 0, nullptr, &left, nullptr) || left == 0) break;
+        DWORD got = 0;
+        const DWORD want = left < sizeof(buffer) ? left : static_cast<DWORD>(sizeof(buffer));
+        if (!ReadFile(pipe_read, buffer, want, &got, nullptr) || got == 0) break;
+        if (raw.size() < opts.max_output_bytes) raw.append(buffer, got);
+      }
+      break;
+    }
     if (now_ms() - started > opts.timeout_ms) {
       res.timed_out = true;
       if (job) {
@@ -254,7 +276,9 @@ CommandResult run_command(const CommandOptions& opts) {
   }
 
   DWORD exit_code = 0;
-  if (res.timed_out) {
+  if (res.cancelled) {
+    exit_code = 130;  // conventional "interrupted" code, matches GNU timeout(1)
+  } else if (res.timed_out) {
     exit_code = 124;  // conventional timeout code, matches GNU timeout(1)
   } else if (!GetExitCodeProcess(pi.hProcess, &exit_code)) {
     exit_code = static_cast<DWORD>(-1);
@@ -396,6 +420,27 @@ CommandResult run_command(const CommandOptions& opts) {
       child_done = true;
       break;
     }
+    if (opts.cancel && opts.cancel->load()) {
+      // The user wants the turn to stop: end the command now instead of
+      // waiting for it. SIGTERM first (the command may clean up after itself),
+      // SIGKILL when it does not go. The whole process group dies, so a
+      // command that spawned children leaves none behind.
+      res.cancelled = true;
+      kill(-pid, SIGTERM);
+      for (int i = 0; i < 10 && !child_done; ++i) {
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+          child_done = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      }
+      if (!child_done) {
+        kill(-pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        child_done = true;
+      }
+      break;
+    }
   }
 
   close(fds[0]);
@@ -406,7 +451,9 @@ CommandResult run_command(const CommandOptions& opts) {
   remove_path(script_path, false, nullptr);
 
   int exit_code = -1;
-  if (res.timed_out) {
+  if (res.cancelled) {
+    exit_code = 130;  // conventional "interrupted" code, matches GNU timeout(1)
+  } else if (res.timed_out) {
     exit_code = 124;
   } else if (WIFEXITED(status)) {
     exit_code = WEXITSTATUS(status);

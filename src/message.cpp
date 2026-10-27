@@ -248,6 +248,7 @@ nlohmann::json Message::to_store() const {
     j["ok"] = ok;
     j["elapsed_ms"] = elapsed_ms;
     if (truncated) j["truncated"] = true;
+    if (cancelled) j["cancelled"] = true;
   }
   if (!tool_calls.empty()) {
     nlohmann::json arr = nlohmann::json::array();
@@ -298,6 +299,8 @@ Message Message::from_store(const nlohmann::json& j) {
   if (el_it != j.end() && el_it->is_number()) m.elapsed_ms = el_it->get<long long>();
   auto tr_it = j.find("truncated");
   if (tr_it != j.end() && tr_it->is_boolean()) m.truncated = tr_it->get<bool>();
+  auto ca_it = j.find("cancelled");
+  if (ca_it != j.end() && ca_it->is_boolean()) m.cancelled = ca_it->get<bool>();
 
   auto imgs = j.find("images");
   if (imgs != j.end() && imgs->is_array()) {

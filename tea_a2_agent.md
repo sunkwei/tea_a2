@@ -166,6 +166,73 @@ UTF-8）。但 JPEG 结尾是 `FF D9`，而 `0xD9` 正是 2 字节序列的前�
 **那条 user 消息折进摘要**、把没有问题的回答留在窗口里，模型看到的是一个它没问过的回合。
 对齐要看 `messages[keep_from]` 本身是不是 user 消息。
 
+### 服务端繁忙（HTTP 529）：等，不是失败
+
+MiniMax 整点高峰会直接拒绝请求：`HTTP 529: 当前为整点高峰时段，服务器短暂繁忙，通常 1-5
+分钟内恢复`，body 里是 `{"type":"error","error":{"type":"overloaded_error",…,"http_code":"529"}}`。
+同一个请求过一两分钟照样成功——**所以这一轮不该失败，该等**。
+
+原来的重试只有 400ms / 800ms（`llm.cpp` 里的 `400 * (attempt + 1)`），对 529 毫无意义：
+一分钟后才是同一堵墙。2026-10-27 改成两套预算：
+
+- **hiccup**（连接断了、502、429）：照旧几百毫秒，重试 `max_retries` 次（默认 2）；
+  provider 给了 `Retry-After` 就听它的。
+- **overloaded**（529，或错误里带 `overloaded_error` / 「繁忙」/「高峰」）：按分钟退避
+  （默认 60s → 120s → 240s，上限 5 分钟/次、10 分钟/次请求），重试 `overload_retries` 次
+  （默认 3）。等待可被「停止」打断（每 50ms 查一次 cancel 标志）。
+
+坑与取舍：
+
+- **「繁忙」要认字，不能只看状态码**：有的网关 HTTP 200 + 流里一个 error 事件
+  （`http_code` 是字符串 `"529"`）——状态码在错误对象里，`attempt_once` 得把它取出来，
+  否则这次失败看起来像普通的 200，直接被当成致命错误。
+- **已经吐过内容的请求不重试**：否则 provider 的回答会被贴两遍。
+- **等待必须有上限**：`overload_max_total_ms`（默认 10 分钟）兜底，不然 provider 一直忙
+  下去就会变成一场没有尽头的等待。
+- 等待期间要**告诉用户在等什么**：`agent.cpp` 把 `RetryNotice` 变成一个 `retry` SSE 事件，
+  界面显示带倒计时的提示（`web/app.js` 的 `retryNoticeText`）——否则几分钟的空白看起来
+  就是卡死了。
+
+设置项：`overload_retries` / `overload_backoff_ms` / `overload_max_backoff_ms` /
+`overload_max_total_ms`（`settings:` 里，可按工作区覆盖）。钉住它的测试：
+`tests/smoke_overload_retry.py`（14/14）、`tests/ui_retry_notice.mjs`。
+
+### 中断：尽量结束，结束之后还要能继续
+
+用户点「中断」时想要的是「尽快停下来」，但**停下之后不能把会话弄坏**。2026-10-27 之前
+这两件事都没做到：
+
+1. `toolkit_exec` 跑的命令**根本停不掉**——`run_command` 只看超时，不看取消标志。
+   于是一条 `sleep 60` 让这一轮多活 60 秒，`{"interrupt":true}` 15 秒内等不到就返回
+   `409 turn_still_running`。
+2. 更要命的是**历史会坏**：工具循环里 `if (out.cancelled) break;` 只给**第一个**没跑的
+   调用补了结果，同一批剩下的调用就悬着。悬着的调用 = 下一次请求 provider 直接拒
+   （MiniMax：`invalid params, 400 (2013)`，「工具调用没有对应的结果」）。
+   `message.cpp` 的 `repair_tool_calls()` 会在**发出去之前**把悬着的调用删掉，所以请求
+   不会报错——但会话记录里那一段是残的，模型也不知道自己问过什么。
+
+现在的做法：
+
+- `CommandOptions::cancel`（`std::atomic<bool>*`）：`run_command` 的轮询循环（~30ms 一次）
+  看到标志就杀**整个进程组**（SIGTERM → 300ms → SIGKILL），返回 `cancelled`、退出码 130。
+  Windows 那边是 `TerminateJobObject`（job object 本来就是为超时准备的）。
+- 工具循环**不再提前 break**：被取消的调用照常得到结果（内容是「cancelled by user…」），
+  同一批剩下的调用也各自得到一份「没有执行」的结果——这样每个调用都有答案。
+- 收尾还有一道保险：`close_dangling_tool_calls()` 扫一遍会话，把**任何**没有答案的调用
+  补上（万一还有别的路径留下悬空调用）。补的时候写明「被中断，没有执行」。
+- 被中断的工具结果会写清楚「命令被中断，可能只跑了一部分，它写过的东西还在」——
+  这不是失败，是停在了半路，下一轮不能当成做完了。
+- 界面上：工具行显示「已中断」（方块图标，不是红叉），轨迹徽标也是「已中断」；
+  补齐了调用时多一条 `interrupted` 事件。
+
+坑：
+
+- **杀进程组，不是杀进程**：`command.cpp` 的子进程 `setsid()` 自己是组长，所以
+  `kill(-pid, …)` 能连它 spawn 的孙子一起收掉；只杀 pid 会留下孤儿在后台跑。
+- **别在中断后重发请求**：`repair_tool_calls()` 会静默删掉悬空的调用，看起来「没事」，
+  但那是在**掩盖**问题。真正的修复是把结果补回去。
+- 测试：`tests/smoke_interrupt.py`（13/13）、`tests/ui_interrupt.mjs`。
+
 ### 计划（toolkit_todo）是**这一轮**的脚手架
 
 会话结束了，界面上还挂着一份没做完的 todo 列表——看着像「还有人没干完的活」，其实没人���做它。

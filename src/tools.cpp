@@ -103,6 +103,9 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
   if (options.timeout_ms < 1000) options.timeout_ms = 1000;
   options.max_output_bytes = static_cast<std::size_t>(ctx.workspace->settings().max_tool_output);
   options.utf8_console = ctx.workspace->settings().utf8_console;
+  // The command can be interrupted: the user asking to stop the turn must not
+  // have to wait for a long build to finish.
+  options.cancel = ctx.cancel;
 
   const std::string cwd_arg = arg_str(args, "cwd");
   if (!cwd_arg.empty()) {
@@ -127,6 +130,7 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
     return result;
   }
   out << "[shell: " << run.shell_used << "]";
+  if (run.cancelled) out << " [interrupted by the user]";
   if (run.timed_out) out << " [timed out after " << options.timeout_ms << "ms]";
   out << " [exit code: " << run.exit_code << "]\n";
   if (run.output.empty()) {
@@ -135,7 +139,7 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
     out << run.output;
   }
 
-  result.ok = (run.exit_code == 0) && !run.timed_out;
+  result.ok = (run.exit_code == 0) && !run.timed_out && !run.cancelled;
   result.truncated = run.output_truncated;
 
   // Reduce the output according to what it is: a build log keeps its diagnostics
@@ -154,6 +158,17 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
     result.meta["dropped_lines"] = static_cast<long long>(filtered.dropped_lines);
     LOG_DEBUG("toolkit_exec: output reduced (", filtered.strategy, "), dropped ",
               filtered.dropped_lines, " lines");
+  }
+  if (run.cancelled) {
+    // An interrupted command is not a failed command: it may have done half of
+    // its work. Say so, so the next turn does not assume the work is done -
+    // and does not assume it is not done either.
+    result.cancelled = true;
+    result.output =
+        "The command was interrupted by the user after " + std::to_string(run.elapsed_ms) +
+        "ms. It may only have run part of the way: whatever it already wrote or changed is "
+        "still there, and the rest did not happen.\n" + result.output;
+    result.meta["cancelled"] = true;
   }
   result.meta["exit_code"] = run.exit_code;
   result.meta["timed_out"] = run.timed_out;
@@ -1325,6 +1340,15 @@ ToolResult tool_search(const nlohmann::json& args, const ToolContext& ctx) {
   result.meta["status"] = resp.status;
   result.meta["elapsed_ms"] = resp.elapsed_ms;
   if (!resp.ok) {
+    if (resp.error == "cancelled by user") {
+      // The turn was stopped while the request was in flight. That is an
+      // interrupt, not a failure: say so, so the row is not painted red and
+      // the next turn knows the search never happened.
+      result.cancelled = true;
+      result.output =
+          "cancelled by user: the turn was interrupted while the request was in flight";
+      return result;
+    }
     result.output = "error: " + resp.error;
     return result;
   }
@@ -1439,6 +1463,15 @@ ToolResult tool_fetch(const nlohmann::json& args, const ToolContext& ctx) {
   result.meta["status"] = resp.status;
   result.meta["elapsed_ms"] = resp.elapsed_ms;
   if (!resp.ok) {
+    if (resp.error == "cancelled by user") {
+      // The turn was stopped while the request was in flight. That is an
+      // interrupt, not a failure: say so, so the row is not painted red and
+      // the next turn knows the search never happened.
+      result.cancelled = true;
+      result.output =
+          "cancelled by user: the turn was interrupted while the request was in flight";
+      return result;
+    }
     result.output = "error: " + resp.error;
     return result;
   }

@@ -1,6 +1,7 @@
 // command.h -- run a shell command and capture merged stdout/stderr.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <string>
 
@@ -14,11 +15,22 @@ struct CommandOptions {
   int timeout_ms = 180000;
   size_t max_output_bytes = 131072;
   bool utf8_console = true;
+  /// Interrupt the command when this flag is set.
+  ///
+  /// The whole process group is killed (SIGTERM first, SIGKILL if the command
+  /// does not go), so a command that spawned children does not leave them
+  /// behind. The result then says `cancelled`: the command may have done half
+  /// of its work, and whatever it wrote is still on disk.
+  ///
+  /// Null => the command runs to completion (or until the timeout).
+  const std::atomic<bool>* cancel = nullptr;
 };
 
 struct CommandResult {
   bool ok = false;               // process started and produced a result
   bool timed_out = false;
+  /// The command was interrupted (the cancel flag was set while it ran).
+  bool cancelled = false;
   bool output_truncated = false;
   int exit_code = -1;
   std::string output;            // stdout + stderr, merged, UTF-8

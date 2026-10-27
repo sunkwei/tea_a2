@@ -26,6 +26,23 @@ struct ChatUsage {
   nlohmann::json to_json() const;
 };
 
+/// Told before every retry wait, so the caller can show what is going on
+/// instead of leaving the user in front of a frozen screen.
+struct RetryNotice {
+  /// "transient" (a hiccup, retried in seconds) or "overloaded" (the provider
+  /// is busy - HTTP 529 - and says it recovers in minutes).
+  std::string kind;
+  int http_status = 0;
+  /// How long the wait before this retry is.
+  int delay_ms = 0;
+  /// Which retry this is (1-based) and how many this kind of failure gets.
+  int attempt = 0;
+  int max_attempts = 0;
+  /// The provider's own words about the failure.
+  std::string error;
+};
+using RetryCallback = std::function<void(const RetryNotice&)>;
+
 struct ChatRequest {
   std::string provider;
   std::string model;
@@ -46,7 +63,21 @@ struct ChatRequest {
   std::string reasoning_effort;
   int connect_timeout_ms = 30000;
   int read_timeout_ms = 600000;
+  /// Retries for a hiccup (a dropped connection, a 502). They are cheap and
+  /// come quickly.
   int max_retries = 2;
+  /// Retries for "the provider is busy" (HTTP 529 and friends). Those waits
+  /// are minutes long - the provider itself says it recovers in 1-5 minutes -
+  /// so they have their own budget, separate from the hiccup retries.
+  int overload_retries = 3;
+  /// The first wait after a busy answer; every further one doubles it.
+  int overload_backoff_ms = 60000;
+  /// The cap for a single wait.
+  int overload_max_backoff_ms = 300000;
+  /// The cap for all the waits of one request together. 0 => no cap.
+  long long overload_max_total_ms = 600000;
+  /// Told about every retry before the wait starts.
+  RetryCallback on_retry;
 };
 
 enum class DeltaKind { Content, Reasoning, ToolArgs };
@@ -63,6 +94,8 @@ struct ChatResult {
   ChatUsage usage;
   std::string error;
   std::string detail;
+  /// What the provider asked for in `Retry-After` (milliseconds, 0 => none).
+  int retry_after_ms = 0;
   long long elapsed_ms = 0;
   /// Time to first streamed delta, and the streaming window that follows it.
   /// `generation_ms` is 0 for a non-streaming response, so callers that want

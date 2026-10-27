@@ -164,6 +164,55 @@ void make_tool_call_ids_unique(const Session* session, std::vector<ToolCall>* ca
   }
 }
 
+/// Answer the tool calls of the last assistant message that nobody replied to.
+///
+/// The agent answers the calls of an iteration one by one, so a turn that was
+/// interrupted (or that failed) in between leaves a call without an answer.
+/// Such a request is rejected by the provider ("invalid params, 400 (2013)" on
+/// MiniMax), i.e. an interrupt would leave the session unusable. Filling the
+/// gap restores it - and the text says the work did not happen, so the next
+/// turn does not assume it did.
+int close_dangling_tool_calls(Session* session,
+                              std::vector<std::pair<std::string, std::string> >* filled_out) {
+  if (!session) return 0;
+
+  // The calls that can miss an answer are the ones of the last assistant
+  // message: the loop answers them in order, right after it.
+  std::size_t assistant_index = session->messages.size();
+  for (std::size_t i = session->messages.size(); i-- > 0;) {
+    if (session->messages[i].role == "assistant" && !session->messages[i].tool_calls.empty()) {
+      assistant_index = i;
+      break;
+    }
+  }
+  if (assistant_index == session->messages.size()) return 0;
+
+  std::set<std::string> answered;
+  for (std::size_t i = assistant_index + 1; i < session->messages.size(); ++i) {
+    const Message& m = session->messages[i];
+    if (m.role == "tool" && !m.tool_call_id.empty()) answered.insert(m.tool_call_id);
+  }
+
+  int filled = 0;
+  const std::vector<ToolCall>& calls = session->messages[assistant_index].tool_calls;
+  for (std::size_t k = 0; k < calls.size(); ++k) {
+    const ToolCall& call = calls[k];
+    if (call.id.empty() || answered.find(call.id) != answered.end()) continue;
+    Message tool_message;
+    tool_message.role = "tool";
+    tool_message.tool_call_id = call.id;
+    tool_message.name = call.name;
+    tool_message.content =
+        "cancelled by user: the turn was interrupted before this tool ran, so it did not happen";
+    tool_message.ok = false;
+    tool_message.created_at = now_iso8601();
+    session->messages.push_back(tool_message);
+    if (filled_out) filled_out->push_back(std::make_pair(call.id, call.name));
+    ++filled;
+  }
+  return filled;
+}
+
 bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provider) {
   bool learned = false;
   if (config.lookup_reasoning_echo(provider.name, &learned)) return learned;
@@ -739,6 +788,16 @@ bool Agent::compact_history(Workspace& workspace, Session* session, const std::s
   }
   request.connect_timeout_ms = st.http_connect_timeout_ms;
   request.read_timeout_ms = st.http_read_timeout_ms;
+  // The same busy-provider policy as the turn itself: a 529 must not throw
+  // away the history just because the summary request was unlucky.
+  request.overload_retries = st.overload_retries;
+  request.overload_backoff_ms = st.overload_backoff_ms;
+  request.overload_max_backoff_ms = st.overload_max_backoff_ms;
+  request.overload_max_total_ms = st.overload_max_total_ms;
+  request.on_retry = [](const RetryNotice& notice) {
+    LOG_WARN("compaction: the provider is busy (", notice.http_status, "); waiting ",
+             notice.delay_ms, "ms before retry ", notice.attempt, "/", notice.max_attempts);
+  };
   // The summary budget. A thinking model (MiniMax-M3, DeepSeek's reasoner, ...)
   // spends the completion budget on reasoning_content first: with a small
   // budget it answers with 4 KB of thoughts and an *empty* content, and the
@@ -1288,6 +1347,27 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     request.connect_timeout_ms = st.http_connect_timeout_ms;
     request.read_timeout_ms = st.http_read_timeout_ms;
 
+    // A busy provider (HTTP 529) is waited out in minutes, not in
+    // milliseconds: it says itself that it recovers in 1-5 minutes, and a
+    // request that comes back after 400 ms hits the same wall.
+    request.overload_retries = st.overload_retries;
+    request.overload_backoff_ms = st.overload_backoff_ms;
+    request.overload_max_backoff_ms = st.overload_max_backoff_ms;
+    request.overload_max_total_ms = st.overload_max_total_ms;
+    // The user has to see that the turn is waiting, not frozen: the wait is
+    // announced before it starts, with the time it will take.
+    request.on_retry = [&emit](const RetryNotice& notice) {
+      nlohmann::json event = nlohmann::json::object();
+      event["type"] = "retry";
+      event["kind"] = notice.kind;
+      event["http_status"] = notice.http_status;
+      event["delay_ms"] = notice.delay_ms;
+      event["attempt"] = notice.attempt;
+      event["max_attempts"] = notice.max_attempts;
+      event["error"] = notice.error;
+      emit(event);
+    };
+
     if (st.max_tokens > 0) {
       request.max_tokens = st.max_tokens;
     } else if (model_info && model_info->max_output_tokens > 0) {
@@ -1540,9 +1620,15 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       }
 
       if (arguments_valid && cancel && cancel->load()) {
+        // The turn was stopped before this tool ran. The call still needs an
+        // answer: a tool call without a result is a request no provider
+        // accepts ("invalid params, 400 (2013)" on MiniMax), so an interrupt
+        // that skipped the answer would break the session for the next turn.
         out.cancelled = true;
         tool_result.ok = false;
-        tool_result.output = "cancelled by user";
+        tool_result.cancelled = true;
+        tool_result.output =
+            "cancelled by user: the turn was interrupted before this tool ran";
       } else if (arguments_valid) {
         ToolContext tool_ctx;
         tool_ctx.config = config_;
@@ -1673,6 +1759,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       tool_message.content = tool_result.output;
       tool_message.ok = tool_result.ok;
       tool_message.truncated = tool_result.truncated;
+      tool_message.cancelled = tool_result.cancelled;
       tool_message.elapsed_ms = now_ms() - tool_started;
       session->messages.push_back(tool_message);
 
@@ -1681,6 +1768,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       result_event["id"] = call.id;
       result_event["name"] = call.name;
       result_event["ok"] = tool_result.ok;
+      result_event["cancelled"] = tool_result.cancelled;
       result_event["elapsed_ms"] = tool_message.elapsed_ms;
       result_event["output"] = tool_result.output;
       result_event["truncated"] = tool_result.truncated;
@@ -1693,7 +1781,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
                                                         : call.raw_arguments,
                              tool_result, tool_message.elapsed_ms);
 
-      if (out.cancelled) break;
+      // An interrupted batch is NOT cut short here: the calls that come after
+      // the interrupted one still need their answer, or the next request would
+      // carry a tool call nobody replied to. The cancel flag is still set, so
+      // the next round of the loop takes the branch above and answers them
+      // without running anything.
     }
 
     // Images a tool loaded (toolkit_load_image) cannot ride on the tool result:
@@ -1736,6 +1828,41 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
     if (out.cancelled) break;
     if (iteration == max_iterations - 1) out.hit_iteration_limit = true;
+  }
+
+  // The restore step of an interrupt: every tool call the model made must have
+  // an answer, or the next request is one no provider accepts ("invalid params,
+  // 400 (2013)" on MiniMax - a call without a result). The loop answers the
+  // calls one by one, so a turn that was stopped in between leaves a gap; this
+  // fills it and says what happened, so the next turn knows the work was not
+  // done instead of guessing.
+  if (out.cancelled) {
+    // The turn was stopped, not broken: the trajectory says so.
+    trajectory.set_cancelled(true);
+    std::vector<std::pair<std::string, std::string> > filled_calls;
+    const int filled = close_dangling_tool_calls(session, &filled_calls);
+    if (filled > 0) {
+      LOG_WARN("agent: the interrupt left ", filled, " tool call(s) without an answer; filled "
+               "them in so the session stays usable");
+      // The UI shows them like any other interrupted tool: they did not run.
+      for (std::size_t k = 0; k < filled_calls.size(); ++k) {
+        nlohmann::json result_event = nlohmann::json::object();
+        result_event["type"] = "tool_result";
+        result_event["id"] = filled_calls[k].first;
+        result_event["name"] = filled_calls[k].second;
+        result_event["ok"] = false;
+        result_event["cancelled"] = true;
+        result_event["output"] =
+            "cancelled by user: the turn was interrupted before this tool ran";
+        emit(result_event);
+      }
+      nlohmann::json event = nlohmann::json::object();
+      event["type"] = "interrupted";
+      event["filled_tool_calls"] = filled;
+      emit(event);
+    }
+    session->info.updated_at = now_iso8601();
+    workspace.save_session(*session, nullptr);
   }
 
   // Anything still queued was never adopted: the turn was stopped, failed or hit

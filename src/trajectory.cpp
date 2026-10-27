@@ -155,6 +155,7 @@ nlohmann::json trajectory_summary(const nlohmann::json& turn) {
   s["started_at"] = turn.value("started_at", std::string());
   s["elapsed_ms"] = turn.value("elapsed_ms", static_cast<long long>(0));
   s["ok"] = turn.value("ok", false);
+  s["cancelled"] = turn.value("cancelled", false);
   s["iterations"] = turn.value("iterations", 0);
   s["steps"] = (turn.contains("steps") && turn["steps"].is_array())
                    ? static_cast<int>(turn["steps"].size())
@@ -233,6 +234,7 @@ nlohmann::json TrajectoryRecorder::build() const {
   turn["started_at"] = started_at_;
   turn["elapsed_ms"] = now_ms() - started_ms_;
   turn["ok"] = finished_ ? ok_ : false;
+  turn["cancelled"] = cancelled_;
   turn["iterations"] = iterations_;
   turn["usage"] = usage_object(usage_, usage_estimated_);
   turn["steps"] = steps_;

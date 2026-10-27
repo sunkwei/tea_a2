@@ -100,6 +100,16 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (yhas(node, "allow_outside_workspace"))
     s.allow_outside_workspace = ybool(node, "allow_outside_workspace", s.allow_outside_workspace);
   if (yhas(node, "stream")) s.stream = ybool(node, "stream", s.stream);
+  if (yhas(node, "overload_retries"))
+    s.overload_retries = static_cast<int>(yint(node, "overload_retries", s.overload_retries));
+  if (yhas(node, "overload_backoff_ms"))
+    s.overload_backoff_ms =
+        static_cast<int>(yint(node, "overload_backoff_ms", s.overload_backoff_ms));
+  if (yhas(node, "overload_max_backoff_ms"))
+    s.overload_max_backoff_ms =
+        static_cast<int>(yint(node, "overload_max_backoff_ms", s.overload_max_backoff_ms));
+  if (yhas(node, "overload_max_total_ms"))
+    s.overload_max_total_ms = yint(node, "overload_max_total_ms", s.overload_max_total_ms);
   if (yhas(node, "stream_include_usage"))
     s.stream_include_usage = ybool(node, "stream_include_usage", s.stream_include_usage);
   if (yhas(node, "utf8_console")) s.utf8_console = ybool(node, "utf8_console", s.utf8_console);
@@ -148,6 +158,11 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (s.web_tool_timeout_ms < 1000) s.web_tool_timeout_ms = 1000;
   if (s.web_tool_timeout_ms > 600000) s.web_tool_timeout_ms = 600000;
   if (s.web_tool_max_calls_per_turn < 1) s.web_tool_max_calls_per_turn = 1;
+  if (s.overload_retries < 0) s.overload_retries = 0;
+  if (s.overload_retries > 20) s.overload_retries = 20;
+  if (s.overload_backoff_ms < 0) s.overload_backoff_ms = 0;
+  if (s.overload_max_backoff_ms < 0) s.overload_max_backoff_ms = 0;
+  if (s.overload_max_total_ms < 0) s.overload_max_total_ms = 0;
 }
 
 }  // namespace

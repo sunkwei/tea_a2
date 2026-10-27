@@ -38,6 +38,10 @@ struct Message {
   bool ok = true;
   long long elapsed_ms = 0;
   bool truncated = false;
+  /// The tool was interrupted (the turn was stopped while it ran). Kept in the
+  /// transcript so the UI can still say "interrupted" after a reload - and so
+  /// the next turn's model sees that the work did not happen.
+  bool cancelled = false;
   std::string created_at;
 
   /// OpenAI wire format (what we POST to the provider).

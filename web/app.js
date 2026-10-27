@@ -406,6 +406,7 @@
     spark: '<svg viewBox="0 0 16 16"><path d="M8 2.6l1.3 3.2 3.2 1.2-3.2 1.3L8 11.5 6.7 8.3 3.5 7l3.2-1.2z"/></svg>',
     check: '<svg viewBox="0 0 16 16"><path d="M3.4 8.4l3 3 6.2-6.6"/></svg>',
     cross: '<svg viewBox="0 0 16 16"><path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/></svg>',
+    stop: '<svg viewBox="0 0 16 16"><rect x="4.4" y="4.4" width="7.2" height="7.2" rx="1"/></svg>',
     traj: '<svg viewBox="0 0 16 16"><path d="M3.2 4h3.2v3.2H3.2zM9.6 8.8h3.2V12H9.6z"/><path d="M6.4 5.6h3.2v4.8"/></svg>'
   };
   function toolSummary(args) {
@@ -420,23 +421,29 @@
     if (status === 'running') return '<span class="spinner"></span>';
     if (status === 'ok') return ICONS.check;                       // 成功 → 对勾
     if (status === 'fail') return ICONS.cross;                     // 失败 → 叉号
+    if (status === 'cancelled') return ICONS.stop;                 // 被中断 → 方块
     return ICONS[(TOOL_META[name] || {}).icon || 'gear'];
   }
   function toolRowView(tc, result, key, running) {
     var meta = TOOL_META[tc.name] || { title: tc.name || '工具', icon: 'gear' };
-    var status = running ? 'running' : (result ? (result.ok === false ? 'fail' : 'ok') : 'idle');
+    // An interrupted tool is neither a success nor a failure: it was stopped
+    // half-way, and the row says so.
+    var status = running ? 'running'
+      : (result ? (result.cancelled ? 'cancelled' : (result.ok === false ? 'fail' : 'ok')) : 'idle');
     var row = el('div', 'tool-row');
     row.dataset.key = key;
     if ((key in state.expanded) ? state.expanded[key] : (status === 'running')) row.classList.add('open');
 
     var line = el('div', 'tool-line');
-    var ic = el('span', 'tool-icon' + (status === 'ok' ? ' ok' : status === 'fail' ? ' fail' : ''));
+    var ic = el('span', 'tool-icon' + (status === 'ok' ? ' ok'
+      : status === 'fail' ? ' fail' : status === 'cancelled' ? ' stop' : ''));
     ic.innerHTML = toolIconSvg(tc.name, status);
     line.appendChild(ic);
     line.appendChild(el('span', 'tool-title', meta.title));
     line.appendChild(el('span', 'dot'));
     line.appendChild(el('span', 'tool-summary', toolSummary(tc.arguments)));
-    if (result && result.elapsed_ms != null) line.appendChild(el('span', 'tool-time', fmtMs(result.elapsed_ms)));
+    if (status === 'cancelled') line.appendChild(el('span', 'tool-time', '已中断'));
+    else if (result && result.elapsed_ms != null) line.appendChild(el('span', 'tool-time', fmtMs(result.elapsed_ms)));
     else if (status === 'running') line.appendChild(el('span', 'tool-time', '运行中'));
     line.appendChild(el('span', 'chev', '›'));
     row.appendChild(line);
@@ -589,7 +596,8 @@
     line.appendChild(el('span', 'tool-title', '轨迹'));
     line.appendChild(el('span', 'dot'));
     line.appendChild(el('span', 'tool-summary', fmtTrajSummary(turn)));
-    if (turn.ok === false) line.appendChild(el('span', 'traj-badge', turn.partial ? '进行中' : '失败'));
+    if (turn.cancelled) line.appendChild(el('span', 'traj-badge stop', '已中断'));
+    else if (turn.ok === false) line.appendChild(el('span', 'traj-badge', turn.partial ? '进行中' : '失败'));
     line.appendChild(el('span', 'chev', '›'));
     row.appendChild(line);
     row.appendChild(el('div', 'tool-panel traj-panel'));
@@ -698,7 +706,11 @@
         if (isLive && !state.ended && idx === blocks.length - 1) md.appendChild(el('span', 'stream-caret'));
         wrap.appendChild(md);
       } else if (b.type === 'notice') {
-        wrap.appendChild(el('div', 'msg-notice', b.text));
+        // 重试提示带着倒计时：文本每次重画都按剩下的时间重算，DOM 里另存一份
+        // 数据（data-retry），这样秒针只改文字、不用重画整块对话。
+        var notice = el('div', 'msg-notice', b.retry ? retryNoticeText(b.retry) : b.text);
+        if (b.retry) notice.setAttribute('data-retry', JSON.stringify(b.retry));
+        wrap.appendChild(notice);
       } else {
         var tc = b.tc;
         wrap.appendChild(toolRowView(tc, outputs[tc.id] || null, keyPrefix + ':t:' + tc.id, tc.status === 'running' && !outputs[tc.id]));
@@ -1197,7 +1209,8 @@
     var outputs = {};
     state.messages.forEach(function (m) {
       if (m.role === 'tool' && m.tool_call_id) {
-        outputs[m.tool_call_id] = { output: m.content, ok: m.ok !== false, elapsed_ms: m.elapsed_ms };
+        outputs[m.tool_call_id] = { output: m.content, ok: m.ok !== false,
+                                    cancelled: !!m.cancelled, elapsed_ms: m.elapsed_ms };
       }
     });
     // The final answer of the latest turn is the natural place for "here are the
@@ -1648,6 +1661,35 @@
     state.liveNode = null;
   }
 
+  /* ---------- 等待重试的提示（服务端繁忙） ----------
+     服务端忙起来时（HTTP 529）程序会等几分钟再自动重试。这段时间界面不能是
+     死的：说清楚在等什么、还要等多久，等完了提示就留在记录里当痕迹。 */
+  function retryNoticeText(info) {
+    if (!info) return '';
+    var left = Math.max(0, Math.ceil((num(info.deadline) - Date.now()) / 1000));
+    var head = info.head || '请求失败';
+    var round = '第 ' + (num(info.attempt) || 1) + '/' + (num(info.max) || 1) + ' 次';
+    if (left > 0) return head + '（' + round + '，还剩 ' + left + ' 秒）';
+    return head + '（' + round + '，正在重试…）';
+  }
+  var retryTicker = 0;
+  function startRetryTicker() {
+    if (retryTicker) return;
+    retryTicker = setInterval(function () {
+      var nodes = document.querySelectorAll('.msg-notice[data-retry]');
+      if (!nodes.length) { stopRetryTicker(); return; }
+      for (var i = 0; i < nodes.length; i++) {
+        var info = null;
+        try { info = JSON.parse(nodes[i].getAttribute('data-retry') || '{}'); } catch (e) { info = null; }
+        if (!info) continue;
+        var text = retryNoticeText(info);
+        if (nodes[i].textContent !== text) nodes[i].textContent = text;
+      }
+    }, 1000);
+  }
+  function stopRetryTicker() {
+    if (retryTicker) { clearInterval(retryTicker); retryTicker = 0; }
+  }
   function handleEvent(ev) {
     if (ev.type === 'ping') return;                              // 心跳：保持连接存活即可
     // 每一帧都带序号：断线重连时服务端按它回放，客户端靠它知道自己看到了哪里。
@@ -1707,6 +1749,36 @@
           images: ev.images || [],
           created_at: new Date().toISOString()
         });
+        renderChat(); scrollMaybe(true);
+      }
+      return;
+    }
+    if (ev.type === 'retry') {
+      // 服务端繁忙（HTTP 529）：程序会等几分钟再自动重试。把等待说清楚，并
+      // 倒计时——不然界面看起来就像卡死了。
+      var overloaded = ev.kind === 'overloaded';
+      var status = num(ev.http_status);
+      var head = overloaded
+        ? ('服务端繁忙（HTTP ' + (status || 529) + '），稍后自动重试')
+        : ('请求失败（HTTP ' + status + '），稍后重试');
+      var info = {
+        deadline: Date.now() + num(ev.delay_ms),
+        head: head,
+        attempt: num(ev.attempt) || 1,
+        max: num(ev.max_attempts) || 1
+      };
+      state.live.blocks.push({ type: 'notice', text: retryNoticeText(info), retry: info });
+      renderChat(); scrollMaybe(true);
+      startRetryTicker();
+      return;
+    }
+    if (ev.type === 'interrupted') {
+      // 中断时有些工具调用还没来得及跑：程序给它们补上了「没有执行」的结果，
+      // 会话因此还能继续用。这件事要说出来，别让用户以为工具跑过了。
+      var n = num(ev.filled_tool_calls);
+      if (n > 0) {
+        state.live.blocks.push({ type: 'notice',
+          text: '已中断：' + n + ' 个工具调用没有执行（已补上结果，会话可以继续）' });
         renderChat(); scrollMaybe(true);
       }
       return;
@@ -1775,7 +1847,9 @@
       scheduleLiveRender(); return;
     }
     if (ev.type === 'tool_result') {
-      state.live.outputs[ev.id] = { output: ev.output, ok: ev.ok !== false, elapsed_ms: ev.elapsed_ms, truncated: !!ev.truncated };
+      state.live.outputs[ev.id] = { output: ev.output, ok: ev.ok !== false,
+                                    cancelled: !!ev.cancelled, elapsed_ms: ev.elapsed_ms,
+                                    truncated: !!ev.truncated };
       var b2 = liveBlockForTool(ev.id);
       if (b2) b2.tc.status = ev.ok === false ? 'fail' : 'ok';
       scheduleLiveRender(); return;
@@ -1790,11 +1864,13 @@
     }
     if (ev.type === 'error') {
       state.ended = true;
+      stopRetryTicker();
       state.streamError = '出错了：' + (ev.message || '未知错误') + (ev.detail ? '\n' + ev.detail : '');
       scheduleLiveRender(); return;
     }
     if (ev.type === 'done' || ev.type === 'stopped') {
       state.ended = true;
+      stopRetryTicker();
       state.liveTokens = 0;                    // 服务端数字到了，丢弃本地估算
       if (ev.trajectory_id) state.lastTrajectoryId = ev.trajectory_id;
       if (ev.type === 'done') applyMetrics(ev.metrics, ev.usage);

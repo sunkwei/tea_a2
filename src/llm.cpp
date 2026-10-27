@@ -57,6 +57,101 @@ bool retryable_status(int status) {
          status == 502 || status == 503 || status == 504 || status == 529;
 }
 
+/// What kind of failure a request hit. The two retryable kinds are waited out
+/// very differently: a hiccup is worth a second, a busy provider is worth
+/// minutes (it says so itself: "通常 1-5 分钟内恢复").
+enum class FailureKind {
+  Fatal,      // the request itself is wrong; trying it again says the same
+  Transient,  // a hiccup: a dropped connection, a 502 - retry in a second
+  Overloaded  // the provider is busy: HTTP 529 / "overloaded_error"
+};
+
+/// Does the failure say "the provider is too busy right now"?
+///
+/// HTTP 529 is the shape Anthropic-style gateways use for it, and the body
+/// carries the reason: "overloaded_error", or (MiniMax) "当前为整点高峰时段，
+/// 服务器短暂繁忙". The wording is matched as well as the status, because a
+/// gateway may report the same thing with a 503.
+bool says_overloaded(const ChatResult& result) {
+  if (result.http_status == 529) return true;
+  const std::string haystack = to_lower(result.error + " " + result.detail);
+  if (haystack.find("overload") != std::string::npos) return true;  // overloaded_error
+  if (haystack.find("server is busy") != std::string::npos) return true;
+  if (haystack.find("繁忙") != std::string::npos) return true;      // 服务器短暂繁忙
+  if (haystack.find("高峰") != std::string::npos) return true;      // 整点高峰时段
+  return false;
+}
+
+FailureKind classify_failure(const ChatResult& result) {
+  if (result.http_status == 0) return FailureKind::Transient;  // the request never arrived
+  if (!retryable_status(result.http_status)) return FailureKind::Fatal;
+  if (says_overloaded(result)) return FailureKind::Overloaded;
+  return FailureKind::Transient;
+}
+
+/// The wait before the n-th retry of a busy provider: the base doubled every
+/// time, capped so a long outage does not turn into an hour of waiting.
+int overload_delay_ms(const ChatRequest& req, int attempt) {
+  long long delay = req.overload_backoff_ms > 0 ? req.overload_backoff_ms : 60000;
+  for (int i = 0; i < attempt; ++i) {
+    if (req.overload_max_backoff_ms > 0 && delay >= req.overload_max_backoff_ms) break;
+    delay *= 2;
+  }
+  if (req.overload_max_backoff_ms > 0 && delay > req.overload_max_backoff_ms) {
+    delay = req.overload_max_backoff_ms;
+  }
+  return static_cast<int>(delay);
+}
+
+/// Sleep, but wake up as soon as the turn is cancelled - a wait of minutes
+/// must not outlive the user's "stop". Returns false when the wait was cut
+/// short.
+bool sleep_interruptible(int delay_ms, const std::atomic<bool>* cancel) {
+  for (int slept = 0; slept < delay_ms; slept += 50) {
+    if (cancel && cancel->load()) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return !(cancel && cancel->load());
+}
+
+/// The HTTP status an error object carries, if any: "http_code": 529 or
+/// "http_code": "529". Gateways that report the failure as a stream event
+/// put it there - without it the failure looks like a plain HTTP 200 and would
+/// never be retried.
+int error_http_code(const nlohmann::json& error) {
+  if (!error.is_object()) return 0;
+  auto it = error.find("http_code");
+  if (it == error.end()) return 0;
+  if (it->is_number()) return it->get<int>();
+  if (it->is_string()) {
+    const std::string text = trim(it->get<std::string>());
+    if (text.empty()) return 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+      if (text[i] < '0' || text[i] > '9') return 0;
+    }
+    long long value = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) value = value * 10 + (text[i] - '0');
+    return static_cast<int>(value);
+  }
+  return 0;
+}
+
+/// `Retry-After: 30` - how long the provider wants us to stay away. Only the
+/// numeric form is understood; the HTTP-date form is rare and the default
+/// wait is close enough.
+int parse_retry_after(const std::string& value) {
+  const std::string text = trim(value);
+  if (text.empty()) return 0;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] < '0' || text[i] > '9') return 0;
+  }
+  long long seconds = 0;
+  for (std::size_t i = 0; i < text.size(); ++i) seconds = seconds * 10 + (text[i] - '0');
+  if (seconds <= 0) return 0;
+  if (seconds > 3600) seconds = 3600;
+  return static_cast<int>(seconds * 1000);
+}
+
 void parse_usage_into(ChatUsage* usage, const nlohmann::json& u) {
   if (!u.is_object()) return;
   usage->present = true;
@@ -202,6 +297,7 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
   std::string sse_buf;
   bool saw_stream_error = false;
   std::string stream_error;
+  int stream_error_status = 0;
 
   HttpChunkCallback on_chunk;
   if (req.stream) {
@@ -248,6 +344,8 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
           saw_stream_error = true;
           stream_error = extract_error_message(ev);
           if (stream_error.empty()) stream_error = "provider reported an error";
+          // The status may sit inside the error object ("http_code": 529).
+          stream_error_status = error_http_code(*err);
           return false;
         }
         auto usage = ev.find("usage");
@@ -270,6 +368,8 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
   const HttpResponse res = http_perform(http, on_chunk);
   result.http_status = res.status;
   result.elapsed_ms = now_ms() - started;
+  // The provider may say when to come back; honour it instead of guessing.
+  result.retry_after_ms = parse_retry_after(res.header("Retry-After"));
 
   if (result.cancelled) {
     result.error = "cancelled";
@@ -298,6 +398,10 @@ ChatResult attempt_once(const ChatRequest& req, const std::string& url, const st
   if (saw_stream_error) {
     result.error = stream_error;
     result.detail = truncate_utf8(sanitize_utf8(sse_buf), 2048);
+    // A gateway that reports the failure inside the stream still knows the
+    // status it would have sent ("http_code": 529). Keep it, so the caller
+    // can tell a busy provider from a broken request.
+    if (stream_error_status > 0) result.http_status = stream_error_status;
     return result;
   }
 
@@ -418,8 +522,14 @@ ChatResult llm_chat(const ChatRequest& req, const DeltaCallback& on_delta,
   LOG_DEBUG("llm: POST ", url, " model=", req.model, " bytes=", payload.size(),
             " tools=", req.tools.size(), " stream=", req.stream ? 1 : 0);
 
-  const int max_attempts = req.max_retries < 0 ? 0 : req.max_retries;
-  for (int attempt = 0; attempt <= max_attempts; ++attempt) {
+  // Two budgets, because the two kinds of failure need very different waits:
+  // a hiccup is retried in a second or two, a busy provider in minutes.
+  const int transient_budget = req.max_retries < 0 ? 0 : req.max_retries;
+  int transient_attempts = 0;
+  int overload_attempts = 0;
+  long long overload_waited_ms = 0;
+
+  for (int attempt = 0;; ++attempt) {
     if (cancel && cancel->load()) {
       result.cancelled = true;
       result.error = "cancelled";
@@ -431,17 +541,62 @@ ChatResult llm_chat(const ChatRequest& req, const DeltaCallback& on_delta,
 
     if (result.ok || result.cancelled) break;
 
+    // A request that already produced output is not repeated: the provider
+    // would answer twice, and the answer would be pasted twice.
     const bool produced_output =
         !result.content.empty() || !result.reasoning.empty() || !result.tool_calls.empty();
-    const bool retryable = (result.http_status == 0 || retryable_status(result.http_status));
-    if (!retryable || produced_output || attempt == max_attempts) break;
+    if (produced_output) break;
 
-    const int delay_ms = 400 * (attempt + 1);
+    const FailureKind kind = classify_failure(result);
+    if (kind == FailureKind::Fatal) break;
+
+    int delay_ms = 0;
+    int budget = 0;
+    int used = 0;
+    if (kind == FailureKind::Overloaded) {
+      budget = req.overload_retries < 0 ? 0 : req.overload_retries;
+      if (overload_attempts >= budget) break;
+      delay_ms = overload_delay_ms(req, overload_attempts);
+      // `Retry-After` may only make the wait longer, never shorter: the
+      // provider's own "come back in 90 seconds" is worth obeying, but a short
+      // one must not cut the wait the provider asked for ("1-5 minutes").
+      if (result.retry_after_ms > delay_ms) delay_ms = result.retry_after_ms;
+      // The total time we are willing to spend waiting for a busy provider.
+      if (req.overload_max_total_ms > 0 &&
+          overload_waited_ms + delay_ms > req.overload_max_total_ms) {
+        LOG_WARN("llm: the provider is still busy and the wait budget (",
+                 req.overload_max_total_ms, "ms) is used up; giving up");
+        break;
+      }
+      ++overload_attempts;
+      overload_waited_ms += delay_ms;
+      used = overload_attempts;
+    } else {
+      budget = transient_budget;
+      if (transient_attempts >= budget) break;
+      delay_ms = 400 * (transient_attempts + 1);
+      // The provider may say how long to stay away; that beats our guess.
+      if (result.retry_after_ms > delay_ms) delay_ms = result.retry_after_ms;
+      ++transient_attempts;
+      used = transient_attempts;
+    }
+
+    RetryNotice notice;
+    notice.kind = (kind == FailureKind::Overloaded) ? "overloaded" : "transient";
+    notice.http_status = result.http_status;
+    notice.delay_ms = delay_ms;
+    notice.attempt = used;
+    notice.max_attempts = budget;
+    notice.error = result.error;
+    if (req.on_retry) req.on_retry(notice);
+
     LOG_WARN("llm: attempt ", attempt + 1, " failed (", result.error, "); retrying in ", delay_ms,
-             "ms");
-    for (int slept = 0; slept < delay_ms; slept += 50) {
-      if (cancel && cancel->load()) break;
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+             "ms (", notice.kind, " ", used, "/", budget, ")");
+    if (!sleep_interruptible(delay_ms, cancel)) {
+      result.cancelled = true;
+      result.error = "cancelled";
+      result.elapsed_ms = now_ms() - started;
+      return result;
     }
   }
 

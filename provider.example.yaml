@@ -246,3 +246,11 @@ settings:
   web_tool_timeout_ms: 60000
   web_tool_max_calls_per_turn: 10   # billed calls per user turn
   max_assistant_content: 131072
+  # A provider that answers "I am busy right now" (HTTP 529, MiniMax's top-of-
+  # the-hour rush) says it recovers in 1-5 minutes: the request has to wait,
+  # not fail. These waits are minutes long and have their own budget; network
+  # hiccups keep their own (fast) retries.
+  overload_retries: 3              # retries for a busy provider (0 = do not wait)
+  overload_backoff_ms: 60000       # the first wait; every further one doubles it
+  overload_max_backoff_ms: 300000  # cap for a single wait
+  overload_max_total_ms: 600000    # cap for all the waits of one request

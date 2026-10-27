@@ -107,6 +107,10 @@ class TrajectoryRecorder {
   void finish(bool ok, const std::string& error, const std::string& detail, int iterations,
               const ChatUsage& usage, bool usage_estimated);
 
+  /// The turn was interrupted (the user stopped it). Not a failure: the record
+  /// says so, so the UI does not paint a stopped turn as a broken one.
+  void set_cancelled(bool cancelled) { cancelled_ = cancelled; }
+
  private:
   nlohmann::json build() const;
   void flush();
@@ -127,6 +131,7 @@ class TrajectoryRecorder {
   int iterations_ = 0;
   bool finished_ = false;
   bool ok_ = false;
+  bool cancelled_ = false;
   bool usage_estimated_ = false;
   std::string error_;
   std::string detail_;

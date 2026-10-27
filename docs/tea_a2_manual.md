@@ -198,7 +198,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.13.2","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.13.3","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -242,6 +242,8 @@ curl -N -X POST $B/api/chat \
 | `todo` | 任务列表变了（`items[]` / `total` / `done`） |
 | `artifacts` | 本轮产出了新文件（`items[]`） |
 | `tool_images` | 有图片被附加进对话 |
+| `retry` | 服务端繁忙，等一会儿自动重试（`kind` / `http_status` / `delay_ms` / `attempt` / `max_attempts`） |
+| `interrupted` | 中断时补齐了 N 个没有执行的工具调用（`filled_tool_calls`） |
 | `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` / `trajectory_id` |
 | `stopped` | 被 `/api/chat/stop` 中断 |
 | `error` | `message` / `detail` |
@@ -295,6 +297,20 @@ curl -s "$B/api/chat/queue?session_id=s_xxx"
 ```
 
 ### 2.4 中断、查询、接回去
+
+中断是「**尽量**结束」：
+
+- **能安全停掉的工具直接停掉**。`toolkit_exec` 跑的命令会被整个进程组杀掉
+  （先 SIGTERM，再 SIGKILL），所以一条跑一分钟的命令不会把这一轮拖成一分钟；
+  web 工具（search / fetch）的 HTTP 请求当场断开。
+- **停在一半的工具会留下痕迹，而且痕迹会被记下来**。命令被杀之后，它已经写下或
+  改过的东西**还在**——这没法回滚，所以工具结果里会写明「命令被中断，可能只跑了一
+  部分」，下一轮看得到，不会把没做完的活当成做完了。
+- **会话不会因此坏掉**。模型发起的每个工具调用都必须有对应的结果，否则下一次请求
+  会被 provider 拒掉（MiniMax：`invalid params, 400 (2013)`）。中断时没来得及执行的
+  调用会被补上一个「没有执行」的结果（界面上是「已中断」），会话因此还能继续用。
+- 被中断的这一轮在轨迹里标成「已中断」，不是「失败」。
+
 
 ```bash
 # 中断当前轮次（**必须带 session_id**，否则 cancelled 一直是 false）
@@ -985,7 +1001,9 @@ HTTP 引擎、轨迹开关等。
 | `409 config_missing` | 还没配置。先 `POST /api/config/quickstart` 或上传配置 |
 | `400 vision_unsupported` | 模型没声明 `supports_vision: true`，图片发不过去。换模型，或改成文字描述 |
 | `409 turn_running` | 轮次正在跑，改名 / 删除 / 改任务列表会被拒。等它结束 |
+| `HTTP 529: 当前为整点高峰时段，服务器短暂繁忙` | provider 整点高峰拒绝了请求。**程序会自己等**：认出「繁忙」后按分钟退避重发（默认 1/2/4 分钟，最多 3 次），界面上显示「服务端繁忙（HTTP 529），稍后自动重试（第 1/3 次，还剩 N 秒）」。想自己控制就调 `settings.overload_retries` / `overload_backoff_ms`（`0` = 不等） |
 | `HTTP 400: invalid params, 400 (2013)`（MiniMax） | provider 对不上历史里的工具调用：同一个调用被答复了两次、结果没有对应的调用、调用没有答复。**发出去之前会自动修好**（日志里有一行 `repaired the tool-call structure`）；还是被拒就看日志里 `the request was rejected - N messages, ...` 那行——请求有多大、provider 原话是什么都在里面 |
+| `409 turn_still_running` | 顶掉旧轮次时它 15 秒内没停下来（通常卡在一个停不掉的工具里）。先 `POST /api/chat/stop`，等它停了再顶 |
 | `409 no_active_turn` | 这个会话没有在跑的轮次。直接 `POST /api/chat` 就行，不用 `/api/chat/queue` |
 | `400 images_not_queued` | 排队路径不收图片（图片必须在请求时解码落盘）。等这一轮结束，或用 `interrupt` 顶掉 |
 | `429 too_many_subscribers` | 跟着看的浏览器超过 `TEA_AGENT_MAX_SUBSCRIBERS`（默认 8） |

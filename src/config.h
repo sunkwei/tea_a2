@@ -167,6 +167,21 @@ struct Settings {
   /// asked for it to be lifted. The web UI reports it as `fixed_by_cli`.
   bool force_allow_outside_workspace = false;
   bool stream = true;
+
+  // ---- a busy provider ---------------------------------------------------
+  /// A provider that answers "I am busy right now" (HTTP 529, MiniMax's
+  /// "整点高峰") says it recovers in 1-5 minutes. Retrying such an answer
+  /// after a second is pointless - the request has to wait. These waits are
+  /// minutes long and have their own budget, separate from the hiccup
+  /// retries.
+  int overload_retries = 3;
+  /// The first wait after a busy answer; every further one doubles it.
+  int overload_backoff_ms = 60000;
+  /// The cap for a single wait.
+  int overload_max_backoff_ms = 300000;
+  /// The cap for all the waits of one request together. 0 => no cap.
+  long long overload_max_total_ms = 600000;
+
   /// Ask for token usage in streaming responses. On by default: without it most
   /// OpenAI-compatible gateways return an empty `usage` object, and the UI has
   /// to fall back to local estimates (no cache hit rate, no real token counts).

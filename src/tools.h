@@ -31,6 +31,10 @@ struct ToolResult {
   bool ok = false;
   std::string output;
   bool truncated = false;
+  /// The tool was interrupted (the turn was stopped while it ran). The tool
+  /// may have done half of its work: whatever it wrote or changed is still
+  /// there, and the next turn has to know that.
+  bool cancelled = false;
   nlohmann::json meta = nlohmann::json::object();
   /// Images this tool made part of the conversation (toolkit_load_image). The
   /// wire format only allows images on *user* messages, so the agent loop turns
