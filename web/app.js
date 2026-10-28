@@ -4685,9 +4685,15 @@
       var up = servers.filter(function (s) { return s.connected; }).length;
       meta.textContent = servers.length ? (up + '/' + servers.length + ' 已连接') : '';
     }
+    // 配置在哪个文件里：服务器连不上，多半是文件没写或者写错地方了。
+    var pathBox = $('mcp-path');
+    if (pathBox) {
+      pathBox.textContent = data.path || '（未知的路径）';
+      pathBox.classList.toggle('missing', data.file_exists === false);
+    }
     if (!servers.length) {
       box.appendChild(el('div', 'empty-note',
-        data.configured ? '没有配置 MCP 服务器' : '未配置（在 provider.yaml 的 mcp: 段里添加）'));
+        data.configured ? '没有配置 MCP 服务器' : '未配置（在这个文件里加 servers:）'));
       return;
     }
     servers.forEach(function (s) {

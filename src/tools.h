@@ -69,7 +69,7 @@ struct ToolContext {
   /// toolkit_task tool writes the progress, the intermediate state and the
   /// "the user has to confirm this" flag into it.
   const std::string* task_id = nullptr;
-  /// The MCP servers (null => the `mcp:` section is not configured). The
+  /// The MCP servers (null => no mcp.yaml is configured). The
   /// `mcp__<server>__<tool>` tools are dispatched through it.
   McpRegistry* mcp = nullptr;
 };
@@ -99,7 +99,7 @@ class ToolRegistry {
   bool has(const std::string& name) const;
 
   /// The MCP servers whose tools join the agent's tool set. Null => no MCP
-  /// tools (the `mcp:` section is not configured).
+  /// tools (no mcp.yaml is configured).
   void set_mcp(McpRegistry* mcp) { mcp_ = mcp; }
   McpRegistry* mcp() const { return mcp_; }
 

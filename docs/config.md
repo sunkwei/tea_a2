@@ -235,32 +235,38 @@ python3 sched/asr_server.py                   # 监听 127.0.0.1:8284
   `http://192.168.x.x:8282` 访问设备时，浏览器不给麦克风，界面因此也不显示按钮——
   这是浏览器的规矩，不是这个程序的选择。
 
-### MCP 服务器（`mcp:` 段）
+### MCP 服务器（`mcp.yaml`）
 
-`mcp:` 段列出 **MCP 服务器**（Model Context Protocol）。这些是**独立的程序**：
-agent 把它们启动起来，用 stdio 上的 JSON-RPC 跟它们说话，它们提供的工具就变成模型
-可以调用的工具。
+**MCP 服务器**（Model Context Protocol）是**独立的程序**：agent 把它们启动起来，用 stdio
+上的 JSON-RPC 跟它们说话，它们提供的工具就变成模型可以调用的工具。
+
+配置**不在 provider.yaml 里**，而在**它同目录下的 `mcp.yaml`**：
 
 ```yaml
-mcp:
-  servers:
-    uiautomation:
-      command: uiautomation-mcp
-      args: []
+# $HOME/.tea_agent/mcp.yaml
+servers:
+  uiautomation:
+    command: uiautomation-mcp
+    args: []
 ```
+
+为什么单独一个文件：provider.yaml 装的是模型提供方和 API key，`mcp.yaml` 装的是「给模型
+装新手」的程序——两回事，节奏也不同（换服务器不用碰 key）。`mcp.yaml` 的路径跟着
+provider.yaml 走：`--config` 指到哪，`mcp.yaml` 就在哪旁边。
+
+（provider.yaml 里如果还留着旧的 `mcp:` 段，它**不再被读**，启动时会警告一句，告诉你
+搬到 `mcp.yaml` 去。）
 
 工具的公开名字是 `mcp__<服务器>__<工具>`（例如 `mcp__uiautomation__SearchElements`），
 这样两个服务器里同名的工具不会打架。
 
-`mcp:` 段是 provider.yaml 的**顶层**段（和 `providers:`、`search:`、`asr:`、`settings:` 平级）。
 `servers:` 既可以写成**映射**（键是服务器的名字），也可以写成**列表**（每项自己带
 `name:`）：
 
 ```yaml
-mcp:
-  servers:
-    - name: uiautomation
-      command: C:\Tools\uiautomation-mcp\uiautomation-mcp.exe
+servers:
+  - name: uiautomation
+      command: 'C:\Tools\uiautomation-mcp\uiautomation-mcp.exe'
       timeout_ms: 60000
 ```
 
@@ -285,16 +291,18 @@ winget install Locomorange.UIAutomationMCP     # 或者从 release 下载
 ```
 
 ```yaml
-mcp:
-  servers:
-    uiautomation:
-      command: C:\Tools\uiautomation-mcp\uiautomation-mcp.exe
-      timeout_ms: 60000          # 截屏这种慢操作要给够时间
+# mcp.yaml
+servers:
+  uiautomation:
+    command: 'C:\Tools\uiautomation-mcp\uiautomation-mcp.exe'
+    timeout_ms: 60000          # 截屏这种慢操作要给够时间
 ```
 
 行为上的几条规则：
 
 - 服务器**按需启动**：第一次用到它的工具时才拉起来。启动横幅不等待它。
+- **改完 `mcp.yaml` 点「刷新」就行**：那个按钮会重新读一遍文件再重连（文件坏了会被
+  拒绝，正在跑的服务器不受影响）。
 - 连不上的服务器在「设置 → MCP 服务器」和日志里写明原因（命令找不到、握手超时、
   回答不是 JSON……），**别的服务器照常工作**，这一轮的工具清单里只是少了它的工具。
 - 一个连不上的服务器在一分钟内不会被反复重试（不然每一轮都要等它）。

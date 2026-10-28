@@ -3,7 +3,7 @@
   Check the MCP servers of a running tea_agent.
 
 .DESCRIPTION
-  Prints what the agent knows about the MCP servers (the `mcp:` section of
+  Prints what the agent knows about the MCP servers (the `mcp.yaml` next to
   provider.yaml): whether each one is connected, which protocol version the
   two sides agreed on, and which tools it offers. With -Tool it calls one tool
   directly, without a model in the loop - the quickest way to find out whether
@@ -46,11 +46,11 @@ if ($Refresh) {
 
 $state = Get-Json "$Base/api/mcp/servers"
 if (-not $state.configured) {
-  Write-Host "no MCP server is configured (add an 'mcp:' section to provider.yaml)" -ForegroundColor Yellow
+  Write-Host "no MCP server is configured (write an mcp.yaml next to provider.yaml)" -ForegroundColor Yellow
   exit 1
 }
 if (-not $state.enabled) {
-  Write-Host "the 'mcp:' section is switched off (enabled: false)" -ForegroundColor Yellow
+  Write-Host "the MCP configuration is switched off (enabled: false)" -ForegroundColor Yellow
 }
 
 foreach ($s in $state.servers) {

@@ -2115,25 +2115,45 @@ void ApiServer::Impl::install_routes() {
   //   POST /api/mcp/refresh           - stop and start every server again
   //   POST /api/mcp/servers/{n}/call  - call one tool of one server
   svr.Get("/api/mcp/servers", [this](const httplib::Request&, httplib::Response& res) {
+    nlohmann::json j = nlohmann::json::object();
+    // Where the configuration lives: the `mcp.yaml` next to provider.yaml.
+    // The UI shows it, because a server that is not there is usually a file
+    // that was never written (or was written in the wrong place).
+    j["path"] = config->mcp_path;
+    j["file_exists"] = config->mcp.file_exists;
     if (!mcp) {
-      nlohmann::json j = nlohmann::json::object();
       j["configured"] = false;
       j["enabled"] = false;
       j["servers"] = nlohmann::json::array();
       send_json(res, j);
       return;
     }
-    send_json(res, mcp->status_json());
+    nlohmann::json state = mcp->status_json();
+    j["configured"] = state.value("configured", false);
+    j["enabled"] = state.value("enabled", false);
+    j["servers"] = state.value("servers", nlohmann::json::array());
+    if (!config->mcp.error.empty()) j["error"] = config->mcp.error;
+    send_json(res, j);
   });
 
   svr.Post("/api/mcp/refresh", [this](const httplib::Request&, httplib::Response& res) {
     if (!mcp) {
       send_error(res, 400, "mcp_not_configured",
-                 "this build has no MCP registry; add an 'mcp:' section to provider.yaml");
+                 "this build has no MCP registry; write an mcp.yaml next to provider.yaml");
       return;
     }
+    // The file is the truth: read it again before restarting the servers,
+    // so "edit mcp.yaml and press refresh" is enough.
+    std::string mcp_error;
+    if (!config->reload_mcp(config->mcp_path, &mcp_error)) {
+      // A broken file does not take the running servers down.
+      send_error(res, 400, "invalid_mcp_config", mcp_error);
+      return;
+    }
+    mcp->configure(config->mcp);
     nlohmann::json j = mcp->refresh();
     j["ok"] = true;
+    j["path"] = config->mcp_path;
     send_json(res, j);
   });
 

@@ -545,16 +545,16 @@ curl -s -X POST $B/api/asr/transcribe -H 'Content-Type: audio/wav' \
 
 ### 2.6 MCP 服务器
 
-`provider.yaml` 顶层 `mcp:` 段里配的 MCP 服务器（Model Context Protocol）是**独立的
-程序**：agent 启动它们，用 stdio 上的 JSON-RPC 跟它们说话，它们提供的工具变成模型可以
-调用的工具（名字是 `mcp__<服务器>__<工具>`）。
+**和 provider.yaml 同目录**的 `mcp.yaml` 里配的 MCP 服务器（Model Context Protocol）是
+**独立的程序**：agent 启动它们，用 stdio 上的 JSON-RPC 跟它们说话，它们提供的工具变成模型
+可以调用的工具（名字是 `mcp__<服务器>__<工具>`）。
 
 ```yaml
-mcp:
-  servers:
-    uiautomation:
-      command: C:\Tools\uiautomation-mcp\uiautomation-mcp.exe
-      timeout_ms: 60000
+# mcp.yaml
+servers:
+  uiautomation:
+    command: 'C:\Tools\uiautomation-mcp\uiautomation-mcp.exe'
+    timeout_ms: 60000
 ```
 
 ```bash
@@ -564,7 +564,7 @@ curl -s $B/api/mcp/servers
 #   "protocol_version":"2024-11-05","server_name":"UIAutomationMCP","tool_count":31,
 #   "tools":[{"name":"SearchElements","full_name":"mcp__uiautomation__SearchElements"}]}]}
 
-# 重新连接所有服务器
+# 重新读一遍 mcp.yaml 并重新连接所有服务器
 curl -s -X POST $B/api/mcp/refresh
 
 # 不用模型，直接调一个工具试试
@@ -576,7 +576,7 @@ curl -s -X POST $B/api/mcp/servers/uiautomation/call \
 
 服务器是**按需启动**的：第一次用到它的工具时才拉起来。连不上的服务器在
 `/api/mcp/servers` 里写着原因（`error`），别的服务器照常工作。细节见
-[配置](config.md#mcp-服务器mcp-段)。
+[配置](config.md#mcp-服务器mcp-yaml)。
 
 ---
 

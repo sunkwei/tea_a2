@@ -441,11 +441,19 @@ from_zipformer2_ctc`——**没有 `from_sense_voice`**。所以用 sherpa 跑 S
 `provider.yaml` 顶层 `mcp:` 段里配一组**独立的程序**，agent 把它们启动起来、用 stdio 上的
 JSON-RPC 跟它们说话，它们提供的工具就并进模型的工具表（`mcp__<服务器>__<工具>`）。
 
+### 配置在**自己的文件**里
+
+`mcp.yaml`，和 provider.yaml 同目录（`--config` 指到哪，它就在哪旁边）。
+provider.yaml 装的是 API key，`mcp.yaml` 装的是「给模型装新手」的程序——两回事，
+也不该互相牵扯。provider.yaml 里如果还留着旧的 `mcp:` 段，**不再被读**，只留一条警告
+（`AppConfig::reload_mcp()`）。
+
 ### 分工
 
 | 谁 | 干什么 |
 | --- | --- |
-| `src/config.cpp` | 读 `mcp:` 段（`servers:` 可以是映射也可以是列表） |
+| `src/config.cpp` | 读 `mcp.yaml`（`servers:` 可以是映射也可以是列表）；`AppConfig::reload_mcp()` |
+| `src/server.cpp` | `POST /api/mcp/refresh` 会**先重新读一遍文件**再重连（改完文件点一下刷新就行）；文件坏了 → 400，正在跑的服务器不受影响 |
 | `src/mcp.cpp` | 起进程、握手（initialize → notifications/initialized → tools/list）、调工具（tools/call） |
 | `src/tools.cpp` | 把 MCP 工具并进 `openai_tools()`，`mcp__` 开头的调用分发给 MCP 注册表 |
 | `src/server.cpp` | `/api/mcp/servers`、`/api/mcp/refresh`、`/api/mcp/servers/{n}/call` |
@@ -472,6 +480,8 @@ JSON-RPC 跟它们说话，它们提供的工具就并进模型的工具表（`m
 - **读管道和关管道有顺序**：先杀进程（管道到头 → 读线程退出），**再 join 读线程**，
   **最后**关句柄。反过来做就是在另一个线程阻塞的句柄上关句柄（句柄值会被复用）。
 - **函数名有 64 字符上限**（OpenAI 兼容）：`mcp__<服务器>__<工具>` 超了就截断加哈希。
+- **配置文件坏了不能拖垮正在跑的东西**：`reload_mcp()` 解析失败时**保留旧配置**并返回
+  错误，`/api/mcp/refresh` 因此返回 400 而不是把服务器全停了。
 - **Windows 上 `python3` 是 Microsoft Store 的占位符**（见上面第 6 条）——测试脚本里用
   `sys.executable` 才靠谱。
 - **`CreateProcessW` 传了环境块就必须带 `CREATE_UNICODE_ENVIRONMENT`**：环境块是按 UTF-16

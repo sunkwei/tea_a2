@@ -398,7 +398,7 @@ int main(int argc, char** argv) {
 
   // ---- tools + server ----------------------------------------------------
   ToolRegistry tools;
-  // The MCP servers of the `mcp:` section. Their tools join the agent's tool
+  // The MCP servers of mcp.yaml. Their tools join the agent's tool
   // set, and the web UI shows whether they are up.
   McpRegistry mcp;
   mcp.configure(config.mcp);
@@ -499,25 +499,25 @@ int main(int argc, char** argv) {
       }
       banner += "\n";
     }
-    // The MCP servers of the `mcp:` section: what they are and whether they
-    // answered. A server that is not there is a line in the log, not a reason
-    // to refuse to start.
-    if (config.mcp.configured) {
-      banner += "  MCP         : ";
-      bool first = true;
+    // The MCP servers of mcp.yaml: what they are and whether they answered.
+    // A server that is not there is a line in the log, not a reason to refuse
+    // to start. The file is named too - "why is nothing there" usually means
+    // "the file is somewhere else".
+    if (config.mcp.file_exists) {
+      banner += "  MCP         : " + config.mcp_path + "\n";
+      if (config.mcp.servers.empty()) {
+        banner += "                (no servers)\n";
+      }
       for (std::size_t i = 0; i < config.mcp.servers.size(); ++i) {
         const McpServerConfig& s = config.mcp.servers[i];
-        if (!first) banner += ", ";
-        first = false;
-        banner += s.name;
+        banner += "                " + s.name;
         if (!s.enabled) {
           banner += " (disabled)";
         } else if (!s.error.empty()) {
           banner += " (unusable: " + s.error + ")";
         }
+        banner += "\n";
       }
-      if (first) banner += "(none)";
-      banner += "\n";
     }
     banner += "  Workspaces  : " + std::to_string(registry.entries().size()) + " registered (index: " +
               registry.index_path() + ")\n";

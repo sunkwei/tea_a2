@@ -1,16 +1,17 @@
 // The MCP servers in the settings page.
 //
-// The `mcp:` section of provider.yaml lists the MCP servers the agent talks
+// The `mcp.yaml` next to provider.yaml lists the MCP servers the agent talks
 // to. Their tools join the agent's tool set, so the settings page has to show
 // what they are: a server that is not there must say why, otherwise "the model
 // does not call the tool" looks like a model problem.
 //
 // This test pins:
 //
+//   * the card says which file the configuration comes from;
 //   * a running server is listed with its status and its tools;
 //   * a server that cannot be started is listed with the reason;
 //   * the MCP tools show up in the list of available tools;
-//   * "刷新" reconnects the servers.
+//   * "刷新" re-reads the file and reconnects the servers.
 //
 //   node tests/ui_mcp.mjs [path-to-tea_agent-binary]
 //
@@ -56,13 +57,14 @@ providers:
     default_model: mock-model
     models:
       mock-model: {}
-mcp:
-  servers:
-    mock:
-      command: "python3"
-      args: ["${MOCK_MCP}"]
-    broken:
-      command: /nonexistent/mcp-server-that-is-not-there
+`);
+  // The MCP configuration is a file of its own, next to provider.yaml.
+  fs.writeFileSync(path.join(tmp, 'mcp.yaml'), `servers:
+  mock:
+    command: "python3"
+    args: ["${MOCK_MCP}"]
+  broken:
+    command: /nonexistent/mcp-server-that-is-not-there
 `);
 
   agent = spawn(BIN, ['--config', path.join(tmp, 'provider.yaml'), '--tea-home', path.join(tmp, 'home'),
@@ -129,6 +131,9 @@ mcp:
     return out;
   })()`);
   check('the settings page lists the MCP servers', !!cards && cards.length === 2, JSON.stringify(cards));
+  const mcpPath = await evalJs(`(document.getElementById('mcp-path') || {}).textContent || ''`);
+  check('the card says which file the configuration comes from',
+    /mcp\.yaml$/.test(mcpPath), mcpPath);
   const good = (cards || []).find((c) => c.text.indexOf('mock') === 0);
   const bad = (cards || []).find((c) => c.text.indexOf('broken') === 0);
   check('a running server is marked as connected', !!good && good.badge.indexOf('已连接') >= 0,

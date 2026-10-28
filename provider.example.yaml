@@ -255,45 +255,6 @@ providers:
 # localhost). Opening the UI over http://<LAN-IP> therefore shows no
 # microphone button - that is the browser's rule, not this program's.
 
-# MCP servers (optional). An MCP server is a separate program that offers
-# tools over the Model Context Protocol; the agent starts it and speaks
-# JSON-RPC to it over stdio. The tools it offers join the agent's own tool set
-# and are published as `mcp__<server>__<tool>`, so a model can call them like
-# any other tool.
-#
-#   mcp:
-#     servers:
-#       uiautomation:
-#         command: uiautomation-mcp
-#         args: []
-#
-# The Windows UI-automation server (https://github.com/locomorange/uiautomation-mcp)
-# is the one this was written for: it drives any Windows application through
-# UI Automation - find a button, click it, type into a field, take a screenshot.
-# Install it with `winget install Locomorange.UIAutomationMCP` (or download the
-# release) and point the section at the executable:
-#
-#   mcp:
-#     servers:
-#       uiautomation:
-#         command: C:\Tools\uiautomation-mcp\uiautomation-mcp.exe
-#         timeout_ms: 60000        # one tool call may take a while (a screenshot)
-#
-# Every field of a server:
-#
-#   command:        the program to run (PATH is searched when it has no slash)
-#   args:           the arguments (a list, or one string split on spaces)
-#   env:            extra environment variables for the child process
-#   cwd:            the directory the server starts in
-#   enabled:        false keeps the entry but never starts it
-#   timeout_ms:     how long one tool call may take (default 60000)
-#   startup_timeout_ms: how long the handshake may take (default 20000)
-#   protocol_version: the MCP version to ask for (default 2024-11-05)
-#
-# A server that cannot be started is reported in the settings page and in the
-# log; the other servers keep working. The tools of a server that is not there
-# are simply not offered to the model.
-
 settings:
   max_iterations: 50           # tool-calling round trips per user message
   max_tool_output: 131072      # bytes of tool output fed back to the model

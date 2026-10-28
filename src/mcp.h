@@ -31,7 +31,7 @@ namespace tea {
 
 /// One tool an MCP server offers.
 struct McpTool {
-  /// The server it belongs to (the name from the `mcp:` section).
+  /// The server it belongs to (the name from mcp.yaml).
   std::string server;
   /// The name the server calls it by.
   std::string name;

@@ -69,8 +69,8 @@ double ydouble(const YAML::Node& node, const std::string& key, double def) {
   }
 }
 
-/// Read one MCP server declaration. Shared by the two shapes of the
-/// `mcp:` section (a mapping keyed by name and a list of entries).
+/// Read one MCP server declaration. Shared by the two shapes of the servers
+/// section (a mapping keyed by name and a list of entries).
 void parse_mcp_server_spec(const YAML::Node& spec, McpServerConfig* out,
                             std::vector<std::string>* warnings) {
   if (!spec || !spec.IsMap()) {
@@ -139,6 +139,71 @@ void parse_mcp_server_spec(const YAML::Node& spec, McpServerConfig* out,
   if (out->command.empty()) {
     out->error = "the MCP server '" + out->name + "' has no 'command:' to run";
     if (warnings) warnings->push_back(out->error);
+  }
+}
+
+/// Read the servers out of an MCP document (the mcp.yaml file).
+///
+/// The document's top level is the configuration itself:
+///
+///   servers:
+///     uiautomation:
+///       command: uiautomation-mcp
+///
+/// A `mcp:` wrapper is accepted as well, so a block copied out of an old
+/// provider.yaml still works.
+void parse_mcp_document(const YAML::Node& root, McpConfig* out,
+                         std::vector<std::string>* warnings) {
+  if (!root || !root.IsMap()) {
+    out->error = "the MCP configuration is not a YAML mapping";
+    if (warnings) warnings->push_back(out->error);
+    return;
+  }
+  const YAML::Node body = (root["mcp"] && root["mcp"].IsMap()) ? root["mcp"] : root;
+  out->enabled = ybool(body, "enabled", true);
+  const YAML::Node servers_node = body["servers"];
+  if (!servers_node || (!servers_node.IsMap() && !servers_node.IsSequence())) {
+    if (out->configured) {
+      out->error = "the MCP configuration needs a 'servers:' mapping or list";
+      if (warnings) warnings->push_back(out->error);
+    }
+    return;
+  }
+  out->configured = true;
+  if (servers_node.IsMap()) {
+    for (YAML::const_iterator it = servers_node.begin(); it != servers_node.end(); ++it) {
+      const YAML::Node name_node = it->first;
+      const YAML::Node spec = it->second;
+      McpServerConfig server;
+      if (name_node.IsScalar()) {
+        try {
+          server.name = name_node.as<std::string>();
+        } catch (const std::exception&) {
+        }
+      }
+      parse_mcp_server_spec(spec, &server, warnings);
+      if (server.name.empty()) {
+        const std::string msg =
+            "an entry of the MCP server list has no name; it cannot be addressed";
+        server.error = msg;
+        if (warnings) warnings->push_back(msg);
+      }
+      out->servers.push_back(server);
+    }
+  } else {
+    for (std::size_t i = 0; i < servers_node.size(); ++i) {
+      const YAML::Node spec = servers_node[i];
+      McpServerConfig server;
+      server.name = trim(ystr(spec, "name"));
+      parse_mcp_server_spec(spec, &server, warnings);
+      if (server.name.empty()) {
+        const std::string msg =
+            "an entry of the MCP server list has no 'name:'; it cannot be addressed";
+        server.error = msg;
+        if (warnings) warnings->push_back(msg);
+      }
+      out->servers.push_back(server);
+    }
   }
 }
 
@@ -658,77 +723,30 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
   }
 
   // ---- the MCP servers ----------------------------------------------------
-  // The `mcp:` section lists the MCP servers the agent may talk to. Each one
-  // is a separate program the agent starts on demand; the tools it offers
-  // join the agent's own tool set (see src/mcp.cpp).
+  // The MCP servers live in their own file: `mcp.yaml`, next to provider.yaml.
+  // They are a different kind of thing - not a model provider, not an HTTP
+  // service, but programs the agent starts - and they change on their own
+  // schedule (a new server, a new version of one), so they do not belong in
+  // the file that holds the API keys.
   //
-  // Two shapes are accepted, because both read naturally:
-  //
-  //   mcp:
+  //   mcp.yaml
   //     servers:
   //       uiautomation:
   //         command: uiautomation-mcp
   //         args: ["--log", "info"]
   //
-  //   mcp:
-  //     servers:
-  //       - name: uiautomation
-  //         command: uiautomation-mcp
+  // The `servers:` mapping can also be written as a list of entries that
+  // carry their own `name:`.
+  mcp_path = path_join(path_parent(config_path), "mcp.yaml");
   {
-    const YAML::Node mcp_node = root["mcp"];
-    if (mcp_node && mcp_node.IsMap()) {
-      mcp.configured = true;
-      mcp.enabled = ybool(mcp_node, "enabled", true);
-      const YAML::Node servers_node = mcp_node["servers"];
-      if (!servers_node || (!servers_node.IsMap() && !servers_node.IsSequence())) {
-        mcp.error = "the 'mcp:' section needs a 'servers:' mapping or list";
-        warnings.push_back(mcp.error);
-      } else if (servers_node.IsMap()) {
-        for (YAML::const_iterator it = servers_node.begin(); it != servers_node.end(); ++it) {
-          const YAML::Node name_node = it->first;
-          const YAML::Node spec = it->second;
-          McpServerConfig server;
-          if (name_node.IsScalar()) {
-            try {
-              server.name = name_node.as<std::string>();
-            } catch (const std::exception&) {
-            }
-          }
-          parse_mcp_server_spec(spec, &server, &warnings);
-          if (server.name.empty()) {
-            const std::string msg = "an entry of the 'mcp:' server list has no name; "
-                                   "it cannot be addressed";
-            server.error = msg;
-            warnings.push_back(msg);
-          }
-          mcp.servers.push_back(server);
-        }
-      } else {
-        for (std::size_t i = 0; i < servers_node.size(); ++i) {
-          const YAML::Node spec = servers_node[i];
-          McpServerConfig server;
-          server.name = trim(ystr(spec, "name"));
-          parse_mcp_server_spec(spec, &server, &warnings);
-          if (server.name.empty()) {
-            const std::string msg =
-                "an entry of the 'mcp:' server list has no 'name:'; it cannot be addressed";
-            server.error = msg;
-            warnings.push_back(msg);
-          }
-          mcp.servers.push_back(server);
-        }
-      }
-    } else if (mcp_node && mcp_node.IsSequence()) {
-      // A bare list is read as the list of servers.
-      mcp.configured = true;
-      for (std::size_t i = 0; i < mcp_node.size(); ++i) {
-        const YAML::Node spec = mcp_node[i];
-        McpServerConfig server;
-        server.name = trim(ystr(spec, "name"));
-        parse_mcp_server_spec(spec, &server, &warnings);
-        mcp.servers.push_back(server);
-      }
-    }
+    std::string mcp_error;
+    reload_mcp(mcp_path, &mcp_error);
+  }
+  // The inline section is not read any more, but a file that still has one
+  // must not look like it works.
+  if (root["mcp"]) {
+    warnings.push_back(
+        "the 'mcp:' section of provider.yaml is not read any more; move it to " + mcp_path);
   }
 
   apply_settings(settings, root["settings"]);
@@ -800,6 +818,47 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
   LOG_INFO("config: loaded ", providers.size(), " provider(s) from ", path,
            " active=", active_provider, "/", active_model);
   for (const auto& w : warnings) LOG_WARN("config: ", w);
+  return true;
+}
+
+// The MCP configuration lives in its own file, next to provider.yaml.
+//
+// A file that is not there is not an error: it just means there are no MCP
+// servers. A file that is broken leaves the configuration that is already in
+// place alone - a typo in mcp.yaml must not take the running servers down.
+bool AppConfig::reload_mcp(const std::string& path, std::string* err) {
+  mcp_path = path;
+  if (path.empty() || !path_exists(path)) {
+    McpConfig empty;
+    empty.path = path;
+    empty.file_exists = false;
+    mcp = empty;
+    return true;
+  }
+  YAML::Node root;
+  try {
+    root = YAML::LoadFile(path);
+  } catch (const std::exception& e) {
+    if (err) *err = std::string("cannot parse ") + path + ": " + e.what();
+    return false;
+  }
+  if (!root || !root.IsMap()) {
+    if (err) *err = path + " is not a YAML mapping";
+    return false;
+  }
+  McpConfig parsed;
+  parsed.path = path;
+  parsed.file_exists = true;
+  std::vector<std::string> mcp_warnings;
+  parse_mcp_document(root, &parsed, &mcp_warnings);
+  mcp = parsed;
+  for (std::size_t i = 0; i < mcp_warnings.size(); ++i) {
+    LOG_WARN("mcp: ", mcp_warnings[i]);
+  }
+  if (!mcp_warnings.empty()) {
+    for (std::size_t i = 0; i < mcp_warnings.size(); ++i) warnings.push_back(mcp_warnings[i]);
+  }
+  LOG_INFO("mcp: ", mcp.servers.size(), " server(s) from ", path);
   return true;
 }
 

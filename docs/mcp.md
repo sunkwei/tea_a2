@@ -1,11 +1,11 @@
 # MCP：把别的程序接进来当工具
 
 MCP（Model Context Protocol）让**别的程序**变成 agent 的工具。`tea_a2` 是 MCP 的**客户端**：
-它在 `provider.yaml` 的 `mcp:` 段里读到一组服务器，**按需把它们启动起来**，用 stdio 上的
-JSON-RPC 跟它们说话，把它们提供的工具并进模型看到的工具表。
+它在**和 provider.yaml 同目录**的 `mcp.yaml` 里读到一组服务器，**按需把它们启动起来**，
+用 stdio 上的 JSON-RPC 跟它们说话，把它们提供的工具并进模型看到的工具表。
 
 ```
-provider.yaml (mcp: servers)
+mcp.yaml (servers:)          ← 和 provider.yaml 同目录
         │
         ▼
    tea_a2 ──启动──▶ uiautomation-mcp（独立的程序）
@@ -19,13 +19,18 @@ provider.yaml (mcp: servers)
 
 ## 配置
 
+配置在**和 provider.yaml 同目录**的 `mcp.yaml` 里（不是 provider.yaml——那边装的是 API key，
+这边装的是「给模型装新手」的程序）：
+
 ```yaml
-mcp:
-  servers:
-    uiautomation:
-      command: uiautomation-mcp
-      args: []
+# $HOME/.tea_agent/mcp.yaml
+servers:
+  uiautomation:
+    command: uiautomation-mcp
+    args: []
 ```
+
+仓库里有一份带注释的模板：`mcp.yaml.example`。
 
 | 字段 | 意思 | 默认 |
 | --- | --- | --- |
@@ -64,12 +69,13 @@ winget install Locomorange.UIAutomationMCP      # 或者从 release 下 zip
 ### 2. 写配置
 
 ```yaml
-mcp:
-  servers:
-    uiautomation:
-      command: C:\\Tools\\uiautomation-mcp\\uiautomation-mcp.exe
-      timeout_ms: 60000        # 截屏、启动应用这类操作要给够时间
+servers:
+  uiautomation:
+    command: 'C:\\Tools\\uiautomation-mcp\\uiautomation-mcp.exe'
+    timeout_ms: 60000        # 截屏、启动应用这类操作要给够时间
 ```
+
+（YAML 里的 Windows 路径**用单引号**：双引号里的 `\\` 是 YAML 的转义，写成单引号最省心。）
 
 ### 3. 起 agent，看状态
 
@@ -119,6 +125,8 @@ pwsh -File scripts\mcp-check.ps1 -Tool mcp__uiautomation__SearchElements `
   它看不到用户桌面上的窗口；用同一个用户、在同一个会话里启动它才行。
 - **服务器是按需启动的**：第一次用到它的工具时才拉起来。启动横幅不等待它，
   所以一个连不上的服务器不会拖慢启动。
+- **改完 `mcp.yaml` 点设置页的「刷新」**：那个按钮会重新读一遍文件再重连。
+  文件写坏了会被拒绝（400），正在跑的服务器不受影响。
 - **连不上的服务器会被写明原因**（命令找不到、握手超时、回答不是 JSON……），
   在设置页和 `GET /api/mcp/servers` 里都能看到；别的服务器照常工作。
 - **一个连不上的服务器一分钟内不会被反复重试**，不然每一轮都要等它。

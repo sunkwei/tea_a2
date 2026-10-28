@@ -732,6 +732,9 @@ button{font-family:inherit}
   color:var(--dsw-alias-label-caption);display:flex;flex-wrap:wrap;gap:6px 14px;
 }
 .doc-scripts .s-nm{color:var(--dsw-alias-label-secondary)}
+/* The MCP configuration file: it is missing (or unreadable) - say so in the
+   warning colour, because "the servers are not there" is usually this. */
+.doc-scripts .mono.missing{color:var(--dsw-alias-state-warn-label)}
 .note{
   display:flex;gap:12px;align-items:flex-start;padding:10px 12px;
   border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md);

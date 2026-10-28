@@ -239,17 +239,22 @@ asr:
 
 ### MCP：把别的程序接进来当工具
 
-`provider.yaml` 顶层可以写一个 `mcp:` 段，列出 **MCP 服务器**（Model Context Protocol）。
-这些是**独立的程序**：agent 把它们启动起来，用 stdio 上的 JSON-RPC 跟它们说话，
-它们提供的工具就变成模型可以调用的工具（名字是 `mcp__<服务器>__<工具>`）：
+**MCP 服务器**（Model Context Protocol）是**独立的程序**：agent 把它们启动起来，用 stdio 上的
+JSON-RPC 跟它们说话，它们提供的工具就变成模型可以调用的工具（名字是
+`mcp__<服务器>__<工具>`）。
+
+配置**不在** `provider.yaml` 里，而是它同目录下的一个 **`mcp.yaml`**——provider.yaml 装的是
+API key，这个文件装的是「给模型装新手」的程序，两回事：
 
 ```yaml
-mcp:
-  servers:
-    uiautomation:
-      command: uiautomation-mcp
-      args: []
+# $HOME/.tea_agent/mcp.yaml
+servers:
+  uiautomation:
+    command: uiautomation-mcp
+    args: []
 ```
+
+（带注释的模板在仓库里：`mcp.yaml.example`。）
 
 最典型的例子是 [uiautomation-mcp](https://github.com/locomorange/uiautomation-mcp)：
 Windows 上的 UI Automation 服务器，能找按钮、点按钮、往输入框里打字、截屏——
@@ -260,18 +265,19 @@ winget install Locomorange.UIAutomationMCP     # 或者直接下 release
 ```
 
 ```yaml
-mcp:
-  servers:
-    uiautomation:
-      command: C:\Tools\uiautomation-mcp\uiautomation-mcp.exe
-      timeout_ms: 60000          # 截屏这种慢操作要给够时间
+# mcp.yaml
+servers:
+  uiautomation:
+    command: 'C:\Tools\uiautomation-mcp\uiautomation-mcp.exe'
+    timeout_ms: 60000          # 截屏这种慢操作要给够时间
 ```
 
 细节：
 
 - 服务器是**按需启动**的：第一次用到它的工具时才拉起来，连不上就在设置页和日志里
   写明原因，不影响别的工具。
-- 「设置 → MCP 服务器」能看到每个服务器的状态和它提供的工具，「刷新」重新连一遍。
+- 「设置 → MCP 服务器」能看到每个服务器的状态和它提供的工具，**「刷新」会重新读一遍
+  `mcp.yaml` 再重连**——改完文件点一下就行。
 - 也可以不用模型，直接调一个 MCP 工具试试：
   `curl -X POST localhost:8282/api/mcp/servers/uiautomation/call -d '{"tool":"mcp__uiautomation__SearchElements","arguments":{"name":"OK"}}'`
 - 服务器返回的图片会像 `toolkit_load_image` 那样存进工作区并附在对话里（模型能看图才行）。

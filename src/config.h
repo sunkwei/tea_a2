@@ -303,9 +303,9 @@ struct AsrConfig {
 /// of the agent's own tool set, so a model can drive a Windows desktop (or
 /// anything else that speaks MCP) with the same tools it uses for files.
 ///
-/// The declaration lives in the `mcp:` section of provider.yaml, next to the
-/// `search:` and `asr:` sections: those are the other services the agent
-/// talks to, and they are all configured in the same file.
+/// The declaration lives in `mcp.yaml`, the file next to provider.yaml: the
+/// MCP servers are programs the agent starts, not providers and not HTTP
+/// services, so they get a file of their own.
 struct McpServerConfig {
   /// The name the tools are published under: `mcp__<name>__<tool>`.
   std::string name;
@@ -329,14 +329,20 @@ struct McpServerConfig {
   std::string error;
 };
 
-/// The `mcp:` section of provider.yaml.
+/// The MCP configuration. It lives in its own file (`mcp.yaml`, next to
+/// provider.yaml), not in provider.yaml: the MCP servers are not model
+/// providers and not HTTP services - they are programs the agent starts.
 struct McpConfig {
-  /// The section is present.
+  /// At least one server is declared.
   bool configured = false;
-  /// The whole section is switched off.
+  /// The whole thing is switched off.
   bool enabled = true;
   std::vector<McpServerConfig> servers;
-  /// Why the section cannot be used. Empty when it is fine.
+  /// The file it was read from.
+  std::string path;
+  /// That file exists.
+  bool file_exists = false;
+  /// Why it cannot be used. Empty when it is fine.
   std::string error;
 };
 
@@ -352,8 +358,10 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   SearchProviderConfig search;
   /// The speech-to-text service (the `asr:` section of provider.yaml).
   AsrConfig asr;
-  /// The MCP servers (the `mcp:` section of provider.yaml).
+  /// The MCP servers (the `mcp.yaml` file next to provider.yaml).
   McpConfig mcp;
+  /// Where that file is: the same directory as provider.yaml.
+  std::string mcp_path;
   std::vector<std::string> warnings;
   std::string error;
   bool loaded = false;
@@ -368,6 +376,12 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   bool cli_allow_outside_workspace = false;
 
   bool load(const std::string& config_path, const std::string& tea_home);
+
+  /// (Re)read the MCP configuration from `path` (the `mcp.yaml` next to
+  /// provider.yaml). A file that does not exist is not an error - it just
+  /// means there are no MCP servers. A file that is broken leaves the old
+  /// configuration alone and returns false with `err` set.
+  bool reload_mcp(const std::string& path, std::string* err);
 
   const ProviderInfo* provider(const std::string& name) const;
   const ProviderInfo* active_provider_info() const;

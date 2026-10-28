@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Smoke test for the MCP client (the `mcp:` section of provider.yaml).
+"""Smoke test for the MCP client (the `mcp.yaml` next to provider.yaml).
 
 The chain is:
 
-    provider.yaml (mcp: servers) -> the agent starts the server
+    mcp.yaml (servers:) -> the agent starts the server
         -> JSON-RPC over stdio (initialize / tools/list / tools/call)
         -> the server's tools join the agent's tool set
         -> the model calls one -> the answer comes back to the model
 
 Every link can break on its own, so the test pins each of them:
 
-  * without an `mcp:` section nothing is advertised and the routes say so;
+  * without an mcp.yaml nothing is advertised and the routes say so;
+  * the `mcp:` section of provider.yaml is NOT read any more (it says so);
   * a server that cannot be started is reported with a reason, and the turn
     still works (the other servers' tools are still there);
   * the tools of a running server appear in the tool list;
@@ -18,7 +19,8 @@ Every link can break on its own, so the test pins each of them:
   * a model that calls an MCP tool gets the server's answer back;
   * an MCP server that returns an image has that image attached to the
     conversation;
-  * "refresh" restarts the servers.
+  * "refresh" re-reads mcp.yaml and restarts the servers;
+  * a broken mcp.yaml is refused and leaves the running servers alone.
 
 Usage:  python3 tests/smoke_mcp.py [path-to-tea_agent-binary]
 """
@@ -141,7 +143,7 @@ def main():
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     agent = None
     try:
-        def write_config(mcp_section=""):
+        def write_config(extra=""):
             text = """version: 1
 providers:
   mock:
@@ -151,18 +153,24 @@ providers:
     models:
       mock-model: {}
 """ % llm_port
-            if mcp_section:
-                text += mcp_section
+            if extra:
+                text += extra
             with open(os.path.join(home, "provider.yaml"), "w", encoding="utf-8") as f:
                 f.write(text)
+
+        def write_mcp(servers=""):
+            """The MCP configuration lives in its own file, next to
+            provider.yaml."""
+            with open(os.path.join(home, "mcp.yaml"), "w", encoding="utf-8") as f:
+                f.write(servers)
 
         def reload_config():
             """The agent reads provider.yaml when it is told to; the file on
             disk is the truth, the running config is a copy of it."""
             return call(port, "POST", "/api/config/reload")
 
-        # ---- no mcp: section ----------------------------------------------
-        write_config("")
+        # ---- no mcp.yaml at all -------------------------------------------
+        write_config()
         port = free_port()
         agent = subprocess.Popen([
             binary, "--tea-home", home, "--host", "127.0.0.1", "--port", str(port),
@@ -174,27 +182,47 @@ providers:
             return 1
 
         status, body = call(port, "GET", "/api/mcp/servers")
-        check("without an mcp: section the status says it is not configured",
+        check("without an mcp.yaml the status says it is not configured",
               status == 200 and body.get("configured") is False, (status, body))
-        check("without an mcp: section there are no servers",
+        check("without an mcp.yaml there are no servers",
               body.get("servers") == [], body)
+        check("the status says where the file is supposed to be",
+              body.get("path", "").endswith("mcp.yaml"), body)
+        check("the status says the file is not there",
+              body.get("file_exists") is False, body)
 
         status, tools = call(port, "GET", "/api/tools")
         names = [t.get("name") for t in (tools.get("tools") or [])]
-        check("without an mcp: section no MCP tool is advertised",
+        check("without an mcp.yaml no MCP tool is advertised",
               not any(str(n).startswith("mcp__") for n in names), names)
 
-        # ---- an mcp: section ----------------------------------------------
-        # The agent starts the mock server itself: the command is the
-        # interpreter, the script is the first argument.
+        # ---- the mcp: section of provider.yaml is not read any more --------
         write_config("""mcp:
   servers:
-    mock:
+    inline:
       command: "%s"
       args: ["%s"]
 """ % (sys.executable, MOCK_MCP))
         status, body = reload_config()
-        check("a config with an mcp: section loads", status == 200, (status, body))
+        check("a provider.yaml with an mcp: section still loads", status == 200, (status, body))
+        status, body = call(port, "GET", "/api/mcp/servers")
+        check("the mcp: section of provider.yaml is ignored",
+              body.get("servers") == [], body)
+        status, body = call(port, "GET", "/api/providers")
+        warnings = " ".join(body.get("warnings") or [])
+        check("the warning says where the configuration belongs now",
+              "mcp.yaml" in warnings, warnings)
+
+        # ---- an mcp: section ----------------------------------------------
+        # The agent starts the mock server itself: the command is the
+        # interpreter, the script is the first argument.
+        write_mcp("""servers:
+  mock:
+    command: "%s"
+    args: ["%s"]
+""" % (sys.executable, MOCK_MCP))
+        status, body = reload_config()
+        check("a config with an mcp.yaml loads", status == 200, (status, body))
 
         status, body = call(port, "POST", "/api/mcp/refresh")
         check("refresh answers with the state of every server", status == 200, (status, body))
@@ -252,13 +280,12 @@ providers:
               status == 200 and body.get("images") == 1, (status, body))
 
         # ---- a server that cannot be started ------------------------------
-        write_config("""mcp:
-  servers:
-    mock:
-      command: "%s"
-      args: ["%s"]
-    broken:
-      command: /nonexistent/mcp-server-that-is-not-there
+        write_mcp("""servers:
+  mock:
+    command: "%s"
+    args: ["%s"]
+  broken:
+    command: /nonexistent/mcp-server-that-is-not-there
 """ % (sys.executable, MOCK_MCP))
         status, body = reload_config()
         check("the config with a broken server still loads", status == 200, (status, body))
@@ -286,11 +313,10 @@ providers:
               "MOCK-ECHO" in answer, answer[:400])
 
         # ---- a server that answers nonsense -------------------------------
-        write_config("""mcp:
-  servers:
-    mock:
-      command: "%s"
-      args: ["%s", "--garbage"]
+        write_mcp("""servers:
+  mock:
+    command: "%s"
+    args: ["%s", "--garbage"]
 """ % (sys.executable, MOCK_MCP))
         status, body = reload_config()
         check("a config with a nonsense server still loads", status == 200, (status, body))
@@ -301,6 +327,41 @@ providers:
               mock and mock[0].get("connected") is False, mock)
         check("the reason is in the status",
               mock and bool(mock[0].get("error")), mock)
+
+        # ---- refresh re-reads the file -------------------------------------
+        write_mcp("""servers:
+  mock:
+    command: "%s"
+    args: ["%s"]
+""" % (sys.executable, MOCK_MCP))
+        status, body = call(port, "POST", "/api/mcp/refresh")
+        servers = body.get("servers") or []
+        check("refresh re-reads mcp.yaml and reconnects the servers",
+              status == 200 and servers and servers[0].get("connected") is True,
+              (status, body))
+
+        write_mcp("""servers:
+  mock:
+    command: "%s"
+    args: ["%s"]
+  second:
+    command: "%s"
+    args: ["%s"]
+""" % (sys.executable, MOCK_MCP, sys.executable, MOCK_MCP))
+        status, body = call(port, "POST", "/api/mcp/refresh")
+        names = [s.get("name") for s in (body.get("servers") or [])]
+        check("a server added to mcp.yaml shows up after a refresh",
+              status == 200 and "second" in names, (status, names))
+
+        # ---- a broken mcp.yaml ----------------------------------------------
+        write_mcp("servers:\n  mock:\n   command: [oops\n")
+        status, body = call(port, "POST", "/api/mcp/refresh")
+        check("a broken mcp.yaml is refused with a reason",
+              status == 400 and body.get("error"), (status, body))
+        status, body = call(port, "GET", "/api/mcp/servers")
+        names = [s.get("name") for s in (body.get("servers") or [])]
+        check("the running servers survive a broken mcp.yaml",
+              "mock" in names, names)
 
     finally:
         if agent is not None:

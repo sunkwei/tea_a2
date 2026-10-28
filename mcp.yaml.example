@@ -1,0 +1,61 @@
+# MCP servers for tea_agent.
+#
+#   copy mcp.yaml.example  %USERPROFILE%\.tea_agent\mcp.yaml
+#
+# It lives next to provider.yaml (the same directory), because the MCP servers
+# are a different kind of thing: not model providers and not HTTP services,
+# but **programs the agent starts**. provider.yaml holds the API keys; this
+# file holds the programs that give the model new hands.
+#
+# An MCP server speaks the Model Context Protocol over stdio: the agent starts
+# the program, writes newline-delimited JSON-RPC 2.0 to its stdin and reads the
+# answers from its stdout. The tools the server offers join the agent's own
+# tool set and are published as `mcp__<server>__<tool>`, so a model can call
+# them like any other tool.
+#
+#   servers:
+#     uiautomation:
+#       command: uiautomation-mcp
+#       args: []
+#
+# The Windows UI-automation server (https://github.com/locomorange/uiautomation-mcp)
+# is the one this was written for: it drives any Windows application through
+# UI Automation - find a button, click it, type into a field, take a screenshot.
+# Install it with `winget install Locomorange.UIAutomationMCP` (or download the
+# release) and point the section at the executable:
+#
+#   servers:
+#     uiautomation:
+#       command: 'C:\Tools\uiautomation-mcp\uiautomation-mcp.exe'
+#       timeout_ms: 60000        # a screenshot may take a while
+#
+# Every field of a server:
+#
+#   command:             the program to run (PATH is searched when it has no
+#                         slash in it)
+#   args:                the arguments (a list, or one string split on spaces)
+#   env:                 extra environment variables for the child process
+#   cwd:                 the directory the server starts in
+#   enabled:             false keeps the entry but never starts it
+#   timeout_ms:          how long one tool call may take (default 60000)
+#   startup_timeout_ms:  how long the handshake may take (default 20000)
+#   protocol_version:    the MCP version to ask for (default 2024-11-05)
+#
+# `servers:` can also be written as a list of entries that carry their own
+# name:
+#
+#   servers:
+#     - name: uiautomation
+#       command: uiautomation-mcp
+#
+# A server that cannot be started is reported in the settings page and in the
+# log; the other servers keep working. The tools of a server that is not there
+# are simply not offered to the model. After editing this file, press
+# "刷新" in the settings page: the file is read again and the servers are
+# restarted.
+
+servers:
+  # uiautomation:
+  #   command: 'C:\Tools\uiautomation-mcp\uiautomation-mcp.exe'
+  #   args: []
+  #   timeout_ms: 60000
