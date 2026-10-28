@@ -366,9 +366,17 @@ def llm_chat(p, model, messages, max_tokens=2000, temperature=0.2, tries=3):
             j = r.json()
             choice = (j.get("choices") or [{}])[0]
             msg = choice.get("message") or {}
-            text = msg.get("content") or msg.get("reasoning_content") or ""
+            text = msg.get("content") or ""
             if not text.strip():
-                last = "空回复: %s" % r.text[:200]
+                # 有些模型（deepseek-flash 这种）把 token 先花在思考上，正文
+                # 就空了。**别把思考过程当答案返回**——那是模型的内心戏，
+                # 不是结果；调用方要的是正文。
+                usage = j.get("usage") or {}
+                last = ("空回复（finish_reason=%s，用掉 %s token，其中思考 %s）：%s"
+                        % (choice.get("finish_reason"),
+                           usage.get("completion_tokens"),
+                           (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+                           (msg.get("reasoning_content") or r.text)[:200]))
                 time.sleep(2)
                 continue
             return text
