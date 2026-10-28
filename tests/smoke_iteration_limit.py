@@ -248,6 +248,10 @@ providers:
               "max_iterations" in note or "额度" in note, note[:160])
         check("the message says the work is not finished",
               "没" in note and "收尾" in note, note[:160])
+        # 只有预算（max_iterations）没有「实际跑了多少轮」——写个数字出来只会
+        # 被人当成「跑了 N 次工具调用」。所以这句话里一个数字都不该有。
+        check("the message shows no round count",
+              not any(ch.isdigit() for ch in note), note[:160])
 
         # ---- the client sees it while the turn ends -------------------------
         deltas = [e for e in events

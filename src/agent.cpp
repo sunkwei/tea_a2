@@ -1932,8 +1932,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   if (out.hit_iteration_limit && !out.cancelled && !out.repeated_output) {
     Message final_msg;
     final_msg.role = "assistant";
-    final_msg.content = "这一轮用完了 " + std::to_string(max_iterations) +
-                        " 次工具调用的额度（max_iterations），工作还没收尾。"
+    // 不写轮数：这里能拿到的只是**预算**（max_iterations），不是这一轮实际
+    // 跑了多少轮——写出来会被当成「跑了 N 次」。真要看轮数：done 事件的
+    // iterations 字段，或轨迹里那一行。
+    final_msg.content = "这一轮用完了迭代额度（max_iterations），工作还没收尾。"
                         "发一条消息，我接着做。";
     final_msg.created_at = now_iso8601();
     session->messages.push_back(final_msg);
