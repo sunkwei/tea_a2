@@ -637,3 +637,71 @@ cp build-win64/bin/tea_agent.exe .
 | `tests/smoke_shell.py` | 28/38 | **实现是在的**（`/api/shell/session/{id}/upload` 与 `…/file` 都有），但测试先把会话 `exit` 掉了，再拿同一个 session id 去做上传/下载 → 全是 404。文件那几项要另开一个会话 |
 
 要动手时先跑一遍它们：**前两个变绿，就是那件事做完了**；第三个要改的是测试本身。
+
+---
+
+## 坑：a2_task.service 偶尔 100% CPU（2026-10-28）
+
+用户报「偶尔几次 `a2_task.service` 占满一个核」。查下来**不是死循环，是三处 O(N²)**：
+队列的存储层是「一个任务一个文件」，几乎每个查询都是**全目录扫描**
+（`os.listdir` + 逐个 `json.load`），而调用方把扫描放进了循环里。
+
+### 三处（都在 `sched/task_server.py`）
+
+1. **`Engine.round()`** —— 对**每个**排队任务问一次「这个项目忙不忙」
+   （`running_count()` → `store.list(status=RUNNING)` → 全扫描）。
+   「项目忙」的分支 `continue` **不增加 `started`**，所以 `--max-per-round` 的 break
+   永远轮不到 → 队列里每个任务都扫一遍。O(Q×N)。
+   实测：N=500 排队任务时一轮 **2.2 秒 > `--interval` 2 秒** → 调度器从此
+   **永不停歇**（一轮跑完睡 2 秒，队列越长越追不上）→ 100% CPU 且自我加剧。
+2. **`App.decorate()` → `queue_position()`** —— 每个排队任务再问一次「我排第几」
+   （又一次全扫描）→ `GET /api/tasks` 是 O(Q×N)。实测 N=1000 时 **21.3 秒**；
+   而 `sched/task_ui.html` 有 `setInterval(refresh, 5000)` → **队列页面开着就每 5 秒烧一次**。
+3. **`Store.record_event()`** —— 每写一条事件，把该任务的**整份事件日志**读回来算
+   `event_id` → O(M²)。实测单个任务 3000 条事件 = 5.2 秒，10000 条 = 59 秒。
+   触发条件：agent 在任务里频繁 `toolkit_task` 汇报进度（每次汇报 publish 一次）。
+
+### 帮凶
+
+- **`Store.lock` 是全局 RLock，而 `list()` / `record_event()` 持锁做全部磁盘 IO**
+  → 一次 21 秒的扫描把所有 HTTP 请求（健康检查、事件流、提交任务）全堵住。
+- **日志风暴**：round 里「task %s waits: its project is busy」每个排队任务每 2 秒一行
+  → 实测 20 秒 2893 行。
+- **`Agent.chat()` 用 `timeout=None`** → SSE 流可以永久挂住，那个 running 任务就永远
+  占着项目槽位 → 正好喂给 1。
+- **SSE `_events` 的 `state["alive"]` 永远是 True**（没人把它置 False）→ 连接只靠
+  写失败才退出；客户端半开时线程一直留着，每 0.3 秒醒一次。
+
+### 改法（O(N²) → O(N)）
+
+| 地方 | 改法 |
+| --- | --- |
+| `Store.list()` | 扫描**放到锁外**（写是原子的：mkstemp + `os.replace`，读者不会看到半条记录） |
+| `Store.record_event()` | `event_id` **在内存里数**；进程第一次遇到某任务时**只读文件尾**（`_last_event_id()`） |
+| `Engine.round()` | 一轮里 running **只算一次**（快照），启动的任务加进快照；「项目忙」改成**计数汇总**一行 |
+| `App.decorate()` | `queue_position()` 接受一个 `order`（`App.queue_order()` 一次算好）；`GET /api/tasks` 整批复用 |
+| `Agent.chat()` | 加 `--chat-timeout`（默认 3600 秒），超时算任务失败 |
+| SSE `_events` | 加 `--sse-idle-timeout`（默认 3600 秒）+ `select()` peek 探测客户端断开 |
+
+### 效果（同一个复现脚本）
+
+| | 改前 | 改后 |
+| --- | --- | --- |
+| 调度器 CPU（600 排队 + 1 running，20 秒） | 66% | **1%** |
+| 调度器 CPU（1000 排队） | 90% | **2%** |
+| `GET /api/tasks`（1000 任务） | 21.3 秒 | **0.7 秒** |
+| 一轮 round（800 任务） | 5.7 秒 | **0.02 秒** |
+| 3000 条事件 | 5.6 秒 | **0.03 秒** |
+
+### 教训
+
+- **「一个文件一条记录」的存储层，配上「全目录扫描」的查询方式 = 队列一长就平方级。**
+  凡是「对每个元素问一次集合」的地方，问之前先问一句：**这个答案能不能只算一次？**
+- 写回归测试要**能证明它抓得住回归**：把旧版文件 `git show HEAD:sched/task_server.py`
+  放到临时目录跑同一个测试，三项都 FAIL（5.66s / 6.75s / 5.61s）才算数。
+  探针：`.tea_agent_run/scripts/task_cpu_probe.py`、`task_round_probe.py`、
+  `task_events_probe.py`、`task_cpu_repro.py`（端到端复现，配 `mock_agent.py`）。
+- 顺手改掉的 bug：`--interval` 的 help 写「default: 60」实际是 2；
+  `Store.list()` 里 `name.endswith(".events.jsonl")` 是死条件（`.jsonl` 不以 `.json` 结尾）。
+- 回归测试：`tests/smoke_task_queue_perf.py`（测工作量，不测形状：慢盘就是慢盘，
+  但平方级在哪种盘上都是平方级）。

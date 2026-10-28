@@ -36,7 +36,9 @@ import calendar
 import json
 import os
 import re
+import select
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -189,9 +191,12 @@ class AgentError(Exception):
 class Agent:
     """The workspace channel: the part of the agent's API the queue needs."""
 
-    def __init__(self, base=DEFAULT_AGENT, timeout=60):
+    def __init__(self, base=DEFAULT_AGENT, timeout=60, chat_timeout=3600):
         self.base = base.rstrip("/")
         self.timeout = timeout
+        # A turn may take hours; but not for ever: without a timeout a turn
+        # whose answer never comes holds its slot (and the project) for good.
+        self.chat_timeout = chat_timeout
 
     def _request(self, method, path, body=None, timeout=None):
         url = self.base + path
@@ -288,7 +293,10 @@ class Agent:
             self.base + "/api/chat", data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            resp = urllib.request.urlopen(req, timeout=None)
+            resp = urllib.request.urlopen(req, timeout=self.chat_timeout or None)
+        except (socket.timeout, TimeoutError):
+            raise AgentError(0, "the agent did not answer within %d seconds"
+                             % self.chat_timeout) from None
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", "replace")
             message = raw
@@ -381,6 +389,8 @@ class Store:
     def __init__(self, root):
         self.root = os.path.abspath(os.path.expanduser(root))
         self.lock = threading.RLock()
+        # task id -> the event_id the next event of that task gets
+        self._event_seq = {}
         os.makedirs(self.root, exist_ok=True)
 
     def _path(self, task_id):
@@ -404,10 +414,14 @@ class Store:
         listening saw them, and after a restart there was no way to find out
         what had happened to a task. Now every state change is written down,
         with a number the client can ask "everything after N".
+
+        The number is counted in memory and only the *last* line of the log is
+        read (when the process does not know the task yet). Reading the whole
+        log for every event made a long task quadratic in its own events: the
+        tenthousandth event cost ten thousand lines of parsing.
         """
         with self.lock:
-            events = self.events(task_id)
-            number = (events[-1]["event_id"] + 1) if events else 1
+            number = self._next_event_id(task_id)
             event = {"event_id": number, "task_id": task_id, "type": event_type,
                      "payload": payload if isinstance(payload, dict) else {},
                      "created_at": now_iso()}
@@ -417,6 +431,50 @@ class Store:
             except OSError:
                 pass
             return event
+
+    def _next_event_id(self, task_id):
+        """The number the next event of this task gets."""
+        known = self._event_seq.get(task_id)
+        if known is not None:
+            self._event_seq[task_id] = known + 1
+            return known
+        last = self._last_event_id(task_id)
+        # last + 1 is this event's number, so the next one is last + 2.
+        self._event_seq[task_id] = last + 2
+        return last + 1
+
+    def _last_event_id(self, task_id):
+        """The event_id of the last line of the log (0 when there is none).
+
+        Only the tail of the file is read: the log of a long task can have
+        thousands of lines, and the number of the last one is all we need.
+        """
+        path = self._events_path(task_id)
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                if not size:
+                    return 0
+                pos = size
+                tail = b""
+                while pos > 0:
+                    step = min(8192, pos)
+                    pos -= step
+                    f.seek(pos)
+                    chunk = f.read(step)
+                    tail = chunk + tail
+                    # A newline inside the chunk (not at its very end) means
+                    # the last line is complete.
+                    if pos == 0 or b"\n" in chunk[:-1]:
+                        break
+                lines = [line for line in tail.split(b"\n") if line.strip()]
+                if not lines:
+                    return 0
+                event = json.loads(lines[-1].decode("utf-8", "replace"))
+                return int(event.get("event_id") or 0)
+        except (OSError, ValueError, TypeError):
+            return 0
 
     def events(self, task_id, since_event_id=0):
         """The task's events, newest last. `since_event_id` skips the old ones."""
@@ -542,14 +600,24 @@ class Store:
     def load(self, workspace_id, task_id):
         # One ledger, one directory: the task ids are unique, so the workspace a
         # task works in is a field of the record, not a directory.
+        with self.lock:
+            return self._load_unlocked(task_id)
+
+    def _load_unlocked(self, task_id):
+        """One record, without the lock.
+
+        The records are written atomically (a temporary file that is renamed
+        over the old one), so a reader never sees half a record: reading
+        without the lock is safe, and it keeps a long scan of the directory
+        from blocking every other thread of the server.
+        """
         if not task_id or not isinstance(task_id, str):
             return None
-        with self.lock:
-            try:
-                with open(self._path(task_id), encoding="utf-8") as f:
-                    loaded = json.load(f)
-            except (OSError, ValueError):
-                return None
+        try:
+            with open(self._path(task_id), encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, ValueError):
+            return None
         if not isinstance(loaded, dict) or not loaded.get("id"):
             # projects.json and friends live in the same directory; they are not
             # tasks.
@@ -596,35 +664,38 @@ class Store:
         task's meta, where the submitter put them.
         """
         out = []
-        with self.lock:
-            try:
-                names = os.listdir(self.root)
-            except OSError:
-                names = []
-            for name in names:
-                if not name.endswith(".json") or name.endswith(".events.jsonl"):
-                    continue
-                task = self.load(workspace_id, name[:-5])
-                if task is None:
-                    continue
-                if not isinstance(task, dict) or not task.get("id"):
-                    # Not a task record (projects.json lives here too).
-                    continue
-                if workspace_id and task.get("workspace_id") != workspace_id:
-                    continue
-                if status and task.get("status") != status:
-                    continue
-                created = task.get("created_at") or ""
-                if created_from and created < created_from:
-                    continue
-                if created_to and created > created_to:
-                    continue
-                meta = task.get("meta") or {}
-                if tag and tag not in (meta.get("tags") or []):
-                    continue
-                if business_id and str(meta.get("business_id") or "") != str(business_id):
-                    continue
-                out.append(task)
+        # The scan happens without the lock: it reads every record of the
+        # directory, and holding the lock for that would keep the whole
+        # server (the API, the scheduler, the event log) waiting for it.
+        # The records are written atomically, so a reader is safe here.
+        try:
+            names = os.listdir(self.root)
+        except OSError:
+            names = []
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            task = self._load_unlocked(name[:-5])
+            if task is None:
+                continue
+            if not isinstance(task, dict) or not task.get("id"):
+                # Not a task record (projects.json lives here too).
+                continue
+            if workspace_id and task.get("workspace_id") != workspace_id:
+                continue
+            if status and task.get("status") != status:
+                continue
+            created = task.get("created_at") or ""
+            if created_from and created < created_from:
+                continue
+            if created_to and created > created_to:
+                continue
+            meta = task.get("meta") or {}
+            if tag and tag not in (meta.get("tags") or []):
+                continue
+            if business_id and str(meta.get("business_id") or "") != str(business_id):
+                continue
+            out.append(task)
         # Newest first: the history view is a list of what just happened.
         out.sort(key=lambda t: (t.get("created_at") or "", t.get("id") or ""), reverse=True)
         total = len(out)
@@ -777,6 +848,14 @@ class Engine:
             tasks = [t for t in tasks if t.get("workspace_id") == workspace_id]
         return len(tasks)
 
+    @staticmethod
+    def _running_in(running, workspace_id):
+        """Is this project working on something right now?"""
+        for one in running:
+            if one.get("workspace_id") == workspace_id:
+                return True
+        return False
+
     # ---- one round --------------------------------------------------------
     def round(self):
         provider = self.args.provider
@@ -819,10 +898,16 @@ class Engine:
 
         started = 0
         now = time.time()
+        # The tasks that are running are counted ONCE for this round. Asking
+        # for every queued task meant one full scan of the ledger per task:
+        # a queue of a few hundred tasks took longer than one round, so the
+        # scheduler never got to rest and the process burned a whole core.
+        running = self.running_tasks()
+        busy = 0
         for task in queued:
             if started >= self.args.max_per_round:
                 break
-            if self.args.max_concurrent and self.running_count() >= self.args.max_concurrent:
+            if self.args.max_concurrent and len(running) >= self.args.max_concurrent:
                 break
             # "Not before": the task waits for its time - and it does not hold
             # the queue: the tasks behind it may go first.
@@ -830,10 +915,10 @@ class Engine:
             if not_before is not None and not_before > now:
                 continue
             # One task at a time per project.
-            if self.running_count(task.get("workspace_id")):
+            if self._running_in(running, task.get("workspace_id")):
                 # The project is working on something else: the task keeps its
                 # place and waits its turn.
-                log("  task %s waits: its project is busy" % task.get("id"))
+                busy += 1
                 continue
             wanted = task.get("provider")
             if wanted and wanted != provider:
@@ -842,6 +927,11 @@ class Engine:
                 continue
             if self.start_task(task, provider):
                 started += 1
+                # It holds a slot from now on: the next task of the same
+                # project has to wait for it.
+                running.append(task)
+        if busy:
+            log("  %d task(s) wait: their project is busy" % busy)
         return started
 
     # ---- the tasks this process inherited --------------------------------
@@ -1290,6 +1380,8 @@ class Handler(BaseHTTPRequestHandler):
             filters["workspace_id"] = caller
         everything = self.app.store.list(**filters)
         total = len(everything)
+        # The queue order is read once for the whole list.
+        order = self.app.queue_order()
         if page_size and page_size > 0:
             page = max(1, page)
             start = (page - 1) * page_size
@@ -1297,7 +1389,7 @@ class Handler(BaseHTTPRequestHandler):
         elif page and page > 0:
             start = (page - 1) * 50
             everything = everything[start:start + 50]
-        self._json(200, {"tasks": [self.app.decorate(t) for t in everything],
+        self._json(200, {"tasks": [self.app.decorate(t, order=order) for t in everything],
                          "counts": self.app.store.counts(caller or workspace_id or None),
                          "total": total, "page": page or 1,
                          "page_size": page_size or 0})
@@ -1700,6 +1792,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         queue, state, listener = self.app.events.subscribe()
+        idle = 0.0
         try:
             while state["alive"]:
                 if queue:
@@ -1709,12 +1802,32 @@ class Handler(BaseHTTPRequestHandler):
                     frame = "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
                     self.wfile.write(frame.encode("utf-8"))
                     self.wfile.flush()
+                    idle = 0.0
                 else:
                     time.sleep(0.3)
+                    idle += 0.3
+                    # A client that is gone (a closed tab, a dead network) must
+                    # not keep a thread of this server for ever.
+                    if self._client_gone():
+                        break
+                    if idle >= self.app.args.sse_idle_timeout:
+                        log("event stream idle for %d s - closing it"
+                            % self.app.args.sse_idle_timeout)
+                        break
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
             self.app.events.unsubscribe(listener)
+
+    def _client_gone(self):
+        """Is the client still there? A closed tab shows up as an empty read."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            if not ready:
+                return False
+            return not self.connection.recv(1024, socket.MSG_PEEK)
+        except (OSError, ValueError):
+            return True
 
     @staticmethod
     def _event_belongs_to(event, workspace_id):
@@ -1735,7 +1848,7 @@ class App:
             data_dir = os.path.join(os.path.abspath(os.path.expanduser(args.workspace_path)),
                                     "tasks")
         self.store = Store(data_dir)
-        self.agent = Agent(args.agent)
+        self.agent = Agent(args.agent, chat_timeout=getattr(args, "chat_timeout", 3600))
         self.events = Events(self.store)
         self.engine = Engine(self.store, self.agent, self.events, args)
 
@@ -1757,9 +1870,13 @@ class App:
         self.events.publish(event)
         return event
 
-    def decorate(self, task, full=False):
+    def decorate(self, task, full=False, order=None):
         """Add the bits a reader wants: where the record is, which workspace,
-        the agent to reach, and where the task stands in the queue."""
+        the agent to reach, and where the task stands in the queue.
+
+        `order` is the queue order of the answer (see queue_order): a list of
+        many tasks gets it computed once, not once per task.
+        """
         task = dict(task)
         task["record_path"] = self.store.record_path(task.get("workspace_id"), task.get("id"))
         task["agent_url"] = self.agent.base
@@ -1767,7 +1884,7 @@ class App:
         if path:
             task["workspace_path"] = path
         # Where the task stands: only a queued task has a place in the line.
-        task["queue_position"] = self.queue_position(task)
+        task["queue_position"] = self.queue_position(task, order)
         task["current_step"] = task.get("note") or ""
         # When the task may start: the absolute time and how it was written.
         not_before = task.get("not_before") or ""
@@ -1786,17 +1903,24 @@ class App:
             task["history"] = task.get("steps") or []
         return task
 
-    def queue_position(self, task):
-        """1 = next in line, 0 = not queued (nothing to wait for)."""
-        if not task or task.get("status") != QUEUED:
-            return 0
+    def queue_order(self):
+        """Where every queued task stands in the line: {task id: position}.
+
+        The line is the same for every task of one answer, so it is read once
+        per answer instead of once per task.
+        """
         queued = self.store.list(status=QUEUED)
         queued.sort(key=lambda t: (-int(t.get("priority") or 0),
                                    t.get("created_at") or "", t.get("id") or ""))
-        for index, one in enumerate(queued):
-            if one.get("id") == task.get("id"):
-                return index + 1
-        return 0
+        return dict((one.get("id"), index + 1) for index, one in enumerate(queued))
+
+    def queue_position(self, task, order=None):
+        """1 = next in line, 0 = not queued (nothing to wait for)."""
+        if not task or task.get("status") != QUEUED:
+            return 0
+        if order is None:
+            order = self.queue_order()
+        return order.get(task.get("id"), 0)
 
     def metrics(self):
         """What somebody watching the queue wants to see.
@@ -2018,7 +2142,13 @@ def main(argv=None):
                         help="a task that was not touched for this many seconds does not hold "
                              "a slot any more")
     parser.add_argument("--interval", type=float, default=2.0,
-                        help="seconds between rounds (default: 60)")
+                        help="seconds between rounds (default: 2)")
+    parser.add_argument("--chat-timeout", type=float, default=3600.0,
+                        help="how long a turn may take before the queue gives up on it "
+                             "(seconds; 0 = no limit)")
+    parser.add_argument("--sse-idle-timeout", type=float, default=3600.0,
+                        help="how long an event stream may stay quiet before it is closed "
+                             "(seconds)")
     parser.add_argument("--max-per-round", type=int, default=4,
                         help="how many queued tasks one round may start (the per-project rule still "
                              "holds: two tasks of the same project never run together)")

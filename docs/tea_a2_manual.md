@@ -648,6 +648,8 @@ python3 sched/task_server.py --agent http://127.0.0.1:8282 --port 8283
 | `--stale-after <s>` | 多久没动就不占位置了 | `300` |
 | `--interval <s>` | 调度器几秒看一轮队列 | `2` |
 | `--max-per-round <n>` | 一轮最多起几个任务 | `4` |
+| `--chat-timeout <s>` | 一轮对话最多等多久（0 = 不限） | `3600` |
+| `--sse-idle-timeout <s>` | 事件流多久没人说话就关掉 | `3600` |
 | `--submit <PROMPT>` | 排一个任务然后退出（**不需要服务在跑**） | |
 | `--title <t>` | `--submit` 的标题 | |
 | `--allow-path <dir>` | 这个任务能额外碰哪个目录（可重复） | |
