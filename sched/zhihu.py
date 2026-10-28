@@ -38,6 +38,7 @@
   * 写操作（发回答/文章/想法）没在这里默认开启，见文末「发布」一节。
 """
 import argparse
+import calendar
 import html as htmllib
 import urllib.parse
 import json
@@ -156,6 +157,34 @@ def html_to_text(raw):
     t = re.sub(r"[ \t\u00a0]+", " ", t)
     t = re.sub(r"\n\s*\n\s*\n+", "\n\n", t)
     return t.strip()
+
+
+def to_epoch(value):
+    """时间戳 → epoch 秒。
+
+    知乎的 created 有时是 epoch（1790003655），有时是 ISO 字符串
+    （2026-09-21T23:14:15+08:00）—— 两种都得认，不然一条坏时间戳就能把
+    整个来源炸掉（排序时 int() 直接抛异常）。
+    """
+    if value in (None, ""):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})"
+                 r"(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$", text)
+    if not m:
+        return 0
+    year, mon, day, hour, minute, sec, tz = m.groups()
+    epoch = calendar.timegm((int(year), int(mon), int(day),
+                              int(hour), int(minute), int(sec), 0, 0, 0))
+    if tz and tz != "Z":
+        sign = 1 if tz[0] == "+" else -1
+        tz = tz[1:].replace(":", "")
+        epoch -= sign * (int(tz[:2]) * 3600 + int(tz[2:]) * 60)
+    return epoch
 
 
 def clean_title(raw):
@@ -903,6 +932,306 @@ def delete_draft(sess, qid):
     return r.status_code, r.text[:200]
 
 
+# --------------------------------------------------------------------------
+# post llm：读最近看过的 → 让 LLM 分析 → 写一篇新的 → 默认只显示
+# --------------------------------------------------------------------------
+#
+# 知乎**没有浏览历史接口了**（2026-10 实测）：/api/v4/history 404、
+# /api/v4/users/{token}/activities 404、网页 /history 是个 404 页面。
+# 所以「最近读过的」从两个地方凑：收藏夹（按收藏时间）和本地语料
+# （之前 fetch 抓的，按内容时间）。收藏 = 读过并且想留的，够用。
+
+RECENT_LIMIT = 10
+
+ANALYZE_PROMPT = """你是中文科幻文学的编辑。下面是作者最近读过的若干篇文章（标题 + 正文）。
+请分析它们的共同点，输出一个 JSON 对象：
+
+{
+  "themes": ["反复出现的话题", "..."],          # 3-6 个
+  "mother_theme": "一句话概括这些内容的共同母题",
+  "motifs": ["反复出现的意象或设定", "..."],      # 3-6 个
+  "angles": ["可以新写一个什么故事的角度", "..."],  # 3 个，各不相同
+  "materials": ["可以直接借用的具体素材（科学概念/设定/细节）", "..."],  # 5-8 个
+  "voice": "这些文字共有的语气特征（一段话）"
+}
+
+只输出 JSON，不要解释。"""
+
+COMPOSE_PROMPT = """你是中文硬科幻作家。下面给你两样东西：①读者最近读过的内容的分析；②这些内容的原文节选。
+请据此写一篇**全新的**文章，并给一个标题。
+
+要求：
+- 不要照抄任何一篇，不要复用原文的句子和具体情节；只用它们提供的题材、概念和语感。
+- 原创性优先：这是一篇新写的科幻作品，不是读后感，也不是综述。
+
+文风（中文硬科幻的通用手法，不冒充任何具体作家的身份或口吻）：
+- 尺度宏大：文明、星际、时间尺度的兴衰；先从一个具体的小人物切入，再推向宇宙尺度
+- 危机为底色：文明级别的危机或转折；人在其中的选择与���性张力
+- 硬核质感：把真实的物理、工程、数学细节嵌进宏大叙事（数字、尺度、装置、代价）
+- 冷峻而壮阔的抒情：克制的短句；结尾有一处哲思或诗意的升华
+- 结构：开头一个具体场景 → 迅速打开尺度 → 中段技术与困境交织 → 结尾收束并升华
+
+输出一个 JSON 对象：{"title": "标题（不超过 40 字）", "body": "正文（markdown 纯文本，空行分段）"}
+只输出 JSON，不要解释。"""
+
+
+def recent_reading(sess, limit=RECENT_LIMIT):
+    """最近读过的内容：收藏夹 + 本地语料，按时间倒序，去重。
+
+    返回的每条都有 text（正文）、title、kind、author、url。
+    """
+    items = []
+    seen = set()
+
+    def add(entry, stamp, origin):
+        if not entry:
+            return
+        key = entry.get("id") or entry.get("url")
+        if not key or key in seen:
+            return
+        seen.add(key)
+        entry = dict(entry)
+        entry["_at"] = to_epoch(stamp)
+        entry["_from"] = origin
+        items.append(entry)
+
+    # 1) 收藏夹：收藏的顺序就是读的顺序
+    try:
+        me = get_me(sess)
+        token = me.get("url_token") or ""
+        for col in get_collections(sess, token):
+            for it in get_collection_items(sess, col.get("id"), limit=20):
+                add(entry_from_generic(it, source="收藏夹·%s" % (col.get("title") or "")),
+                    to_epoch(it.get("created") or it.get("created_time")), "收藏夹")
+    except Exception as exc:
+        print("[recent] 收藏夹读不到：%s" % exc)
+
+    # 2) 本地语料：之前抓过的。语料里的每条**已经是**一个条目（正文在
+    #    "text" 里），不能再过 entry_from_generic（那函数只认原始对象，
+    #    认不出 text → 整条被丢掉）。
+    try:
+        for key, meta in (load_corpus() or {}).items():
+            if not isinstance(meta, dict) or not meta:
+                continue
+            entry = dict(meta)
+            # 语料的 key 就是 entry["id"]（存的时候就是这么写的），
+            # 格式 "kind:裸id" —— 和收藏夹那边一样，去重才认得出是同一篇。
+            entry["id"] = key
+            add(entry, to_epoch(meta.get("created")), "语料")
+    except Exception as exc:
+        print("[recent] 本地语料读不到：%s" % exc)
+
+    items.sort(key=lambda e: -e.get("_at", 0))
+    items = items[:limit]
+    for one in items:
+        fill_text(sess, one)
+    return items
+
+
+def fill_text(sess, entry):
+    """收藏夹里只有摘要；正文要另外取。"""
+    kind = entry.get("kind")
+    ident = (entry.get("id") or "").split(":")[-1]
+    if not ident:
+        return entry
+    if entry.get("_from") == "语料":
+        return entry          # 语料里本来就是全文
+    if len(entry.get("text") or "") > 200:
+        return entry          # 收藏夹的摘要够长了，不去折腾
+    try:
+        if kind == "answer":
+            data = get_answer(sess, ident)
+            entry["text"] = html_to_text(data.get("content") or "")
+            q = data.get("question") or {}
+            if q.get("name"):
+                entry["title"] = clean_title(q["name"])
+        elif kind == "article":
+            data = get_article(sess, ident)
+            entry["text"] = html_to_text(data.get("content") or "")
+            if data.get("title"):
+                entry["title"] = clean_title(data["title"])
+    except Exception as exc:
+        print("[recent] %s 的正文取不到：%s" % (ident, exc))
+    return entry
+
+
+def reading_digest(items, max_chars=24000):
+    """把最近读过的内容压成给模型看的材料。
+
+    预算是**每篇一份**（不是总量）：总量封顶的话，前面两篇长文就把额度
+    用完了，后面八篇模型根本没见过 —— 那还叫什么「分析最近读过的十篇」。
+    """
+    parts = []
+    per_item = max(600, max_chars // max(1, len(items)))
+    for n, it in enumerate(items, 1):
+        text = it.get("text") or ""
+        if len(text) > per_item:
+            text = text[:per_item] + "\n…（这篇太长了，已截断）"
+        parts.append("[%d] 《%s》（%s｜%s｜%s）\n%s\n" % (
+            n, it.get("title") or "无题", it.get("kind") or "?",
+            it.get("author") or "?", it.get("url") or "", text))
+    return "\n".join(parts)
+
+
+def analyze_reading(bili, prov, model, items, max_chars=24000):
+    """第一步：让 LLM 分析这些文章。"""
+    raw = bili.llm_chat(prov, model, [
+        {"role": "system", "content": ANALYZE_PROMPT},
+        {"role": "user", "content": reading_digest(items, max_chars)},
+    ], max_tokens=2000, temperature=0.3)
+    try:
+        obj = bili.extract_json(raw)
+    except Exception as exc:
+        raise SystemExit("[llm] 分析的回复不是 JSON：%s" % exc)
+    if not isinstance(obj, dict):
+        raise SystemExit("[llm] 分析的回复不是 JSON 对象")
+    return obj
+
+
+def compose_article(bili, prov, model, items, analysis, max_chars=24000):
+    """第二步：让 LLM 写一篇新的。"""
+    brief = json.dumps(analysis, ensure_ascii=False, indent=1)
+    user = ("读者的阅读分析：\n%s\n\n原文节选（只作素材，不要照抄）：\n%s"
+            % (brief, reading_digest(items, max_chars)))
+    raw = bili.llm_chat(prov, model, [
+        {"role": "system", "content": COMPOSE_PROMPT},
+        {"role": "user", "content": user},
+    ], max_tokens=8000, temperature=0.8)
+    try:
+        obj = bili.extract_json(raw)
+    except Exception as exc:
+        raise SystemExit("[llm] 创作的回复不是 JSON：%s" % exc)
+    if not isinstance(obj, dict):
+        raise SystemExit("[llm] 创作的回复不是 JSON 对象")
+    return obj
+
+
+# 知乎专栏文章的发布（2026-10 抓包确认的流程）：
+#   1) POST https://zhuanlan.zhihu.com/api/articles/drafts
+#      {"title":..., "content": <html>, "delta_time":0, "can_reward":false,
+#       "table_of_contents":false}  → 响应里带 id（草稿 id）
+#   2) POST https://www.zhihu.com/api/v4/content/publish
+#      {"action":"article", "data":{...}}（内容和标题都在 data 里）
+# 注意 action 是 "article"（不是 "publish"），正文字段是 data.hybrid.html。
+ARTICLE_BUSINESS = {
+    "commentPermission": "anyone",
+    "disclaimer_type": "none",
+    "disclaimer_status": "close",
+    "table_of_contents_enabled": False,
+    "commercial_report_info": {"commercial_types": []},
+    "commercial_zhitask_bind_info": None,
+    "canReward": False,
+}
+
+
+def publish_article(sess, title, html):
+    """发一篇知乎专栏文章，返回 (article_id, 原始响应)。"""
+    sess.headers["Origin"] = "https://www.zhihu.com"
+    sess.headers["Referer"] = "https://zhuanlan.zhihu.com/write"
+    sess.headers["Content-Type"] = "application/json"
+
+    r = sess.post("https://zhuanlan.zhihu.com/api/articles/drafts",
+                  json={"title": title, "content": html, "delta_time": 0,
+                        "can_reward": False, "table_of_contents": False},
+                  timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError("存草稿失败 http %s: %s" % (r.status_code, r.text[:200]))
+    try:
+        draft = r.json()
+    except ValueError:
+        raise RuntimeError("草稿接口的回复不是 JSON：%s" % r.text[:200])
+    draft_id = draft.get("id") or ""
+    if not draft_id:
+        raise RuntimeError("草稿没有 id：%s" % r.text[:200])
+
+    business = dict(ARTICLE_BUSINESS)
+    business["content"] = html
+    business["title"] = title
+    text_len = len(html_to_text(html).strip())
+    payload = {
+        "action": "article",
+        "data": {
+            "publish": {"traceId": "%d,%s" % (
+                int(time.time() * 1000),
+                "00000000-0000-0000-0000-000000000000")},
+            "extra_info": {"publisher": "pc",
+                           "pc_business_params": json.dumps(business, ensure_ascii=False)},
+            "draft": {"disabled": 1, "id": str(draft_id), "isPublished": False},
+            "commentsPermission": {"comment_permission": "anyone"},
+            "creationStatement": {"disclaimer_type": "none",
+                                   "disclaimer_status": "close"},
+            "contentsTables": {"table_of_contents_enabled": False},
+            "commercialReportInfo": {"isReport": 0},
+            "appreciate": {"can_reward": False, "tagline": ""},
+            "hybridInfo": {},
+            "hybrid": {"html": html, "textLength": text_len},
+            "title": {"title": title},
+        },
+    }
+    r = sess.post("https://www.zhihu.com/api/v4/content/publish",
+                  json=payload, timeout=40)
+    if r.status_code != 200:
+        raise RuntimeError("发布失败 http %s: %s" % (r.status_code, r.text[:300]))
+    j = r.json()
+    data = j.get("data") or {}
+    aid = data.get("id") or ""
+    raw = data.get("result")
+    if not aid and isinstance(raw, str):
+        try:
+            inner = json.loads(raw)
+            aid = inner.get("id") or (inner.get("article") or {}).get("id") or ""
+        except ValueError:
+            pass
+    return aid, j
+
+
+def cmd_post_llm(args, sess):
+    """post llm：读最近看过的 → 分析 → 写一篇 → 默认只显示，--yes 才投递。"""
+    items = recent_reading(sess, limit=args.count)
+    if not items:
+        raise SystemExit("没找到最近读过的内容（收藏夹和本地语料都是空的）")
+    print("[recent] 最近读过的 %d 篇：" % len(items))
+    for one in items:
+        print("   - 《%s》 %s（%s）" % ((one.get("title") or "无题")[:36],
+                                         one.get("kind") or "?", one.get("_from") or ""))
+
+    bili = _bili()
+    pname, prov, model = bili.pick_provider(args.provider, args.model)
+    print("[llm] provider=%s model=%s" % (pname, model))
+
+    analysis = analyze_reading(bili, prov, model, items, args.max_chars)
+    print("[llm] 共同母题：%s" % (analysis.get("mother_theme") or "（模型没说）"))
+    for a in (analysis.get("angles") or [])[:3]:
+        print("[llm]   角度：%s" % a)
+
+    article = compose_article(bili, prov, model, items, analysis, args.max_chars)
+    title = str(article.get("title") or "").strip()
+    body = str(article.get("body") or "").strip()
+    if not body:
+        raise SystemExit("[llm] 模型没给出正文")
+    if not title:
+        title = (body.splitlines()[0] or "无题").strip()[:40]
+
+    html = md_to_html(body)
+    out = args.out or os.path.join(STATE_DIR, "draft.md")
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write("# %s\n\n%s\n" % (title, body))
+    print("[llm] 标题：%s" % title)
+    print("[llm] 正文 %d 字 → %s" % (len(body), out))
+    print("")
+    print(body)
+    print("")
+    if not args.yes:
+        print("[post] 这是 dry-run，加 --yes 才真发。")
+        return
+    aid, raw = publish_article(sess, title, html)
+    print("[post] 发布完成 article_id=%s" % aid)
+    print("[post] 原始返回：%s" % json.dumps(raw, ensure_ascii=False)[:300])
+    if aid:
+        print("[post] 链接：https://zhuanlan.zhihu.com/p/%s" % aid)
+
+
 def cmd_post(args):
     """发回答 / 发文章。
 
@@ -910,6 +1239,10 @@ def cmd_post(args):
     内容从文件读，避免命令行里带大段正文。
     """
     sess = make_session()
+    if args.kind == "llm":
+        return cmd_post_llm(args, sess)
+    if not args.file:
+        raise SystemExit("发回答/文章要带 --file <正文文件>")
     with open(args.file, "r", encoding="utf-8") as fh:
         body = fh.read()
     html = md_to_html(body)
@@ -933,7 +1266,12 @@ def cmd_post(args):
             print("[post] 链接：https://www.zhihu.com/question/%s/answer/%s"
                   % (args.question, aid))
     else:
-        raise SystemExit("发文章暂未实现（文章走的是另一套 content/publish 参数）")
+        title = args.title or "无题"
+        aid, raw = publish_article(sess, title, html)
+        print("[post] 发布完成 article_id=%s" % aid)
+        print("[post] 原始返回：%s" % json.dumps(raw, ensure_ascii=False)[:300])
+        if aid:
+            print("[post] 链接：https://zhuanlan.zhihu.com/p/%s" % aid)
 
 
 def cmd_rm(args):
@@ -1044,11 +1382,18 @@ def main():
     p.add_argument("--draft", help="要删的草稿所属问题 id")
     p.set_defaults(func=cmd_rm)
 
-    p = sub.add_parser("post", help="发回答/文章（默认 dry-run）")
-    p.add_argument("kind", choices=["answer", "article"])
-    p.add_argument("--file", required=True, help="正文文件（markdown/纯文本）")
+    p = sub.add_parser("post", help="发回答/文章/让 LLM 写一篇（默认 dry-run）")
+    p.add_argument("kind", choices=["answer", "article", "llm"])
+    p.add_argument("--file", help="正文文件（markdown/纯文本）；kind=llm 时不用")
     p.add_argument("--question", help="回答要发到哪个问题 id")
-    p.add_argument("--title", help="文章标题")
+    p.add_argument("--title", help="文章标题（kind=llm 时由模型生成）")
+    p.add_argument("--count", type=int, default=RECENT_LIMIT,
+                   help="kind=llm：读几篇最近看过的（默认 %d）" % RECENT_LIMIT)
+    p.add_argument("--provider", default=None, help="kind=llm：用哪个 provider")
+    p.add_argument("--model", default=None, help="kind=llm：用哪个模型")
+    p.add_argument("--out", default=None, help="kind=llm：文稿写到哪个文件")
+    p.add_argument("--max-chars", type=int, default=24000,
+                   help="kind=llm：给模型的材料字数上限")
     p.add_argument("--yes", action="store_true", help="真发（否则只打印）")
     p.set_defaults(func=cmd_post)
 

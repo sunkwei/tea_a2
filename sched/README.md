@@ -165,8 +165,29 @@ python3 sched/zhihu.py whoami | hot | search "大模型" | invited | collections
 python3 sched/zhihu.py fetch --collection 737068447
 python3 sched/zhihu.py summarize && python3 sched/zhihu.py digest --overview
 python3 sched/zhihu.py post answer --file body.md --question <id> --yes   # 真发回答
+python3 sched/zhihu.py post llm --count 10                              # 读最近看过的 10 篇 → 让 LLM 写一篇新的
 python3 sched/zhihu.py rm --answer <id>                                 # 删掉
 ```
+
+### post llm：让模型写一篇新的
+
+知乎**没有浏览历史接口了**（`/api/v4/history` 404，网页 `/history` 也是 404），
+所以「最近读过的」从**收藏夹**（按收藏时间）和**本地语料**（`fetch` 抓过的）两处凑，
+去重后按时间倒序取前 N 篇。
+
+```bash
+python3 sched/zhihu.py post llm                    # 读 10 篇 → 分析 → 写一篇 → 只显示
+python3 sched/zhihu.py post llm --count 6 --out /tmp/a.md
+python3 sched/zhihu.py post llm --yes              # 真投递到知乎专栏
+```
+
+- 默认**只打印**文稿（`--yes` 才投递）；文稿也写到 `~/.tea_agent/zhihu/draft.md`。
+- 模型被问两次：一次**分析**这些文章（母题/角度/可用素材），一次**创作**（标题 + 正文）。
+- 正文是 markdown 纯文本（空行分段），转成知乎编辑器要的 HTML 后发出去。
+- 投递的流程是抓包确认的（`POST zhuanlan.zhihu.com/api/articles/drafts` 建草稿 →
+  `POST www.zhihu.com/api/v4/content/publish`，`action=article`，正文在 `data.hybrid.html`）。
+- 风格是**中文硬科幻的通用手法**（宏大尺度 + 危机 + 硬核细节 + 冷峻抒情），
+  prompt 里不冒充任何具体作家的身份。
 
 - **登录**：`--login` 开一个**有头浏览器**（playwright，`headless=false`）停在登录页，
   你登录完**把窗口关掉**即可，storageState 会被存到工具读的那个文件

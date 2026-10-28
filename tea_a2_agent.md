@@ -705,3 +705,110 @@ cp build-win64/bin/tea_agent.exe .
   `Store.list()` 里 `name.endswith(".events.jsonl")` 是死条件（`.jsonl` 不以 `.json` 结尾）。
 - 回归测试：`tests/smoke_task_queue_perf.py`（测工作量，不测形状：慢盘就是慢盘，
   但平方级在哪种盘上都是平方级）。
+
+---
+
+## 坑：知乎发文章（专栏）的接口（2026-10-28）
+
+`sched/zhihu.py post article` 原来是 `raise SystemExit("发文章暂未实现")`。这次把它做出来了，
+顺便加了 `post llm`（读最近看过的 → 让 LLM 分析 → 写一篇新的）。接口全是抓包确认的。
+
+### 浏览历史没了
+
+知乎的「浏览历史」**整条路都断了**（2026-10 实测）：
+
+| 试过的 | 结果 |
+| --- | --- |
+| `GET /api/v4/history`、`/api/v4/history/list`、`/api/v4/browsing_histories`、`/api/v4/users/{t}/histories`、`/api/v4/me/histories` | 全 404 |
+| `GET /api/v4/activities`、`/api/v4/users/{t}/activities` | 404 |
+| `GET /api/v4/creators/publish/column`、`/api/v4/columns/{t}/articles` | 404 |
+| 网页 `https://www.zhihu.com/history` | **404 页面**（浏览器里也是「你似乎来到了没有知识存在的荒原」） |
+| `GET /api/v3/moments/{t}/activities` | 200，但那是**自己的动态**，不是读过什么 |
+
+所以「最近读过的」只能从**收藏夹**（按收藏时间）和**本地语料**（`fetch` 抓过的）凑。
+
+### 发文章的流程（抓包）
+
+```
+1) POST https://zhuanlan.zhihu.com/api/articles/drafts
+   {"title":..., "content": <html>, "delta_time":0, "can_reward":false, "table_of_contents":false}
+   → 响应里有 id（草稿 id）
+2) POST https://www.zhihu.com/api/v4/content/publish
+   {"action": "article", "data": {...}}
+```
+
+`data` 的字段（和**发回答**不一样，别照抄回答那份）：
+
+| 字段 | 值 |
+| --- | --- |
+| `draft` | `{"disabled":1, "id":"<草稿 id>", "isPublished":false}` |
+| `hybrid` | `{"html": <正文 html>, "textLength": <纯文本长度>}` ← **正文在这里**（文章没有 `content` 字段） |
+| `title` | `{"title": "<标题>"}` |
+| `extra_info.pc_business_params` | 一个 **JSON 字符串**：commentPermission/disclaimer_type/disclaimer_status/table_of_contents_enabled/**content**/**title**/commercial_report_info/commercial_zhitask_bind_info/canReward |
+| `commentsPermission` | `{"comment_permission": "anyone"}` ← **文章是 anyone，回答是 all** |
+| 其余 | `creationStatement`、`contentsTables`、`commercialReportInfo`、`appreciate`、`hybridInfo`（空对象）、`publish.traceId` |
+
+- **`action` 是 `"article"`**（不是 bundle 里看到的 `"publish"`/`"update"`——那三个是 API 客户端的
+  内部动作名，落到请求里的是 type）。
+- `textLength` 是**纯文本**长度（去掉 HTML 标签），不是 HTML 长度。
+- 正文 HTML 是 `<p>段落</p>` 连起来的片段（网页端编辑器存的就是这个）。
+
+### zhuanlan 域不需要签名，www 域要
+
+| 接口 | 域 | 签名 |
+| --- | --- | --- |
+| `POST /api/articles/drafts` | zhuanlan | **不要**（`zsAutoSignature:false`） |
+| `GET /api/articles/my_drafts?limit=10&offset=0` | **zhuanlan** | **不要** |
+| `DELETE /api/articles/{id}/draft` | zhuanlan | **不要** |
+| `GET /api/v4/articles/my_drafts` | www | 要 x-zse-96 → **403** |
+| `GET /api/v4/articles/my_drafts/count` | www | 不要（`{"count":3}`） |
+| `POST /api/v4/content/publish` | www | 不要（cookie 就够） |
+
+**坑**：草稿列表在 **zhuanlan** 域（`zhuanlan.zhihu.com/api/articles/my_drafts`），
+在 www 域是 403。我先试 www 域绕了半天才发现。列表**不要**带 `include=$.data[*].schedule`
+（带了反而 403）。
+
+### 坑
+
+- **时间戳两种格式**：知乎的 `created` 有时是 epoch（`1790003655`），有时是 ISO
+  （`2026-09-21T23:14:15+08:00`）。`int()` 一下就把**整个来源块**炸掉了（异常在循环里，
+  一条坏时间戳 = 后面全丢）。zhihu.py 里的 `to_epoch()` 两种都认（自己解析 ISO，别用
+  `datetime.fromisoformat`——这仓库还支持 Python 3.6）。
+- **本地语料别过 `entry_from_generic()`**：那函数认的是原始对象（description/excerpt/content），
+  语料条目正文在 `text` 字段里 → 整条被丢掉。语料已经是条目了，直接用。
+- **`llm_chat` 别把 `reasoning_content` 当答案**：deepseek-flash 这种模型会先思考，
+  token 花完了 `content` 就是空的，老代码 `content or reasoning_content` 于是把**思考过程**
+  当成回复返回（症状：模型回复是「The user wants a new Chinese hard sci-fi story...」）。
+  改法：`content` 空就当空回复（报 finish_reason 和 token 用量），重试。
+  另外**思考很吃 token**：创作正文要 `max_tokens=8000` 才够。
+- **给模型的材料要每篇一份预算**，不是总量封顶：总量封顶的话前面两篇长文就把额度用完，
+  后面八篇模型根本没见过——那还叫什么「分析最近读过的十篇」。
+- **测试的 `check()` 别忘了记失败**：`if not ok: failures.append(name)` 漏了的话，
+  测试会永远打印「22/22 checks passed」——我第一版就这样，藏了 2 个真失败。
+
+### 工具
+
+- `sched/zhihu.py post llm [--count N] [--provider] [--model] [--out] [--yes]`
+  （默认只打印文稿，`--yes` 才投递；文稿写到 `~/.tea_agent/zhihu/draft.md`）
+- 探针 `.tea_agent_run/scripts/zhihu_publish_capture.mjs`（**拦截并 abort** 发布请求，
+  拿到 payload 但不真发）、`zhihu_drafts.py`（列出/清理草稿箱）
+
+### 这条链路的验证到哪一步了
+
+| 环节 | 状态 |
+| --- | --- |
+| `recent_reading`（收藏夹 + 本地语料） | 实跑过（真知乎账号） |
+| LLM 分析 + 创作 | 实跑过（deepseek-flash，出了 2476 字的《授缰人》） |
+| `POST zhuanlan.zhihu.com/api/articles/drafts` | **实跑过**（纯 requests，200 + 拿到草稿 id；试完立刻删了） |
+| `POST www.zhihu.com/api/v4/content/publish` | payload 逐字段核对过（浏览器里拦截 abort 抓的），**但没有真发过** |
+
+最后一步没有真发，是因为它会往用户的知乎账号里公开发一篇文章——那是人的决定，不是我的。
+
+### 另一个坑：打包后 release/ 里多出来的散文件
+
+0.16.0 打包时，`release/` 里除了 zip 还多出 `docs/`、`tasks/` 和三个二进制
+（暂存目录内容的副本，时间戳和 cp 那一刻一样）。`git status` 显示成 `?? release/`，
+很容易被 `git add release/` 一起提交进去。**打���完要检查 `release/` 里只剩那个 zip**。
+
+原因没查清（每个命令的路径都是对着暂存目录写的），但结论是可靠的：
+`ls -la release/` 之后应该是「一个 zip」的状态。
