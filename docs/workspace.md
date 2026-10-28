@@ -15,6 +15,7 @@
 ├── agent.md                  # 本工作区的经验（注入 prompt，见下）
 ├── system_prompt.md          # 工作区级 system prompt 覆盖（空 = 用默认，见下）
 ├── scripts/                  # 可复用脚本，跨会话保留
+├── merges.jsonl              # 合并记录（tools/merge_work_area.py 每次合并留一行）
 ├── trajectories/<sid>.jsonl  # 每轮轨迹，一轮一行（见 [轨迹](api.md#轨迹每一轮实际做了什么的审计记录)）
 ├── tmp/                      # toolkit_exec 的临时脚本
 └── artifacts/                # 预留产物目录
@@ -117,6 +118,47 @@ bool write_file_atomic(const std::string& path, const std::string& data, std::st
   （`system_prompt.md` 变成空文件）——以后机器级默认改了，这里还会跟着变；
 - 保存空白（或与默认完全相同的文本）同样等于「没有覆盖」，不会把今天的默认值钉死在
   工作区里。
+
+### 合并两个工作区：把一份 `.tea_agent_run` 并进另一份
+
+工作区搬家（换机器、换盘），或者两台机器各干了一半想把历史收到一处时，**不能直接拷目录**：
+目标里已经有自己的会话、自己的记忆，直接拷会把更新的那份覆盖掉。
+
+`tools/merge_work_area.py` 做的是「合并」：
+
+```bash
+# 先看看会做什么（不碰任何文件）
+python tools/merge_work_area.py /old/project/.tea_agent_run ./.tea_agent_run --dry-run
+
+# 真合并
+python tools/merge_work_area.py /old/project/.tea_agent_run ./.tea_agent_run
+```
+
+两个参数都是 `.tea_agent_run` 目录；给工作区根目录也行，脚本会自己找。合并的内容：
+
+| 类别 | 合并方式 |
+| --- | --- |
+| `sessions/` | 会话文件拷过去，`index.json` 用两边的会话重建；**目标里已有的会话 id 会改名**（`--conflict skip` / `overwrite` 可换策略），分叉会话的 `forked_from` 跟着改成新 id，它的轨迹文件也一起改名 |
+| `memory/memory.json` | 记忆条目追加；**同 id 或同文本的条目不重复** |
+| `trajectories/<sid>.jsonl` | 轨迹按轮合并（同一个 `turn_id` 取新的一条），记录里的 `session_id` / `workspace_id` 改成目标工作区的 |
+| `agent.md` | 按小节合并，**已有的行不重复**；超过 32 KB 上限时保持目标原样并报错 |
+| `artifacts/` | 把合并进来的对话引用的图片拷过去（`--copy-all-artifacts` 拷整个目录） |
+| `audit/` | 哈希链文件**换个名字整份拷过去**——每份文件是一条独立的链，拼链会断 |
+| `logs/agent.log` | 追加到目标日志后面（带一行标记，重复跑不会追加两次） |
+| `scripts/` | 目标没有的脚本才拷，不覆盖 |
+
+几条保证：
+
+- **只读源目录**：源 `.tea_agent_run` 一个字节都不动；
+- **可重复执行**：第二遍是空操作（已存在的会话、记忆、行、图片都跳过），中断了直接重跑就行；
+- **不覆盖目标已有内容**：`index.json`、`memory.json` 走「读-改-写」，目标自己的条目都留着；
+- **坏掉的 `index.json` 不会让目标自己的会话消失**：索引读不出来时按会话文件重建；
+- **有备份**：被替换的文件先复制到 `<to>/.merge-backups/<时间戳>/`（`--no-backup` 关闭）。
+
+每次合并在 `<to>/merges.jsonl` 留一行（时间、来源、目标、合了几个会话）。
+`--only sessions,memory` / `--skip audit,logs` 可以只合一部分，`--json` 打印机器可读的报告。
+
+回归：`python tests/smoke_merge_work_area.py`（51 项）。
 
 ### 删除工作区：只是把它从列表里摘掉
 

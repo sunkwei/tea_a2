@@ -98,6 +98,7 @@ node tests/ui_reasoning_follow.mjs                        # 「深度思考」�
 node tests/ui_agent_doc.mjs                               # 记忆页的 agent.md 编辑框（需 google-chrome）
 node tests/ui_system_prompt.mjs                           # 设置页的系统提示词编辑/预览/恢复默认（需 google-chrome）
 python3 tests/smoke_destroy.py                            # 销毁：预览/确认/删除 tea home 与各 .tea_agent_run
+python3 tests/smoke_merge_work_area.py                     # 合并两个工作区的 .tea_agent_run：会话/记忆/轨迹/agent.md/产物/审计/日志/脚本
 node tests/ui_destroy.mjs                                 # 设置页「销毁」确认框与删除后回到首次运行（需 google-chrome）
 node tests/ui_render_perf.mjs                             # 流式渲染不重建气泡（需 google-chrome）
 node tests/ui_crumbs.mjs                                  # 顶栏显示工作区与会话标题（需 google-chrome）
@@ -170,6 +171,12 @@ data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/image
 日志）和各 `.tea_agent_run` 都消失，而项目目录与其中的文件还在；随后 `/api/health` 报
 `config_loaded=false`、`/api/config/status` 要求重新配置、`/api/workspaces` 为空；再删一次是
 幂等的；删除后重新添加同一工作区也正常。
+
+`tests/smoke_merge_work_area.py` 覆盖 `tools/merge_work_area.py`（把一份 `.tea_agent_run`
+合并进另一份）：会话文件与侧栏索引两边都在、目标自己的会话不丢、id 撞了改名且分叉会话的
+`forked_from` 跟着改、记忆条目不重复、`agent.md` 按小节合并不重复行、对话引用的图片被拷过去、
+审计链换名整份拷（不拼链）、日志按标记追加、脚本只补没有的；**源目录一个字节都不动**；
+第二遍是空操作（幂等）；`--dry-run` 不碰文件；目标索引坏了也按会话文件重建，自己的会话不消失。
 
 `tests/ui_destroy.mjs` 在真实浏览器里点一遍：设置页有红色「销毁…」按钮，确认框写着
 「是否真的彻底删除痕迹？」并逐条列出 tea home 与两个工作区的 `.tea_agent_run`；取消后什么都没

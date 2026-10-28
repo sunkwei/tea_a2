@@ -41,7 +41,8 @@ web/                        index.html / tokens.css / app.css / app.js（构建�
 provider.example.yaml        provider.yaml 的模板（模型提供方、search/asr 段、settings）
 mcp.yaml.example            mcp.yaml 的模板（MCP 服务器：程序、参数、环境变量）
 docs/                       文档：构建、部署、接口、工具、配置、队列、源码、测试
-tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/（宿主工具子项目）、mock_*.mjs
+tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/（宿主工具子项目）、mock_*.mjs、
+                            merge_work_area.py（把一份 .tea_agent_run 合并进另一份）
 tests/mock_mcp_server.py    一个假的 MCP 服务器（stdio 上的 JSON-RPC），用来测 MCP 客户端
 tests/e2e.ps1              端到端测试（155 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /

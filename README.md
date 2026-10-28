@@ -333,7 +333,7 @@ servers:
 | [级联：一台 a2 控制另一台](docs/peer.md) | **让一台 tea_a2 控制另一台**：`peers:` 配置、`toolkit_peer`、机器对机器的通道 `/api/peer/*`、安全边界 |
 | [内置工具与上下文](docs/tools.md) | 每个工具、文件访问范围、上下文预算、轨迹 |
 | [MCP](docs/mcp.md) | **把别的程序接进来当工具**：配置、接口、和 Windows 上的 uiautomation-mcp 联调 |
-| [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、system prompt、销毁、导出 |
+| [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、system prompt、销毁、导出、合并两个工作区 |
 | [配置](docs/config.md) | `provider.yaml`、额度与搜索抓取、按工作区覆盖、请求头 |
 | [源码结构](docs/source.md) | 每个文件干什么、第三方依赖 |
 | [测试与验证状态](docs/testing.md) | 怎么跑、每个测试钉住了什么、哪些平台实测过 |

@@ -98,7 +98,7 @@ if (-not $SkipPython) {
                  'smoke_todo.py', 'smoke_tool_images.py', 'smoke_usage_cache.py',
                  'smoke_provider_usage.py', 'smoke_console_level.py', 'smoke_vision.py',
                  'smoke_web_tools.py', 'smoke_run_archive.py', 'smoke_multi_session.py',
-                 'smoke_export_html.py', 'smoke_destroy.py')
+                 'smoke_export_html.py', 'smoke_destroy.py', 'smoke_merge_work_area.py')
     foreach ($s in $smokes) {
         if ($Only -and $s -notlike "*$Only*") { continue }
         Run-Step $s { & python (Join-Path $root "tests\$s") $Exe }
