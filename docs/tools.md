@@ -16,10 +16,36 @@
 | `toolkit_search` | 网页搜索：结构化结果（标题 / URL / 日期 / 摘要）。**provider 级能力**——对话用的 provider 声明 `supports_search: true` 才出现在工具表里；另外配了独立搜索 provider（`provider.yaml` 顶层 `search:` 段）时也会出现，请求发给那个 provider（用它的 key）。见 [config.md](config.md) |
 | `toolkit_fetch` | 抓取单个网页 → Markdown 正文。同样是 provider 级能力（`supports_fetch`），也走独立搜索 provider |
 | `toolkit_fleet` | 管理一队设备（学校机群）：`status` `devices` `report` `collect` `exec` `upgrade` `ask`。**只在配了 `fleet_url` 时才出现在工具表里**——和 provider 不支持就不给 `toolkit_search` 一个规矩：不让模型去试一个它用不了的工具。详见 [fleet.md](fleet.md) |
+| `toolkit_peer` | **级联：控制另一台机器上的 tea_a2**。`list` `health` `status` `chat` `exec` `tools` `workspaces` `stop`。`chat` 问的是**对端自己的 agent**（它用它的 provider、它的工具、它的上下文回答），回来的结果里还带**对端干了什么**的轨迹。对端写在 settings 的 `peers:` 段里，**令牌只从配置取，不进提示词**。详见 [peer.md](peer.md) |
 | `mcp__<服务器>__<工具>` | **MCP 服务器提供的工具**：和 provider.yaml 同目录的 `mcp.yaml` 里配的独立程序，agent 启动它们并用 stdio 上的 JSON-RPC 跟它们说话，它们的工具就进入模型的工具表。服务器连不上时它的工具不会出现（原因在设置页和 `/api/mcp/servers` 里）。详见 [config.md](config.md#mcp-服务器mcp-yaml) |
 
 相对路径基于工作区根目录；默认**禁止越出工作区**，判定前会解析符号链接，所以工作区里的软链
 也无法把工具带出去。这个边界可以在网页上开关——见下面的「文件访问范围」。
+
+### 级联：`toolkit_peer`
+
+`toolkit_fleet` 管的是**很多台**（台账、灰度、审计）；`toolkit_peer` 说的是**一台**：
+「让另一台设备上的 tea_a2 去干这件事」。
+
+```jsonc
+// 模型调用
+{"action": "chat", "peer": "study-pc", "prompt": "检查投影仪服务是否在跑，不在就修好"}
+```
+
+几条设计上的取舍：
+
+- **令牌不进提示词。** 对端写在 settings 的 `peers:` 段里（名字 + 地址 + 令牌），
+  模型只拿到**名字**；`url=` 可以临时指一台没配过的机器，但令牌仍然只从配置里取
+  （地址和某个已配置对端相同时，用那一台的）。
+- **回来的不只是答案。** 工具结果里还有**对端做了什么**（它的工具调用、哪一步失败）
+  和对端的 session id——没有这些，上层模型只能相信对端的转述。
+- **走的是对端自己的脑子。** `chat` 跑的是对端的 agent loop：对端的 provider、
+  对端的工具、对端的上下文。上一层决定「问什么」，下一层决定「怎么做」。
+- **确定性的事别烧模型。** `exec` 在对端跑一条命令就完事，不经过任何模型。
+- **长任务有着落。** 默认等 15 分钟；用户按停时传输被切断，工具如实告诉模型
+  「对端可能还在干」。
+
+对端那一侧要 `--api-token`（机器对机器的通道 `/api/peer/*`），细节见 [peer.md](peer.md)。
 
 ### 图片：`toolkit_load_image`
 

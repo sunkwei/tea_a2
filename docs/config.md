@@ -42,6 +42,12 @@ settings:
   command_timeout_ms: 180000   # toolkit_exec 默认超时
   keep_turns: 10
   http_engine: auto            # auto | socket | winhttp（也可用 --http-engine 覆盖）
+  peers:                       # 可选：别的 tea_a2（级联），见 [peer.md](peer.md)
+    study-pc:
+      url: http://172.16.1.31:8383
+      token: <对端的 --api-token>   # 令牌只存在这里，不进提示词
+      # workspace: ws_9f2c          # 可选：对端上用哪个工作区
+      # description: 书房的电脑       # 可选：模型会看到这句
 ```
 
 默认值只有一条规则：**文件里第一个 provider 的 `models:` 里的第一个模型**。

@@ -9,9 +9,16 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.15.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
+| `GET` | `/api/health` | 探活、版本（`0.16.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded` |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
+| `GET` | `/api/peer/health` | **对端通道**：`/api/health` 的令牌版镜像（见下「机器对机器的通道」） |
+| `GET` | `/api/peer/status` | **对端通道**：`/api/status` 的令牌版镜像 |
+| `POST` | `/api/peer/chat` | **对端通道**：`/api/chat` 的令牌版镜像（级联真正用的那条，SSE） |
+| `POST` | `/api/peer/chat/stop` | **对端通道**：停掉对端正在跑的一轮 |
+| `POST` | `/api/peer/exec` | **对端通道**：`/api/exec` 的令牌版镜像 |
+| `GET` | `/api/peer/tools` | **对端通道**：对端有哪些工具（能力探测） |
+| `GET` | `/api/peer/workspaces` | **对端通道**：对端的工作区 |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
@@ -54,6 +61,29 @@
 | `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
+
+## 机器对机器的通道（级联：一台 a2 控制另一台）
+
+`/api/peer/<路由>` 是 `/api/<路由>` 的**令牌版镜像**：`/api/peer/chat` → `/api/chat`，
+`/api/peer/exec` → `/api/exec`，以此类推。镜像只有七条（`chat`、`chat/stop`、`exec`、
+`status`、`health`、`tools`、`workspaces`），其它前缀下的路径一律 404。
+
+规矩：
+
+- **没配 `--api-token`，`/api/peer/*` 根本不存在**（404，不是 403）；
+- 令牌不对是 **401**（`Authorization: Bearer <token>` 或 `X-Api-Token`），常数时间比对；
+- 镜像**不改变**普通路由的行为：`/api/chat` 还是原来那个样子（网页端要用它）。
+
+它存在的理由是给「机器对机器」一个自己的身份：另一台 tea_a2 用它来驱动这一台，
+这一台的日志里就能分出「这是另一台 agent 来的」和「这是网页里那个人来的」。
+用法见 [peer.md](peer.md)。
+
+```bash
+# 问对端自己的 agent（SSE）
+curl -N -X POST http://peer:8383/api/peer/chat \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"workspace_id":"ws_9f2c","message":"这台机器现在有什么在跑？"}'
+```
 
 ## 机群通道（服务器管 40 台设备）
 

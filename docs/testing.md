@@ -63,6 +63,9 @@ python3 tests/smoke_task_server.py                         # 任务队列（Pyth
 python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）
                                                           # + 审计 + 机群服务 API + 真二进制的 /api/status 与 /api/exec
                                                           # + 多级链路（服务器 a2 → toolkit_fleet → 机群服务 → 设备 a2）
+python3 tests/smoke_peer.py                                 # 级联：peers: 配置 + 对端通道（令牌/白名单/404）+
+                                                          # + 整条链路（控制端 a2 → toolkit_peer → 对端 a2 自己的 agent）
+                                                          # + exec 动作 + 旧版对端退回普通路由
 python3 tests/smoke_task_order.py                          # 任务单：解析/报错/命令行排队/模板可下载
 python3 tests/smoke_telegram_bot.py                        # Telegram 前端：轮询/命令/文件/白名单/offset
 python3 tests/smoke_utf8_truncation.py                    # 文件被截断在字符中间：轮次不崩/结果是合法 UTF-8
@@ -428,6 +431,7 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 | 真实 `www.minimax.cn` 额度接口 | ✅ M Plan 订阅 Key 实查：5 小时窗口与周窗口的剩余百分比、重置时间都对得上 |
 | 交叉编译宿主工具机制（`TEA_AGENT_USE_HOST_ASSET_TOOL=ON`） | ✅ 在本机以原生方式验证该路径 |
 | **Linux 构建与运行** | ✅ 在 wsl2, ubuntu20.04 等环境测试 |
+| **级联（`toolkit_peer` + `/api/peer/*`）** | ✅ 两台真 agent 跑通：控制端的模型 → 工具 → 对端自己的 agent → 答案 + 轨迹回来（`tests/smoke_peer.py` 16/16） |
 | **macOS 构建与运行** | ✅ 在 Mac OS X 10.6 Snow Leopard 测试通过 |
 | **真实 ARM 交叉编译产物** | ✅ aarch64-linux-gnu-gcc (Linaro GCC 6.5-2018.12) 6.5.0 编译，到 horizon x3 执行正常 GLIBC 2.28 |
 | Linux→Windows MinGW-w64 交叉构建（`win64-mingw-cross` preset） | ✅ 产出 PE32+ `tea_agent.exe` 且内嵌 CA；运行需在 Windows 上验证 |

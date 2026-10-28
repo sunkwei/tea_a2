@@ -63,6 +63,11 @@ std::string human_size(uint64_t bytes);
 /// Show only enough of a secret to identify it: "sk-94e...a84b".
 std::string mask_secret(const std::string& secret);
 
+/// Normalize a base URL: trimmed, without the trailing '/', and only
+/// http:// or https://. Returns "" when the URL cannot be used as a base
+/// (empty, or a scheme this build cannot talk to).
+std::string normalize_base_url(const std::string& url);
+
 // --------------------------------------------------------------------------
 // images
 // --------------------------------------------------------------------------

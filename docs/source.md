@@ -13,14 +13,16 @@ src/
   provider_yaml.{h,cpp}     原地改写 provider.yaml 里某个 provider 的 models: 块
   agent.{h,cpp}             多轮工具调用主循环、预算与滚动摘要、system prompt
   prompt_queue.h            轮次进行中的排队消息（线程安全 FIFO，每轮采纳一条）
-  tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image/todo/task）
+  tools.{h,cpp}             工具注册表与内置工具（exec/file/memory/agent_doc/load_image/todo/task/
+                            search/fetch/fleet/peer——peer 是级联：问另一台 tea_a2 自己的 agent）
   mcp.{h,cpp}               MCP 客户端：起一个 MCP 服务器进程、stdio 上的 JSON-RPC
                             （initialize / tools/list / tools/call）、把它的工具并进工具表
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆/产出文件、索引；
                             并发写用进程级锁 + 原子替换（见 [并发](workspace.md#并发同一个工作区可以同时跑好几轮)）
   html_export.{h,cpp}       会话 → 自包含 HTML（内联 CSS/图片、可导入的 JSON 区块）
-  server.{h,cpp}            HTTP 路由、SSE 泵、内置资源
+  server.{h,cpp}            HTTP 路由、SSE 泵、内置资源；/api/peer/* 是机器对机器的
+                            令牌版镜像（级联的对端通道）
   shell.{h,cpp}             网页终端的会话/缓冲/能力探测（不经过模型）
   shell_posix.cpp            Linux/macOS：pty（posix_openpt + fork + exec）
   shell_win32.cpp            Windows：ConPTY（CreatePseudoConsole）+ PowerShell
@@ -72,7 +74,7 @@ commit 则是**构建期元数据**，它既不在源码里、也不在二进制
 
 ```
 # tea_agent.buildinfo（与二进制放在一起）
-version=0.15.1
+version=0.16.0
 commit=678cd2c1f014        # 工作区有未提交改动时是 <hash>-dirty
 ```
 

@@ -1660,6 +1660,556 @@ ToolResult tool_fleet(const nlohmann::json& args, const ToolContext& ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// toolkit_peer -- one tea_a2 driving another
+//
+// The cascade. A peer is another tea_a2, on another machine, with a brain of
+// its own: asking it a question runs ITS agent loop, with its provider, its
+// tools and its context. The upper level decides *what* to ask; the lower
+// level decides *how* to do it.
+//
+// The transport is the HTTP/SSE API this agent already serves - no new
+// protocol. What is new is that one agent can address another by name, that
+// the peer's secret stays in the settings instead of in a prompt, and that
+// the answer comes back with a trace of what the peer actually did.
+// ---------------------------------------------------------------------------
+
+/// The peer this call is about: resolved from the settings (by name) or from
+/// an address the model typed in.
+struct PeerTarget {
+  /// The name the model used ("lab-pc"), or the address for an ad-hoc peer.
+  std::string name;
+  /// Base url, no trailing '/'.
+  std::string url;
+  /// The peer's secret. Empty => the peer has no peer channel.
+  std::string token;
+  /// The workspace a chat runs in, when the settings say so.
+  std::string workspace;
+  /// What the peer is.
+  std::string description;
+  /// True when this peer came from the settings (and not from an address the
+  /// model typed in).
+  bool configured = false;
+};
+
+/// The peers of this agent. The workspace's settings win over the global ones
+/// (a project may know machines the machine does not).
+std::vector<PeerConfig> peer_settings(const ToolContext& ctx) {
+  if (ctx.workspace) return ctx.workspace->settings().peers;
+  if (ctx.config) return ctx.config->settings.peers;
+  return std::vector<PeerConfig>();
+}
+
+/// Find the peer the call is about.
+bool resolve_peer(const nlohmann::json& args, const ToolContext& ctx, PeerTarget* out,
+                  std::string* err) {
+  const std::vector<PeerConfig> peers = peer_settings(ctx);
+  const std::string name = trim(arg_str(args, "peer"));
+  const std::string raw_url = trim(arg_str(args, "url"));
+
+  if (!name.empty()) {
+    for (std::size_t i = 0; i < peers.size(); ++i) {
+      if (peers[i].name != name) continue;
+      out->name = peers[i].name;
+      out->url = peers[i].url;
+      out->token = peers[i].token;
+      out->workspace = peers[i].workspace;
+      out->description = peers[i].description;
+      out->configured = true;
+      return true;
+    }
+    std::string known;
+    for (std::size_t i = 0; i < peers.size(); ++i) {
+      if (!known.empty()) known += ", ";
+      known += peers[i].name;
+    }
+    *err = "there is no peer called '" + name + "'" +
+           (known.empty() ? " (no peers are configured)"
+                          : " (the configured ones are: " + known + ")");
+    return false;
+  }
+
+  if (!raw_url.empty()) {
+    out->url = normalize_base_url(raw_url);
+    if (out->url.empty()) {
+      *err = "'" + raw_url + "' is not an http(s) address";
+      return false;
+    }
+    out->name = out->url;
+    // An address the model typed in is still the same machine as a configured
+    // peer with that address - so it keeps the secret and the workspace. The
+    // secret never comes from the model, only from the settings.
+    for (std::size_t i = 0; i < peers.size(); ++i) {
+      if (peers[i].url != out->url) continue;
+      out->token = peers[i].token;
+      out->workspace = peers[i].workspace;
+      out->description = peers[i].description;
+      out->configured = true;
+      break;
+    }
+    return true;
+  }
+
+  *err = "which peer? pass peer=\"<name>\" (one of the configured peers) or "
+         "url=\"http://host:port\"";
+  return false;
+}
+
+/// One HTTP request to a peer, with the peer's secret when we have one.
+HttpResponse peer_http(const PeerTarget& peer, const std::string& method,
+                       const std::string& path, const std::string& body,
+                       int connect_timeout_ms, int read_timeout_ms,
+                       const HttpChunkCallback& on_chunk) {
+  HttpRequest req;
+  req.method = method;
+  req.url = peer.url + path;
+  if (method == "POST") {
+    req.body = body;
+    req.content_type = "application/json";
+  }
+  if (!peer.token.empty()) {
+    req.headers.push_back(HttpHeader{"Authorization", "Bearer " + peer.token});
+  }
+  req.connect_timeout_ms = connect_timeout_ms;
+  req.read_timeout_ms = read_timeout_ms;
+  LOG_INFO("toolkit_peer: ", method, " ", req.url);
+  return http_perform(req, on_chunk);
+}
+
+/// The peer channel's path for an ordinary route: /api/chat -> /api/peer/chat.
+std::string peer_channel_path(const std::string& plain_path) {
+  const std::string prefix = "/api/";
+  if (starts_with(plain_path, prefix)) {
+    return "/api/peer/" + plain_path.substr(prefix.size());
+  }
+  return "/api/peer" + plain_path;
+}
+
+/// A request to a peer, through the peer channel when there is one.
+///
+/// The peer channel (/api/peer/chat) is the token-guarded mirror of the
+/// ordinary route. A peer that does not know it - an older build, or one
+/// without a token - answers 404, and then the ordinary route is used. A 401
+/// is NOT a reason to fall back: the peer refused the secret, and quietly
+/// taking the open route instead would defeat the guard.
+///
+/// `before_request` runs before every attempt: a stream parser has to start
+/// from an empty buffer, or the leftovers of a failed attempt are glued to the
+/// first frame of the next one (and that frame is then lost).
+HttpResponse peer_call(const PeerTarget& peer, const std::string& method,
+                       const std::string& plain_path, const std::string& body,
+                       int connect_timeout_ms, int read_timeout_ms,
+                       const HttpChunkCallback& on_chunk = HttpChunkCallback(),
+                       const std::function<void()>& before_request = std::function<void()>()) {
+  if (!peer.token.empty()) {
+    if (before_request) before_request();
+    HttpResponse guarded =
+        peer_http(peer, method, peer_channel_path(plain_path), body, connect_timeout_ms,
+                  read_timeout_ms, on_chunk);
+    if (guarded.status != 404) return guarded;
+  }
+  if (before_request) before_request();
+  return peer_http(peer, method, plain_path, body, connect_timeout_ms, read_timeout_ms,
+                   on_chunk);
+}
+
+/// The text of a JSON value that may be a string or a whole object. The
+/// peer's event stream carries both shapes ("arguments" is a string on one
+/// build and an object on another), and a tool that throws on the wire is
+/// worse than one that prints it.
+std::string peer_json_text(const nlohmann::json& value) {
+  if (value.is_string()) return value.get<std::string>();
+  if (value.is_null()) return "";
+  if (value.is_object() || value.is_array()) return dump_json(value);
+  return value.dump();
+}
+
+/// What the peer's agent did, read off its event stream.
+struct PeerTurn {
+  /// The answer, as the peer wrote it.
+  std::string content;
+  /// The peer's session id - the handle a later `stop` needs.
+  std::string session_id;
+  /// One line per tool call on the peer: what it called, and how it went.
+  std::vector<std::string> steps;
+  /// The peer's error, if it failed.
+  std::string error;
+  /// Whether the turn finished.
+  bool done = false;
+  /// A line that has not been seen completely yet.
+  std::string buffer;
+
+  /// Forget everything read so far. Used between two attempts at the same
+  /// peer: the leftovers of a failed one would otherwise be glued to the
+  /// first frame of the next one.
+  void reset() {
+    buffer.clear();
+    content.clear();
+    steps.clear();
+    error.clear();
+    session_id.clear();
+    done = false;
+  }
+
+  void feed(const char* data, std::size_t len) {
+    buffer.append(data, len);
+    std::size_t pos;
+    while ((pos = buffer.find('\n')) != std::string::npos) {
+      const std::string line = buffer.substr(0, pos);
+      buffer.erase(0, pos + 1);
+      handle_line(line);
+    }
+  }
+
+  void handle_line(const std::string& raw) {
+    const std::string line = trim(raw);
+    if (!starts_with(line, "data:")) return;
+    const std::string payload = trim(line.substr(5));
+    if (payload.empty() || payload == "[DONE]") return;
+    nlohmann::json frame;
+    try {
+      frame = nlohmann::json::parse(payload);
+    } catch (const std::exception&) {
+      return;
+    }
+    if (!frame.is_object()) return;
+    const std::string type = frame.value("type", std::string());
+    if (type == "start") {
+      session_id = peer_json_text(frame["session_id"]);
+    } else if (type == "content_delta") {
+      const std::string text = peer_json_text(frame["text"]);
+      if (!text.empty()) content += text;
+    } else if (type == "tool_call") {
+      const std::string tool = peer_json_text(frame["name"]);
+      std::string args = peer_json_text(frame["arguments"]);
+      args = truncate_utf8(args, 160);
+      steps.push_back("called " + tool + (args.empty() ? "" : "(" + args + ")"));
+    } else if (type == "tool_result") {
+      const std::string tool = peer_json_text(frame["name"]);
+      const bool ok = frame.value("ok", false);
+      const long long elapsed = frame.value("elapsed_ms", static_cast<long long>(0));
+      std::string output = trim(peer_json_text(frame["output"]));
+      const std::size_t nl = output.find('\n');
+      if (nl != std::string::npos) output = output.substr(0, nl);
+      output = truncate_utf8(output, 160);
+      steps.push_back(tool + ": " + (ok ? "ok" : "FAILED") + " (" + std::to_string(elapsed) +
+                      "ms)" + (output.empty() ? "" : " - " + output));
+    } else if (type == "error") {
+      error = peer_json_text(frame["message"]);
+      if (error.empty()) error = "the peer failed";
+    } else if (type == "done") {
+      done = true;
+      // The finished event carries the whole answer. The deltas are the
+      // stream; this is the truth (a turn that was cut short has none).
+      const std::string whole = peer_json_text(frame["content"]);
+      if (!whole.empty()) content = whole;
+    }
+  }
+};
+
+/// The first line of a peer's answer, for the header line of the result.
+std::string peer_header(const PeerTarget& peer, const std::string& what) {
+  std::string out = "[" + what;
+  if (!peer.name.empty()) out += " " + peer.name;
+  out += " @ " + peer.url + "]";
+  return out;
+}
+
+/// The error message of a peer's answer, if it is one.
+std::string peer_error_message(const HttpResponse& resp) {
+  std::string message = resp.body;
+  try {
+    nlohmann::json parsed = nlohmann::json::parse(resp.body);
+    if (parsed.contains("error")) {
+      const nlohmann::json& err = parsed["error"];
+      if (err.is_string()) {
+        message = err.get<std::string>();
+      } else if (err.is_object() && err.contains("message")) {
+        message = err.value("message", std::string());
+      }
+    } else if (parsed.contains("message") && parsed["message"].is_string()) {
+      message = parsed["message"].get<std::string>();
+    }
+  } catch (const std::exception&) {
+    // not JSON: the raw body is the message
+  }
+  return truncate_utf8(message, 2000);
+}
+
+/// The workspace a chat on the peer runs in: what the caller said, else what
+/// the settings say, else the peer's first workspace.
+bool peer_workspace(const PeerTarget& peer, const std::string& wanted, std::string* out,
+                    std::string* err) {
+  if (!wanted.empty()) {
+    *out = wanted;
+    return true;
+  }
+  if (!peer.workspace.empty()) {
+    *out = peer.workspace;
+    return true;
+  }
+  // The workspace is registered on the PEER, and a peer may have several, so
+  // the peer is the one who says.
+  HttpResponse resp = peer_call(peer, "GET", "/api/workspaces", "", 10000, 30000);
+  if (resp.status != 200) {
+    *err = "cannot ask the peer for its workspaces (HTTP " + std::to_string(resp.status) +
+           "): " + peer_error_message(resp);
+    return false;
+  }
+  try {
+    nlohmann::json parsed = nlohmann::json::parse(resp.body);
+    if (parsed.contains("workspaces") && parsed["workspaces"].is_array()) {
+      for (std::size_t i = 0; i < parsed["workspaces"].size(); ++i) {
+        const nlohmann::json& ws = parsed["workspaces"][i];
+        if (ws.is_object() && ws.contains("id") && ws["id"].is_string()) {
+          *out = ws["id"].get<std::string>();
+          return true;
+        }
+      }
+    }
+  } catch (const std::exception&) {
+  }
+  *err = "the peer has no workspace to work in (register one on it, or name one with "
+         "workspace_id)";
+  return false;
+}
+
+/// The peers this agent knows, as text.
+std::string peer_list_text(const ToolContext& ctx) {
+  const std::vector<PeerConfig> peers = peer_settings(ctx);
+  if (peers.empty()) {
+    return "no peers are configured. Add them to the 'peers:' section of the settings "
+           "(provider.yaml, tea_agent.yaml or the workspace's settings.yaml):\n"
+           "  peers:\n"
+           "    lab-pc:\n"
+           "      url: http://172.16.1.31:8383\n"
+           "      token: <the peer's --api-token>\n"
+           "      workspace: <the workspace id on the peer>   # optional\n"
+           "      description: the projector in room 302        # optional\n"
+           "A peer can also be addressed directly with url=\"http://host:port\".";
+  }
+  std::string out = "peers (" + std::to_string(peers.size()) + "):\n";
+  for (std::size_t i = 0; i < peers.size(); ++i) {
+    const PeerConfig& p = peers[i];
+    out += "- " + p.name + "  " + p.url;
+    out += p.token.empty() ? "  (no token: only the open routes)" : "  (token: yes)";
+    if (!p.workspace.empty()) out += "  workspace: " + p.workspace;
+    if (!p.description.empty()) out += "  - " + p.description;
+    out += "\n";
+  }
+  return out;
+}
+
+ToolResult tool_peer(const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  const std::string action = to_lower(trim(arg_str(args, "action", "list")));
+
+  if (action == "list") {
+    result.output = peer_list_text(ctx);
+    result.ok = true;
+    return result;
+  }
+
+  PeerTarget peer;
+  std::string err;
+  if (!resolve_peer(args, ctx, &peer, &err)) {
+    result.output = "error: " + err;
+    return result;
+  }
+
+  const Settings& st = ctx.config ? ctx.config->settings : Settings();
+  const std::size_t out_limit = static_cast<std::size_t>(st.max_tool_output);
+  const int timeout_s = static_cast<int>(arg_int(args, "timeout_s", 900));
+  const int connect_timeout_ms = 10000;
+
+  if (action == "health" || action == "status" || action == "tools" ||
+      action == "workspaces") {
+    const std::string path = action == "health"    ? "/api/health"
+                             : action == "status" ? "/api/status"
+                             : action == "tools"  ? "/api/tools"
+                                                 : "/api/workspaces";
+    LOG_INFO("toolkit_peer: ", action, " ", peer.url);
+    HttpResponse resp = peer_call(peer, "GET", path, "", connect_timeout_ms, 60000);
+    result.meta["peer"] = peer.name;
+    result.meta["url"] = peer.url;
+    result.meta["status"] = resp.status;
+    if (!resp.ok) {
+      result.output = "error: cannot reach the peer at " + peer.url + ": " +
+                      (resp.error.empty() ? ("HTTP " + std::to_string(resp.status)) : resp.error);
+      return result;
+    }
+    if (resp.status != 200) {
+      result.output = "error: the peer refused the request (HTTP " +
+                      std::to_string(resp.status) + "): " + peer_error_message(resp);
+      return result;
+    }
+    bool truncated = false;
+    result.output = limit_output(resp.body, out_limit, &truncated);
+    result.truncated = truncated;
+    result.ok = true;
+    return result;
+  }
+
+  if (action == "exec") {
+    const std::string command = arg_str(args, "command");
+    if (trim(command).empty()) {
+      result.output = "error: 'command' is required";
+      return result;
+    }
+    nlohmann::json payload = nlohmann::json::object();
+    payload["command"] = command;
+    payload["timeout_ms"] = static_cast<long long>(timeout_s) * 1000;
+    const std::string cwd = arg_str(args, "cwd");
+    if (!cwd.empty()) payload["cwd"] = cwd;
+    LOG_INFO("toolkit_peer: exec on ", peer.url, ": ", sanitize_for_terminal(command));
+    HttpResponse resp = peer_call(peer, "POST", "/api/exec", dump_json(payload),
+                                   connect_timeout_ms, timeout_s * 1000 + 30000);
+    result.meta["peer"] = peer.name;
+    result.meta["url"] = peer.url;
+    result.meta["status"] = resp.status;
+    if (!resp.ok) {
+      result.output = "error: cannot reach the peer at " + peer.url + ": " +
+                      (resp.error.empty() ? ("HTTP " + std::to_string(resp.status)) : resp.error);
+      return result;
+    }
+    if (resp.status != 200) {
+      result.output = "error: the peer refused the command (HTTP " +
+                      std::to_string(resp.status) + "): " + peer_error_message(resp);
+      return result;
+    }
+    nlohmann::json answer;
+    bool parsed_ok = false;
+    try {
+      answer = nlohmann::json::parse(resp.body);
+      parsed_ok = true;
+    } catch (const std::exception&) {
+    }
+    std::string body = resp.body;
+    if (parsed_ok && answer.contains("output")) {
+      body = answer.value("output", std::string());
+      const int exit_code = answer.value("exit_code", 0);
+      result.ok = answer.value("ok", exit_code == 0);
+      result.meta["exit_code"] = static_cast<long long>(exit_code);
+    }
+    bool truncated = false;
+    result.output = peer_header(peer, "exec") + "\n" + limit_output(body, out_limit, &truncated);
+    result.truncated = truncated;
+    return result;
+  }
+
+  if (action == "stop") {
+    const std::string session_id = arg_str(args, "session_id");
+    if (session_id.empty()) {
+      result.output = "error: 'session_id' is required (the peer's session)";
+      return result;
+    }
+    nlohmann::json payload = nlohmann::json::object();
+    payload["session_id"] = session_id;
+    HttpResponse resp = peer_call(peer, "POST", "/api/chat/stop", dump_json(payload),
+                                   connect_timeout_ms, 30000);
+    if (!resp.ok || resp.status != 200) {
+      result.output = "error: the peer did not stop that turn (HTTP " +
+                      std::to_string(resp.status) + "): " + peer_error_message(resp);
+      return result;
+    }
+    result.output = "asked the peer to stop session " + session_id;
+    result.ok = true;
+    return result;
+  }
+
+  if (action == "chat") {
+    std::string prompt = arg_str(args, "prompt");
+    if (prompt.empty()) prompt = arg_str(args, "message");
+    if (trim(prompt).empty()) {
+      result.output = "error: 'prompt' is required";
+      return result;
+    }
+    std::string workspace_id;
+    if (!peer_workspace(peer, arg_str(args, "workspace_id"), &workspace_id, &err)) {
+      result.output = "error: " + err;
+      return result;
+    }
+    nlohmann::json payload = nlohmann::json::object();
+    payload["message"] = prompt;
+    payload["workspace_id"] = workspace_id;
+    const std::string session_id = arg_str(args, "session_id");
+    if (!session_id.empty()) payload["session_id"] = session_id;
+
+    PeerTurn turn;
+    const std::atomic<bool>* cancel = ctx.cancel;
+    // The peer answers in its own time: a long job on the other machine is
+    // not a reason to give up here. The user can still stop the turn, and
+    // then the transfer is cut.
+    HttpChunkCallback on_chunk = [&turn, cancel](const char* data, std::size_t len) -> bool {
+      if (cancel && cancel->load()) return false;
+      turn.feed(data, len);
+      return true;
+    };
+    LOG_INFO("toolkit_peer: chat on ", peer.url, " (workspace ", workspace_id, ")");
+    HttpResponse resp = peer_call(peer, "POST", "/api/chat", dump_json(payload),
+                                   connect_timeout_ms, timeout_s * 1000, on_chunk,
+                                   [&turn]() { turn.reset(); });
+    result.meta["peer"] = peer.name;
+    result.meta["url"] = peer.url;
+    result.meta["status"] = resp.status;
+    result.meta["workspace_id"] = workspace_id;
+    if (!turn.session_id.empty()) result.meta["session_id"] = turn.session_id;
+
+    if (cancel && cancel->load()) {
+      result.cancelled = true;
+      result.output = "The call to the peer was interrupted. The peer may still be working on "
+                      "it: ask it again with the same session_id to see what it has.";
+      return result;
+    }
+    if (!resp.ok) {
+      result.output = "error: cannot reach the peer at " + peer.url + ": " +
+                      (resp.error.empty() ? ("HTTP " + std::to_string(resp.status)) : resp.error);
+      return result;
+    }
+    // The peer answered with a JSON envelope instead of a stream: that happens
+    // when the turn was queued or refused. Say what it said.
+    if (resp.status != 200 && resp.body.find("data:") == std::string::npos) {
+      result.output = "error: the peer refused the request (HTTP " +
+                      std::to_string(resp.status) + "): " + peer_error_message(resp);
+      return result;
+    }
+    if (!turn.error.empty()) {
+      result.output = "error: the peer's agent failed: " + turn.error;
+      return result;
+    }
+    if (turn.content.empty() && turn.steps.empty() && !turn.done) {
+      result.output = "error: the peer answered nothing (HTTP " + std::to_string(resp.status) +
+                      "). It may have queued the message instead of running it.";
+      return result;
+    }
+
+    std::string out = peer_header(peer, "chat") + " (" + std::to_string(resp.elapsed_ms) +
+                       "ms, " + std::to_string(turn.steps.size()) + " tool call(s) on the peer)\n";
+    if (!turn.content.empty()) {
+      out += turn.content + "\n";
+    }
+    if (!turn.steps.empty()) {
+      out += "\n--- what the peer did ---\n";
+      for (std::size_t i = 0; i < turn.steps.size(); ++i) {
+        out += "- " + turn.steps[i] + "\n";
+      }
+    }
+    if (!turn.session_id.empty()) {
+      out += "\n(the peer's session is " + turn.session_id +
+             " - use it to stop the turn or to continue the conversation)";
+    }
+    bool truncated = false;
+    result.output = limit_output(out, out_limit, &truncated);
+    result.truncated = truncated;
+    result.ok = true;
+    return result;
+  }
+
+  result.output = "error: unknown action '" + action +
+                  "' (list, health, status, chat, exec, tools, workspaces, stop)";
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // the MCP tools
 //
 // The tools of an MCP server are published as `mcp__<server>__<tool>`, so the
@@ -2123,6 +2673,64 @@ ToolRegistry::ToolRegistry() {
     })JSON");
     defs_.push_back(def);
   }
+  {
+    ToolDef def;
+    def.name = "toolkit_peer";
+    def.description =
+        "Drive another tea_a2 (a peer) on another machine. Actions: list (the peers this "
+        "installation knows), health (is it up, which version), status (its snapshot), "
+        "chat (ask ITS agent to do something - it thinks with its own provider, its own "
+        "tools and its own context, and the answer comes back with a trace of what it did), "
+        "exec (run one command there, no model involved), tools (what that machine can do), "
+        "workspaces (its workspaces) and stop (end a turn running there). Address a peer by "
+        "name (peer=\"lab-pc\") or by address (url=\"http://172.16.1.31:8383\"); the secret "
+        "stays in the settings, never in the call. "
+        "级联：让另一台机器上的 tea_a2 干活。";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["list", "health", "status", "chat", "exec", "tools", "workspaces", "stop"],
+          "description": "What to do."
+        },
+        "peer": {
+          "type": "string",
+          "description": "The name of a configured peer (see the peers: section of the settings)."
+        },
+        "url": {
+          "type": "string",
+          "description": "The address of a peer that is not configured, e.g. http://172.16.1.31:8383. It gets no secret unless a configured peer has the same address."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "What the peer's own agent should do (action=chat). It answers in its own words."
+        },
+        "command": {
+          "type": "string",
+          "description": "The command to run on the peer (action=exec). No model is involved."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "The directory to run the command in (action=exec)."
+        },
+        "workspace_id": {
+          "type": "string",
+          "description": "Which workspace on the peer the chat runs in. Default: the one the settings name, else the peer's first."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "The peer's session: continue a conversation in it (action=chat), or end the turn running in it (action=stop)."
+        },
+        "timeout_s": {
+          "type": "integer",
+          "description": "How long to wait for the peer. Default 900 seconds."
+        }
+      },
+      "required": ["action"]
+    })JSON");
+    defs_.push_back(def);
+  }
 }
 
 nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider,
@@ -2175,6 +2783,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     else if (name == "toolkit_search") result = tool_search(arguments, ctx);
     else if (name == "toolkit_fetch") result = tool_fetch(arguments, ctx);
     else if (name == "toolkit_fleet") result = tool_fleet(arguments, ctx);
+    else if (name == "toolkit_peer") result = tool_peer(arguments, ctx);
     else if (mcp_ && starts_with(name, "mcp__")) result = tool_mcp(name, arguments, ctx);
     else {
       result.ok = false;

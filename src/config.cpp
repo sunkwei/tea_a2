@@ -207,7 +207,93 @@ void parse_mcp_document(const YAML::Node& root, McpConfig* out,
   }
 }
 
-void apply_settings(Settings& s, const YAML::Node& node) {
+/// The `peers:` list: the other tea_a2 instances this agent may drive.
+///
+/// Two spellings, because both are natural:
+///
+///   peers:
+///     - name: lab-pc
+///       url: http://172.16.1.31:8383
+///       token: <the peer's --api-token>
+///
+///   peers:
+///     lab-pc:
+///       url: http://172.16.1.31:8383
+///
+/// A peer that cannot be reached is dropped with a warning: a peer the model
+/// would only find out about by calling it is worse than no peer at all.
+void parse_peers(const YAML::Node& node, std::vector<PeerConfig>* out,
+                 std::vector<std::string>* warnings) {
+  if (!node || !out) return;
+  std::vector<PeerConfig> found;
+  if (node.IsSequence()) {
+    for (std::size_t i = 0; i < node.size(); ++i) {
+      const YAML::Node spec = node[i];
+      if (!spec.IsMap()) continue;
+      PeerConfig peer;
+      peer.name = trim(ystr(spec, "name"));
+      peer.url = trim(ystr(spec, "url"));
+      peer.token = trim(ystr(spec, "token"));
+      peer.workspace = trim(ystr(spec, "workspace"));
+      peer.description = trim(ystr(spec, "description"));
+      found.push_back(peer);
+    }
+  } else if (node.IsMap()) {
+    for (YAML::const_iterator it = node.begin(); it != node.end(); ++it) {
+      const YAML::Node spec = it->second;
+      if (!spec.IsMap()) continue;
+      PeerConfig peer;
+      try {
+        peer.name = trim(it->first.as<std::string>());
+      } catch (const std::exception&) {
+      }
+      peer.url = trim(ystr(spec, "url"));
+      peer.token = trim(ystr(spec, "token"));
+      peer.workspace = trim(ystr(spec, "workspace"));
+      peer.description = trim(ystr(spec, "description"));
+      found.push_back(peer);
+    }
+  } else {
+    if (warnings) {
+      warnings->push_back("the 'peers:' setting must be a list or a mapping of peers");
+    }
+    return;
+  }
+
+  out->clear();
+  for (std::size_t i = 0; i < found.size(); ++i) {
+    PeerConfig peer = found[i];
+    if (peer.name.empty()) {
+      if (warnings) warnings->push_back("a peer without a 'name:' cannot be addressed; dropped");
+      continue;
+    }
+    peer.url = normalize_base_url(peer.url);
+    if (peer.url.empty()) {
+      if (warnings) {
+        warnings->push_back("the peer '" + peer.name +
+                            "' has no usable 'url:' (an http:// or https:// address); dropped");
+      }
+      continue;
+    }
+    bool duplicate = false;
+    for (std::size_t k = 0; k < out->size(); ++k) {
+      if ((*out)[k].name == peer.name) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) {
+      if (warnings) {
+        warnings->push_back("two peers are called '" + peer.name + "'; the second one is dropped");
+      }
+      continue;
+    }
+    out->push_back(peer);
+  }
+}
+
+void apply_settings(Settings& s, const YAML::Node& node,
+                   std::vector<std::string>* warnings) {
   if (!node || !node.IsMap()) return;
   if (yhas(node, "max_iterations")) s.max_iterations = static_cast<int>(yint(node, "max_iterations", s.max_iterations));
   if (yhas(node, "max_tool_output")) s.max_tool_output = yint(node, "max_tool_output", s.max_tool_output);
@@ -236,6 +322,7 @@ void apply_settings(Settings& s, const YAML::Node& node) {
         static_cast<int>(yint(node, "web_tool_max_calls_per_turn", s.web_tool_max_calls_per_turn));
   if (yhas(node, "fleet_url")) s.fleet_url = ystr(node, "fleet_url", s.fleet_url);
   if (yhas(node, "fleet_token")) s.fleet_token = ystr(node, "fleet_token", s.fleet_token);
+  if (yhas(node, "peers")) parse_peers(node["peers"], &s.peers, warnings);
   if (yhas(node, "allow_outside_workspace"))
     s.allow_outside_workspace = ybool(node, "allow_outside_workspace", s.allow_outside_workspace);
   if (yhas(node, "stream")) s.stream = ybool(node, "stream", s.stream);
@@ -327,7 +414,7 @@ bool apply_settings_yaml(Settings* settings, const std::string& yaml_path, std::
   // Accept both a nested `settings:` block (same shape as tea_agent.yaml) and a
   // flat file whose keys are the settings themselves.
   const YAML::Node block = root["settings"] ? root["settings"] : root;
-  apply_settings(*settings, block);
+  apply_settings(*settings, block, nullptr);
   return true;
 }
 
@@ -750,7 +837,7 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
         "the 'mcp:' section of provider.yaml is not read any more; move it to " + mcp_path);
   }
 
-  apply_settings(settings, root["settings"]);
+  apply_settings(settings, root["settings"], &warnings);
 
   // Optional C++-specific overrides that do not belong in provider.yaml.
   extra_path = path_join(tea_home, "tea_agent.yaml");
@@ -758,7 +845,7 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
     try {
       YAML::Node extra = YAML::LoadFile(extra_path);
       if (extra && extra.IsMap()) {
-        apply_settings(settings, extra["settings"]);
+        apply_settings(settings, extra["settings"], &warnings);
         if (extra["server"] && extra["server"].IsMap()) {
           // Reserved for future use; server flags come from the command line.
         }

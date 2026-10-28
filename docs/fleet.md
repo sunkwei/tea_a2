@@ -8,6 +8,12 @@
 
 ---
 
+> **只管一台？用级联。** 机群要装 Python 侧的机群服务、要维护台账；要是只是想让
+> 「另一台设备上的 tea_a2 干活」，用 [`toolkit_peer`](peer.md)：配一个 `peers:` 段，
+> 工具直接说 HTTP，不用装任何东西。两者可以叠着用。
+
+---
+
 ## 一句话的架构
 
 ```
@@ -401,4 +407,4 @@ settings:
 
 ---
 
-← 回到 [README](../README.md) · 接口字段见 [api.md](api.md) · 源文件见 [source.md](source.md)
+← 回到 [README](../README.md) · 接口字段见 [api.md](api.md) · 源文件见 [source.md](source.md) · 只管一台见 [peer.md](peer.md)

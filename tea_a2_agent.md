@@ -30,7 +30,8 @@
    用 LF 片段去匹配 CRLF 文件会 0 命中。
 3. **版本号只有一处真相**：`src/version.cpp` 里的 `kVersionString`（CMake 用正则从那里解析）。
    改版本 = 改它 + `docs/api.md`、`docs/build.md`、`docs/deploy.md`、`docs/source.md`、
-   `docs/tea_a2_manual.md` 这 5 个文件里引用版本的地方。commit hash 不在源码里也不在二进制里，
+   `docs/tea_a2_manual.md`、`docs/mcp.md` 这 6 个文件里引用版本的地方（CMakeLists.txt 错误
+   提示里的字面量也要一起改）。commit hash 不在源码里也不在二进制里，
    它是构建期产物 `tea_agent.buildinfo`（放在二进制旁边）。
 4. **一个端口一个实例**。Windows 上 httplib 设了 `SO_REUSEADDR`，第二个实例会**静默**绑到同一个
    端口，流量被两个实例分走——浏览器可能连到错的那个，症状是「写不进某个工作区」。
@@ -578,6 +579,49 @@ cp build-win64/bin/tea_agent.exe .
 - 升级**必须带回滚命令**；没有回滚的升级等于没有回滚。
 - 采集**一台设备不回答只是一行错误**，不能拖垮其他 39 台（并发 + 逐台兜住异常）。
 - 审计日志**只追加**，一行一个 JSON 对象。
+
+---
+
+## 级联（0.16.0）：一台 tea_a2 控制另一台
+
+**不用新协议。** HTTP/SSE 本来就是总线（`POST /api/chat` = 一台 agent 的完整入口），
+缺的是「对端」这一层：名字、地址、令牌、工具、轨迹。
+
+### 三样东西
+
+| 东西 | 在哪 | 干什么 |
+| --- | --- | --- |
+| `peers:` 段 | settings（`provider.yaml` / `tea_agent.yaml` / 工作区 `settings.yaml`） | 对端的 name/url/token/workspace/description |
+| `toolkit_peer` | `src/tools.cpp` | `list/health/status/chat/exec/tools/workspaces/stop` |
+| `/api/peer/*` | `src/server.cpp`（pre-routing handler） | `/api/<路由>` 的**令牌版镜像**（白名单七条） |
+
+### 为什么是镜像（而不是新路由）
+
+对端已经有一整套路由了；再造一套只会漂。镜像 = 同一份实现、另一把锁：
+`/api/peer/chat` → 改写 `req.path` 成 `/api/chat` → 走原来那个 handler。
+**没配 `--api-token` 时 `/api/peer/*` 根本不存在（404）**，默认安装不多出攻击面。
+
+### 坑（写的时候踩到的）
+
+- **镜像路径别拼错**：`"/api/peer" + "/api/chat"` = `/api/peer/api/chat`（白名单不认 →
+  404 → 工具退回普通路由 → 「级联没走令牌通道」但**看起来一切正常**）。用
+  `peer_channel_path()`：剥掉 `/api` 前缀再拼 `/api/peer/`。
+- **SSE 解析器每次尝试前必须 reset**。上一次尝试（404、被拒）留下的半行会粘到下一帧
+  前面，那一帧的整行就不以 `data:` 开头 → **被静默丢掉**。症状：答案少了一帧、
+  工具结果里没有 session id，而日志里那帧明明到过。
+- **cpp-httplib 的 pre-routing handler 拿到的是 `const Request&`**，要改 `req.path` 得
+  `const_cast`（那个对象其实不是 const：`Server::routing(Request&, …)` 传的是引用）。
+- **写 mock 时对端和控制端不能共用类级状态**。共用 `seen` 计数 → 对端以为自己在第二轮
+  → 直接答话不调工具 → 看起来「对端没有自己的脑子」，其实是你 mock 写错了。
+- **令牌只从配置取**。模型给的是**名字**（或一个地址）；地址和某个已配置对端相同时才借用
+  那一台的令牌。模型自己编的地址拿不到令牌——这是有意的。
+
+### 约定
+
+- **确定性的事用 `exec`，别用 `chat`**：`chat` 会烧对端的模型，`exec` 不会。
+- **结果里必须带对端的轨迹**（它调了什么工具、哪一步失败）+ 对端的 session id。
+  没有这些，上层模型只能相信对端的转述。
+- **旧版本对端要能连**：对端没有镜像时 404 → 退回普通路由（工具里自动做，不要让用户配）。
 
 ---
 

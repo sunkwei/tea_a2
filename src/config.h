@@ -125,6 +125,28 @@ struct ProviderInfo {
   const ModelInfo* find_model(const std::string& name) const;
 };
 
+/// Another tea_a2 that this agent may drive - the cascade.
+///
+/// A peer is not a provider and not a fleet service: it is a *machine* with
+/// an agent of its own, somewhere else on the network. It gets a section of
+/// its own (`peers:` in the settings) because it carries its own secret (the
+/// peer's API token) and because it is a different kind of thing to talk to.
+struct PeerConfig {
+  /// The name the model uses to address this peer ("lab-pc").
+  std::string name;
+  /// Base URL of the peer, e.g. "http://172.16.1.31:8383". No trailing slash.
+  std::string url;
+  /// The peer's API token (what it was started with as --api-token). Empty
+  /// => the peer has no fleet channel; only its open routes can be used.
+  std::string token;
+  /// Which workspace on the peer a chat runs in. Empty => the peer is asked
+  /// (it reports its first workspace).
+  std::string workspace;
+  /// What this peer is. The model sees it, so it should say something useful
+  /// ("the projector in room 302").
+  std::string description;
+};
+
 struct Settings {
   /// Tool-calling round trips per user message. **0 = unlimited**: the turn
   /// runs until the model answers with text instead of a tool call (or until
@@ -165,6 +187,10 @@ struct Settings {
   /// Bearer token for that service. Kept next to the URL so one place holds
   /// everything the fleet channel needs.
   std::string fleet_token;
+  /// The other tea_a2 instances this agent may drive (the cascade). A peer
+  /// has its own brain: asking it a question runs *its* agent loop, with its
+  /// provider and its context.
+  std::vector<PeerConfig> peers;
   bool allow_outside_workspace = false;
   /// `--allow-outside-workspace` was given on the command line. Not a YAML key:
   /// it is a floor applied *after* every settings file is layered, so a workspace

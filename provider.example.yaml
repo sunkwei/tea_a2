@@ -285,3 +285,13 @@ settings:
   overload_backoff_ms: 60000       # the first wait; every further one doubles it
   overload_max_backoff_ms: 300000  # cap for a single wait
   overload_max_total_ms: 600000    # cap for all the waits of one request
+  # Peers: the other tea_a2 instances this agent may drive (the cascade).
+  # The tool is toolkit_peer; the peer answers with ITS own agent, provider and
+  # context. The token is the peer's --api-token and stays here - it never
+  # reaches a prompt. See docs/peer.md.
+  # peers:
+  #   study-pc:
+  #     url: http://172.16.1.31:8383
+  #     token: <the peer's --api-token>
+  #     workspace: ws_9f2c        # optional: which workspace on the peer
+  #     description: the study room machine   # optional: the model sees this

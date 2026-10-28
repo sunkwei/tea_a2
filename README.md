@@ -45,6 +45,7 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 | --- | --- |
 | **主控/被控** | 设备上跑 `tea_a2`，上层 agent (也可以是级联的 tea_a2) 通过 `/api/chat` 下发任务，用 SSE 收结果和工具执行过程 |
 | **独立运行** | 设备或开发机上直接打开内置 Web UI，人机对话 |
+| **级联** | 一台 `tea_a2` 直接控制另一台（`toolkit_peer`）：问它自己的 agent、让它跑命令、看它的状态。见 [级联](docs/peer.md) |
 
 设计上的取舍都是为「一个文件丢上设备就能跑」：
 
@@ -63,11 +64,12 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 
 **这个程序没有任何认证机制。** `toolkit_exec` 可以执行任意系统命令，所以：
 
-- 机群通道（`--api-token` 打开的 `/api/exec`）是**唯一**带令牌的部分，而且**默认关闭**：
-  不配 `--api-token` 时这个路由根本不存在（404）。但只要用了 `--host 0.0.0.0`，
-  设备上的其它 API（`/api/chat` 之类）也一起暴露了——`toolkit_exec` 能执行任意命令。
+- 带令牌的通道（`--api-token` 打开的 `/api/exec`、以及给「另一台 tea_a2」用的
+  `/api/peer/*`）是**仅有的**带令牌的部分，而且**默认关闭**：不配 `--api-token` 时
+  这些路由根本不存在（404）。但只要用了 `--host 0.0.0.0`，设备上的其它 API
+  （`/api/chat` 之类）也一起暴露了——`toolkit_exec` 能执行任意命令。
   要么把设备放在受控的 VLAN 里，要么在前面加一层反向代理（nginx + token / mTLS）。
-  见 [多级协同与机群运维](docs/fleet.md)。
+  见 [多级协同与机群运维](docs/fleet.md) 和 [级联](docs/peer.md)。
 
 - 默认绑定 `127.0.0.1`，只允许本机访问——请保持这个默认值。
 - 用 `--host 0.0.0.0` 或放到公网之前，必须自己在前面加一层认证（反向代理 + mTLS / token 校验 /
@@ -328,6 +330,7 @@ servers:
 | [部署](docs/deploy.md) | 嵌入式设备、静态单文件、TLS 证书、Windows 自启、systemd 单元 |
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |
 | [多级协同与机群运维](docs/fleet.md) | **一台服务器管 40 台设备**：台账、每日采集、灰度升级、审计、让设备自己的 a2 判断 |
+| [级联：一台 a2 控制另一台](docs/peer.md) | **让一台 tea_a2 控制另一台**：`peers:` 配置、`toolkit_peer`、机器对机器的通道 `/api/peer/*`、安全边界 |
 | [内置工具与上下文](docs/tools.md) | 每个工具、文件访问范围、上下文预算、轨迹 |
 | [MCP](docs/mcp.md) | **把别的程序接进来当工具**：配置、接口、和 Windows 上的 uiautomation-mcp 联调 |
 | [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、system prompt、销毁、导出 |

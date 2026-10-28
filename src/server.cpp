@@ -1281,6 +1281,60 @@ void ApiServer::Impl::install_routes() {
     }
   });
 
+  // ---- the peer channel ---------------------------------------------------
+  //
+  // /api/peer/<route> is the token-guarded mirror of /api/<route>.
+  //
+  // Why a mirror at all: the fleet channel already guards /api/exec with the
+  // token, but the route a cascade really needs - the agent loop itself -
+  // was open, and a machine-to-machine caller had no route of its own. The
+  // mirror gives it one: a route that only exists when the operator asked
+  // for it (a token is configured) and that only answers a caller that has
+  // the secret.
+  //
+  // The mirror is a whitelist. Everything else under /api/peer/ is a 404 that
+  // says so - the peer channel is not a second copy of the whole API.
+  svr.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+    const std::string prefix = "/api/peer/";
+    if (req.path.size() <= prefix.size() ||
+        req.path.compare(0, prefix.size(), prefix) != 0) {
+      return httplib::Server::HandlerResponse::Unhandled;
+    }
+    if (api_token.empty()) {
+      // No token => no peer channel. 404, not 403: the route is not part of
+      // this build's surface at all.
+      send_error(res, 404, "not_found",
+                 "this device has no peer channel (start it with --api-token <token>)");
+      return httplib::Server::HandlerResponse::Handled;
+    }
+    if (!secret_equals(request_token(req), api_token)) {
+      send_error(res, 401, "unauthorized",
+                 "the peer channel needs the API token (Authorization: Bearer <token>)");
+      return httplib::Server::HandlerResponse::Handled;
+    }
+    const std::string tail = req.path.substr(prefix.size());
+    static const char* kMirrored[] = {"chat", "chat/stop", "exec",  "status",
+                                      "health", "tools", "workspaces"};
+    bool known = false;
+    for (std::size_t i = 0; i < sizeof(kMirrored) / sizeof(kMirrored[0]); ++i) {
+      if (tail == kMirrored[i]) {
+        known = true;
+        break;
+      }
+    }
+    if (!known) {
+      send_error(res, 404, "not_found", "the peer channel has no route '" + tail + "'");
+      return httplib::Server::HandlerResponse::Handled;
+    }
+    // cpp-httplib hands the pre-routing handler a *const* request, but the
+    // object comes from the request being served (it is not const), and the
+    // path is what the router matches on. Rewriting it here is what lets the
+    // mirror work without touching a single route registration.
+    httplib::Request& routed = const_cast<httplib::Request&>(req);
+    routed.path = "/api/" + tail;
+    return httplib::Server::HandlerResponse::Unhandled;
+  });
+
   // ---- CORS preflight ----------------------------------------------------
   svr.Options(R"(/.*)", [](const httplib::Request&, httplib::Response& res) {
     res.status = 204;

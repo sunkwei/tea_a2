@@ -377,6 +377,13 @@ std::string human_size(uint64_t bytes) {
   return buf;
 }
 
+std::string normalize_base_url(const std::string& url) {
+  std::string base = trim(url);
+  while (!base.empty() && base.back() == '/') base.pop_back();
+  if (base.rfind("http://", 0) != 0 && base.rfind("https://", 0) != 0) return "";
+  return base;
+}
+
 std::string mask_secret(const std::string& secret) {
   if (secret.empty()) return "";
   if (secret.size() <= 8) return std::string(secret.size(), '*');

@@ -14,6 +14,7 @@ README 讲的是「这是什么、为什么这么设计」；[HTTP 接口](api.m
 | 用 curl 让 agent 干活 | [2. agent 的 HTTP 命令](#2-agent-的-http-命令) |
 | 排队、查进度、取消、重做 | [3. 任务队列的命令](#3-任务队列的命令) |
 | 用麦克风说话（语音输入） | [2.12](#212-语音输入) |
+| 让这台机器去控制另一台 tea_a2（级联） | [2.13](#213-级联控制另一台-tea_a2) |
 | 定时做一件活儿（`not_before`、微信 `/at`） | [3.2.1](#321-定时做一件活儿) · [4](#4-聊天端的命令) |
 | 在微信 / Telegram 里排队 | [4. 聊天端的命令](#4-聊天端的命令) |
 | 写脚本调 agent | [5. 给脚本用的客户端](#5-给脚本用的客户端) |
@@ -199,7 +200,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.15.1","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.16.0","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -577,6 +578,41 @@ curl -s -X POST $B/api/mcp/servers/uiautomation/call \
 服务器是**按需启动**的：第一次用到它的工具时才拉起来。连不上的服务器在
 `/api/mcp/servers` 里写着原因（`error`），别的服务器照常工作。细节见
 [配置](config.md#mcp-服务器mcp-yaml)。
+
+### 2.13 级联：控制另一台 tea_a2
+
+被控端加一个令牌（`--api-token`）就多出一组**机器对机器**的路由：
+`/api/peer/<路由>` 是 `/api/<路由>` 的令牌版镜像。没配令牌时这些路由**不存在**（404）。
+
+```bash
+# 被控端
+tea_agent --host 0.0.0.0 --port 8383 --api-token "$(cat /etc/tea/peer-token)"
+
+# 控制端：问对端自己的 agent（SSE，边跑边收）
+curl -N -X POST http://peer:8383/api/peer/chat \
+     -H "Authorization: Bearer $PEER_TOKEN" -H "Content-Type: application/json" \
+     -d '{"workspace_id":"ws_9f2c","message":"这台机器现在有什么在跑？"}'
+
+# 让对端跑一条命令（不经过模型）
+curl -s -X POST http://peer:8383/api/peer/exec \
+     -H "Authorization: Bearer $PEER_TOKEN" -H "Content-Type: application/json" \
+     -d '{"command":"uptime","timeout_ms":5000}'
+
+# 对端在不在 / 什么状态 / 有哪些工具 / 哪些工作区
+curl -s -H "Authorization: Bearer $PEER_TOKEN" http://peer:8383/api/peer/health
+curl -s -H "Authorization: Bearer $PEER_TOKEN" http://peer:8383/api/peer/status
+curl -s -H "Authorization: Bearer $PEER_TOKEN" http://peer:8383/api/peer/tools
+curl -s -H "Authorization: Bearer $PEER_TOKEN" http://peer:8383/api/peer/workspaces
+
+# 停掉对端正在跑的一轮
+curl -s -X POST http://peer:8383/api/peer/chat/stop \
+     -H "Authorization: Bearer $PEER_TOKEN" -H "Content-Type: application/json" \
+     -d '{"session_id":"s_xxx"}'
+```
+
+想让**模型**去控制对端（而不是脚本），在 settings 里配 `peers:` 段（名字 + 地址 + 令牌），
+模型就能用 `toolkit_peer` 这个工具（`chat` / `exec` / `status` / …）指名道姓地问对端；
+不配也能用 `url=` 临时指一台地址，但那样没有令牌。细节见 [级联](peer.md)。
 
 ---
 
