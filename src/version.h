@@ -22,7 +22,7 @@
 
 namespace tea {
 
-/// The version this binary was built from, e.g. "0.14.0" (see version.cpp).
+/// The version this binary was built from, e.g. "0.15.0" (see version.cpp).
 const char* version_string();
 
 /// The commit this binary was built from, e.g. "b0575d01c748", with "-dirty"

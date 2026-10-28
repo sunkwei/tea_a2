@@ -53,6 +53,10 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 - **跨平台同一套代码**：路径、文件 I/O、进程、SIGPIPE 都按平台封装，没有 `std::filesystem`。
 - **内置网页终端**：这台机器上的**真实 shell**（Linux 上是 bash、Windows 上是 PowerShell），跑在
   pty / ConPTY 上；浏览器里直接敲命令，**不经过模型**，也不经过 agent 的工具边界。
+- **能接别的程序（MCP）**：`mcp.yaml`（和 provider.yaml 同目录）里列出的 MCP 服务器会被启动
+  起来，它们的工具直接进模型的工具表——比如 Windows 上的
+  [uiautomation-mcp](https://github.com/locomorange/uiautomation-mcp)，让模型真的去操作这台
+  机器上的窗口。
 ## ⚠️ 安全须知
 
 **这个程序由 tea_agent 项目创建 0.1 版本；之后版本由 tea_a2 自己进化完成，模型使用 deepseek-flash/minimax-m3.1-flash**
