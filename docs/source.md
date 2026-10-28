@@ -38,13 +38,14 @@ src/
   version.{h,cpp}           版本号（唯一手改的真相）；commit 在二进制旁边的
                             tea_agent.buildinfo 里，程序启动时读它
 web/                        index.html / tokens.css / app.css / app.js（构建期嵌入）
-provider.example.yaml        provider.yaml 的模板（模型提供方、search/asr 段、settings）
+provider.example.yaml        provider.yaml 的模板（模型提供方、search/asr 段）
+tea_agent.example.yaml         tea_agent.yaml 的模板（设置：输出上限、超时、压缩、peers…）
 mcp.yaml.example            mcp.yaml 的模板（MCP 服务器：程序、参数、环境变量）
 docs/                       文档：构建、部署、接口、工具、配置、队列、源码、测试
 tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/（宿主工具子项目）、mock_*.mjs、
                             merge_work_area.py（把一份 .tea_agent_run 合并进另一份）
 tests/mock_mcp_server.py    一个假的 MCP 服务器（stdio 上的 JSON-RPC），用来测 MCP 客户端
-tests/e2e.ps1              端到端测试（155 项）；tests/sse_probe.mjs 严格流客户端
+tests/e2e.ps1              端到端测试（157 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
 sched/task_server.py        任务服务（Python，可选）：任务队列 + 额度闸门 + 事件流

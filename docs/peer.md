@@ -53,11 +53,12 @@
 
 ## 二、配置：对端是谁
 
-`peers:` 放在 **settings 段**里（`provider.yaml`、`tea_agent.yaml` 或工作区的
-`settings.yaml` 都行，规则和其它设置一样：后者盖前者）。
+`peers:` 放在 **settings 段**里——也就是 `<tea_home>/tea_agent.yaml`（机器级）或工作区的
+`.tea_agent_run/settings.yaml`（按工作区），规则和其它设置一样：后者盖前者。
+（`provider.yaml` 的 `settings:` 段不再被读，所以别把它写在那里。）
 
 ```yaml
-# ~/.tea_agent/provider.yaml
+# ~/.tea_agent/tea_agent.yaml
 settings:
   peers:
     study-pc:                              # 名字：模型用它来指这台机器

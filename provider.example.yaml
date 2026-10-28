@@ -255,43 +255,16 @@ providers:
 # localhost). Opening the UI over http://<LAN-IP> therefore shows no
 # microphone button - that is the browser's rule, not this program's.
 
-settings:
-  max_iterations: 0            # tool-calling round trips per user message; 0 = no limit
-                               # (the turn runs until the model answers with text; the
-                               #  same-output-three-times guard is the only other stop)
-  max_tool_output: 131072      # bytes of tool output fed back to the model
-  keep_turns: 10               # hard floor on how many turns stay in context
-  command_timeout_ms: 180000   # default toolkit_exec timeout
-  stream: true
-  # Context management (see README). Compaction folds old turns into a summary
-  # instead of dropping them; these can also be set per workspace in
-  # <workspace>/.tea_agent_run/settings.yaml.
-  enable_compaction: true
-  compaction_keep_recent: 4
-  compaction_summary_max_tokens: 800
-  tool_output_max_lines: 400
-  # Web tools (toolkit_search/toolkit_fetch) get their own bounded budget; they
-  # must not inherit http_read_timeout_ms (600s, meant for LLM streaming), or a
-  # single slow endpoint stalls a turn for minutes and cannot be cancelled.
-  web_tool_connect_timeout_ms: 10000
-  web_tool_timeout_ms: 60000
-  web_tool_max_calls_per_turn: 10   # billed calls per user turn
-  max_assistant_content: 131072
-  # A provider that answers "I am busy right now" (HTTP 529, MiniMax's top-of-
-  # the-hour rush) says it recovers in 1-5 minutes: the request has to wait,
-  # not fail. These waits are minutes long and have their own budget; network
-  # hiccups keep their own (fast) retries.
-  overload_retries: 3              # retries for a busy provider (0 = do not wait)
-  overload_backoff_ms: 60000       # the first wait; every further one doubles it
-  overload_max_backoff_ms: 300000  # cap for a single wait
-  overload_max_total_ms: 600000    # cap for all the waits of one request
-  # Peers: the other tea_a2 instances this agent may drive (the cascade).
-  # The tool is toolkit_peer; the peer answers with ITS own agent, provider and
-  # context. The token is the peer's --api-token and stays here - it never
-  # reaches a prompt. See docs/peer.md.
-  # peers:
-  #   study-pc:
-  #     url: http://172.16.1.31:8383
-  #     token: <the peer's --api-token>
-  #     workspace: ws_9f2c        # optional: which workspace on the peer
-  #     description: the study room machine   # optional: the model sees this
+# The settings do NOT live in this file.
+#
+# provider.yaml says **who to talk to**: the providers, the independent search
+# provider (`search:`), the speech-to-text service (`asr:`). How the agent
+# works is configured in two other files:
+#
+#   <tea_home>/tea_agent.yaml                  machine level (all workspaces)
+#   <workspace>/.tea_agent_run/settings.yaml   per workspace (wins)
+#
+# A `settings:` block here is not read any more - it came from the Python
+# implementation, where this file was both the provider list and the settings.
+# The startup log says so if it finds one. See tea_agent.example.yaml for the
+# settings and what each one does.

@@ -66,7 +66,6 @@ struct ContextStats {
 struct TurnResult {
   bool ok = false;
   bool cancelled = false;
-  bool hit_iteration_limit = false;
   /// The model gave the same output three times in a row (it is going in
   /// circles); the turn was stopped and the chat says so.
   bool repeated_output = false;

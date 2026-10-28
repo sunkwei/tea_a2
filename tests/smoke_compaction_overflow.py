@@ -331,11 +331,14 @@ providers:
         max_output_tokens: 1000
         supports_tools: true
         supports_reasoning: true
-settings:
-  max_iterations: 12
-  max_tool_output: 200000
-  stream: true
 """ % (mock_port, mock_port))
+
+    # provider.yaml says who to talk to; the settings live in their own file,
+    # in the tea home next to it.
+    home_dir = os.path.join(tmp, "home")
+    os.makedirs(home_dir)
+    with open(os.path.join(home_dir, "tea_agent.yaml"), "w", encoding="utf-8") as f:
+        f.write("settings:\n  max_tool_output: 200000\n  stream: true\n")
 
     port = free_port()
     proc = subprocess.Popen([

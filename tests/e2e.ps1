@@ -38,6 +38,7 @@ $homeDir = Join-Path $scratch 'home'
 $wsDir = Join-Path $scratch 'workspace'
 New-Item -ItemType Directory -Force -Path $homeDir, $wsDir | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'fixtures\provider.yaml') (Join-Path $homeDir 'provider.yaml')
+Copy-Item (Join-Path $PSScriptRoot 'fixtures\tea_agent.yaml') (Join-Path $homeDir 'tea_agent.yaml')
 
 $failures = @()
 $checks = 0

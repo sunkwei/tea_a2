@@ -295,7 +295,6 @@ void parse_peers(const YAML::Node& node, std::vector<PeerConfig>* out,
 void apply_settings(Settings& s, const YAML::Node& node,
                    std::vector<std::string>* warnings) {
   if (!node || !node.IsMap()) return;
-  if (yhas(node, "max_iterations")) s.max_iterations = static_cast<int>(yint(node, "max_iterations", s.max_iterations));
   if (yhas(node, "max_tool_output")) s.max_tool_output = yint(node, "max_tool_output", s.max_tool_output);
   if (yhas(node, "max_assistant_content"))
     s.max_assistant_content = yint(node, "max_assistant_content", s.max_assistant_content);
@@ -378,8 +377,6 @@ void apply_settings(Settings& s, const YAML::Node& node,
   if (s.compaction_retain_ratio >= s.compaction_trigger_ratio)
     s.compaction_retain_ratio = s.compaction_trigger_ratio / 2;
   if (s.compaction_retries < 0) s.compaction_retries = 0;
-  // 0 means "no limit" (the default); a negative number is nonsense -> 0.
-  if (s.max_iterations < 0) s.max_iterations = 0;
   if (s.command_timeout_ms < 1000) s.command_timeout_ms = 1000;
   if (s.web_tool_connect_timeout_ms < 1000) s.web_tool_connect_timeout_ms = 1000;
   if (s.web_tool_timeout_ms < 1000) s.web_tool_timeout_ms = 1000;
@@ -837,7 +834,17 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
         "the 'mcp:' section of provider.yaml is not read any more; move it to " + mcp_path);
   }
 
-  apply_settings(settings, root["settings"], &warnings);
+  // provider.yaml says **who to talk to**, not how the agent works. Its
+  // `settings:` block is not read any more: the settings live in
+  // <tea_home>/tea_agent.yaml (machine level) and in a workspace's
+  // <run_dir>/settings.yaml (per workspace). A file that still carries one
+  // must not look like it works.
+  if (root["settings"]) {
+    warnings.push_back(
+        "the 'settings:' block of provider.yaml is not read any more; put it in " +
+        path_join(tea_home, "tea_agent.yaml") +
+        " (machine level) or in the workspace's .tea_agent_run/settings.yaml (per workspace)");
+  }
 
   // Optional C++-specific overrides that do not belong in provider.yaml.
   extra_path = path_join(tea_home, "tea_agent.yaml");
@@ -874,25 +881,10 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
     active_model = first ? first->primary_model() : std::string();
   }
   if (root["roles"]) {
-    std::string ignored;
-    const YAML::Node roles_root = root["roles"];
-    if (roles_root.IsMap()) {
-      for (auto it = roles_root.begin(); it != roles_root.end(); ++it) {
-        std::string role;
-        try {
-          role = it->first.as<std::string>();
-        } catch (const std::exception&) {
-          continue;
-        }
-        if (!ignored.empty()) ignored += ", ";
-        ignored += role;
-      }
-    }
     warnings.push_back(
-        "the 'roles:' block is ignored (found: " + (ignored.empty() ? "main" : ignored) +
-        "). The default is the FIRST provider in this file and the FIRST model in its "
-        "'models:' map; move them up, or pass --provider/--model. Roles came from the Python "
-        "implementation and never mapped onto anything here.");
+        "the 'roles:' block is ignored. The default is the FIRST provider in this file and "
+        "the FIRST model in its 'models:' map; move them up, or pass --provider/--model. "
+        "Roles came from the Python implementation and never mapped onto anything here.");
   }
   if (!set_active(active_provider, active_model, nullptr)) {
     if (provider_order.empty()) {

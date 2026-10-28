@@ -1901,7 +1901,6 @@ void ApiServer::Impl::install_routes() {
     j["search_provider"] = search_provider;
 
     nlohmann::json settings = nlohmann::json::object();
-    settings["max_iterations"] = config->settings.max_iterations;
     settings["max_tool_output"] = config->settings.max_tool_output;
     settings["command_timeout_ms"] = config->settings.command_timeout_ms;
     settings["allow_outside_workspace"] = config->settings.allow_outside_workspace;

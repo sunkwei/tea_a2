@@ -1,0 +1,13 @@
+# The C++-specific settings, next to provider.yaml.
+#
+# provider.yaml says **who to talk to** (the providers, the search provider,
+# the asr service); this file says **how the agent works**. The same file
+# exists in every tea home (<tea_home>/tea_agent.yaml), and a workspace can
+# override it in .tea_agent_run/settings.yaml.
+#
+# The `settings:` block of provider.yaml is NOT read: it belonged to the Python
+# implementation, where the file was both the provider list and the settings.
+settings:
+  max_tool_output: 65536
+  command_timeout_ms: 30000
+  stream: true

@@ -225,7 +225,7 @@ providers:
         max_context_tokens: 1024
 
 settings:
-  max_iterations: 42
+  max_tool_output: 4242
 """
 
 
@@ -382,7 +382,7 @@ def main():
         check("the comment survived", "# a comment that has to survive the update" in after,
               after)
         check("the other providers survived", "ollama:" in after and "boom:" in after, after)
-        check("the settings block survived", "max_iterations: 42" in after, after)
+        check("the settings block survived", "max_tool_output: 4242" in after, after)
         check("the key survived", "sk-acme" in after, after)
         check("the model order is kept (the first one is the default)",
               after.index("gpt-4o:") < after.index("acme-mini:") < after.index("acme-vl:"),

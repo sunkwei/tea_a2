@@ -344,7 +344,7 @@ const CANNED = {
       models: ['mock-model'],
       name: 'mock',
     }],
-    settings: { max_iterations: 8, max_tool_output: 65536 },
+    settings: { max_tool_output: 65536 },
     warnings: [],
   },
   '/api/tools': {

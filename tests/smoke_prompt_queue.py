@@ -350,9 +350,6 @@ providers:
       stop-model:
         max_context_tokens: 32768
         max_output_tokens: 4096
-settings:
-  stream: true
-  max_iterations: 8
 """
             % (mock_port, mock_port, mock_port)
         )

@@ -65,12 +65,3 @@ providers:
         max_output_tokens: 4096
         supports_tools: true
         supports_reasoning: true
-roles:
-  main:
-    provider: mock
-    model: mock-model
-settings:
-  max_iterations: 8
-  max_tool_output: 65536
-  command_timeout_ms: 30000
-  stream: true

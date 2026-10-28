@@ -614,7 +614,7 @@ def test_advertisement(exe, tmp):
             f.write("providers:\n  mock:\n    api_url: http://127.0.0.1:%d/v1\n"
                     "    api_key: sk-test\n    default_model: mock-model\n"
                     "    models:\n      - id: mock-model\n"
-                    "provider_order: [mock]\nsettings:\n  max_iterations: 1\n" % mock_port)
+                    "provider_order: [mock]\n" % mock_port)
         env = dict(os.environ)
         env["TEA_AGENT_HOME"] = home
         if fleet_url:
@@ -736,7 +736,7 @@ def test_server_drives_the_fleet(exe, tmp):
             f.write("providers:\n  mock:\n    api_url: http://127.0.0.1:%d/v1\n"
                     "    api_key: sk-test\n    default_model: mock-model\n"
                     "    models:\n      - id: mock-model\n"
-                    "provider_order: [mock]\nsettings:\n  max_iterations: 4\n" % mock_port)
+                    "provider_order: [mock]\n" % mock_port)
         agent_port = free_port()
         env = dict(os.environ)
         env["TEA_AGENT_HOME"] = home
@@ -819,7 +819,7 @@ def test_ask_the_devices(exe, tmp):
         f.write("providers:\n  mock:\n    api_url: http://127.0.0.1:%d/v1\n"
                 "    api_key: sk-device\n    default_model: device-model\n"
                 "    models:\n      - id: device-model\n"
-                "provider_order: [mock]\nsettings:\n  max_iterations: 4\n" % mock_port)
+                "provider_order: [mock]\n" % mock_port)
     port = free_port()
     env = dict(os.environ)
     env["TEA_AGENT_HOME"] = home

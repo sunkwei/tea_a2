@@ -36,21 +36,31 @@ search:                        # 可选：独立的搜索 provider（见下「�
   provider: DeepSeek           # providers: 里的一个名字：web 工具发给它、用它的 key
   # always: true               # 强制所有 web 调用都走它（默认是「回退」）
 
-settings:
-  max_iterations: 0            # 单条消息最多几轮工具调用；0 = 不限（跑到模型自己收尾）
-  max_tool_output: 131072      # 回填给模型的工具输出上限（字节）
-  command_timeout_ms: 180000   # toolkit_exec 默认超时
-  keep_turns: 10
-  http_engine: auto            # auto | socket | winhttp（也可用 --http-engine 覆盖）
-  peers:                       # 可选：别的 tea_a2（级联），见 [peer.md](peer.md)
-    study-pc:
-      url: http://172.16.1.31:8383
-      token: <对端的 --api-token>   # 令牌只存在这里，不进提示词
-      # workspace: ws_9f2c          # 可选：对端上用哪个工作区
-      # description: 书房的电脑       # 可选：模型会看到这句
+# 设置不在这个文件里：provider.yaml 只说「跟谁说话」。设置住在
+# <tea_home>/tea_agent.yaml（机器级）或工作区的 .tea_agent_run/settings.yaml
+# （按工作区，优先级更高）——见下「设置住在哪儿」。
 ```
 
 默认值只有一条规则：**文件里第一个 provider 的 `models:` 里的第一个模型**。
+
+## 设置住在哪儿
+
+`provider.yaml` 只说**跟谁说话**：`providers:`、`search:`、`asr:`。**设置**（agent 怎么
+干活）住在另外两个文件里：
+
+| 位置 | 范围 | 说明 |
+| --- | --- | --- |
+| `<tea_home>/tea_agent.yaml` | 机器级 | 所有工作区共用；模板见 [tea_agent.example.yaml](../tea_agent.example.yaml) |
+| `<workspace>/.tea_agent_run/settings.yaml` | 按工作区 | 盖住机器级的同名设置 |
+| 命令行 | 这一次启动 | 只覆盖少数几项（如 `--http-engine`） |
+
+规则还是**后者盖前者**。`provider.yaml` 里那个 `settings:` 块**不再被读**——它本来是
+Python 实现留下的（那时候 provider.yaml 既是 provider 列表又是设置）。文件里还留着它，
+程序不会报错，但里面的东西不生效：启动日志里会写一句，提醒你把设置搬到
+`tea_agent.yaml`。
+
+设置里**没有**「一轮最多几轮工具调用」这种旋钮：一轮跑到模型自己收尾为止，唯一会停下
+它的是模型连续三次给出相同的结果（见[多轮工具调用](tools.md#多轮工具调用与上下文)）。
 
 ```yaml
 providers:
@@ -90,7 +100,7 @@ provider 卡片上的「**更新模型**」按钮做这件事——服务端拿 
   `supported_parameters` / `modalities` …）→ provider.yaml 里本来就有的 → 内置表
   （`deepseek-chat`、`gpt-4o` 这类常见模型）→ 按名字猜（`-reasoner` 会思考、`-vl` 能看图）。
   界面上每个模型都标了来源。
-- **只改一个块**：别的 provider、注释、`settings:` 块原样保留——provider.yaml 是给人看的
+- **只改一个块**：别的 provider 和注释原样保留——provider.yaml 是给人看的
   文件，不能因为点了一次按钮就重排它。写完先校验再替换，配置随即热加载生效。
 - **不越权**：采样参数（`temperature` / `top_p`）和 `reasoning_effort` 是用户自己调过的，
   一次列表更新不会抹掉它们。
@@ -136,7 +146,7 @@ providers:
 （各 5 元 / 1000 次成功请求，账号级各 5 QPS），开了才会计费。搜索支持 `site:`、`lang:`、
 `after:`/`before:` 等语法，工具描述里会教给模型。
 
-超时与计费预算单独配置（`settings:` 里，也可按工作区覆盖）：
+超时与计费预算单独配置（写在 `<tea_home>/tea_agent.yaml` 的 `settings:` 段里，也可按工作区覆盖）：
 
 ```yaml
 settings:
@@ -148,7 +158,7 @@ settings:
 这三项是必须的，不能让 web 工具沿用 LLM 的超时：`http_read_timeout_ms` 默认 600 秒（流式
 响应要用），一次卡住的搜索会让整轮对话停十分钟，而且中途无法取消。现在 web 工具用独立的
 有界超时，用户点停止会立即中断传输（返回 `cancelled by user`）。预算用尽后这两个工具会从
-工具表里消失，模型不会继续空转重试——否则它会把 `max_iterations` 全部耗在重试上，既慢又费钱。
+工具表里消失，模型不会继续空转重试——否则这一轮会在重试里耗掉很久，既慢又费钱。
 
 ### 独立的 search provider（`search:` 段）
 
@@ -193,7 +203,7 @@ search:
   `GET /api/providers` 的 `search_provider.error` 里也能看到；web 工具保持关闭。
 - 也可以写成 `search_provider:`（同一个东西的另一种拼法）。
 
-`search:` 段是 provider.yaml 的**顶层**段（和 `providers:`、`settings:` 平级），
+`search:` 段是 provider.yaml 的**顶层**段（和 `providers:` 平级），
 不是某个 provider 块里的字段。
 
 ### 语音输入（`asr:` 段）
@@ -211,7 +221,7 @@ asr:
   timeout_ms: 30000                # ← 可选，默认 30 秒
 ```
 
-`asr:` 段是 provider.yaml 的**顶层**段（和 `providers:`、`search:`、`settings:` 平级）。
+`asr:` 段是 provider.yaml 的**顶层**段（和 `providers:`、`search:` 平级）。
 没配这一段，界面上就**没有**麦克风按钮——给一个点了没反应的死按钮更糟。
 
 服务端做的事很少：把浏览器录好的音频（16 kHz 单声道 WAV）转成
@@ -510,6 +520,7 @@ HTTP 529: 当前为整点高峰时段，服务器短暂繁忙，通常 1-5 分�
 
 两个预算是分开算的：网络抖动（连接断了、502）照旧是几百毫秒级的重试；只有「服务端繁忙」
 才等几分钟——provider 自己说了要 1-5 分钟，400 毫秒后重发只会再撞一次同一堵墙。
+这段写在 `<tea_home>/tea_agent.yaml` 的 `settings:` 段里。
 
 ```yaml
 settings:

@@ -33,6 +33,7 @@ pwsh -File tests/relink-while-running.ps1 -Exe build-gcc/bin/tea_agent.exe  # �
 python3 tests/smoke_web_tools.py                          # 网页工具（本地 mock，不产生费用）
 python3 tests/smoke_provider_usage.py                      # 订阅额度查询：声明/归一化/错误处理
 python3 tests/smoke_provider_models.py                     # 查模型 + 回填 provider.yaml：形状/默认值/只改 models 块
+python3 tests/smoke_no_iteration_cap.py                        # 没有轮数上限：配置里的 max_iterations 不再被读
 node tests/ui_provider_models.mjs                          # 设置页「更新模型」：列表、改数字、写入、热加载（需 google-chrome）
 node tests/ui_usage.mjs                                   # 顶栏额度徽标 + 设置页按 provider 查询（需 google-chrome）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体
@@ -164,6 +165,11 @@ data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/image
 `current_prompt`/`source` 反映真正生效的人设；保存后**下一次模型请求**就以新内容开头，且替换
 而非追加内置人设，环境块与 agent.md 仍在；把默认文本原样保存回去不会产生覆盖；
 空白内容恢复默认；超过 64 KB 报 400 且不改文件。
+
+`tests/smoke_no_iteration_cap.py` 覆盖「没有轮数上限」这件事本身：设置里没有这个
+旋钮（`/api/providers` 不报它）、provider.yaml 的 `settings:` 段不再被读（启动日志写一句）、
+工作区的 `settings.yaml` 里写 `max_iterations` 也没用——一轮该跑多久就跑多久，最后是模型
+自己的回答，不是「额度用完」那种说明；done 事件和轨迹里也没有「撞上限」这个标记。
 
 `tests/smoke_destroy.py` 覆盖「销毁」：`GET /api/destroy` 列出的正是 tea home 与各工作区的
 `.tea_agent_run`（目录已不存在的也照实标 `exists:false`）；不带 `confirm` 的 POST 返回 400 且
@@ -374,7 +380,7 @@ CDP 操作真实页面：断言弹出配置对话框、Esc/点遮罩关不掉、
 能填入内容、上传成功后页面自动重载且状态栏变回「已连接」。
 
 `tests/e2e.ps1` 起一个假 OpenAI 服务（`tools/mock_llm_server.mjs`，按 4 步脚本驱动工具调用），
-再以独立 `--tea-home` 启动 agent，覆盖 **155 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
+再以独立 `--tea-home` 启动 agent，覆盖 **157 项断言**：健康检查、key 脱敏、工具注册、工作区索引、
 SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea_agent_run/` 全部子目录、会话持久化、
 会话分叉（复制到选中轮次、血缘落盘、父会话不变、非法下标/未知会话报错）、目录树与文件读写、
 记忆与日志接口、内置 UI 交付（含指标栏）且无 CDN 依赖。全程本地 `http://`，不需要 api_key。
@@ -431,8 +437,8 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 
 | 项 | 状态 |
 | --- | --- |
-| Windows x64 + MinGW-w64 GCC 16.2 | ✅ 构建 0 warning，E2E 155/155 |
-| Windows x64 + MSVC | ✅ 构建 0 error，E2E 155/155 |
+| Windows x64 + MinGW-w64 GCC 16.2 | ✅ 构建 0 warning，E2E 157/157 |
+| Windows x64 + MSVC | ✅ 构建 0 error，E2E 157/157 |
 | C++14 语言模式（GCC 6.5 兼容性） | ✅ 全量编译通过 |
 | 真实 `api.deepseek.com` / `opencode.ai` | ✅ 含多轮工具调用 |
 | 真实 `www.minimax.cn` 额度接口 | ✅ M Plan 订阅 Key 实查：5 小时窗口与周窗口的剩余百分比、重置时间都对得上 |

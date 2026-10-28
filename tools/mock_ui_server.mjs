@@ -377,7 +377,7 @@ async function route(req, res) {
         { name: 'DeepSeek', api_url: 'https://api.deepseek.com', default_model: 'deepseek-flash', models: ['deepseek-flash', 'deepseek-reasoner'], has_key: true },
         { name: 'OpenAI', api_url: 'https://api.openai.com/v1', default_model: 'gpt-4o-mini', models: ['gpt-4o-mini', 'gpt-4o'], has_key: false },
       ],
-      settings: { max_iterations: 50, max_tool_output: 131072 },
+      settings: { max_tool_output: 131072 },
     });
   }
   if (p === '/api/tools') return sendJson(res, 200, { tools: TOOLS });

@@ -598,7 +598,6 @@
     line.appendChild(el('span', 'tool-summary', fmtTrajSummary(turn)));
     if (turn.cancelled) line.appendChild(el('span', 'traj-badge stop', '已中断'));
     else if (turn.repeated_output) line.appendChild(el('span', 'traj-badge', '重复输出'));
-    else if (turn.hit_iteration_limit) line.appendChild(el('span', 'traj-badge', '到达上限'));
     else if (turn.ok === false) line.appendChild(el('span', 'traj-badge', turn.partial ? '进行中' : '失败'));
     line.appendChild(el('span', 'chev', '›'));
     row.appendChild(line);
@@ -4676,8 +4675,6 @@
       row('当前模型', cfg.active.provider + ' · ' + cfg.active.model);
     }
     if (cfg.settings) {
-      row('最大迭代', cfg.settings.max_iterations > 0
-        ? String(cfg.settings.max_iterations) : '不限（跑到模型自己收尾）');
       row('工具输出上限', cfg.settings.max_tool_output + ' 字节');
     }
     // 没配置时：顶上那张「配置 provider.yaml」的卡是入口，下面那行「重置

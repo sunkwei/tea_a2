@@ -5,15 +5,15 @@ A turn is a loop: the model asks for a tool, the tool answers, the model looks
 at the answer and asks for the next tool. The loop ends when the model answers
 with text - that text is the turn's **final answer**.
 
-Two things can cut the loop short, and both of them have to leave a final
-message behind (otherwise the conversation looks like the agent went mute and
-the user has to send another message to find out what happened):
+One thing can cut the loop short, and it has to leave a final message behind
+(otherwise the conversation looks like the agent went mute and the user has to
+send another message to find out what happened):
 
   * the model gives the **same output three times in a row** - it is going in
-    circles, not working. The turn stops and says so;
-  * `max_iterations` is set (it is **not** by default any more: 0 means "run
-    until the conversation is done"), and the budget runs out. The turn stops
-    and says so.
+    circles, not working. The turn stops and says so.
+
+There is no other way: a turn has no iteration budget, so it runs until the
+model answers.
 
 What is pinned here:
 
@@ -21,9 +21,10 @@ What is pinned here:
   * the conversation ends with an assistant message that says the model was
     repeating itself, and that message is in the session file;
   * the `done` event carries `repeated_output`, and the trajectory records it;
-  * with no limit configured, a turn runs past the old 50-iteration cap (61
-    iterations here) and ends with a normal final answer;
-  * a turn with an explicit `max_iterations` still stops there, with a note.
+  * a turn runs past the old 50-iteration cap (61 iterations here) and ends with
+    a normal final answer;
+  * nothing in the config can cut a turn short any more: the settings have no
+    iteration knob at all.
 
 Usage: python3 tests/smoke_repeat_guard.py [path-to-tea_agent-binary]
 """
@@ -235,10 +236,11 @@ providers:
         _, listing = call(port, "GET", "/api/workspaces")
         wid = listing["workspaces"][0]["id"]
 
-        # ---- the default has no iteration cap ------------------------------
+        # ---- there is no iteration knob at all ------------------------------
         _, providers = call(port, "GET", "/api/providers")
-        cap = (providers.get("settings") or {}).get("max_iterations")
-        check("max_iterations defaults to 0 (no limit)", cap == 0, cap)
+        settings = providers.get("settings") or {}
+        check("the settings have no iteration knob",
+              "max_iterations" not in settings, settings)
 
         # ---- the same output three times in a row stops the turn ----------
         MockProvider.mode = "repeat"
@@ -272,8 +274,8 @@ providers:
         rows = turns if isinstance(turns, list) else []
         check("the trajectory records the repetition",
               rows and rows[0].get("repeated_output") is True, rows[0] if rows else rows)
-        check("the iteration cap did not fire (there is no cap)",
-              rows and not rows[0].get("hit_iteration_limit"),
+        check("the trajectory has no iteration-cap flag",
+              rows and "hit_iteration_limit" not in rows[0],
               rows[0] if rows else rows)
 
         # ---- with no limit, a turn runs past the old cap --------------------

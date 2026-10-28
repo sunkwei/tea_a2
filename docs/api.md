@@ -589,8 +589,8 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 2. 用户在对话框里改完，确认之后 `POST /api/providers/{name}/models`，body 是
    `{"models":[…]}`——**要写进去的最终列表**（顺序 = 顺序，第一个就是默认模型）。
 
-   写入只动这个 provider 的 `models:` 块：别的 provider、注释、`settings:` 块
-   原样保留（provider.yaml 是给人看的文件，不能因为点了一次按钮就重排它）。
+   写入只动这个 provider 的 `models:` 块：别的 provider 和注释原样保留
+   （provider.yaml 是给人看的文件，不能因为点了一次按钮就重排它）。
    写完先校验（拿临时文件试加载），通过才替换并热加载配置；轮次正在跑时 409。
 
    请求里没带的字段沿用文件里原来的值：采样参数（`temperature` / `top_p`）和

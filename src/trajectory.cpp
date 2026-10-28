@@ -156,8 +156,6 @@ nlohmann::json trajectory_summary(const nlohmann::json& turn) {
   s["elapsed_ms"] = turn.value("elapsed_ms", static_cast<long long>(0));
   s["ok"] = turn.value("ok", false);
   s["cancelled"] = turn.value("cancelled", false);
-  // 这一轮被迭代上限截断了：没答完，UI 要能说出来。
-  s["hit_iteration_limit"] = turn.value("hit_iteration_limit", false);
   s["repeated_output"] = turn.value("repeated_output", false);
   s["iterations"] = turn.value("iterations", 0);
   s["steps"] = (turn.contains("steps") && turn["steps"].is_array())
@@ -238,7 +236,6 @@ nlohmann::json TrajectoryRecorder::build() const {
   turn["elapsed_ms"] = now_ms() - started_ms_;
   turn["ok"] = finished_ ? ok_ : false;
   turn["cancelled"] = cancelled_;
-  if (iteration_limit_) turn["hit_iteration_limit"] = true;
   if (repeated_output_) turn["repeated_output"] = true;
   turn["iterations"] = iterations_;
   turn["usage"] = usage_object(usage_, usage_estimated_);

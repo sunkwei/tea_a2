@@ -148,12 +148,9 @@ struct PeerConfig {
 };
 
 struct Settings {
-  /// Tool-calling round trips per user message. **0 = unlimited**: the turn
-  /// runs until the model answers with text instead of a tool call (or until
-  /// the repetition guard stops it). The old default was 50, which cut long
-  /// jobs short - silently, without a final answer - so the default is now
-  /// "no limit"; set a number to get the old behaviour back.
-  int max_iterations = 0;
+  // There is no iteration budget: a turn runs until the model answers with
+  // text instead of a tool call (or until the user stops it, or until the
+  // repetition guard stops it).
   int64_t max_tool_output = 131072;
   int64_t max_assistant_content = 131072;
   int keep_turns = 10;
@@ -176,7 +173,7 @@ struct Settings {
   int web_tool_connect_timeout_ms = 10000;
   int web_tool_timeout_ms = 60000;
   /// Hard cap on billed web-tool calls per user turn. A model that keeps
-  /// retrying would otherwise burn the whole max_iterations budget, which is
+  /// retrying would otherwise keep the turn going for a long time, which is
   /// both slow and (the provider bills per call) expensive.
   int web_tool_max_calls_per_turn = 10;
   /// Where the fleet manager lives (the server-side service that keeps the

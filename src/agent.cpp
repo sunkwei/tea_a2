@@ -1,6 +1,5 @@
 #include "agent.h"
 
-#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
@@ -1205,7 +1204,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
   // --- build the tool schema ----------------------------------------------
   // Billed web-tool calls are counted per turn, not per iteration: a model that
-  // keeps retrying a failing search would otherwise run to max_iterations.
+  // keeps retrying a failing search would otherwise keep the turn going.
   int web_tool_calls = 0;
   // toolkit_search/toolkit_fetch only appear when this turn's provider
   // declares them, or when the independent search provider (the `search:`
@@ -1240,8 +1239,8 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   }
 
   // Once the billed web-tool budget for this turn is spent, stop advertising
-  // them: an error result alone invites the model to retry until
-  // max_iterations, which is slow and (per call billing) expensive.
+  // them: an error result alone invites the model to retry, which is slow and
+  // (per call billing) expensive.
   nlohmann::json tools_json_no_web;
   auto tools_for_request = [&]() -> const nlohmann::json& {
     const int budget = st.web_tool_max_calls_per_turn;
@@ -1258,10 +1257,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     return tools_json_no_web;
   };
 
-  // 迭代上限默认是**不限**（max_iterations = 0）：一轮跑到模型自己收尾为止。
-  // 设了一个正数的人还是拿到老行为（到顶就停，并补一条说明）。
-  const int max_iterations =
-      st.max_iterations > 0 ? st.max_iterations : std::numeric_limits<int>::max();
+  // 一轮跑到模型自己收尾为止：**没有轮数上限，也没有「预算」这种配置**。
+  // 会停下这一轮的只有：模型给出最终回答、用户中断、provider 报错，
+  // 以及下面那道「连续三次相同输出」的闸（模型在原地打转）。
   bool finished = false;
   // 同样的结果连着来：模型在原地打转。上限没了之后，这道闸是防止一轮永远
   // 跑下去、把钱烧光的最后一道。
@@ -1307,7 +1305,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     }
   };
 
-  for (int iteration = 0; iteration < max_iterations; ++iteration) {
+  for (int iteration = 0; ; ++iteration) {
     if (cancel && cancel->load()) {
       out.cancelled = true;
       break;
@@ -1611,9 +1609,8 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     if (chat.tool_calls.empty()) {
       // The model is done, but a prompt queued while it was answering must not
       // wait for a whole new HTTP turn: continue the loop and adopt it at the
-      // top of the next iteration. When the iteration budget is spent we stop
-      // and report the leftovers instead.
-      if (options.inbox && iteration + 1 < max_iterations && !options.inbox->empty()) {
+      // top of the next iteration.
+      if (options.inbox && !options.inbox->empty()) {
         LOG_DEBUG("queue: model finished but a prompt is queued; continuing");
         continue;
       }
@@ -1875,7 +1872,6 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
                               " tool_calls=" + std::to_string(chat.tool_calls.size()));
 
     if (out.cancelled) break;
-    if (iteration == max_iterations - 1) out.hit_iteration_limit = true;
 
     // 同样的结果连着来了三次：模型在原地打转（同一个工具、同样的参数）。
     // 再跑下去只是烧钱——这一轮到此为止，下面会补一条说明告诉用户为什么停。
@@ -1898,7 +1894,6 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   }
 
   // 轨迹记录的是**事实**：这一轮是被上限截断的，还是被重复输出打断的。
-  trajectory.set_iteration_limit(out.hit_iteration_limit);
   trajectory.set_repeated_output(out.repeated_output);
 
   // 模型在原地打转：连续三次给出相同的结果。这一轮没有收尾，同样要留下一句
@@ -1924,30 +1919,6 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     emit(event);
   }
 
-  // 迭代次数用完了，模型还在调工具：这一轮没有收尾。不能就这么结束——对话里
-  // 没有最后一句话，看起来像 agent 半路哑了（用户得再发一条消息，才知道
-  // 到底发生了什么）。补一条说明：这一轮到此为止、工作没干完、发消息可以
-  // 接着做。这条消息进会话（刷新页面也还在），也当场发出去（直播气泡里
-  // 立刻能看见）。
-  if (out.hit_iteration_limit && !out.cancelled && !out.repeated_output) {
-    Message final_msg;
-    final_msg.role = "assistant";
-    // 不写轮数：这里能拿到的只是**预算**（max_iterations），不是这一轮实际
-    // 跑了多少轮——写出来会被当成「跑了 N 次」。真要看轮数：done 事件的
-    // iterations 字段，或轨迹里那一行。
-    final_msg.content = "这一轮用完了迭代额度（max_iterations），工作还没收尾。"
-                        "发一条消息，我接着做。";
-    final_msg.created_at = now_iso8601();
-    session->messages.push_back(final_msg);
-    session->info.updated_at = final_msg.created_at;
-    out.content = final_msg.content;
-    nlohmann::json delta = nlohmann::json::object();
-    delta["type"] = "content_delta";
-    delta["text"] = final_msg.content;
-    emit(delta);
-    LOG_WARN("agent: the turn hit the iteration cap (", max_iterations,
-             " iterations) and the model was still calling tools - the chat says so");
-  }
 
   // The restore step of an interrupt: every tool call the model made must have
   // an answer, or the next request is one no provider accepts ("invalid params,
@@ -2091,7 +2062,6 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     event["iterations"] = out.iterations;
     // 这一轮是被迭代上限截断的（没有收尾）：客户端据此说清楚，别让人以为
     // agent 正常答完了。
-    if (out.hit_iteration_limit) event["hit_iteration_limit"] = true;
     // 或者是被「同样的结果连着三次」打断的。
     if (out.repeated_output) {
       event["repeated_output"] = true;

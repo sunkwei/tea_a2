@@ -274,7 +274,7 @@ def test_cascade(exe, tmp):
         f.write("providers:\n  mock:\n    api_url: http://127.0.0.1:%d/v1\n"
                 "    api_key: sk-peer\n    default_model: peer-model\n"
                 "    models:\n      - id: peer-model\n"
-                "provider_order: [mock]\nsettings:\n  max_iterations: 4\n" % peer_mock_port)
+                "provider_order: [mock]\n" % peer_mock_port)
     peer_proc, peer_base = start_agent(exe, peer_home, ["--api-token", "peer-secret"])
 
     controller_mock, controller_mock_port = start_mock({
@@ -293,14 +293,15 @@ def test_cascade(exe, tmp):
             f.write("providers:\n  mock:\n    api_url: http://127.0.0.1:%d/v1\n"
                     "    api_key: sk-ctl\n    default_model: ctl-model\n"
                     "    models:\n      - id: ctl-model\n"
-                    "provider_order: [mock]\n"
-                    "settings:\n  max_iterations: 4\n"
-                    "  peers:\n"
+                    "provider_order: [mock]\n" % controller_mock_port)
+        # The peers are settings, and the settings live in their own file now:
+        # provider.yaml only says who to talk to.
+        with open(os.path.join(home, "tea_agent.yaml"), "w", encoding="utf-8") as f:
+            f.write("settings:\n  peers:\n"
                     "    peer-a:\n"
                     "      url: %s\n"
                     "      token: peer-secret\n"
-                    "      description: the study room machine\n" %
-                    (controller_mock_port, peer_base))
+                    "      description: the study room machine\n" % peer_base)
         proc, base = start_agent(exe, home)
         try:
             workspace_id = first_workspace(base)
@@ -361,10 +362,10 @@ def test_exec_action(exe, tmp):
             f.write("providers:\n  mock:\n    api_url: http://127.0.0.1:%d/v1\n"
                     "    api_key: sk-ctl\n    default_model: ctl-model\n"
                     "    models:\n      - id: ctl-model\n"
-                    "provider_order: [mock]\n"
-                    "settings:\n  max_iterations: 4\n"
-                    "  peers:\n    peer-a:\n      url: %s\n      token: peer-secret\n" %
-                    (controller_mock_port, peer_base))
+                    "provider_order: [mock]\n" % controller_mock_port)
+        with open(os.path.join(home, "tea_agent.yaml"), "w", encoding="utf-8") as f:
+            f.write("settings:\n  peers:\n"
+                    "    peer-a:\n      url: %s\n      token: peer-secret\n" % peer_base)
         proc, base = start_agent(exe, home)
         try:
             workspace_id = first_workspace(base)
@@ -401,11 +402,10 @@ def test_older_peer(exe, tmp):
             f.write("providers:\n  mock:\n    api_url: http://127.0.0.1:%d/v1\n"
                     "    api_key: sk-ctl\n    default_model: ctl-model\n"
                     "    models:\n      - id: ctl-model\n"
-                    "provider_order: [mock]\n"
-                    "settings:\n  max_iterations: 4\n"
-                    "  peers:\n"
-                    "    old:\n      url: %s\n      token: old-token\n" %
-                    (controller_mock_port, old_base))
+                    "provider_order: [mock]\n" % controller_mock_port)
+        with open(os.path.join(home, "tea_agent.yaml"), "w", encoding="utf-8") as f:
+            f.write("settings:\n  peers:\n"
+                    "    old:\n      url: %s\n      token: old-token\n" % old_base)
         proc, base = start_agent(exe, home)
         try:
             workspace_id = first_workspace(base)
@@ -435,11 +435,11 @@ def test_bad_settings(exe, tmp):
         f.write("providers:\n  mock:\n    api_url: http://127.0.0.1:%d/v1\n"
                 "    api_key: sk-x\n    default_model: m\n"
                 "    models:\n      - id: m\n"
-                "provider_order: [mock]\n"
-                "settings:\n  max_iterations: 4\n"
-                "  peers:\n"
+                "provider_order: [mock]\n" % mock_port)
+    with open(os.path.join(home, "tea_agent.yaml"), "w", encoding="utf-8") as f:
+        f.write("settings:\n  peers:\n"
                 "    broken:\n      url: not-an-address\n"
-                "    good:\n      url: http://127.0.0.1:9999\n" % mock_port)
+                "    good:\n      url: http://127.0.0.1:9999\n")
     try:
         proc, base = start_agent(exe, home)
     except Exception:
