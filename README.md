@@ -184,7 +184,7 @@ provider、注释和 `settings:` 原样保留，配置随即热加载生效，�
 浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置。
 
 （界面的导览在 [用起来](docs/using.md)；要直接敲命令，看
-[使用手册](docs/manual.md)。）
+[使用手册](docs/tea_a2_manual.md)。）
 
 ```bash
 # 常用参数
@@ -320,7 +320,8 @@ servers:
 
 | | |
 | --- | --- |
-| [使用手册](docs/manual.md) | **命令清单**：命令行参数、curl 配方、队列命令、微信命令、脚本、环境变量 |
+| [使用手册](docs/tea_a2_manual.md) | **命令清单**：命令行参数、curl 配方、队列命令、微信命令、脚本、环境变量 |
+| [Python 侧脚本](sched/README.md) | **sched/ 目录说明**：任务队列、聊天前端（微信/Telegram）、机群、语音转写、自用工具（B 站 / 知乎） |
 | [用起来](docs/using.md) | 界面导览：配置对话框、工作区、主题地址、分叉、图片 |
 | [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照 |
 | [构建与跨平台编译](docs/build.md) | 依赖、本机构建、交叉编译（aarch64 / Windows）、产物校验 |
@@ -331,8 +332,6 @@ servers:
 | [MCP](docs/mcp.md) | **把别的程序接进来当工具**：配置、接口、和 Windows 上的 uiautomation-mcp 联调 |
 | [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、system prompt、销毁、导出 |
 | [配置](docs/config.md) | `provider.yaml`、额度与搜索抓取、按工作区覆盖、请求头 |
-| [任务队列](docs/tasks.md) | 队列服务、微信 / Telegram 那一端、网页、使用手册、逐任务授权目录 |
-| [任务队列](docs/tasks.md) | 队列服务、微信那一端、网页、使用手册、逐任务授权目录 |
 | [源码结构](docs/source.md) | 每个文件干什么、第三方依赖 |
 | [测试与验证状态](docs/testing.md) | 怎么跑、每个测试钉住了什么、哪些平台实测过 |
 | [开发笔记](tea_a2_agent.md) | **给改这个仓库的人**：踩过的坑、命令、约定（换一台机器开发先看这个） |
