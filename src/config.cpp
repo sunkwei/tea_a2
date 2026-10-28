@@ -291,7 +291,8 @@ void apply_settings(Settings& s, const YAML::Node& node) {
   if (s.compaction_retain_ratio >= s.compaction_trigger_ratio)
     s.compaction_retain_ratio = s.compaction_trigger_ratio / 2;
   if (s.compaction_retries < 0) s.compaction_retries = 0;
-  if (s.max_iterations < 1) s.max_iterations = 1;
+  // 0 means "no limit" (the default); a negative number is nonsense -> 0.
+  if (s.max_iterations < 0) s.max_iterations = 0;
   if (s.command_timeout_ms < 1000) s.command_timeout_ms = 1000;
   if (s.web_tool_connect_timeout_ms < 1000) s.web_tool_connect_timeout_ms = 1000;
   if (s.web_tool_timeout_ms < 1000) s.web_tool_timeout_ms = 1000;

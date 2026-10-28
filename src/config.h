@@ -126,7 +126,12 @@ struct ProviderInfo {
 };
 
 struct Settings {
-  int max_iterations = 50;
+  /// Tool-calling round trips per user message. **0 = unlimited**: the turn
+  /// runs until the model answers with text instead of a tool call (or until
+  /// the repetition guard stops it). The old default was 50, which cut long
+  /// jobs short - silently, without a final answer - so the default is now
+  /// "no limit"; set a number to get the old behaviour back.
+  int max_iterations = 0;
   int64_t max_tool_output = 131072;
   int64_t max_assistant_content = 131072;
   int keep_turns = 10;

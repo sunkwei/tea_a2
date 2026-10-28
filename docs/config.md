@@ -37,7 +37,7 @@ search:                        # 可选：独立的搜索 provider（见下「�
   # always: true               # 强制所有 web 调用都走它（默认是「回退」）
 
 settings:
-  max_iterations: 50           # 单条消息最多几轮工具调用
+  max_iterations: 0            # 单条消息最多几轮工具调用；0 = 不限（跑到模型自己收尾）
   max_tool_output: 131072      # 回填给模型的工具输出上限（字节）
   command_timeout_ms: 180000   # toolkit_exec 默认超时
   keep_turns: 10

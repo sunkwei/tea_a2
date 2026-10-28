@@ -67,6 +67,11 @@ struct TurnResult {
   bool ok = false;
   bool cancelled = false;
   bool hit_iteration_limit = false;
+  /// The model gave the same output three times in a row (it is going in
+  /// circles); the turn was stopped and the chat says so.
+  bool repeated_output = false;
+  /// What repeated, in words ("toolkit_exec(ls -la)") - for the notice.
+  std::string repeated_detail;
   int iterations = 0;
   std::string content;
   std::string provider;

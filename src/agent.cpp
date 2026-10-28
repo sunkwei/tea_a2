@@ -1,5 +1,6 @@
 #include "agent.h"
 
+#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
@@ -30,6 +31,44 @@ constexpr std::size_t kMaxToolImagesPerTurn = 6;
 /// conversation accumulates pictures; without a cap a long session would
 /// re-upload everything on every iteration until the provider rejects it.
 constexpr std::size_t kMaxEncodedImageBytesPerTurn = 24u * 1024u * 1024u;
+
+/// 一次迭代的"输出"签名：模型这一轮要调的工具（名字 + 参数）。
+///
+/// 模型在原地打转时，每次的签名都一样：同一个工具、同样的参数，来回三四次。
+/// 参数按 JSON 规范化（键序不同的同一份参数算同一个），解析失败时退回模型
+/// 发过来的原文。
+std::string iteration_signature(const ChatResult& chat) {
+  if (chat.tool_calls.empty()) return std::string();
+  std::string sig;
+  for (std::size_t i = 0; i < chat.tool_calls.size(); ++i) {
+    const ToolCall& c = chat.tool_calls[i];
+    sig += c.name;
+    sig += '\x1f';
+    sig += c.arguments.is_object() && !c.arguments.empty() ? c.arguments.dump() : c.raw_arguments;
+    sig += '\x1e';
+  }
+  return sig;
+}
+
+/// 人话：这一轮重复的是什么（"toolkit_exec(ls -la)"）。给中断提示用。
+std::string describe_iteration(const ChatResult& chat) {
+  if (chat.tool_calls.empty()) return "同样的内容";
+  std::string out;
+  for (std::size_t i = 0; i < chat.tool_calls.size(); ++i) {
+    const ToolCall& c = chat.tool_calls[i];
+    if (!out.empty()) out += "、";
+    out += c.name;
+    const std::string args = c.arguments.is_object() && !c.arguments.empty()
+                                 ? c.arguments.dump()
+                                 : c.raw_arguments;
+    if (!args.empty() && args != "{}") {
+      out += "(";
+      out += args.size() > 80 ? args.substr(0, 80) + "..." : args;
+      out += ")";
+    }
+  }
+  return out;
+}
 
 void accumulate_usage(ChatUsage* total, const ChatUsage& part) {
   if (!part.present) return;
@@ -1219,8 +1258,16 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     return tools_json_no_web;
   };
 
-  const int max_iterations = st.max_iterations;
+  // 迭代上限默认是**不限**（max_iterations = 0）：一轮跑到模型自己收尾为止。
+  // 设了一个正数的人还是拿到老行为（到顶就停，并补一条说明）。
+  const int max_iterations =
+      st.max_iterations > 0 ? st.max_iterations : std::numeric_limits<int>::max();
   bool finished = false;
+  // 同样的结果连着来：模型在原地打转。上限没了之后，这道闸是防止一轮永远
+  // 跑下去、把钱烧光的最后一道。
+  const int kMaxIdenticalOutputs = 3;
+  std::string last_signature;
+  int identical_run = 0;
   // Per-turn bookkeeping for toolkit_load_image: the collected attachments and
   // the budget that keeps one turn from filling the context with pictures.
   std::vector<ImageAttachment> tool_images;
@@ -1829,6 +1876,75 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
     if (out.cancelled) break;
     if (iteration == max_iterations - 1) out.hit_iteration_limit = true;
+
+    // 同样的结果连着来了三次：模型在原地打转（同一个工具、同样的参数）。
+    // 再跑下去只是烧钱——这一轮到此为止，下面会补一条说明告诉用户为什么停。
+    const std::string signature = iteration_signature(chat);
+    if (!signature.empty()) {
+      if (signature == last_signature) {
+        ++identical_run;
+      } else {
+        identical_run = 1;
+        last_signature = signature;
+      }
+      if (identical_run >= kMaxIdenticalOutputs) {
+        out.repeated_output = true;
+        out.repeated_detail = describe_iteration(chat);
+        LOG_WARN("agent: the model gave the same output ", identical_run,
+                 " times in a row (", out.repeated_detail, ") - the turn stops here");
+        break;
+      }
+    }
+  }
+
+  // 轨迹记录的是**事实**：这一轮是被上限截断的，还是被重复输出打断的。
+  trajectory.set_iteration_limit(out.hit_iteration_limit);
+  trajectory.set_repeated_output(out.repeated_output);
+
+  // 模型在原地打转：连续三次给出相同的结果。这一轮没有收尾，同样要留下一句
+  // 说明（否则用户只看到工具来来回回，不知道发生了什么）。
+  if (out.repeated_output && !out.cancelled) {
+    Message final_msg;
+    final_msg.role = "assistant";
+    final_msg.content = "模型连续 " + std::to_string(kMaxIdenticalOutputs) + " 次给出相同的结果（" +
+                        out.repeated_detail + "），它停在原地打转了。这一轮到此为止："
+                        "发一条消息说说下一步，我换个做法。";
+    final_msg.created_at = now_iso8601();
+    session->messages.push_back(final_msg);
+    session->info.updated_at = final_msg.created_at;
+    out.content = final_msg.content;
+    nlohmann::json delta = nlohmann::json::object();
+    delta["type"] = "content_delta";
+    delta["text"] = final_msg.content;
+    emit(delta);
+    nlohmann::json event = nlohmann::json::object();
+    event["type"] = "repeated_output";
+    event["count"] = kMaxIdenticalOutputs;
+    event["detail"] = out.repeated_detail;
+    emit(event);
+  }
+
+  // 迭代次数用完了，模型还在调工具：这一轮没有收尾。不能就这么结束——对话里
+  // 没有最后一句话，看起来像 agent 半路哑了（用户得再发一条消息，才知道
+  // 到底发生了什么）。补一条说明：这一轮到此为止、工作没干完、发消息可以
+  // 接着做。这条消息进会话（刷新页面也还在），也当场发出去（直播气泡里
+  // 立刻能看见）。
+  if (out.hit_iteration_limit && !out.cancelled && !out.repeated_output) {
+    Message final_msg;
+    final_msg.role = "assistant";
+    final_msg.content = "这一轮用完了 " + std::to_string(max_iterations) +
+                        " 次工具调用的额度（max_iterations），工作还没收尾。"
+                        "发一条消息，我接着做。";
+    final_msg.created_at = now_iso8601();
+    session->messages.push_back(final_msg);
+    session->info.updated_at = final_msg.created_at;
+    out.content = final_msg.content;
+    nlohmann::json delta = nlohmann::json::object();
+    delta["type"] = "content_delta";
+    delta["text"] = final_msg.content;
+    emit(delta);
+    LOG_WARN("agent: the turn hit the iteration cap (", max_iterations,
+             " iterations) and the model was still calling tools - the chat says so");
   }
 
   // The restore step of an interrupt: every tool call the model made must have
@@ -1971,6 +2087,14 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     nlohmann::json event = nlohmann::json::object();
     event["type"] = "done";
     event["iterations"] = out.iterations;
+    // 这一轮是被迭代上限截断的（没有收尾）：客户端据此说清楚，别让人以为
+    // agent 正常答完了。
+    if (out.hit_iteration_limit) event["hit_iteration_limit"] = true;
+    // 或者是被「同样的结果连着三次」打断的。
+    if (out.repeated_output) {
+      event["repeated_output"] = true;
+      event["repeated_detail"] = out.repeated_detail;
+    }
     event["elapsed_ms"] = out.elapsed_ms;
     event["usage"] = usage_json(out.usage);
     event["metrics"] = metrics_json(out.max_context_tokens, out.context_tokens, out.output_tokens,

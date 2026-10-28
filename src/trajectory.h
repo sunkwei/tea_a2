@@ -111,6 +111,15 @@ class TrajectoryRecorder {
   /// says so, so the UI does not paint a stopped turn as a broken one.
   void set_cancelled(bool cancelled) { cancelled_ = cancelled; }
 
+  /// The turn ran out of iterations (max_iterations) while the model was still
+  /// calling tools: the work was not finished. The record says so, so the UI can
+  /// tell "cut short" from "answered".
+  void set_iteration_limit(bool hit) { iteration_limit_ = hit; }
+
+  /// The model gave the same output three times in a row and the turn was
+  /// stopped: it was going in circles, not working.
+  void set_repeated_output(bool hit) { repeated_output_ = hit; }
+
  private:
   nlohmann::json build() const;
   void flush();
@@ -132,6 +141,8 @@ class TrajectoryRecorder {
   bool finished_ = false;
   bool ok_ = false;
   bool cancelled_ = false;
+  bool iteration_limit_ = false;
+  bool repeated_output_ = false;
   bool usage_estimated_ = false;
   std::string error_;
   std::string detail_;

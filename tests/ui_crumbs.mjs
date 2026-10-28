@@ -6,7 +6,10 @@
 // showed a workspace and the session list showed a conversation.
 //
 // What is pinned here:
-//   * after boot the bar shows the selected workspace and the session title;
+//   * after boot the bar shows the selected workspace (its **full path**, not
+//     just the name) and the session title;
+//   * the full path is in the crumb's tooltip even when it is shortened;
+//   * the bar follows the workspace switch / new session / rename as before;
 //   * the title the server derives from the first message replaces "新会话"
 //     once that turn finished (it only exists after the reload);
 //   * switching workspace updates the bar (and falls back to 新会话 when that
@@ -126,6 +129,18 @@ providers:
   };
   const crumbs = () => evalJs(`Array.prototype.map.call(
     document.querySelectorAll('#crumbs .crumb'), function (n) { return n.textContent; }).join(' / ')`);
+  // 顶栏第一段是工作区的完整路径；太长时从中间省（和 web/app.js 的 shortenPath 同一套规则）。
+  const shortenPath = (p, max = 46) => {
+    if (p.length <= max) return p;
+    const keep = max - 3;                      // 中间的 "..."
+    const tail = Math.floor(keep / 2);
+    const head = keep - tail;
+    const cut = p.lastIndexOf('/', p.length - tail - 1);
+    if (cut > 0 && cut <= head) return p.slice(0, cut) + '...' + p.slice(p.length - tail);
+    return p.slice(0, head) + '...' + p.slice(p.length - tail);
+  };
+  const wsCrumb = (name) => shortenPath(path.join(tmp, name));
+  const crumbTitle = () => evalJs(`(document.querySelector('#crumbs .crumb.path') || {}).title || ''`);
   const pickWorkspace = async (needle) => {
     await evalJs(`document.getElementById('ws-chip').click(); true`);
     await sleep(300);
@@ -160,7 +175,9 @@ providers:
   await booted();
 
   check('boot: the bar names the workspace, not 无工作区',
-    (await crumbs()) === 'proj_a / 新会话', await crumbs());
+    (await crumbs()) === `${wsCrumb('proj_a')} / 新会话`, await crumbs());
+  check('boot: the workspace crumb carries the full path',
+    (await crumbTitle()) === path.join(tmp, 'proj_a'), await crumbTitle());
 
   // First turn: the server derives the session title from the message.
   const text = '检查构建脚本里的静态链接开关';
@@ -171,28 +188,29 @@ providers:
     document.getElementById('send').click();
     return true;
   })()`);
-  const titled = await waitFor(async () => (await crumbs()) === `proj_a / ${text}`);
+  const titled = await waitFor(async () => (await crumbs()) === `${wsCrumb('proj_a')} / ${text}`);
   check('after the first turn the bar shows the derived session title', titled, await crumbs());
 
   // Reload: same workspace + session must come back from localStorage.
   await booted();
   check('a reload keeps workspace and session in the bar',
-    (await crumbs()) === `proj_a / ${text}`, await crumbs());
+    (await crumbs()) === `${wsCrumb('proj_a')} / ${text}`, await crumbs());
 
   // Switching workspace: proj_b has no session yet.
   await pickWorkspace('proj_b');
   check('switching workspace updates the bar',
-    (await crumbs()).indexOf('proj_b /') === 0, await crumbs());
+    (await crumbs()).indexOf(`${wsCrumb('proj_b')} /`) === 0, await crumbs());
 
   // New session draft.
   await evalJs(`document.getElementById('new-session').click(); true`);
   await sleep(400);
-  check('a new session draft shows 新会话', (await crumbs()) === 'proj_b / 新会话', await crumbs());
+  check('a new session draft shows 新会话',
+    (await crumbs()) === `${wsCrumb('proj_b')} / 新会话`, await crumbs());
 
   // Switch back: that workspace's session reopens with its title.
   await pickWorkspace('proj_a');
   check('switching back reopens the session with its title',
-    (await crumbs()) === `proj_a / ${text}`, await crumbs());
+    (await crumbs()) === `${wsCrumb('proj_a')} / ${text}`, await crumbs());
 
   // Rename from the sidebar: the bar must follow immediately.
   // The session list is re-rendered asynchronously after the workspace switch,
@@ -219,7 +237,7 @@ providers:
       return false;
     })()`);
   }
-  const renamed = await waitFor(async () => (await crumbs()) === 'proj_a / renamed by test', 6000, 150);
+  const renamed = await waitFor(async () => (await crumbs()) === `${wsCrumb('proj_a')} / renamed by test`, 6000, 150);
   check('renaming a session updates the bar', renamed,
     `${await crumbs()} (rename clicked: ${renameClicked}, dialog: ${dialogReady})`);
 } catch (e) {

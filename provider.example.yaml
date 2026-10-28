@@ -256,7 +256,9 @@ providers:
 # microphone button - that is the browser's rule, not this program's.
 
 settings:
-  max_iterations: 50           # tool-calling round trips per user message
+  max_iterations: 0            # tool-calling round trips per user message; 0 = no limit
+                               # (the turn runs until the model answers with text; the
+                               #  same-output-three-times guard is the only other stop)
   max_tool_output: 131072      # bytes of tool output fed back to the model
   keep_turns: 10               # hard floor on how many turns stay in context
   command_timeout_ms: 180000   # default toolkit_exec timeout

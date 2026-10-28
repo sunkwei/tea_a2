@@ -87,9 +87,15 @@ button{font-family:inherit}
   gap:16px;padding:0 20px;border-bottom:.5px solid var(--dsw-alias-border-l3);
 }
 .topbar-left{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}
-.crumbs{display:flex;align-items:center;gap:8px;font-size:13px;min-width:0;overflow:hidden}
+.crumbs{display:flex;align-items:center;gap:8px;font-size:13px;min-width:0;overflow:hidden;flex:1 1 auto}
 .crumbs .sep{color:var(--dsw-alias-label-caption)}
-.crumbs .crumb{color:var(--dsw-alias-label-caption);background:none;border:0;padding:0;font-size:13px;cursor:default;white-space:nowrap}
+.crumbs .crumb{color:var(--dsw-alias-label-caption);background:none;border:0;padding:0;font-size:13px;cursor:default;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 工作区路径：顶栏第一段。放得下就显示完整路径，放不下才从中间省（JS 量出来的）。
+   不许被 flex 压扁：JS 已经按可用宽度省过了，再压一下就会从尾巴把项目名切掉。 */
+.crumbs .crumb.path{flex:0 0 auto}
+/* 会话名：剩下的宽度都给它，不够就自己省略（尾部一个 …）。shrink 因子比路径大：
+   先缩它，别去挤路径。 */
+.crumbs .crumb.cur{flex:1 20 auto;min-width:0}
 .crumbs button.crumb{cursor:pointer}
 .crumbs button.crumb:hover{color:var(--dsw-alias-label-secondary)}
 .crumbs .crumb.cur{color:var(--dsw-alias-label-primary)}

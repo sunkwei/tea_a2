@@ -597,6 +597,8 @@
     line.appendChild(el('span', 'dot'));
     line.appendChild(el('span', 'tool-summary', fmtTrajSummary(turn)));
     if (turn.cancelled) line.appendChild(el('span', 'traj-badge stop', '已中断'));
+    else if (turn.repeated_output) line.appendChild(el('span', 'traj-badge', '重复输出'));
+    else if (turn.hit_iteration_limit) line.appendChild(el('span', 'traj-badge', '到达上限'));
     else if (turn.ok === false) line.appendChild(el('span', 'traj-badge', turn.partial ? '进行中' : '失败'));
     line.appendChild(el('span', 'chev', '›'));
     row.appendChild(line);
@@ -2645,9 +2647,71 @@
     items.forEach(function (it, i) {
       if (i) c.appendChild(el('span', 'sep', '/'));
       var last = i === items.length - 1;
-      if (last) { c.appendChild(el('span', 'crumb cur', it.label)); return; }
-      c.appendChild(btn('crumb', it.label, it.onClick || null));
+      var node;
+      if (last) { node = el('span', 'crumb cur', it.label); }
+      else { node = btn('crumb' + (it.path ? ' path' : ''), it.label, it.onClick || null); }
+      // 完整内容放在 title 里：显示上省掉的部分（长路径、长会话标题）也能看到全的。
+      if (it.title) node.title = it.title;
+      c.appendChild(node);
     });
+    fitCrumbPath();
+  }
+  /* 顶栏第一段是**工作区**。以前只写名字（tea_a2），看不出到底是哪个目录——
+     同名的项目一多就分不清了。这里显示完整路径；太长时从中间省掉一段（头尾都留：
+     头是根目录，尾是项目名），完整路径放在 title 里。 */
+  var CRUMB_PATH_MAX = 46;
+  var CRUMB_DOTS = '...';                    // 中间的省略号：显示不出来，鼠标悬停看全的
+  function shortenPath(p, max) {
+    var s = String(p == null ? '' : p);
+    max = max || CRUMB_PATH_MAX;
+    if (!s || s.length <= max) return s;
+    var keep = max - CRUMB_DOTS.length;       // 留给中间的省略号
+    var tail = Math.floor(keep / 2);
+    var head = keep - tail;
+    // 尽量切在 '/' 上：切在目录名中间看着像坏掉了。
+    var cut = s.lastIndexOf('/', s.length - tail - 1);
+    if (cut > 0 && cut <= head) return s.slice(0, cut) + CRUMB_DOTS + s.slice(s.length - tail);
+    return s.slice(0, head) + CRUMB_DOTS + s.slice(s.length - tail);
+  }
+  function workspaceCrumb() {
+    if (!state.workspace) return { label: '无工作区', title: '', path: '' };
+    var full = state.workspace.path || state.workspace.name || '';
+    return { label: shortenPath(full), title: full, path: full };
+  }
+  /* 顶栏宽度是量出来的，不是猜的：先按完整路径画，再看放不放得下，放不下才从
+     中间省掉一段（头尾都留：头是根目录，尾是项目名）。 */
+  function fitCrumbPath() {
+    var c = $('crumbs');
+    if (!c || !state.workspace) return;
+    var crumb = c.querySelector('.crumb.path');
+    if (!crumb) return;
+    var full = state.workspace.path || state.workspace.name || '';
+    if (!full) return;
+    // 其它段（会话名）最多占 120px：路径优先，剩下多少给它多少，它自己会省略。
+    var others = 0;
+    for (var i = 0; i < c.children.length; i++) {
+      if (c.children[i] === crumb) continue;
+      var w = c.children[i].scrollWidth || c.children[i].getBoundingClientRect().width;
+      others += Math.min(w, 120);
+    }
+    others += 8 * Math.max(0, c.children.length - 1);     // 段之间的间隔
+    var avail = c.clientWidth - others - 4;
+    crumb.textContent = full;
+    if (avail < 80) {
+      // 窄得没法显示路径了：只留最后一段（项目名），前面一个省略号。
+      var base = full.split('/').filter(function (x) { return x; }).pop() || full;
+      crumb.textContent = '.../' + base;
+      return;
+    }
+    if (crumb.scrollWidth <= avail) return;              // 放得下：完整路径
+    var lo = 6, hi = full.length, best = 6;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      crumb.textContent = shortenPath(full, mid);
+      if (crumb.scrollWidth <= avail) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    crumb.textContent = shortenPath(full, best);
   }
   /* ---------- 服务状态：只信任「刚刚」的事实 ----------
      以前 /api/health 只在启动时查一次，之后再也不刷新。于是任何一次瞬时失败
@@ -3899,6 +3963,7 @@
     $('sidebar-show').classList.toggle('hidden', !hidden);
     $('sidebar-hide').setAttribute('aria-expanded', hidden ? 'false' : 'true');
     $('sidebar-show').setAttribute('aria-expanded', hidden ? 'true' : 'false');
+    fitCrumbPath();      // 侧栏收起/展开：顶栏的可用宽度变了，路径要重裁
   }
   function toggleSidebar(force) {
     state.sidebarHidden = typeof force === 'boolean' ? force : !state.sidebarHidden;
@@ -3912,9 +3977,13 @@
 
   function renderCrumbs() {
     updateExportButton();
-    var ws = state.workspace ? state.workspace.name : '无工作区';
-    if (state.view === 'chat') setCrumbs([{ label: ws }, { label: state.session ? (state.session.title || state.session.id) : '新会话' }]);
-    else setCrumbs([{ label: ws }, { label: VIEW_LABEL[state.view] || state.view }]);
+    var ws = workspaceCrumb();
+    if (state.view === 'chat') {
+      var title = state.session ? (state.session.title || state.session.id) : '新会话';
+      setCrumbs([ws, { label: title, title: title }]);
+    } else {
+      setCrumbs([ws, { label: VIEW_LABEL[state.view] || state.view }]);
+    }
   }
 
   /* ---------- 9) 文件视图 ---------- */
@@ -4607,7 +4676,8 @@
       row('当前模型', cfg.active.provider + ' · ' + cfg.active.model);
     }
     if (cfg.settings) {
-      row('最大迭代', String(cfg.settings.max_iterations));
+      row('最大迭代', cfg.settings.max_iterations > 0
+        ? String(cfg.settings.max_iterations) : '不限（跑到模型自己收尾）');
       row('工具输出上限', cfg.settings.max_tool_output + ' 字节');
     }
     // 没配置时：顶上那张「配置 provider.yaml」的卡是入口，下面那行「重置
@@ -5764,6 +5834,7 @@
     window.addEventListener('resize', function () {
       hideTurnTip();
       scheduleTurnSpy();
+      fitCrumbPath();          // 窗口窄了：路径按新宽度重裁
       if (state.view === 'shell') shellResize();
     });
     $('input').addEventListener('input', autoGrow);
