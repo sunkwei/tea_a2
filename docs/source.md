@@ -72,7 +72,7 @@ commit 则是**构建期元数据**，它既不在源码里、也不在二进制
 
 ```
 # tea_agent.buildinfo（与二进制放在一起）
-version=0.15.0
+version=0.15.1
 commit=678cd2c1f014        # 工作区有未提交改动时是 <hash>-dirty
 ```
 

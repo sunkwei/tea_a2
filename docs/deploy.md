@@ -26,11 +26,11 @@ cmake --build --preset arm64-linux -j"$(nproc)"
 
 | 构建 | 大小 | 运行库依赖 |
 | --- | --- | --- |
-| Windows x64 / MinGW-w64（0.15.0 实测，`win64-mingw-cross`） | 7.5 MB（`strip` 后 4.9 MB） | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
-| Windows x64 / MSVC（0.8.1 实测，未在 0.15.0 重测） | 2.6 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
-| Linux x64（0.15.0 实测，`posix` preset） | 4.5 MB（`strip` 后 4.0 MB） | 动态链接目标机的 glibc；要完全静态见下一行 |
-| Linux x64（0.15.0 实测，`-DTEA_AGENT_STATIC_LIBC=ON -DTEA_AGENT_STATIC_RUNTIME=ON`） | 6.8 MB（`strip` 后 5.8 MB） | **完全静态**：不依赖目标机的 glibc 版本 |
-| Linux aarch64（0.15.0 实测，`arm64-linux` preset） | 4.9 MB | 默认完全静态（Arm GNU 11.3 + 静态 glibc）；该工具链的 libstdc++ 自带调试信息，链接出来会大很多，部署前记得 `strip` |
+| Windows x64 / MinGW-w64（0.15.1 实测，`win64-mingw-cross`） | 7.5 MB（`strip` 后 4.9 MB） | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
+| Windows x64 / MSVC（0.8.1 实测，未在 0.15.1 重测） | 2.6 MB | 需要目标机安装 VC++ 运行库（`MSVCP140.dll` / `VCRUNTIME140*.dll`） |
+| Linux x64（0.15.1 实测，`posix` preset） | 4.5 MB（`strip` 后 4.0 MB） | 动态链接目标机的 glibc；要完全静态见下一行 |
+| Linux x64（0.15.1 实测，`-DTEA_AGENT_STATIC_LIBC=ON -DTEA_AGENT_STATIC_RUNTIME=ON`） | 6.8 MB（`strip` 后 5.8 MB） | **完全静态**：不依赖目标机的 glibc 版本 |
+| Linux aarch64（0.15.1 实测，`arm64-linux` preset） | 4.9 MB | 默认完全静态（Arm GNU 11.3 + 静态 glibc）；该工具链的 libstdc++ 自带调试信息，链接出来会大很多，部署前记得 `strip` |
 
 （发布包 `release/tea_a2-<版本>.zip` 里的三个二进制都是 `strip` 过的。语音输入的模型
 **不在包里**——那是 240 MB 的独立文件，按需下载。）
