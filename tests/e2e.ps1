@@ -349,28 +349,29 @@ try {
 
             $taskBody = @{ workspace_id = $wsId; prompt = 'run the mock sequence as a task'; title = 'e2e task' } |
                 ConvertTo-Json -Compress
-            $task = Invoke-RestMethod -Method Post -Uri "$taskBase/api/tasks" `
-                -ContentType 'application/json' -Body $taskBody
+            # The queue answers in one envelope: {code, message, request_id, data}.
+            $task = (Invoke-RestMethod -Method Post -Uri "$taskBase/api/tasks" `
+                -ContentType 'application/json' -Body $taskBody).data
             Check "POST /api/tasks creates a task" ($null -ne $task.id -and $task.status -eq 'queued') `
                 "id=$($task.id) status=$($task.status)"
             Check "the task keeps its prompt" ($task.prompt -eq 'run the mock sequence as a task') $task.prompt
-            $taskFile = Join-Path $taskData "$wsId\$($task.id).json"
+            $taskFile = Join-Path $taskData "$($task.id).json"
             Check "the task is persisted by the task server" (Test-Path $taskFile) $taskFile
 
-            $taskList = Invoke-RestMethod "$taskBase/api/tasks?workspace_id=$wsId"
+            $taskList = (Invoke-RestMethod "$taskBase/api/tasks?workspace_id=$wsId").data
             Check "GET /api/tasks lists the task" (@($taskList.tasks).Count -ge 1) `
                 "count=$(@($taskList.tasks).Count)"
             Check "the counts report the queued task" ($taskList.counts.queued -ge 1) `
                 ($taskList.counts | ConvertTo-Json -Compress)
 
-            $started = Invoke-RestMethod -Method Post -Uri "$taskBase/api/tasks/$($task.id)/start?workspace_id=$wsId" `
-                -ContentType 'application/json' -Body '{}'
+            $started = (Invoke-RestMethod -Method Post -Uri "$taskBase/api/tasks/$($task.id)/start?workspace_id=$wsId" `
+                -ContentType 'application/json' -Body '{}').data
             Check "POST /api/tasks/{id}/start runs it" ($started.status -eq 'running') "status=$($started.status)"
 
             $taskDone = $null
             for ($i = 0; $i -lt 60; $i++) {
                 Start-Sleep -Milliseconds 500
-                $one = Invoke-RestMethod "$taskBase/api/tasks/$($task.id)?workspace_id=$wsId"
+                $one = (Invoke-RestMethod "$taskBase/api/tasks/$($task.id)?workspace_id=$wsId").data
                 if ($one.status -in @('done', 'failed', 'cancelled', 'waiting_confirmation')) { $taskDone = $one; break }
             }
             Check "the task ends up done" ($null -ne $taskDone -and $taskDone.status -eq 'done') `
