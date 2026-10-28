@@ -4,6 +4,7 @@
 和 sched/bili.py 一个路子：个人工具，纯 HTTP + cookie，不依赖 tea_agent 二进制，
 只共用 ~/.tea_agent/provider.yaml 里的 provider 配置。
 
+    python3 sched/zhihu.py --login                      # 登录：开有头浏览器登录并存 storageState
     python3 sched/zhihu.py whoami                       # 账号信息 + 登录态有效期
     python3 sched/zhihu.py hot --limit 20               # 热榜
     python3 sched/zhihu.py search "大模型" --limit 10    # 搜索（综合/内容/用户）
@@ -16,6 +17,7 @@
 
 登录态来自一个 Playwright storageState 文件（cookie 明文，跨 OS 通用）：
   $ZHIHU_STATE  >  ~/.tea_agent/zhihu_state.json  >  /mnt/c/Users/Hetin/Documents/pw_zhihu.json
+  （--login 会把新状态写到第一个已存在的候选里；Windows 上默认写 %USERPROFILE%\Documents）
 
 知乎接口现状（2026-10 实测，别照着老博客改）：
   * 能用（带 cookie 就行，不需要签名）：
@@ -37,34 +39,48 @@
 """
 import argparse
 import html as htmllib
+import urllib.parse
 import json
 import os
 import re
 import sys
 import time
 
+# 依赖懒加载：--login 只要标准库，裸 Python 也能跑
 try:
     import requests
 except ImportError:
-    sys.exit("需要 requests：pip3 install requests")
+    requests = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import bili                     # 复用 provider 选择 / LLM 调用 / JSON 抽取
-except Exception as exc:            # pragma: no cover
-    sys.exit("导入 sched/bili.py 失败（%s），LLM 相关子命令不可用" % exc)
+
+
+def _bili():
+    """sched/bili.py：provider 选择 / LLM 调用 / JSON 抽取都复用它。"""
+    try:
+        import bili
+    except Exception as exc:        # pragma: no cover
+        raise SystemExit("导入 sched/bili.py 失败（%s）" % exc)
+    return bili
 
 HOME = os.path.expanduser("~")
-STATE_DIR = os.path.join(HOME, ".tea_agent", "zhihu")
+STATE_DIR = os.environ.get("ZHIHU_HOME") or os.path.join(HOME, ".tea_agent", "zhihu")
 CORPUS = os.path.join(STATE_DIR, "corpus.json")
 SUMMARIES = os.path.join(STATE_DIR, "summaries.json")
 DIGEST = os.path.join(STATE_DIR, "digest.md")
 
+# 登录态可能在哪：环境变量 > 本机 ~ 下的副本 > WSL 里共用的 Windows 那份 > Windows 原生位置
+WIN_DOCS = os.path.join(HOME, "Documents")
 STATE_CANDIDATES = [
     os.environ.get("ZHIHU_STATE", ""),
     os.path.join(HOME, ".tea_agent", "zhihu_state.json"),
     "/mnt/c/Users/Hetin/Documents/pw_zhihu.json",
+    os.path.join(WIN_DOCS, "pw_zhihu.json"),
 ]
+if os.name == "nt":
+    STATE_DEFAULT = os.path.join(WIN_DOCS, "pw_zhihu.json")
+else:
+    STATE_DEFAULT = "/mnt/c/Users/Hetin/Documents/pw_zhihu.json"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -90,6 +106,8 @@ def load_cookies():
 
 
 def make_session():
+    if requests is None:
+        raise SystemExit("需要 requests：pip3 install requests")
     s = requests.Session()
     s.headers.update({
         "User-Agent": UA,
@@ -167,7 +185,7 @@ def get_hot(sess, limit=30):
 
 def search(sess, query, stype="general", limit=10, offset=0):
     url = ("https://www.zhihu.com/api/v4/search_v3?t=%s&q=%s&correction=1"
-           "&offset=%d&limit=%d" % (stype, requests.utils.quote(query), offset, limit))
+           "&offset=%d&limit=%d" % (stype, urllib.parse.quote(query), offset, limit))
     j = api(sess, url)
     return j.get("data") or []
 
@@ -602,6 +620,7 @@ def cmd_summarize(args):
         with open(SUMMARIES, "r", encoding="utf-8") as fh:
             summaries = json.load(fh)
 
+    bili = _bili()
     pname, prov, model = bili.pick_provider(args.provider, args.model)
     print("[llm] provider=%s model=%s" % (pname, model))
 
@@ -680,6 +699,7 @@ def cmd_digest(args):
            "> 生成于 %s ｜ 共 %d 条\n" % (time.strftime("%Y-%m-%d %H:%M"), len(items))]
 
     if args.overview and items:
+        bili = _bili()
         pname, prov, model = bili.pick_provider(args.provider, args.model)
         print("[llm] 生成综述 (%s/%s) …" % (pname, model))
         blob = "\n\n".join(
@@ -927,9 +947,41 @@ def cmd_rm(args):
 
 
 # --------------------------------------------------------------------------
+def cmd_login(args):
+    """登录入口：开有头浏览器登录知乎，把 storageState 存下来。"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import browser_login
+
+    out = browser_login.state_path("ZHIHU_STATE", STATE_CANDIDATES,
+                                    STATE_DEFAULT)
+    ok, msg = browser_login.login(
+        url="https://www.zhihu.com/signin",
+        out=out, cookie="z_c0", label="zhihu",
+        headless=args.headless, timeout=args.timeout)
+    if not ok:
+        raise SystemExit("[zhihu] 登录没成功：%s" % msg)
+    good, detail = browser_login.check_state(out, "z_c0")
+    print("[zhihu] %s → %s" % (out, detail))
+    if not good:
+        raise SystemExit("[zhihu] 登录态不对：" + detail)
+    try:
+        sess = make_session()
+        me = get_me(sess)
+        print("[zhihu] 账号：%s (%s) 通知 %s" % (
+            me.get("name"), me.get("url_token"),
+            me.get("default_notifications_count")))
+    except Exception as exc:
+        print("[zhihu] 校验跳过：%s" % exc)
+
+
 def main():
     ap = argparse.ArgumentParser(description="知乎内容抓取 + LLM 提炼")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap.add_argument("--login", action="store_true",
+                    help="登录入口：开有头浏览器登录，把 storageState 存下来")
+    ap.add_argument("--headless", action="store_true",
+                    help="配合 --login：不开窗口，改成扫码")
+    ap.add_argument("--timeout", type=int, default=600, help="--login 最多等多久（秒）")
+    sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("whoami", help="账号信息").set_defaults(func=cmd_whoami)
 
@@ -1001,6 +1053,12 @@ def main():
     p.set_defaults(func=cmd_post)
 
     args = ap.parse_args()
+    if args.login:
+        cmd_login(args)
+        return
+    if not args.cmd:
+        ap.print_help()
+        return
     args.func(args)
 
 

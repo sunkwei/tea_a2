@@ -5,6 +5,7 @@
 但完全独立：不依赖 tea_agent 二进制，只共用 ~/.tea_agent/provider.yaml
 里的 provider 配置。
 
+    python3 sched/bili.py --login                           # 登录：开有头浏览器登录并存 storageState
     python3 sched/bili.py fetch      --pages 2 --limit 20     # 拉历史+字幕，存语料
     python3 sched/bili.py summarize  --limit 6                # 调 LLM 生成结构化摘要
     python3 sched/bili.py digest                              # 输出 markdown digest
@@ -32,28 +33,35 @@ import re
 import sys
 import time
 
+# 延迟依赖：--login 只要标准库，裸 Python 也能跑
 try:
     import requests
 except ImportError:
-    sys.exit("需要 requests：pip3 install requests")
+    requests = None
 try:
     import yaml
 except ImportError:
-    sys.exit("需要 pyyaml：pip3 install pyyaml")
+    yaml = None
 
 HOME = os.path.expanduser("~")
-STATE_DIR = os.path.join(HOME, ".tea_agent", "bili")
+STATE_DIR = os.environ.get("BILI_HOME") or os.path.join(HOME, ".tea_agent", "bili")
 CORPUS = os.path.join(STATE_DIR, "corpus.json")
 SUMMARIES = os.path.join(STATE_DIR, "summaries.json")
 DIGEST = os.path.join(STATE_DIR, "digest.md")
 PROVIDER_YAML = os.path.join(HOME, ".tea_agent", "provider.yaml")
 
 # 登录态来源：优先本机的一份，其次是 Windows 侧导出的那份
+WIN_DOCS = os.path.join(HOME, "Documents")
 STATE_CANDIDATES = [
     os.environ.get("BILI_STATE", ""),
     os.path.join(HOME, ".tea_agent", "bili_state.json"),
     "/mnt/c/Users/Hetin/Documents/pw_bilibili.json",
+    os.path.join(WIN_DOCS, "pw_bilibili.json"),
 ]
+if os.name == "nt":
+    STATE_DEFAULT = os.path.join(WIN_DOCS, "pw_bilibili.json")
+else:
+    STATE_DEFAULT = "/mnt/c/Users/Hetin/Documents/pw_bilibili.json"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -81,6 +89,8 @@ def load_cookies():
 
 
 def make_session():
+    if requests is None:
+        raise SystemExit("需要 requests：pip3 install requests")
     s = requests.Session()
     s.headers.update({
         "User-Agent": UA,
@@ -313,6 +323,8 @@ def chat_completions_url(api_url):
 
 
 def pick_provider(name=None, model=None):
+    if yaml is None:
+        raise SystemExit("需要 pyyaml：pip3 install pyyaml")
     with open(PROVIDER_YAML, "r", encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
     providers = cfg.get("providers") or {}
@@ -333,6 +345,8 @@ def pick_provider(name=None, model=None):
 
 
 def llm_chat(p, model, messages, max_tokens=2000, temperature=0.2, tries=3):
+    if requests is None:
+        raise SystemExit("需要 requests：pip3 install requests")
     url = chat_completions_url(p.get("api_url"))
     headers = {"Content-Type": "application/json"}
     headers["Authorization"] = "Bearer " + (p.get("api_key") or "")
@@ -596,9 +610,43 @@ def cmd_all(args):
     print("\n[digest] %s" % args.out)
 
 
+def cmd_login(args):
+    """登录入口：开有头浏览器登录 B 站，把 storageState 存下来。"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import browser_login
+
+    out = browser_login.state_path("BILI_STATE", STATE_CANDIDATES,
+                                    STATE_DEFAULT)
+    ok, msg = browser_login.login(
+        url="https://passport.bilibili.com/login",
+        out=out, cookie="SESSDATA", label="bili",
+        headless=args.headless, timeout=args.timeout)
+    if not ok:
+        raise SystemExit("[bili] 登录没成功：%s" % msg)
+    good, detail = browser_login.check_state(out, "SESSDATA")
+    print("[bili] %s → %s" % (out, detail))
+    if not good:
+        raise SystemExit("[bili] 登录态不对：" + detail)
+    # 顺手验一下：导航接口认不认我们
+    try:
+        sess = make_session()
+        nav = api(sess, "https://api.bilibili.com/x/web-interface/nav")
+        print("[bili] isLogin=%s mid=%s uname=%s" % (
+            (nav.get("data") or {}).get("isLogin"),
+            (nav.get("data") or {}).get("mid"),
+            (nav.get("data") or {}).get("uname")))
+    except Exception as exc:
+        print("[bili] 校验跳过：%s" % exc)
+
+
 def main():
     ap = argparse.ArgumentParser(description="bilibili 观看历史知识提炼")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap.add_argument("--login", action="store_true",
+                    help="登录入口：开有头浏览器登录，把 storageState 存下来")
+    ap.add_argument("--headless", action="store_true",
+                    help="配合 --login：不开窗口，改成扫码")
+    ap.add_argument("--timeout", type=int, default=600, help="--login 最多等多久（秒）")
+    sub = ap.add_subparsers(dest="cmd")
 
     def common(p):
         p.add_argument("--pages", type=int, default=2, help="历史翻页数（每页 30 条）")
@@ -623,6 +671,12 @@ def main():
     p.set_defaults(func=cmd_show)
 
     args = ap.parse_args()
+    if args.login:
+        cmd_login(args)
+        return
+    if not args.cmd:
+        ap.print_help()
+        return
     args.func(args)
 
 
