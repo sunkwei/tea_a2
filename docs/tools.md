@@ -9,6 +9,7 @@
 | `toolkit_exec` | 执行系统命令。Windows 写成临时 `.cmd`/`.ps1` 再执行（绕开引号问题），超时用 Job Object 杀整个进程树；POSIX 用 `setsid` + 进程组 `kill`。输出统一转 UTF-8 回填模型 |
 | `toolkit_file` | `read` `write` `append` `list` `mkdir` `delete` `move` `stat` |
 | `toolkit_workspace_search` | 在工作区里搜东西：**文件名 + 文件内容**。查询串按原样逐字节比较（**不做正则/模糊匹配**）；`scope=name\|content\|both`、`exact=true`（完全匹配：路径整串相等 / 整行相等）、`case_sensitive`、`path=`（只搜某个子目录）、`max_results=`。见 [api.md](api.md#工作区搜索get-ap-workspacesidsearch) |
+| `toolkit_history_search` | 搜**历史对话**：会话标题、说过的话、想过的、调用过的工具，以及**轨迹**（命令的输出在那里）。查询串按原样逐字节比较（**不做正则/模糊匹配**）；`scope=all\|title\|messages\|trajectory`、`exact=true`（完全匹配）、`case_sensitive`、`max_results=`。见 [api.md](api.md#历史搜索get-ap-workspacesidsessionssearch) |
 | `toolkit_memory` | 工作区长期记忆的增删查，自动注入 system prompt，跨会话保留偏好与项目事实 |
 | `toolkit_agent_doc` | `read` `append` `replace` `scripts`：维护 `.tea_agent_run/agent.md`（本工作区的经验：坑、可复用命令与脚本） |
 | `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
@@ -76,6 +77,31 @@
 - **历史图片会继续发送**：会话里存的是路径，每轮把上下文里所有图片重新编码成 data URL
   （压缩掉的部分跳过），所以「上一轮看过的那张图还能不能接着问」的答案是能。为免无限增长，
   一次请求的图片总量封顶 24 MB，超出时最旧的几张降级为纯文本并记一条 WARN。
+
+### 搜历史：`toolkit_history_search`
+
+「我上次说过那句话吗？」「那个报错当时在哪儿？」——这些问题问的是**发生过什么**，不是
+文件长什么样，所以要搜会话与轨迹，而不是搜工作区的文件。
+
+```jsonc
+// 整个工作区里找 "水獭"（标题、对话、轨迹都找）
+{ "query": "水獭" }
+// 只看轨迹（命令的输出在那里）
+{ "query": "water otter", "scope": "trajectory" }
+```
+
+匹配规则和文件搜索一样：**完全字符串匹配**，查询串按原样逐字节比较，`exact=true`
+要求整串相等（标题整串、或某一整行）。
+
+返回的是每个命中的会话：会话 id、标题、时间、命中处数，以及最多 5 条片段——每条都
+标了来自哪里（`[标题]` / `[对话]` / `[摘要]` / `[工具调用]` / `[轨迹]`），这样「是 agent
+说的」还是「是命令打印的」一眼能分清。
+
+读多少是有上限的：最多 200 个会话、单会话超过 4 MB 只读标题、每会话最多 5 条片段。
+撞到上限时结果里会写明「还有更多」——**结果不完整时必须说出来**。
+
+网页侧栏「会话」上面那个搜索框走的是同一套核心（`GET
+/api/workspaces/{id}/sessions/search`）。
 
 ### 搜工作区：`toolkit_workspace_search`
 

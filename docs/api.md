@@ -26,6 +26,7 @@
 | `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件 |
 | `GET` | `/api/workspaces/{id}/raw?path=` | 读文件原始字节（图片 / PDF 等，**16 MB 上限**，用于在页面里显示） |
 | `GET` | `/api/workspaces/{id}/download?path=` | 以附件形式下载文件（`Content-Disposition: attachment`），**从磁盘流式发送、无 16 MB 限制**；`&inline=1` 改为在浏览器里直接打开（视频 / PDF） |
+| `GET` | `/api/workspaces/{id}/sessions/search?q=` | **搜历史对话**：会话标题 + 说过的内容 + 轨迹里的工具输出。查询串按原样逐字节比较。`scope=all\|title\|messages\|trajectory`（默认 all）、`exact=1`（完全匹配）、`case=1`、`limit=` |
 | `GET` / `POST` | `/api/workspaces/{id}/sessions` | 会话列表 / 新建 |
 | `GET` | `/api/sessions/{sid}` | 取完整会话（含 reasoning、工具调用与结果）；另外带 `summary_upto` / `summary_bytes`——前面有多少条消息已经折成摘要 |
 | `GET` / `PUT` | `/api/sessions/{sid}/todos` | 任务列表：GET 随 `/api/sessions/{sid}` 一起返回；PUT 用 `{"items":[…]}` 整体替换，或 `{"index":n,"status":"…"}` 改一条（`index` **从 1 起算**）。计划在轮次结束时关掉，两轮之间 `todos` 是空的、步骤在 `todo_carry` 里；这时 PUT 改的是 `todo_carry`（改完它就变回活着的计划） |
@@ -145,6 +146,65 @@ curl -X POST http://device:8282/api/exec \
   "dry_run": false
 }
 ```
+
+---
+
+### 历史搜索（`GET /api/workspaces/{id}/sessions/search`）
+
+搜**这个工作区里发生过什么**：会话标题、说过的话、想过的、调用过的工具，以及**轨迹**
+（命令的输出在那里）。
+
+```bash
+curl -s "http://127.0.0.1:8282/api/workspaces/$WS/sessions/search?q=水獭" | jq
+```
+
+```json
+{
+  "query": "水獭",
+  "scope": "all",
+  "exact": false,
+  "case_sensitive": false,
+  "count": 2,
+  "sessions_scanned": 17,
+  "truncated": false,
+  "sessions_skipped": false,
+  "results": [
+    {
+      "session_id": "s_9f2c1a",
+      "title": "关于水獭的讨论",
+      "created_at": "2026-10-29T07:00:00Z",
+      "updated_at": "2026-10-29T07:10:00Z",
+      "message_count": 12,
+      "hits": 3,
+      "title_hit": true,
+      "snippets": [
+        { "kind": "title", "text": "关于水獭的讨论" },
+        { "kind": "message", "role": "user", "index": 4, "text": "…水獭到底吃什么？…" },
+        { "kind": "trajectory", "tool": "toolkit_exec", "text": "…水獭吃鱼…" }
+      ]
+    }
+  ]
+}
+```
+
+| 参数 | 取值 | 意思 |
+| --- | --- | --- |
+| `q` | 必填 | 查询串。**按原样逐字节比较**（同文件搜索：不是正则、不做模糊匹配） |
+| `scope` | `all`（默认）/ `title` / `messages` / `trajectory` | 搜标题、搜对话、搜轨迹，还是都搜 |
+| `exact` | `1` | **完全匹配**：标题整串相等，或某一整行相等 |
+| `case` | `1` | 区分大小写（默认不区分，只折 ASCII 大写） |
+| `limit` | 数字 | 最多返回几个会话（默认 50，上限 200） |
+
+`snippets[].kind` 说明命中来自哪里：`title`（标题）、`message`（对话里的一条消息）、
+`summary`（被压缩成摘要的那段）、`tool_call`（模型发起的工具调用）、`trajectory`
+（轨迹里的工具输出）。`message`/`tool_call` 带 `index`（消息在会话里的下标），
+网页据此跳到那一条。
+
+**有上限**：最多读 200 个会话、单会话超过 4 MB 只读标题、每个会话最多 5 条片段；
+撞到上限时 `truncated` / `sessions_skipped` 为 true——**结果不完整时要说出来**。
+
+网页的入口在**侧栏「会话」上面那个搜索框**（回车搜索，Esc 返回）；agent 那边是
+`toolkit_history_search` 工具。
 
 ---
 

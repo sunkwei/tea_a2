@@ -74,7 +74,12 @@
                 title="导入导出的 .html（或会话 JSON），恢复成一个新会话">⤒</button>
         <button id="new-session" class="mini-btn" type="button" title="新建会话">＋</button>
       </div>
+      <!-- 搜历史：这个工作区里说过的、跑过的命令（轨迹里的输出）。
+           查的是「对话 + 轨迹」，不是文件。 -->
+      <input class="ta sess-search" id="session-search" type="search" spellcheck="false"
+             placeholder="搜索历史对话 / 轨迹" aria-label="搜索历史对话">
       <div id="session-list" class="sess-list"></div>
+
     </div>
   </aside>
 

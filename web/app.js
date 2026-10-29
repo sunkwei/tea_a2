@@ -61,6 +61,8 @@
     /// 从这条轮次分出去的新会话，再发进那个会话；当前会话不动。null = 未选。
     fork: null,
     files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0, search: null },
+    /// 侧栏里的历史搜索（对话 + 轨迹）。null = 没在搜。
+    sessionSearch: null,
     memory: [], logsTimer: null, logsAutoScroll: true,
     /// 当前会话的任务列表（todo）：agent 用 toolkit_todo 维护，SSE 的 todo 事件
     /// 实时推送。done/total 用于「3/7」这样的进度显示。
@@ -3183,10 +3185,122 @@
   }
   /* 会话索引：标题 + 相对时间 + 消息条数，当前会话高亮，行内改名/删除。
      排序在 loadSessions 里做（最新的在前），这里只负责渲染。 */
+  // ---- 历史搜索（对话 + 轨迹）------------------------------------------------
+  // 查的是「这个工作区里发生过什么」：会话标题、说过的话、跑过的命令
+  // （命令的输出在轨迹里）。跟「文件」页那个搜索是两回事。
+  function runSessionSearch() {
+    if (!state.workspace) { toast('请先选择工作区'); return Promise.resolve(); }
+    var input = $('session-search');
+    var q = (input.value || '').trim();
+    if (!q) { clearSessionSearch(); return Promise.resolve(); }
+    var url = 'api/workspaces/' + encodeURIComponent(state.workspace.id) + '/sessions/search?q=' +
+      encodeURIComponent(q);
+    return api(url).then(function (d) {
+      state.sessionSearch = {
+        q: q, results: d.results || [], count: d.count || 0, truncated: !!d.truncated
+      };
+      renderSessions();
+    }, function (e) { toast('搜索失败：' + e.message); });
+  }
+  function clearSessionSearch() {
+    state.sessionSearch = null;
+    var input = $('session-search');
+    if (input) input.value = '';
+    renderSessions();
+  }
+  function hitKindLabel(snip) {
+    var kind = snip && snip.kind;
+    if (kind === 'title') return '标题';
+    if (kind === 'message') return '对话';
+    if (kind === 'summary') return '摘要';
+    if (kind === 'tool_call') return '工具调用';
+    if (kind === 'trajectory') return '轨迹';
+    return '命中';
+  }
+  // 把命中的词标出来：用 DOM 节点拼，不拼 HTML 字符串（片段是模型写的）。
+  function markedSnippet(text, q) {
+    var span = el('span');
+    text = text == null ? '' : String(text);
+    if (!q) { span.textContent = text; return span; }
+    var lower = text.toLowerCase();
+    var needle = q.toLowerCase();
+    var pos = 0;
+    while (pos < text.length) {
+      var at = lower.indexOf(needle, pos);
+      if (at < 0) {
+        span.appendChild(document.createTextNode(text.slice(pos)));
+        break;
+      }
+      if (at > pos) span.appendChild(document.createTextNode(text.slice(pos, at)));
+      span.appendChild(el('b', null, text.slice(at, at + q.length)));
+      pos = at + q.length;
+    }
+    return span;
+  }
+  function renderSessionSearchResults(box, s) {
+    var head = el('div', 'sess-search-head');
+    head.appendChild(el('span', null, '搜索「' + s.q + '」：' + s.count + ' 个会话'));
+    head.appendChild(btn('sess-clear', '返回', clearSessionSearch));
+    box.appendChild(head);
+    if (s.truncated) {
+      box.appendChild(el('div', 'sess-snip', '（会话太多，只显示了前面一部分）'));
+    }
+    if (!s.results.length) {
+      box.appendChild(el('div', 'empty-note', '没有匹配的历史'));
+      return;
+    }
+    s.results.forEach(function (hit) {
+      var item = el('div', 'sess-item');
+      var active = state.session && state.session.id === hit.session_id;
+      var row = el('button', 'sess-row' + (active ? ' active' : ''));
+      row.type = 'button';
+      row.appendChild(el('span', 'sess-title', hit.title || hit.session_id));
+      var meta = el('span', 'sess-meta');
+      meta.appendChild(el('span', null, fmtRelTime(hit.updated_at || hit.created_at) || '—'));
+      meta.appendChild(el('span', null, '·'));
+      meta.appendChild(el('span', null, hit.hits + ' 处'));
+      row.appendChild(meta);
+      row.title = (hit.title || hit.session_id) + '\n' + hit.hits + ' 处命中';
+      // 跳过去时落在哪一条：第一个带消息下标的命中。
+      var jump = -1;
+      (hit.snippets || []).forEach(function (snip) {
+        if (jump < 0 && snip.index != null && num(snip.index) >= 0) jump = num(snip.index);
+        var line = el('div', 'sess-snip');
+        line.appendChild(el('span', null, '[' + hitKindLabel(snip) + '] '));
+        line.appendChild(markedSnippet(snip.text || '', s.q));
+        item.appendChild(line);
+      });
+      row.onclick = function () { openSession(hit.session_id, jump); };
+      item.insertBefore(row, item.firstChild);
+      box.appendChild(item);
+    });
+  }
+  // 跳到会话里的某一条消息：消息本体没有 id（用户消息有 data-mid），
+  // 所以落在它之前最近的一条用户消息上——那正是这一轮的开头。
+  function scrollToMessage(index) {
+    var box = $('messages');
+    if (!box) return;
+    var nodes = box.querySelectorAll('[data-mid]');
+    if (!nodes.length) return;
+    var target = null;
+    for (var i = 0; i < nodes.length; i++) {
+      // dataset.mid 是字符串：num() 只认 number，这里要自己 parseInt。
+      var mid = parseInt(nodes[i].dataset.mid, 10);
+      if (isNaN(mid)) continue;
+      if (mid <= index) target = nodes[i];
+    }
+    if (!target) target = nodes[0];
+    target.scrollIntoView({ block: 'center' });
+    target.classList.add('hit');
+    setTimeout(function () { target.classList.remove('hit'); }, 1700);
+  }
+
   function renderSessions() {
     var box = $('session-list');
     clear(box);
     if (!state.workspace) { box.appendChild(el('div', 'empty-note', '请先选择工作区')); return; }
+    // 搜索结果接管这个列表：位置不变，读起来还是「会话列表」。
+    if (state.sessionSearch) { renderSessionSearchResults(box, state.sessionSearch); return; }
     if (!state.sessions.length) { box.appendChild(el('div', 'empty-note', '暂无会话，点击上方 ＋ 新建')); return; }
     state.sessions.forEach(function (s) {
       var active = state.session && state.session.id === s.id;
@@ -3724,6 +3838,9 @@
       state.trajectory = []; state.lastTrajectoryId = null;
       state.files = { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0, search: null };
       // 换工作区 = 换项目：上一个项目的搜索词没有意义，连框一起清掉。
+      state.sessionSearch = null;
+      var histInput = $('session-search');
+      if (histInput) histInput.value = '';
       var searchInput = $('files-search-input');
       if (searchInput) searchInput.value = '';
       $('files-search-clear').classList.add('hidden');
@@ -3754,7 +3871,7 @@
       return refreshRunning();       // 侧栏的「进行中」标记跟着列表一起刷新
     }, function () { renderSessions(); });
   }
-  function openSession(sid) {
+  function openSession(sid, jumpTo) {
     if (!sid) return Promise.resolve();
     // 正在跟随另一轮：先离开（服务端照跑），而不是拒绝点这一下。多主题并行时
     // "必须先按停止/离开才能看别的会话"是最别扭的地方，这里改成自动离开。
@@ -3791,6 +3908,8 @@
         if (epoch !== state.sessionEpoch) return null;
         attachTrajectories();
         saveLS(); renderSessions(); renderChat(); renderMetrics(); scrollMaybe(true);
+        // 从搜索结果跳进来的：落在命中的那一轮上，别让人自己找。
+        if (jumpTo != null && jumpTo >= 0) scrollToMessage(jumpTo);
         // 这一轮可能还在服务端跑着（页面刚重新打开、或从别的标签页切回来）：接回去。
         return maybeAttach(sid);
       });
@@ -6044,6 +6163,14 @@
     $('overlay').onclick = function (e) {
       if (e.target === $('overlay')) closeDialog();
     };
+    $('session-search').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); runSessionSearch(); }
+      else if (e.key === 'Escape') { clearSessionSearch(); }
+    });
+    // 原生搜索框的 × 按钮：字空了，结果也清掉（否则列表停在旧结果上）。
+    $('session-search').addEventListener('search', function () {
+      if (!($('session-search').value || '').trim()) clearSessionSearch();
+    });
     $('files-search-go').onclick = runFileSearch;
     $('files-search-clear').onclick = clearFileSearch;
     $('files-search-input').addEventListener('keydown', function (e) {

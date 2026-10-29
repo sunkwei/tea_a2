@@ -76,6 +76,55 @@ struct SearchResults {
   bool files_skipped = false;  // some files were too big or binary
 };
 
+/// One place inside a conversation where the query was found.
+struct HistorySnippet {
+  /// "title" | "message" | "summary" | "tool_call" | "trajectory"
+  std::string kind;
+  std::string role;   // "user" | "assistant" | "tool" (empty for the others)
+  int index = -1;     // index of the message in the transcript (-1 = none)
+  std::string tool;   // the tool name (a tool call or a trajectory step)
+  std::string text;   // the matching fragment, with the context around it
+
+  nlohmann::json to_json() const;
+};
+
+/// One session of the workspace's history that matched.
+struct HistoryHit {
+  std::string session_id;
+  std::string title;
+  std::string created_at;
+  std::string updated_at;
+  int message_count = 0;
+  int hits = 0;
+  bool title_hit = false;
+  std::vector<HistorySnippet> snippets;
+
+  nlohmann::json to_json() const;
+};
+
+/// What to look for in the history, and where.
+struct HistoryQuery {
+  std::string text;         // the literal query; empty => nothing to look for
+  bool titles = true;       // match the session title
+  bool messages = true;     // match the transcript (what was said, thought, called)
+  bool trajectory = true;   // match the trajectory (tool calls and their output)
+  /// "完全匹配": the whole string has to be equal (the whole title, or one
+  /// whole line of the message).
+  bool whole = false;
+  bool case_sensitive = false;
+  std::size_t max_results = 50;
+  std::size_t max_sessions = 200;      // how many sessions are read
+  std::size_t max_bytes_per_session = 4u * 1024u * 1024u;
+  std::size_t max_snippets = 5;        // per session
+};
+
+struct HistoryResults {
+  std::vector<HistoryHit> hits;
+  std::size_t sessions_scanned = 0;
+  bool truncated = false;        // the caps hid sessions
+  bool sessions_skipped = false;  // some sessions were too big to read
+};
+
 class WorkspaceRegistry {
  public:
   bool load(const std::string& tea_home, std::string* err);
@@ -233,6 +282,14 @@ class Workspace {
   /// hid hits, so the caller can say "and more" instead of pretending the
   /// list is the whole truth.
   SearchResults search(const SearchQuery& query) const;
+
+  /// Search the workspace's **history**: the conversations that happened here
+  /// (see HistoryQuery). Titles, what was said, what was thought, what was
+  /// called - and the trajectory, which is where a command's output lives.
+  ///
+  /// The read is bounded (sessions, bytes, snippets) and `HistoryResults`
+  /// says when a cap hid something.
+  HistoryResults search_history(const HistoryQuery& query) const;
 
   std::vector<nlohmann::json> load_memory(std::string* err) const;
   nlohmann::json add_memory_note(const std::string& text, std::string* err) const;

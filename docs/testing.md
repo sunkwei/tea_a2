@@ -77,6 +77,7 @@ bash scripts/test-all.sh                                  # 整套测试：并�
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
 python3 tests/smoke_workspace_search.py                 # 工作区搜索：文件名/内容/完全匹配/不越界/工具那一半
+python3 tests/smoke_history_search.py                  # 历史搜索：对话/轨迹/标题/完全匹配/不跨工作区/工具那一半
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
 node tests/ui_workspace_delete.mjs                       # 删除工作区：确认框 + 只摘登记，文件不动（需 google-chrome）
 node tests/ui_workspace_access.mjs                        # 文件访问范围开关：受限 / 全局 / 命令行锁死（需 google-chrome）
@@ -95,6 +96,7 @@ node tests/ui_session_export.mjs                          # 导出按钮 → 下
 python3 tests/smoke_run_archive.py                        # 工作区归档下载：真 zip / 沙箱 / 超限跳过
 node tests/ui_files_download.mjs                          # 文件页「下载」按钮真的产出 zip（需 google-chrome）
 node tests/ui_workspace_search.mjs                      # 文件页搜索框：结果/点开文件/完全匹配/返回目录（需 google-chrome）
+node tests/ui_history_search.mjs                       # 侧栏历史搜索：结果/跳到命中的那条/Esc 返回（需 google-chrome）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
@@ -173,6 +175,19 @@ IMAP 这一层是协议级的：`CAPABILITY` / `LOGIN` / `SELECT`（UIDVALIDITY�
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的
 下一次请求里；`op=read/replace/scripts` 各自生效；超过 32 KB 的 append 报错并提示压缩且不
 改动文件；`GET/PUT /api/workspaces/{id}/agent-doc` 能读、能改、超限报 400。
+
+`tests/smoke_history_search.py` 覆盖历史搜索：跑两轮真对话（一个让模型答出 `MAGICTOKEN`，
+一个让它跑一条 `echo`），然后确认——说过的话能被搜到（并带出片段）、**命令的输出
+（轨迹）也能被搜到**（片段里写着是哪个工具）、`scope=messages|trajectory` 各自收窄、
+改过的**标题**能被 `scope=title` 搜到、`exact=1` 只认整串相等（句子里有个词不算）、
+查询串是字面量（`.*` 搜不到）、**另一个工作区的历史搜不到**、缺 `q` 与未知 `scope`
+报 400、未知工作区 404；最后一轮真对话确认 `toolkit_history_search` 工具跑得起来、
+结果里带着命中的会话，而且这个工具确实出现在给模型的工具表里。
+
+`tests/ui_history_search.mjs` 在浏览器里操作侧栏的历史搜索：搜索框在「会话」下面；
+搜「水獭」能搜到那个会话（命中词标粗、标题、片段都显示）、**轨迹**里的命中也标成
+`[轨迹]`；点结果能打开那个会话并**跳到命中的那一条**（那条消息被标上落点）；
+Esc 回到普通会话列表，搜索框同时清空。
 
 `tests/smoke_workspace_search.py` 覆盖工作区搜索：文件名命中、内容命中（并报出**行号**与
 原文）、`scope=name|content` 各自收窄、`exact=1` 只认整串相等（路径整串、整行整串，

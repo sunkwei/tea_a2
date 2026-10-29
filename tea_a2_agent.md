@@ -387,6 +387,38 @@ search:
 
 ---
 
+---
+
+## 历史搜索（对话 + 轨迹）：`toolkit_history_search`
+
+搜「这个工作区里发生过什么」：会话标题、说过的话、想过的、模型调用过的工具，以及
+**轨迹**（命令的输出在那里）。跟「搜文件」是两回事，两套核心、各自一个接口：
+
+| 搜什么 | 核心 | 接口 | 界面入口 |
+| --- | --- | --- | --- |
+| 文件名 + 文件内容 | `Workspace::search()` | `GET /api/workspaces/{id}/search` | 「文件」页的搜索框 |
+| 历史对话 + 轨迹 | `Workspace::search_history()` | `GET /api/workspaces/{id}/sessions/search` | 侧栏「会话」下面的搜索框 |
+
+### 坑
+
+- **会话的内容在会话文件里，不在 index.json 里**。`list_sessions()` 走 index.json 时只有
+  标题和时间；搜内容必须**逐个读 `<run_dir>/sessions/<id>.json`**（`load_session()`）。
+  所以这个搜索是 O(会话数 × 会话大小)，必须卡上限：最多 200 个会话、单会话 > 4 MB
+  只读标题、每会话最多 5 条片段。撞到上限时 `truncated` / `sessions_skipped` 为 true，
+  界面和工具输出都要说「还有更多」——**结果不完整时不能装作这就是全部**。
+- **轨迹是命令输出的所在地**：会话文件里有 tool 消息（工具的输出），轨迹里另外记了
+  **工具名 + 原始参数 + 输出**（每轮一行 jsonl，`<run_dir>/trajectories/<id>.jsonl`）。
+  只在命令输出里出现过的词，靠搜轨迹才找得到。
+- **`num()` 只认 number**（`web/app.js`）：`dataset.mid` 是字符串，`num()` 会把它变成 0。
+  从搜索结果跳到某条消息时要用 `parseInt` 自己解析，否则永远落在最后一条用户消息上。
+- **助手消息没有 id**：只有用户消息有 `data-mid`。所以「跳到命中的那一条」落在**它之前
+  最近的一条用户消息**上（那正是这一轮的开头），再给它加一个 `.hit` 类闪一下。
+- 改完 `web/` 要重建二进制（Web UI 是构建期嵌进去的）。
+- 测试：`tests/smoke_history_search.py`（31 项，含工具那一半）、
+  `tests/ui_history_search.mjs`（浏览器那一半：结果、标粗、跳到落点、Esc 返回）。
+
+---
+
 ## 语音输入（SenseVoiceSmall）
 
 界面上的麦克风按钮：录音 → 转写 → **文字填进输入框**（不自动发，转写会错）。

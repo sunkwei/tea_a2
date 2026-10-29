@@ -10,6 +10,7 @@
 #include "env.h"
 #include "log.h"
 #include "state_lock.h"
+#include "trajectory.h"
 #include "util.h"
 
 namespace tea {
@@ -1488,6 +1489,286 @@ SearchResults Workspace::search(const SearchQuery& query) const {
                      const int rb = b.name_hit ? 0 : 1;
                      if (ra != rb) return ra < rb;
                      return a.path < b.path;
+                   });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// history search (conversations + trajectories)
+// ---------------------------------------------------------------------------
+namespace {
+
+/// Where in the history a hit came from. The UI says it out loud, because
+/// "the agent said it" and "a tool printed it" are different things.
+const char* const kHitTitle = "title";
+const char* const kHitMessage = "message";
+const char* const kHitSummary = "summary";
+const char* const kHitToolCall = "tool_call";
+const char* const kHitTrajectory = "trajectory";
+
+/// The offset of `needle` in `haystack`, or npos.
+///
+/// Case folding only touches ASCII letters, so the folded string has the same
+/// length as the original and the offset is valid for both.
+std::size_t search_find(const std::string& haystack, const std::string& needle,
+                         bool case_sensitive) {
+  if (needle.empty() || haystack.empty()) return std::string::npos;
+  if (case_sensitive) {
+    const std::size_t at = haystack.find(needle);
+    return at;
+  }
+  const std::string folded = search_fold(haystack);
+  return folded.find(search_fold(needle));
+}
+
+/// True when `text` contains the query - or, in the whole-string mode, when
+/// one of its lines *is* the query.
+bool history_matches(const std::string& text, const std::string& needle, bool whole,
+                     bool case_sensitive, std::size_t* offset) {
+  if (offset) *offset = std::string::npos;
+  if (text.empty() || needle.empty()) return false;
+  if (!whole) {
+    const std::size_t at = search_find(text, needle, case_sensitive);
+    if (offset) *offset = at;
+    return at != std::string::npos;
+  }
+  // 完全匹配：整行相等。
+  std::size_t pos = 0;
+  int line_no = 0;
+  while (pos <= text.size()) {
+    const std::size_t nl = text.find('\n', pos);
+    std::string line = (nl == std::string::npos) ? text.substr(pos) : text.substr(pos, nl - pos);
+    ++line_no;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (search_equals(trim(line), needle, case_sensitive)) {
+      if (offset) *offset = pos;
+      return true;
+    }
+    if (nl == std::string::npos) break;
+    pos = nl + 1;
+  }
+  return false;
+}
+
+/// A window of `text` around the match, so the reader sees the hit in context.
+/// The window is cut on UTF-8 boundaries: a half character in the snippet
+/// would be a broken character in the browser.
+std::string history_snippet(const std::string& text, std::size_t offset, std::size_t hit_len) {
+  const std::size_t kBefore = 40;
+  const std::size_t kAfter = 120;
+  const std::size_t kMax = 200;
+  std::size_t start = offset > kBefore ? offset - kBefore : 0;
+  std::size_t end = std::min(text.size(), offset + hit_len + kAfter);
+  if (end - start > kMax) end = start + kMax;
+  // Move `start` forward to a character boundary (a UTF-8 continuation byte
+  // cannot start a character).
+  while (start > 0 && start < text.size() &&
+         (static_cast<unsigned char>(text[start]) & 0xC0) == 0x80) {
+    ++start;
+  }
+  std::string out = text.substr(start, end - start);
+  // And `end` back to one.
+  while (end > start && end < text.size() &&
+         (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+    --end;
+    out = text.substr(start, end - start);
+  }
+  if (start > 0) out = "…" + out;
+  if (end < text.size()) out += "…";
+  return trim(out);
+}
+
+}  // namespace
+
+nlohmann::json HistorySnippet::to_json() const {
+  nlohmann::json j = nlohmann::json::object();
+  j["kind"] = kind;
+  if (!role.empty()) j["role"] = role;
+  if (index >= 0) j["index"] = index;
+  if (!tool.empty()) j["tool"] = tool;
+  j["text"] = text;
+  return j;
+}
+
+nlohmann::json HistoryHit::to_json() const {
+  nlohmann::json j = nlohmann::json::object();
+  j["session_id"] = session_id;
+  j["title"] = title;
+  j["created_at"] = created_at;
+  j["updated_at"] = updated_at;
+  j["message_count"] = message_count;
+  j["hits"] = hits;
+  j["title_hit"] = title_hit;
+  nlohmann::json arr = nlohmann::json::array();
+  for (std::size_t i = 0; i < snippets.size(); ++i) arr.push_back(snippets[i].to_json());
+  j["snippets"] = arr;
+  return j;
+}
+
+HistoryResults Workspace::search_history(const HistoryQuery& query) const {
+  HistoryResults out;
+  const std::string needle = trim(query.text);
+  if (needle.empty()) return out;
+  if (!query.titles && !query.messages && !query.trajectory) return out;
+
+  const std::vector<SessionInfo> sessions = list_sessions();
+  for (std::size_t s = 0; s < sessions.size(); ++s) {
+    if (out.hits.size() >= query.max_results || out.sessions_scanned >= query.max_sessions) {
+      // More may be hiding: say so instead of pretending this is everything.
+      out.truncated = true;
+      break;
+    }
+    const SessionInfo& info = sessions[s];
+    ++out.sessions_scanned;
+
+    HistoryHit hit;
+    hit.session_id = info.id;
+    hit.title = info.title;
+    hit.created_at = info.created_at;
+    hit.updated_at = info.updated_at;
+    hit.message_count = info.message_count;
+
+    // ---- the title --------------------------------------------------------
+    if (query.titles) {
+      std::size_t at = 0;
+      if (history_matches(info.title, needle, query.whole, query.case_sensitive, &at)) {
+        hit.title_hit = true;
+        ++hit.hits;
+        HistorySnippet snip;
+        snip.kind = kHitTitle;
+        snip.text = info.title;
+        hit.snippets.push_back(snip);
+      }
+    }
+
+    // ---- the transcript ---------------------------------------------------
+    if (query.messages) {
+      const std::string file = session_file_for(sessions_dir(), info.id);
+      const uint64_t size = file_size(file);
+      if (size > query.max_bytes_per_session) {
+        out.sessions_skipped = true;
+      } else {
+        Session session;
+        std::string err;
+        if (load_session(info.id, &session, &err)) {
+          for (std::size_t m = 0; m < session.messages.size(); ++m) {
+            if (hit.snippets.size() >= query.max_snippets) break;
+            const Message& msg = session.messages[m];
+            // What is worth searching in a message: what was said, what was
+            // thought, and what was called.
+            struct Part {
+              const char* kind;
+              const std::string* text;
+            };
+            const Part parts[] = {
+                {kHitMessage, &msg.content},
+                {kHitToolCall, &msg.reasoning},
+            };
+            for (std::size_t p = 0; p < 2; ++p) {
+              if (parts[p].text->empty()) continue;
+              std::size_t at = 0;
+              if (!history_matches(*parts[p].text, needle, query.whole, query.case_sensitive,
+                                   &at)) {
+                continue;
+              }
+              HistorySnippet snip;
+              snip.kind = parts[p].kind;
+              snip.role = msg.role;
+              snip.index = static_cast<int>(m);
+              snip.text = history_snippet(*parts[p].text, at, needle.size());
+              hit.snippets.push_back(snip);
+              ++hit.hits;
+              if (hit.snippets.size() >= query.max_snippets) break;
+            }
+            // The tool calls the model made are part of the conversation too.
+            for (std::size_t t = 0; t < msg.tool_calls.size(); ++t) {
+              if (hit.snippets.size() >= query.max_snippets) break;
+              const ToolCall& call = msg.tool_calls[t];
+              const std::string args =
+                  call.raw_arguments.empty() ? dump_json(call.arguments) : call.raw_arguments;
+              std::size_t at = 0;
+              if (!history_matches(args, needle, query.whole, query.case_sensitive, &at)) continue;
+              HistorySnippet snip;
+              snip.kind = kHitToolCall;
+              snip.role = msg.role;
+              snip.index = static_cast<int>(m);
+              snip.tool = call.name;
+              snip.text = history_snippet(args, at, needle.size());
+              hit.snippets.push_back(snip);
+              ++hit.hits;
+            }
+          }
+          // The compacted summary is what the model remembers of the old
+          // messages; a hit there is still a hit.
+          if (!session.summary.empty() && hit.snippets.size() < query.max_snippets) {
+            std::size_t at = 0;
+            if (history_matches(session.summary, needle, query.whole, query.case_sensitive, &at)) {
+              HistorySnippet snip;
+              snip.kind = kHitSummary;
+              snip.text = history_snippet(session.summary, at, needle.size());
+              hit.snippets.push_back(snip);
+              ++hit.hits;
+            }
+          }
+        }
+      }
+    }
+
+    // ---- the trajectory ---------------------------------------------------
+    // The trajectory is the audit trail: which tools ran, with which
+    // arguments, and what they printed. A word that only ever appeared in a
+    // command's output is worth finding.
+    if (query.trajectory) {
+      std::vector<nlohmann::json> turns;
+      std::string err;
+      const std::string tpath = trajectory_file_path(run_dir_, info.id);
+      if (load_trajectories(tpath, &turns, &err)) {
+        for (std::size_t t = 0; t < turns.size(); ++t) {
+          if (hit.snippets.size() >= query.max_snippets) break;
+          if (!turns[t].is_object()) continue;
+          auto steps = turns[t].find("steps");
+          if (steps == turns[t].end() || !steps->is_array()) continue;
+          for (std::size_t k = 0; k < steps->size(); ++k) {
+            if (hit.snippets.size() >= query.max_snippets) break;
+            const nlohmann::json& step = (*steps)[k];
+            if (!step.is_object()) continue;
+            const std::string kind = step.value("kind", std::string());
+            if (kind != "tool") continue;
+            const std::string tool = step.value("name", std::string());
+            const std::string args = step.value("arguments", std::string());
+            const std::string output = step.value("output", std::string());
+            struct Field {
+              const std::string* text;
+            };
+            const Field fields[] = {{&args}, {&output}};
+            for (std::size_t f = 0; f < 2; ++f) {
+              if (fields[f].text->empty()) continue;
+              std::size_t at = 0;
+              if (!history_matches(*fields[f].text, needle, query.whole, query.case_sensitive,
+                                   &at)) {
+                continue;
+              }
+              HistorySnippet snip;
+              snip.kind = kHitTrajectory;
+              snip.tool = tool;
+              snip.text = history_snippet(*fields[f].text, at, needle.size());
+              hit.snippets.push_back(snip);
+              ++hit.hits;
+              if (hit.snippets.size() >= query.max_snippets) break;
+            }
+          }
+        }
+      }
+    }
+
+    if (hit.hits > 0) out.hits.push_back(hit);
+  }
+
+  // Newest first - the same order the session list uses.
+  std::stable_sort(out.hits.begin(), out.hits.end(),
+                   [](const HistoryHit& a, const HistoryHit& b) {
+                     if (a.updated_at != b.updated_at) return a.updated_at > b.updated_at;
+                     return a.session_id < b.session_id;
                    });
   return out;
 }

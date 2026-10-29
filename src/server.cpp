@@ -2771,6 +2771,81 @@ void ApiServer::Impl::install_routes() {
             send_json(res, j);
           });
   // ---- sessions ----------------------------------------------------------
+  // ---- history search ------------------------------------------------------
+  // Search the workspace's conversations: the titles, what was said, what was
+  // thought, what was called - and the trajectory, where a command's output
+  // lives. The query is a literal string (完全字符串匹配), like the file search.
+  svr.Get(R"(/api/workspaces/([^/]+)/sessions/search)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string q = trim(req.has_param("q") ? req.get_param_value("q") : "");
+            if (q.empty()) {
+              send_error(res, 400, "bad_request", "'q' is required");
+              return;
+            }
+
+            HistoryQuery query;
+            query.text = q;
+            // scope: all | title | messages | trajectory
+            const std::string scope =
+                to_lower(trim(req.has_param("scope") ? req.get_param_value("scope") : "all"));
+            if (scope == "title" || scope == "titles") {
+              query.titles = true;
+              query.messages = false;
+              query.trajectory = false;
+            } else if (scope == "messages" || scope == "message" || scope == "transcript") {
+              query.titles = false;
+              query.messages = true;
+              query.trajectory = false;
+            } else if (scope == "trajectory" || scope == "trace") {
+              query.titles = false;
+              query.messages = false;
+              query.trajectory = true;
+            } else if (scope == "all" || scope.empty()) {
+              query.titles = true;
+              query.messages = true;
+              query.trajectory = true;
+            } else {
+              send_error(res, 400, "bad_request",
+                         "scope must be one of: all, title, messages, trajectory (got '" + scope +
+                             "')");
+              return;
+            }
+
+            query.whole = req.has_param("exact") &&
+                          (req.get_param_value("exact") == "1" ||
+                           req.get_param_value("exact") == "true");
+            query.case_sensitive = req.has_param("case") &&
+                                   (req.get_param_value("case") == "1" ||
+                                    req.get_param_value("case") == "true");
+            if (req.has_param("limit")) {
+              const long long limit = atoll(req.get_param_value("limit").c_str());
+              if (limit > 0) query.max_results = static_cast<std::size_t>(limit > 200 ? 200 : limit);
+            }
+
+            const HistoryResults found = ws.search_history(query);
+            nlohmann::json list = nlohmann::json::array();
+            for (std::size_t i = 0; i < found.hits.size(); ++i) {
+              list.push_back(found.hits[i].to_json());
+            }
+            nlohmann::json j = nlohmann::json::object();
+            j["query"] = q;
+            j["scope"] = scope.empty() ? "all" : scope;
+            j["exact"] = query.whole;
+            j["case_sensitive"] = query.case_sensitive;
+            j["results"] = list;
+            j["count"] = found.hits.size();
+            j["sessions_scanned"] = found.sessions_scanned;
+            j["truncated"] = found.truncated;
+            j["sessions_skipped"] = found.sessions_skipped;
+            send_json(res, j);
+          });
+
   svr.Get(R"(/api/workspaces/([^/]+)/sessions)",
           [this](const httplib::Request& req, httplib::Response& res) {
             Workspace ws;

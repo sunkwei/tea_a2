@@ -574,6 +574,31 @@ button{font-family:inherit}
   padding:0 8px 2px 30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 
+/* ---------- 侧栏里的历史搜索 ---------- */
+/* 搜索框就在「会话」标题下面：搜的是历史对话与轨迹，不是文件 */
+.sess-search{
+  width:100%;flex:0 0 auto;height:26px;padding:0 8px;font-size:12px;line-height:24px;
+  margin:0 0 6px;resize:none;
+}
+.sess-search-head{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;
+  padding:2px 8px 4px;font-size:11px;color:var(--dsw-alias-label-caption);
+}
+.sess-search-head button{border:0;background:transparent;color:var(--dsw-alias-label-caption);
+  font-size:11px;cursor:pointer;padding:0}
+.sess-search-head button:hover{color:var(--dsw-alias-label-primary)}
+/* 一条命中：上面是会话标题，下面是命中的那几行 */
+.sess-snip{
+  font:11px/15px var(--ds-font-family-code);color:var(--dsw-alias-label-caption);
+  padding:0 8px 4px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.sess-snip b{color:var(--dsw-alias-label-primary);font-weight:600}
+/* 从搜索结果跳过去的落点：闪一下，让人知道看的是哪一条 */
+.msg.hit{animation:hitflash 1.6s ease-out}
+@keyframes hitflash{
+  0%{background:var(--dsw-alias-interactive-bg-active)}
+  100%{background:transparent}
+}
 /* ---------- files ---------- */
 .files-grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;align-items:start}
 /* 文件树同样跟着变宽，长文件名少出省略号 */

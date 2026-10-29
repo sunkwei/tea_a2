@@ -363,6 +363,12 @@ curl -s "$B/api/workspaces/ws_xxx/search?q=toolkit_workspace_search"
 curl -s "$B/api/workspaces/ws_xxx/search?q=tools.cpp&scope=name&exact=1"
 curl -s "$B/api/workspaces/ws_xxx/search?q=TODO&scope=content&path=src"
 
+# 搜历史对话（标题 + 说过的内容 + 轨迹里的工具输出）
+curl -s --get "$B/api/workspaces/ws_xxx/sessions/search" --data-urlencode "q=水獭"
+# 只看轨迹 / 只看标题 / 完全匹配
+curl -s "$B/api/workspaces/ws_xxx/sessions/search?q=otter&scope=trajectory"
+curl -s "$B/api/workspaces/ws_xxx/sessions/search?q=%E6%B0%B4%E7%8D%AD&scope=title&exact=1"
+
 # 读 / 写文件
 curl -s "$B/api/workspaces/ws_xxx/file?path=README.md"
 curl -s -X PUT "$B/api/workspaces/ws_xxx/file" -H 'Content-Type: application/json' \

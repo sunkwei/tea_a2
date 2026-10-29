@@ -483,6 +483,90 @@ ToolResult tool_workspace_search(const nlohmann::json& args, const ToolContext& 
 }
 
 // ---------------------------------------------------------------------------
+// toolkit_history_search
+//
+// Search what happened in this workspace before: the session titles, what was
+// said, what was thought, what was called - and the trajectory, where a
+// command's output lives. The query is compared byte for byte (no regular
+// expression, no glob); `exact` asks for a whole-string match (完全匹配).
+// ---------------------------------------------------------------------------
+ToolResult tool_history_search(const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  if (!ctx.workspace) {
+    result.output = "error: no workspace is active";
+    return result;
+  }
+  const std::string query_text = trim(arg_str(args, "query"));
+  if (query_text.empty()) {
+    result.output = "error: 'query' is required";
+    return result;
+  }
+
+  HistoryQuery query;
+  query.text = query_text;
+  const std::string scope = to_lower(trim(arg_str(args, "scope", "all")));
+  if (scope == "title" || scope == "titles") {
+    query.titles = true;
+    query.messages = false;
+    query.trajectory = false;
+  } else if (scope == "messages" || scope == "message" || scope == "transcript") {
+    query.titles = false;
+    query.messages = true;
+    query.trajectory = false;
+  } else if (scope == "trajectory" || scope == "trace") {
+    query.titles = false;
+    query.messages = false;
+    query.trajectory = true;
+  } else if (scope == "all" || scope.empty()) {
+    query.titles = true;
+    query.messages = true;
+    query.trajectory = true;
+  } else {
+    result.output =
+        "error: scope must be one of: all, title, messages, trajectory (got '" + scope + "')";
+    return result;
+  }
+  query.whole = arg_bool(args, "exact", false);
+  query.case_sensitive = arg_bool(args, "case_sensitive", false);
+  const long long wanted = arg_int(args, "max_results", 20);
+  if (wanted > 0) {
+    query.max_results = static_cast<std::size_t>(wanted > 100 ? 100 : wanted);
+  }
+
+  const HistoryResults found = ctx.workspace->search_history(query);
+  std::ostringstream out;
+  out << found.hits.size() << (found.hits.size() == 1 ? " session" : " sessions")
+      << " matched \"" << query_text << "\" in " << ctx.workspace->root() << " (scope=" << scope
+      << ", " << (query.whole ? "exact" : "substring") << ", "
+      << (query.case_sensitive ? "case-sensitive" : "case-insensitive") << "; scanned "
+      << found.sessions_scanned << " sessions)";
+  if (found.truncated) out << "\n[more sessions exist: the search hit its limit]";
+  if (found.sessions_skipped) out << "\n[some sessions were too big to read]";
+  for (std::size_t i = 0; i < found.hits.size(); ++i) {
+    const HistoryHit& hit = found.hits[i];
+    out << "\n\n" << hit.session_id << "  " << (hit.title.empty() ? "(no title)" : hit.title)
+        << "  (" << hit.hits << (hit.hits == 1 ? " hit)" : " hits)");
+    if (!hit.updated_at.empty()) out << "  " << hit.updated_at;
+    for (std::size_t s = 0; s < hit.snippets.size(); ++s) {
+      const HistorySnippet& snip = hit.snippets[s];
+      out << "\n  [" << snip.kind;
+      if (!snip.role.empty()) out << "/" << snip.role;
+      if (!snip.tool.empty()) out << "/" << snip.tool;
+      out << "] " << snip.text;
+    }
+  }
+  result.ok = true;
+  result.meta["matches"] = static_cast<long long>(found.hits.size());
+  result.meta["truncated"] = found.truncated;
+  std::size_t limit =
+      ctx.workspace ? static_cast<std::size_t>(ctx.workspace->settings().max_tool_output) : 131072u;
+  bool truncated = false;
+  result.output = limit_output(out.str(), limit, &truncated);
+  result.truncated = truncated;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // toolkit_memory
 // ---------------------------------------------------------------------------
 ToolResult tool_memory(const nlohmann::json& args, const ToolContext& ctx) {
@@ -2488,6 +2572,46 @@ ToolRegistry::ToolRegistry() {
   }
   {
     ToolDef def;
+    def.name = "toolkit_history_search";
+    def.description =
+        "Search what happened in this workspace before: the session titles, what was said, what "
+        "was thought, what was called - and the trajectory, where a command's output lives. The "
+        "query is a literal string compared byte for byte (no regular expression, no glob). "
+        "scope=all (default) | title | messages | trajectory. exact=true asks for a whole-string "
+        "match (完全匹配). Use it when the user asks \"did we talk about X\" or \"where did I see "
+        "that error\". "
+        "在历史对话与轨迹里搜索（完全字符串匹配）。";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The literal string to look for (compared byte for byte)."
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["all", "title", "messages", "trajectory"],
+          "description": "Where to look: the session titles, the transcript, the trajectory, or all."
+        },
+        "exact": {
+          "type": "boolean",
+          "description": "true => whole-string match (完全匹配) instead of 'contains'."
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "true => case matters (default: it does not)."
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of sessions to return (default 20)."
+        }
+      },
+      "required": ["query"]
+    })JSON");
+    defs_.push_back(def);
+  }
+  {
+    ToolDef def;
     def.name = "toolkit_memory";
     def.description =
         "Store and recall durable notes about this workspace (kept in "
@@ -2895,6 +3019,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     if (name == "toolkit_exec") result = tool_exec(arguments, ctx);
     else if (name == "toolkit_file") result = tool_file(arguments, ctx);
     else if (name == "toolkit_workspace_search") result = tool_workspace_search(arguments, ctx);
+    else if (name == "toolkit_history_search") result = tool_history_search(arguments, ctx);
     else if (name == "toolkit_memory") result = tool_memory(arguments, ctx);
     else if (name == "toolkit_todo") result = tool_todo(arguments, ctx);
     else if (name == "toolkit_load_image") result = tool_load_image(arguments, ctx);
