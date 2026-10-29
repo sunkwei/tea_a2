@@ -156,7 +156,7 @@ curl -s -X POST http://127.0.0.1:8282/api/mcp/servers/uiautomation/call \
 协议就是 JSON-RPC 2.0 over stdio，四步：
 
 ```
--> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tea_agent","version":"0.16.1"}}}
+-> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tea_agent","version":"0.17.0"}}}
 <- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"my-server","version":"1.0"}}}
 -> {"jsonrpc":"2.0","method":"notifications/initialized"}
 -> {"jsonrpc":"2.0","id":2,"method":"tools/list"}
