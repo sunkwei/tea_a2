@@ -66,6 +66,10 @@ CLIENT_VERSION = "0.10.0"
 
 # The protocol's enums (iLink Bot API).
 MSG_TYPE_USER = 1
+# A wechat message that is too long is refused by the far side, so a long
+# answer goes out in pieces of this size.
+MESSAGE_CHUNK = 1800
+
 MSG_TYPE_BOT = 2
 MSG_STATE_FINISH = 2
 ITEM_TEXT = 1
@@ -616,8 +620,18 @@ class WeChatBot(channel.TaskChannel):
             return False
 
     def send_text(self, user_id, text):
-        """One text message to the user (WeChat needs the context token)."""
-        return self.reply(user_id, text)
+        """One text message to the user (WeChat needs the context token).
+
+        A long answer goes out in pieces: the whole answer has to arrive, and
+        one message that is too long is refused by the far side (or arrives
+        cut). Every piece carries the same context token.
+        """
+        if not text:
+            return True
+        for part in channel.chunks(text, MESSAGE_CHUNK):
+            if not self.reply(user_id, part):
+                return False
+        return True
 
     def poll_once(self):
         """One long poll. Returns the messages that came in."""

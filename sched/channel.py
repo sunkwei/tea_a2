@@ -50,6 +50,20 @@ def log(message):
     print("%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
 
 
+def chunks(text, size):
+    """The text in pieces of at most `size` characters.
+
+    A long answer does not fit in one message on either channel, and cutting
+    it off silently loses the answer - so it goes out in pieces.
+    """
+    text = text or ""
+    out = []
+    while text:
+        out.append(text[:size])
+        text = text[size:]
+    return out
+
+
 class ChannelError(Exception):
     """Something on the way out answered badly: the queue, the agent, the chat."""
 
@@ -709,8 +723,14 @@ class TaskChannel:
         if not user_id:
             return False
         if kind == "task_done":
-            text = "做完了 %s\n%s" % (task_id, (task.get("note") or
-                                            (task.get("result") or "")[:300]))
+            # **只发最后的完整答案。** 以前这里先取 note（那是模型汇报进度
+            # 的一句话）再退到 result 的前 300 字——而模型是被明确要求汇报
+            # 进度的（agent.cpp 的 QUEUED TASK 段落），所以发出去的几乎总是
+            # 那句「我正在做 X」，真正的答案没跟过去。
+            # 没有答案时才退回那句进度备注：总比什么都不说强。
+            answer = (task.get("result") or "").strip()
+            body = answer or (task.get("note") or "").strip() or "（这一轮没有留下文字答案）"
+            text = "做完了 %s\n%s" % (task_id, body)
             sent = self.send_text(user_id, text)
             # The files the task produced go out with the answer: a result the
             # user cannot open on their phone is only half an answer.

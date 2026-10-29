@@ -102,6 +102,11 @@ python3 sched/telegram_bot.py --token 123456:ABC --allow-chat 12345
 - **Telegram** 走 Bot API，token 从 `TEA_TELEGRAM_TOKEN` 或 `--token` 来。
 - 两边都有白名单：`--allow-path`（允许 agent 碰的路径）、`--allow-chat`（Telegram 的 chat id）、
   `--allow-any-chat`（别用）。
+- **任务做完时发的是「最后的完整答案」**（任务记录里的 `result`，也就是模型那一轮的
+  最终回复），不是进度汇报的话。模型在排队任务里是被要求汇报进度的（那条汇报写在
+  记录的 `note` 里），早先通知发的是 `note`、答案只给前 300 字——现在只发完整答案，
+  没有答案才退回那句进度备注。
+- **长答案分段发**（Telegram 每段 3800 字、微信 1800 字），不截断：完整答案要完整到。
 - 状态目录：`~/.tea_agent/wechat`、`~/.tea_agent/telegram`；各自的工作区在
   `~/.tea_agent/*-workspace`。
 

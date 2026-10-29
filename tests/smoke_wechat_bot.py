@@ -477,6 +477,35 @@ def main():
                   .get("text_item", {}).get("text", "") for m in MockILink.sent),
               MockILink.sent)
 
+        # ---- the whole answer, not the progress note ---------------
+        # The model is told to report progress on a queued task, so the
+        # record carries a note ("我正在做第一步"). The notification must
+        # still carry the whole answer - that is the point of the message.
+        MockILink.sent = []
+        answer = "这是完整的最终答案。" * 40
+        bot.notify_event({"type": "task_done", "task": {
+            "id": task_id, "note": "我正在做第一步", "result": answer,
+            "meta": {}}})
+        texts = [(m["msg"].get("item_list") or [{}])[0]
+                 .get("text_item", {}).get("text", "") for m in MockILink.sent]
+        check("the whole answer goes out", any(answer in t for t in texts),
+              texts[:1])
+        check("the progress note does not replace the answer",
+              not any("我正在做第一步" in t and answer not in t for t in texts),
+              texts[:1])
+
+        # ---- a long answer goes out in pieces ------------------------
+        MockILink.sent = []
+        long_answer = "长" * 5000
+        bot.notify_event({"type": "task_done", "task": {
+            "id": task_id, "note": "在做", "result": long_answer, "meta": {}}})
+        texts = [(m["msg"].get("item_list") or [{}])[0]
+                 .get("text_item", {}).get("text", "") for m in MockILink.sent]
+        check("a long answer goes out in pieces", len(texts) > 1, len(texts))
+        check("every character of the long answer arrives",
+              "".join(texts).count("长") == 5000,
+              sum(t.count("长") for t in texts))
+
         # ---- out: the files a task produced go to the phone --------------
         produced = os.path.join(ws_path, "notes.txt")
         content = "这是任务写出来的文件\n第二行\n".encode("utf-8")

@@ -75,16 +75,6 @@ COMMANDS = [
 ]
 
 
-def chunks(text, size):
-    """The text in pieces of at most `size` characters."""
-    text = text or ""
-    out = []
-    while text:
-        out.append(text[:size])
-        text = text[size:]
-    return out
-
-
 class State:
     """What has to survive a restart: the update offset.
 
@@ -280,7 +270,7 @@ class TelegramBot(channel.TaskChannel):
         """One text message to the user (a long one goes out in pieces)."""
         if not text:
             return True
-        for part in chunks(text, MESSAGE_CHUNK):
+        for part in channel.chunks(text, MESSAGE_CHUNK):
             try:
                 self.telegram.send_message(user_id, part)
             except channel.ChannelError as exc:
