@@ -560,6 +560,20 @@ button{font-family:inherit}
 @media (max-width:860px){ #metric-cache{display:none} }
 @media (max-width:720px){ #metric-elapsed{display:none} }
 
+/* ---------- 工作区搜索 ---------- */
+/* 搜索框放在文件列表上方：结果就替换列表，读起来还是一条路径 */
+.files-search{display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.files-search .ta{width:auto;flex:1 1 220px;min-width:0}
+/* 下拉框不吃剩下的的宽度：选择器比 .files-search .ta 更具体（两个类） */
+.files-search .files-search-select{flex:0 0 auto;width:auto}
+.files-search .switch{white-space:nowrap}
+/* 一条结果：上面是路径（可点），下面是命中的那几行 */
+.search-hit{padding:2px 0}
+.search-hit .snip{
+  font:11px/16px var(--ds-font-family-code);color:var(--dsw-alias-label-caption);
+  padding:0 8px 2px 30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+
 /* ---------- files ---------- */
 .files-grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;align-items:start}
 /* 文件树同样跟着变宽，长文件名少出省略号 */

@@ -357,6 +357,12 @@ curl -s -X DELETE $B/api/workspaces/ws_xxx
 # 列目录
 curl -s "$B/api/workspaces/ws_xxx/tree?path=src"
 
+# 在工作区里搜（文件名 + 内容；查询串按原样逐字节比较，不做正则/模糊匹配）
+curl -s "$B/api/workspaces/ws_xxx/search?q=toolkit_workspace_search"
+# 只搜文件名 / 只搜内容 / 完全匹配（整串相等）/ 区分大小写 / 只搜某个子目录
+curl -s "$B/api/workspaces/ws_xxx/search?q=tools.cpp&scope=name&exact=1"
+curl -s "$B/api/workspaces/ws_xxx/search?q=TODO&scope=content&path=src"
+
 # 读 / 写文件
 curl -s "$B/api/workspaces/ws_xxx/file?path=README.md"
 curl -s -X PUT "$B/api/workspaces/ws_xxx/file" -H 'Content-Type: application/json' \

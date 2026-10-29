@@ -233,6 +233,23 @@
               <button class="btn primary" id="files-save" type="button">保存</button>
             </div>
           </div>
+          <!-- 工作区搜索：文件名 + 文件内容。完全字符串匹配（不做正则/模糊），
+               勾上「完全匹配」就要求整串相等（路径整串相等 / 整行相等）。 -->
+          <div class="files-search">
+            <input class="ta" id="files-search-input" type="search" spellcheck="false"
+                   placeholder="在工作区里搜索：文件名或文件内容">
+            <select class="ta files-search-select" id="files-search-scope" title="搜索范围">
+              <option value="both">文件名 + 内容</option>
+              <option value="name">只看文件名</option>
+              <option value="content">只看内容</option>
+            </select>
+            <label class="switch" title="完全匹配：整串必须完全相等">
+              <input type="checkbox" id="files-search-exact"> 完全匹配
+            </label>
+            <button class="btn primary" id="files-search-go" type="button">搜索</button>
+            <button class="btn hidden" id="files-search-clear" type="button">返回目录</button>
+          </div>
+          <div class="files-grid">
           <div class="files-grid">
             <div class="file-list" id="files-list"></div>
             <div class="file-pane">

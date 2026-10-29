@@ -6,6 +6,7 @@
 //   freshly started agent can list them all.
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,50 @@ struct WorkspaceEntry {
 
   nlohmann::json to_json() const;
   static WorkspaceEntry from_json(const nlohmann::json& j);
+};
+
+/// One hit of a workspace search.
+struct SearchHit {
+  std::string path;    // workspace-relative, forward slashes
+  std::string name;    // the file/directory name
+  bool is_dir = false;
+  uint64_t size = 0;
+  std::string mtime;   // ISO-8601 UTC
+  int hits = 0;        // content hits (0 when only the path matched)
+  bool name_hit = false;  // the path matched the query
+  std::vector<int> lines;      // 1-based line numbers of the content hits
+  std::vector<std::string> samples;  // the matching lines (trimmed, capped)
+  std::string preview;         // the first matching line, trimmed
+
+  nlohmann::json to_json() const;
+};
+
+/// What to look for, and how.
+///
+/// The query is a **literal string**: no regular expression, no glob, no
+/// fuzzy matching. What the user types is what gets compared, byte for byte
+/// (modulo case folding and the `whole` flag below).
+struct SearchQuery {
+  std::string text;        // the literal query; empty => nothing to look for
+  std::string subpath;     // search only here (workspace-relative); empty => the whole tree
+  bool names = true;       // match the path of a file/directory
+  bool content = true;     // match the text inside a file
+  /// "完全匹配": the whole string has to be equal. For a path that means the
+  /// relative path (or the file name) equals the query; for content it means
+  /// the whole line equals it. Off by default: a search that only finds the
+  /// exact spelling is useless for anything but a known name.
+  bool whole = false;
+  bool case_sensitive = false;
+  std::size_t max_results = 100;
+  /// Files bigger than this are not read (their path can still match).
+  std::size_t max_file_bytes = 2u * 1024u * 1024u;
+};
+
+struct SearchResults {
+  std::vector<SearchHit> hits;
+  std::size_t files_scanned = 0;
+  bool truncated = false;      // the result cap hid hits
+  bool files_skipped = false;  // some files were too big or binary
 };
 
 class WorkspaceRegistry {
@@ -180,6 +225,14 @@ class Workspace {
   /// result cap hid files - the UI has to say so instead of pretending the
   /// list is complete.
   std::vector<std::string> recent_artifacts(long long since_ms, bool* truncated = nullptr) const;
+
+  /// Search the workspace for a literal string (see SearchQuery).
+  ///
+  /// The walk is bounded (depth, files visited, bytes read, results) and never
+  /// leaves the workspace root. `SearchResults::truncated` says when the cap
+  /// hid hits, so the caller can say "and more" instead of pretending the
+  /// list is the whole truth.
+  SearchResults search(const SearchQuery& query) const;
 
   std::vector<nlohmann::json> load_memory(std::string* err) const;
   nlohmann::json add_memory_note(const std::string& text, std::string* err) const;

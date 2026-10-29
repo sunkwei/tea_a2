@@ -1257,6 +1257,241 @@ std::vector<std::string> Workspace::recent_artifacts(long long since_ms,
   return out;
 }
 
+// workspace search
+// ---------------------------------------------------------------------------
+namespace {
+
+/// Directories the search never descends into. They hold thousands of files
+/// that nobody is looking for (dependencies, build output, VCS data) and their
+/// content is generated rather than written by hand.
+bool search_skip_dir(const std::string& name) {
+  static const char* const kSkip[] = {
+      ".git",       ".hg",      ".svn",         "node_modules", "__pycache__",
+      ".venv",      "venv",     ".cache",       ".idea",        ".vscode",
+      ".gradle",    ".tox",     ".mypy_cache",  ".pytest_cache", ".tea_agent_run",
+  };
+  for (std::size_t i = 0; i < sizeof(kSkip) / sizeof(kSkip[0]); ++i) {
+    if (name == kSkip[i]) return true;
+  }
+  return false;
+}
+
+/// Extensions whose files are binary by construction. Checking the name first
+/// saves reading a 40 MB video into memory just to find a NUL byte in it.
+bool search_binary_ext(const std::string& name) {
+  static const char* const kBin[] = {
+      ".png", ".jpg",  ".jpeg", ".gif",  ".webp", ".bmp",  ".ico",  ".tif",  ".tiff",
+      ".pdf", ".zip",  ".gz",   ".bz2",  ".xz",   ".7z",   ".rar",  ".tar",  ".tgz",
+      ".exe", ".dll",  ".so",   ".dylib", ".o",   ".obj",  ".a",    ".lib",  ".class",
+      ".jar", ".pyc",  ".pyo",  ".wasm", ".mp3",  ".mp4",  ".wav",  ".avi",  ".mkv",
+      ".mov", ".woff", ".woff2", ".ttf", ".otf", ".eot",  ".db",   ".sqlite", ".bin",
+      ".dat", ".pack", ".idx",  ".iso",  ".dmg",  ".deb",  ".rpm",
+  };
+  const std::string ext = path_extension(name);
+  for (std::size_t i = 0; i < sizeof(kBin) / sizeof(kBin[0]); ++i) {
+    if (ext == kBin[i]) return true;
+  }
+  return false;
+}
+
+/// ASCII case folding. The query is compared byte for byte otherwise: folding
+/// non-ASCII would need a locale, and a wrong fold is worse than no fold at
+/// all (it would report a hit that is not there).
+std::string search_fold(const std::string& s) {
+  std::string out = s;
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    const char c = out[i];
+    if (c >= 'A' && c <= 'Z') out[i] = static_cast<char>(c - 'A' + 'a');
+  }
+  return out;
+}
+
+/// "the query appears in the haystack" - a plain substring test, no regex.
+bool search_contains(const std::string& haystack, const std::string& needle,
+                     bool case_sensitive) {
+  if (needle.empty()) return false;
+  if (case_sensitive) return haystack.find(needle) != std::string::npos;
+  return search_fold(haystack).find(search_fold(needle)) != std::string::npos;
+}
+
+/// "the query is the whole string" - the 完全匹配 mode.
+bool search_equals(const std::string& value, const std::string& needle, bool case_sensitive) {
+  if (needle.empty()) return false;
+  if (case_sensitive) return value == needle;
+  return search_fold(value) == search_fold(needle);
+}
+
+/// A NUL byte in the first chunk means "this is not text". Anything else is
+/// treated as text: a file with a stray control character is still worth
+/// searching.
+bool search_looks_binary(const std::string& text) {
+  const std::size_t limit = std::min<std::size_t>(text.size(), 8192);
+  return text.substr(0, limit).find('\0') != std::string::npos;
+}
+
+/// Cut a matching line down to something that fits on a screen.
+std::string search_preview(const std::string& line) {
+  std::string s = trim(line);
+  const std::size_t kMax = 200;
+  if (s.size() > kMax) {
+    s = s.substr(0, kMax);
+    s += "…";
+  }
+  return s;
+}
+
+}  // namespace
+
+nlohmann::json SearchHit::to_json() const {
+  nlohmann::json j = nlohmann::json::object();
+  j["path"] = path;
+  j["name"] = name;
+  j["type"] = is_dir ? "dir" : "file";
+  j["size"] = size;
+  j["mtime"] = mtime;
+  j["hits"] = hits;
+  j["name_hit"] = name_hit;
+  if (!lines.empty()) j["lines"] = lines;
+  if (!samples.empty()) j["samples"] = samples;
+  if (!preview.empty()) j["preview"] = preview;
+  return j;
+}
+
+SearchResults Workspace::search(const SearchQuery& query) const {
+  SearchResults out;
+  const std::string needle = trim(query.text);
+  if (needle.empty()) return out;
+  if (!query.names && !query.content) return out;
+
+  // Where the walk starts: the workspace root, or a subdirectory of it. A
+  // subdirectory that leaves the workspace is refused - the search never
+  // reaches outside the root.
+  std::string start = root_;
+  if (!query.subpath.empty()) {
+    std::string err;
+    const std::string sub = resolve_path(query.subpath, &err);
+    if (sub.empty() || !path_is_dir(sub) || !path_is_within(sub, root_)) return out;
+    start = sub;
+  }
+
+  constexpr int kMaxDepth = 12;
+  constexpr std::size_t kMaxVisited = 10000;
+  constexpr std::size_t kMaxHitsPerFile = 20;
+  constexpr std::size_t kMaxSamplesPerFile = 5;
+  // Total text this one search is allowed to read. Without it a repository
+  // full of big files would turn a search into a full disk scan.
+  constexpr std::size_t kMaxContentBytes = 32u * 1024u * 1024u;
+  std::size_t content_bytes = 0;
+  std::size_t visited = 0;
+
+  struct Frame {
+    std::string dir;
+    int depth;
+  };
+  std::vector<Frame> stack;
+  stack.push_back({start, 0});
+
+  while (!stack.empty() && visited < kMaxVisited && out.hits.size() < query.max_results) {
+    const Frame frame = stack.back();
+    stack.pop_back();
+    std::vector<DirEntryInfo> entries;
+    if (!list_directory(frame.dir, &entries, nullptr)) continue;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      if (visited >= kMaxVisited || out.hits.size() >= query.max_results) {
+        // More may be hiding: the caller must say "and more" rather than
+        // presenting a truncated list as the whole truth.
+        out.truncated = true;
+        break;
+      }
+      const DirEntryInfo& e = entries[i];
+      ++visited;
+      if (e.is_dir) {
+        if (frame.depth + 1 > kMaxDepth) continue;
+        if (search_skip_dir(e.name)) continue;
+        stack.push_back({e.path, frame.depth + 1});
+        continue;
+      }
+      ++out.files_scanned;
+
+      const std::string rel = display_path(e.path);
+      SearchHit hit;
+      hit.path = rel;
+      hit.name = e.name;
+      hit.size = e.size;
+      hit.mtime = e.mtime;
+
+      if (query.names) {
+        // The whole-string mode accepts the file name as well as the whole
+        // relative path: "main.cpp" should find "src/main.cpp".
+        hit.name_hit = query.whole
+                           ? (search_equals(rel, needle, query.case_sensitive) ||
+                              search_equals(e.name, needle, query.case_sensitive))
+                           : search_contains(rel, needle, query.case_sensitive);
+      }
+
+      if (query.content) {
+        if (e.size > query.max_file_bytes) {
+          out.files_skipped = true;
+        } else if (search_binary_ext(e.name)) {
+          out.files_skipped = true;
+        } else if (content_bytes + e.size > kMaxContentBytes) {
+          out.files_skipped = true;
+        } else {
+          std::string text;
+          if (read_file(e.path, &text, query.max_file_bytes, nullptr)) {
+            content_bytes += text.size();
+            if (search_looks_binary(text)) {
+              out.files_skipped = true;
+            } else {
+              int line_no = 0;
+              std::size_t pos = 0;
+              while (pos <= text.size()) {
+                const std::size_t nl = text.find('\n', pos);
+                std::string line =
+                    (nl == std::string::npos) ? text.substr(pos) : text.substr(pos, nl - pos);
+                ++line_no;
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                const bool matched =
+                    query.whole ? search_equals(trim(line), needle, query.case_sensitive)
+                                 : search_contains(line, needle, query.case_sensitive);
+                if (matched) {
+                  if (hit.hits == 0) hit.preview = search_preview(line);
+                  if (hit.lines.size() < kMaxHitsPerFile) hit.lines.push_back(line_no);
+                  if (hit.samples.size() < kMaxSamplesPerFile) {
+                    hit.samples.push_back(search_preview(line));
+                  }
+                  ++hit.hits;
+                }
+                if (nl == std::string::npos) break;
+                pos = nl + 1;
+              }
+            }
+          } else {
+            out.files_skipped = true;
+          }
+        }
+      }
+
+      if (hit.name_hit || hit.hits > 0) {
+        out.hits.push_back(hit);
+      }
+    }
+  }
+  if (!stack.empty()) out.truncated = true;
+
+  // Order: the file whose name matches comes first, then a file whose content
+  // matches. Inside a group, alphabetical - a stable order the UI and the
+  // model can rely on.
+  std::stable_sort(out.hits.begin(), out.hits.end(),
+                   [](const SearchHit& a, const SearchHit& b) {
+                     const int ra = a.name_hit ? 0 : 1;
+                     const int rb = b.name_hit ? 0 : 1;
+                     if (ra != rb) return ra < rb;
+                     return a.path < b.path;
+                   });
+  return out;
+}
+
 std::vector<nlohmann::json> Workspace::load_memory(std::string* err) const {
   std::vector<nlohmann::json> notes;
   bool ok = false;

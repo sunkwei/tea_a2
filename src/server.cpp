@@ -2426,6 +2426,82 @@ void ApiServer::Impl::install_routes() {
             send_json(res, j);
           });
 
+  // ---- workspace search ----------------------------------------------------
+  // A literal-string search over the workspace: file names and file content.
+  // The query is compared byte for byte (no regex, no glob) - see SearchQuery.
+  svr.Get(R"(/api/workspaces/([^/]+)/search)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            const std::string id = req.matches[1].str();
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(id, &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string q = trim(req.has_param("q") ? req.get_param_value("q") : "");
+            if (q.empty()) {
+              send_error(res, 400, "bad_request", "'q' is required");
+              return;
+            }
+
+            SearchQuery query;
+            query.text = q;
+            query.subpath = req.has_param("path") ? req.get_param_value("path") : "";
+
+            // scope: name | content | both (default both)
+            const std::string scope =
+                to_lower(trim(req.has_param("scope") ? req.get_param_value("scope") : "both"));
+            if (scope == "name" || scope == "names" || scope == "path") {
+              query.names = true;
+              query.content = false;
+            } else if (scope == "content" || scope == "text" || scope == "body") {
+              query.names = false;
+              query.content = true;
+            } else if (scope == "both" || scope.empty()) {
+              query.names = true;
+              query.content = true;
+            } else {
+              send_error(res, 400, "bad_request",
+                         "scope must be one of: name, content, both (got '" + scope + "')");
+              return;
+            }
+
+            // exact=1 => 完全匹配: the whole string has to be equal.
+            query.whole = req.has_param("exact") &&
+                          (req.get_param_value("exact") == "1" ||
+                           req.get_param_value("exact") == "true");
+            // case=1 => case sensitive (default: not).
+            query.case_sensitive = req.has_param("case") &&
+                                   (req.get_param_value("case") == "1" ||
+                                    req.get_param_value("case") == "true");
+            if (req.has_param("limit")) {
+              const long long limit = atoll(req.get_param_value("limit").c_str());
+              if (limit > 0) {
+                query.max_results = static_cast<std::size_t>(
+                    limit > 500 ? 500 : limit);
+              }
+            }
+
+            const SearchResults found = ws.search(query);
+            nlohmann::json list = nlohmann::json::array();
+            for (std::size_t i = 0; i < found.hits.size(); ++i) {
+              list.push_back(found.hits[i].to_json());
+            }
+            nlohmann::json j = nlohmann::json::object();
+            j["query"] = q;
+            j["scope"] = scope.empty() ? "both" : scope;
+            j["exact"] = query.whole;
+            j["case_sensitive"] = query.case_sensitive;
+            j["path"] = query.subpath;
+            j["root"] = ws.root();
+            j["results"] = list;
+            j["count"] = found.hits.size();
+            j["files_scanned"] = found.files_scanned;
+            j["truncated"] = found.truncated;
+            j["files_skipped"] = found.files_skipped;
+            send_json(res, j);
+          });
+
   svr.Get(R"(/api/workspaces/([^/]+)/file)",
           [this](const httplib::Request& req, httplib::Response& res) {
             Workspace ws;

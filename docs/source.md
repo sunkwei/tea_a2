@@ -19,6 +19,7 @@ src/
                             （initialize / tools/list / tools/call）、把它的工具并进工具表
   command.{h,cpp}           命令执行（Job Object / 进程组、超时、编码归一）
   workspace.{h,cpp}         多工作区、.tea_agent_run/、会话/记忆/产出文件、索引；
+                            工作区搜索（文件名 + 内容，完全字符串匹配，见 [api.md](api.md#工作区搜索get-ap-workspacesidsearch)）；
                             并发写用进程级锁 + 原子替换（见 [并发](workspace.md#并发同一个工作区可以同时跑好几轮)）
   html_export.{h,cpp}       会话 → 自包含 HTML（内联 CSS/图片、可导入的 JSON 区块）
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源；/api/peer/* 是机器对机器的

@@ -408,6 +408,81 @@ ToolResult tool_file(const nlohmann::json& args, const ToolContext& ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// toolkit_workspace_search
+//
+// A literal-string search over the workspace: file names and file content.
+// The query is compared byte for byte - no regular expression, no glob, no
+// fuzzy matching. `exact` switches to whole-string equality (完全匹配).
+// ---------------------------------------------------------------------------
+ToolResult tool_workspace_search(const nlohmann::json& args, const ToolContext& ctx) {
+  ToolResult result;
+  if (!ctx.workspace) {
+    result.output = "error: no workspace is active";
+    return result;
+  }
+  const std::string query_text = trim(arg_str(args, "query"));
+  if (query_text.empty()) {
+    result.output = "error: 'query' is required";
+    return result;
+  }
+
+  SearchQuery query;
+  query.text = query_text;
+  query.subpath = trim(arg_str(args, "path"));
+  const std::string scope = to_lower(trim(arg_str(args, "scope", "both")));
+  if (scope == "name" || scope == "names" || scope == "path") {
+    query.names = true;
+    query.content = false;
+  } else if (scope == "content" || scope == "text" || scope == "body") {
+    query.names = false;
+    query.content = true;
+  } else if (scope == "both" || scope.empty()) {
+    query.names = true;
+    query.content = true;
+  } else {
+    // An unknown scope is a mistake, not something to guess: say so instead of
+    // quietly searching something else than what was asked for.
+    result.output = "error: scope must be one of: name, content, both (got '" + scope + "')";
+    return result;
+  }
+  query.whole = arg_bool(args, "exact", false);
+  query.case_sensitive = arg_bool(args, "case_sensitive", false);
+  const long long wanted = arg_int(args, "max_results", 50);
+  if (wanted > 0) {
+    query.max_results = static_cast<std::size_t>(wanted > 200 ? 200 : wanted);
+  }
+
+  const SearchResults found = ctx.workspace->search(query);
+  std::ostringstream out;
+  out << found.hits.size() << (found.hits.size() == 1 ? " match" : " matches") << " for \""
+      << query_text << "\" in " << ctx.workspace->root() << " (scope="
+      << (query.names && query.content ? "both" : (query.names ? "name" : "content"))
+      << ", " << (query.whole ? "exact" : "substring") << ", "
+      << (query.case_sensitive ? "case-sensitive" : "case-insensitive") << "; scanned "
+      << found.files_scanned << " files)";
+  if (found.truncated) out << "\n[more results exist: the search hit its limit]";
+  if (found.files_skipped) out << "\n[some files were skipped: too big or binary]";
+  for (std::size_t i = 0; i < found.hits.size(); ++i) {
+    const SearchHit& hit = found.hits[i];
+    out << "\n\n" << hit.path;
+    if (hit.hits > 0) out << "  (" << hit.hits << (hit.hits == 1 ? " line)" : " lines)");
+    for (std::size_t k = 0; k < hit.samples.size(); ++k) {
+      const int line_no = (k < hit.lines.size()) ? hit.lines[k] : 0;
+      out << "\n  " << line_no << ": " << hit.samples[k];
+    }
+  }
+  result.ok = true;
+  result.meta["matches"] = static_cast<long long>(found.hits.size());
+  result.meta["truncated"] = found.truncated;
+  std::size_t limit =
+      ctx.workspace ? static_cast<std::size_t>(ctx.workspace->settings().max_tool_output) : 131072u;
+  bool truncated = false;
+  result.output = limit_output(out.str(), limit, &truncated);
+  result.truncated = truncated;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // toolkit_memory
 // ---------------------------------------------------------------------------
 ToolResult tool_memory(const nlohmann::json& args, const ToolContext& ctx) {
@@ -2369,6 +2444,50 @@ ToolRegistry::ToolRegistry() {
   }
   {
     ToolDef def;
+    def.name = "toolkit_workspace_search";
+    def.description =
+        "Search the workspace for a literal string: file names and file content. The query is "
+        "compared byte for byte - no regular expression, no glob, no fuzzy matching. scope=name "
+        "matches the path, scope=content matches the text inside the files, scope=both (default) "
+        "does both. exact=true asks for a whole-string match (完全匹配): the path (or file name) "
+        "has to equal the query, or the whole line has to equal it. Use it when you know the "
+        "exact name you are looking for; leave it off for a normal search. "
+        "在工作区里搜文件与内容（完全字符串匹配）。";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The literal string to look for (compared byte for byte)."
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["both", "name", "content"],
+          "description": "What to match: file names, file content, or both (default both)."
+        },
+        "exact": {
+          "type": "boolean",
+          "description": "true => whole-string match (完全匹配) instead of 'contains'."
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "true => case matters (default: it does not)."
+        },
+        "path": {
+          "type": "string",
+          "description": "Search only this subdirectory of the workspace (relative path)."
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of hits to return (default 50)."
+        }
+      },
+      "required": ["query"]
+    })JSON");
+    defs_.push_back(def);
+  }
+  {
+    ToolDef def;
     def.name = "toolkit_memory";
     def.description =
         "Store and recall durable notes about this workspace (kept in "
@@ -2775,6 +2894,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
   try {
     if (name == "toolkit_exec") result = tool_exec(arguments, ctx);
     else if (name == "toolkit_file") result = tool_file(arguments, ctx);
+    else if (name == "toolkit_workspace_search") result = tool_workspace_search(arguments, ctx);
     else if (name == "toolkit_memory") result = tool_memory(arguments, ctx);
     else if (name == "toolkit_todo") result = tool_todo(arguments, ctx);
     else if (name == "toolkit_load_image") result = tool_load_image(arguments, ctx);

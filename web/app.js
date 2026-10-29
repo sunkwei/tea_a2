@@ -60,7 +60,7 @@
     /// 选中的分叉点：{ sid, mid, ord, preview }。下一条消息先 POST /fork 建一个
     /// 从这条轮次分出去的新会话，再发进那个会话；当前会话不动。null = 未选。
     fork: null,
-    files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 },
+    files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0, search: null },
     memory: [], logsTimer: null, logsAutoScroll: true,
     /// 当前会话的任务列表（todo）：agent 用 toolkit_todo 维护，SSE 的 todo 事件
     /// 实时推送。done/total 用于「3/7」这样的进度显示。
@@ -3722,7 +3722,11 @@
       state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
       state.turnSteps = 0; state.turnStartAt = 0;
       state.trajectory = []; state.lastTrajectoryId = null;
-      state.files = { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0 };
+      state.files = { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0, search: null };
+      // 换工作区 = 换项目：上一个项目的搜索词没有意义，连框一起清掉。
+      var searchInput = $('files-search-input');
+      if (searchInput) searchInput.value = '';
+      $('files-search-clear').classList.add('hidden');
     }
     renderWorkspaceChip(); renderChat(); renderMetrics(); saveLS();
     return loadSessions().then(function () {
@@ -4161,9 +4165,71 @@
     reader.readAsText(file);
   }
 
+  // ---- 工作区搜索 -----------------------------------------------------------
+  // 完全字符串匹配：查询串按原样逐字节比较（服务端不做正则/模糊匹配）。
+  // 「完全匹配」勾上以后，路径要整串相等、内容要整行相等。
+  function runFileSearch() {
+    if (!state.workspace) { toast('请先选择工作区'); return Promise.resolve(); }
+    var input = $('files-search-input');
+    var q = (input.value || '').trim();
+    if (!q) { clearFileSearch(); return Promise.resolve(); }
+    var scope = $('files-search-scope').value || 'both';
+    var exact = $('files-search-exact').checked ? '1' : '0';
+    var url = 'api/workspaces/' + encodeURIComponent(state.workspace.id) + '/search?q=' +
+      encodeURIComponent(q) + '&scope=' + encodeURIComponent(scope) + '&exact=' + exact;
+    return api(url).then(function (d) {
+      state.files.search = {
+        q: q, scope: scope, exact: exact,
+        results: d.results || [], count: d.count || 0,
+        truncated: !!d.truncated, files_skipped: !!d.files_skipped
+      };
+      renderFiles();
+    }, function (e) { toast('搜索失败：' + e.message); });
+  }
+  function clearFileSearch() {
+    state.files.search = null;
+    var input = $('files-search-input');
+    if (input) input.value = '';
+    $('files-search-clear').classList.add('hidden');
+    renderFiles();
+  }
+  function renderSearchResults(list, s) {
+    $('files-search-clear').classList.remove('hidden');
+    if (!s.results.length) {
+      list.appendChild(el('div', 'empty-note', '没有匹配的文件'));
+      return;
+    }
+    s.results.forEach(function (r) {
+      var wrap = el('div', 'search-hit');
+      var b = el('button', 'file-row' + (state.files.path === r.path ? ' active' : ''));
+      b.type = 'button';
+      b.innerHTML = '<span class="ico2">' + (r.type === 'dir' ? '▸' : '·') + '</span>' +
+        '<span class="nm"></span><span class="sz"></span>';
+      b.querySelector('.nm').textContent = r.path;
+      b.querySelector('.sz').textContent = r.name_hit ? '文件名' : (r.hits + ' 处');
+      b.title = r.path + (r.hits ? '（命中 ' + r.hits + ' 处）' : '');
+      b.onclick = function () {
+        if (r.type === 'dir') loadTree(r.path);
+        else openFile(r.path);
+      };
+      wrap.appendChild(b);
+      var lines = r.lines || [];
+      var samples = r.samples || [];
+      samples.forEach(function (text, i) {
+        wrap.appendChild(el('div', 'snip', (lines[i] || 0) + ': ' + text));
+      });
+      list.appendChild(wrap);
+    });
+  }
+
   function loadTree(dir) {
     if (!state.workspace) return Promise.resolve();
     state.files.dir = dir || '';
+    // 换目录 = 离开搜索结果：搜索框和结果一起清掉，列表回到目录视图。
+    state.files.search = null;
+    var input = $('files-search-input');
+    if (input) input.value = '';
+    $('files-search-clear').classList.add('hidden');
     return api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/tree?path=' + encodeURIComponent(state.files.dir))
       .then(function (d) { state.files.entries = d.entries || []; renderFiles(); },
         function (e) { toast('读取目录失败：' + e.message); });
@@ -4182,25 +4248,38 @@
     });
     var list = $('files-list');
     clear(list);
-    if (f.dir) {
-      var up = el('button', 'file-row');
-      up.type = 'button';
-      up.innerHTML = '<span class="ico2">↑</span><span class="nm">返回上级</span>';
-      up.onclick = function () { loadTree(parts.slice(0, -1).join('/')); };
-      list.appendChild(up);
+    if (f.search) {
+      // 搜索结果替换目录列表：位置不变，读起来还是一条路径。
+      renderSearchResults(list, f.search);
+    } else {
+      if (f.dir) {
+        var up = el('button', 'file-row');
+        up.type = 'button';
+        up.innerHTML = '<span class="ico2">↑</span><span class="nm">返回上级</span>';
+        up.onclick = function () { loadTree(parts.slice(0, -1).join('/')); };
+        list.appendChild(up);
+      }
+      if (!f.entries.length) list.appendChild(el('div', 'empty-note', '空目录'));
+      f.entries.forEach(function (en) {
+        var b = el('button', 'file-row' + (f.path === en.path ? ' active' : ''));
+        b.type = 'button';
+        b.innerHTML = '<span class="ico2">' + (en.type === 'dir' ? '▸' : '·') + '</span><span class="nm"></span>' +
+          '<span class="sz">' + (en.type === 'dir' ? '目录' : fmtBytes(en.size)) + '</span>';
+        b.querySelector('.nm').textContent = en.name;
+        b.onclick = function () { if (en.type === 'dir') loadTree(en.path); else openFile(en.path); };
+        list.appendChild(b);
+      });
     }
-    if (!f.entries.length) list.appendChild(el('div', 'empty-note', '空目录'));
-    f.entries.forEach(function (en) {
-      var b = el('button', 'file-row' + (f.path === en.path ? ' active' : ''));
-      b.type = 'button';
-      b.innerHTML = '<span class="ico2">' + (en.type === 'dir' ? '▸' : '·') + '</span><span class="nm"></span>' +
-        '<span class="sz">' + (en.type === 'dir' ? '目录' : fmtBytes(en.size)) + '</span>';
-      b.querySelector('.nm').textContent = en.name;
-      b.onclick = function () { if (en.type === 'dir') loadTree(en.path); else openFile(en.path); };
-      list.appendChild(b);
-    });
     var dirty = f.content !== f.original;
-    $('files-note').textContent = f.path ? (f.truncated ? '内容已截断，只读显示' : (dirty ? '有未保存修改' : '未修改')) : '';
+    var note = '';
+    if (f.search) {
+      note = '搜索「' + f.search.q + '」：' + f.search.count + ' 个结果';
+      if (f.search.truncated) note += '（结果太多，只显示了前面一部分）';
+      if (f.search.files_skipped) note += '（部分文件过大或为二进制，未搜内容）';
+    } else if (f.path) {
+      note = f.truncated ? '内容已截断，只读显示' : (dirty ? '有未保存修改' : '未修改');
+    }
+    $('files-note').textContent = note;
     $('files-save').disabled = !f.path || f.readOnly || !dirty || isImagePath(f.path);
     $('files-revert').disabled = !f.path || !dirty || isImagePath(f.path);
     // 下载的是服务端那个工作区的 .tea_agent_run：没有工作区就没什么可打包。
@@ -5965,6 +6044,11 @@
     $('overlay').onclick = function (e) {
       if (e.target === $('overlay')) closeDialog();
     };
+    $('files-search-go').onclick = runFileSearch;
+    $('files-search-clear').onclick = clearFileSearch;
+    $('files-search-input').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); runFileSearch(); }
+    });
     $('files-save').onclick = saveFile;
     $('files-download').onclick = downloadRunArchive;
     $('files-revert').onclick = function () {

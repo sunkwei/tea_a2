@@ -8,6 +8,7 @@
 | --- | --- |
 | `toolkit_exec` | 执行系统命令。Windows 写成临时 `.cmd`/`.ps1` 再执行（绕开引号问题），超时用 Job Object 杀整个进程树；POSIX 用 `setsid` + 进程组 `kill`。输出统一转 UTF-8 回填模型 |
 | `toolkit_file` | `read` `write` `append` `list` `mkdir` `delete` `move` `stat` |
+| `toolkit_workspace_search` | 在工作区里搜东西：**文件名 + 文件内容**。查询串按原样逐字节比较（**不做正则/模糊匹配**）；`scope=name\|content\|both`、`exact=true`（完全匹配：路径整串相等 / 整行相等）、`case_sensitive`、`path=`（只搜某个子目录）、`max_results=`。见 [api.md](api.md#工作区搜索get-ap-workspacesidsearch) |
 | `toolkit_memory` | 工作区长期记忆的增删查，自动注入 system prompt，跨会话保留偏好与项目事实 |
 | `toolkit_agent_doc` | `read` `append` `replace` `scripts`：维护 `.tea_agent_run/agent.md`（本工作区的经验：坑、可复用命令与脚本） |
 | `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
@@ -75,6 +76,41 @@
 - **历史图片会继续发送**：会话里存的是路径，每轮把上下文里所有图片重新编码成 data URL
   （压缩掉的部分跳过），所以「上一轮看过的那张图还能不能接着问」的答案是能。为免无限增长，
   一次请求的图片总量封顶 24 MB，超出时最旧的几张降级为纯文本并记一条 WARN。
+
+### 搜工作区：`toolkit_workspace_search`
+
+模型想找「这个符号在哪儿定义」「哪一行写了那句话」，本来只有两条路：`toolkit_exec` 跑一条
+`grep`（要自己拼命令、要等进程、输出还得自己筛），或者用 `toolkit_file` 一个目录一个目录地
+翻。`toolkit_workspace_search` 把这件事变成一次调用。
+
+```jsonc
+// 在整个工作区里找 "workspace_search"
+{ "query": "workspace_search" }
+// 只搜文件名，而且要整串相等（完全匹配）
+{ "query": "tools.cpp", "scope": "name", "exact": true }
+// 只搜某个子目录里的内容
+{ "query": "TODO", "scope": "content", "path": "src" }
+```
+
+**匹配规则就一条：完全字符串匹配。** 查询串按原样逐字节比较——不是正则、不是通配符、
+不是模糊匹配。查 `.*` 找的是字面量 `.*`，不会有任何意外。这一点是刻意的：搜索是给人
+（和给模型）用的，猜错了意图比找不到更让人火大。
+
+- `scope`：`both`（默认）/ `name` / `content`；
+- `exact=true`：**完全匹配**——路径（或者文件名）必须整串相等，内容则是整行相等；
+- `case_sensitive=true`：区分大小写（默认不区分，只折 ASCII 大写）；
+- `path=`：只在这个子目录里搜；
+- `max_results=`：最多几条（默认 50）。
+
+返回的是一段文本：每个命中的文件一行路径，下面跟着命中的行号和那几行原文。
+
+**有上限，而且上限会说出来。** 最多访问 10000 个文件、目录深度 12、单次最多读 32 MB 文本；
+单文件超过 2 MB 只搜文件名不搜内容；二进制文件不搜内容；`.tea_agent_run`、`node_modules`、
+`.git` 这些目录不参与。撞到上限时结果里会写明「还有更多」/「有文件被跳过」——**结果不完整
+时必须说出来，不能装作这就是全部**。
+
+网页「文件」页的搜索框走的是同一套核心（`GET /api/workspaces/{id}/search`），所以界面上
+看到的和模型看到的是一回事。
 
 ### 文件访问范围：受限工作区 / 全局
 

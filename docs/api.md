@@ -22,6 +22,7 @@
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
+| `GET` | `/api/workspaces/{id}/search?q=` | **在工作区里搜东西**：文件名 + 文件内容。查询串按原样逐字节比较（**不做正则/模糊匹配**）。`scope=name\|content\|both`（默认 both）、`exact=1`（完全匹配：路径整串相等 / 整行相等）、`case=1`（区分大小写）、`path=`（只搜这个子目录）、`limit=`（最多几条，默认 100） |
 | `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件 |
 | `GET` | `/api/workspaces/{id}/raw?path=` | 读文件原始字节（图片 / PDF 等，**16 MB 上限**，用于在页面里显示） |
 | `GET` | `/api/workspaces/{id}/download?path=` | 以附件形式下载文件（`Content-Disposition: attachment`），**从磁盘流式发送、无 16 MB 限制**；`&inline=1` 改为在浏览器里直接打开（视频 / PDF） |
@@ -144,6 +145,64 @@ curl -X POST http://device:8282/api/exec \
   "dry_run": false
 }
 ```
+
+---
+
+### 工作区搜索（`GET /api/workspaces/{id}/search`）
+
+在工作区里搜文件：**文件名**和**文件内容**一起搜。
+
+```bash
+curl -s "http://127.0.0.1:8282/api/workspaces/$WS/search?q=toolkit_workspace_search" | jq
+```
+
+```json
+{
+  "query": "toolkit_workspace_search",
+  "scope": "both",
+  "exact": false,
+  "case_sensitive": false,
+  "path": "",
+  "root": "/home/me/project",
+  "count": 2,
+  "files_scanned": 318,
+  "truncated": false,
+  "files_skipped": false,
+  "results": [
+    {
+      "path": "src/tools.cpp",
+      "name": "tools.cpp",
+      "type": "file",
+      "size": 91233,
+      "mtime": "2026-10-29T07:16:02Z",
+      "hits": 3,
+      "name_hit": false,
+      "lines": [417, 2330, 2848],
+      "samples": ["ToolResult tool_workspace_search(...)", "..."],
+      "preview": "ToolResult tool_workspace_search(...)"
+    }
+  ]
+}
+```
+
+**匹配规则**（就是「完全字符串匹配」，没有别的花样）：
+
+| 参数 | 取值 | 意思 |
+| --- | --- | --- |
+| `q` | 必填 | 查询串。**按原样逐字节比较**：不是正则、不是通配符、不是模糊匹配。查 `.*` 就是找字面量 `.*` |
+| `scope` | `both`（默认）/ `name` / `content` | 搜文件名、搜文件内容，还是两个都搜 |
+| `exact` | `1` | **完全匹配**：路径（或者文件名）必须整串相等；内容则是整行相等。不带这个参数时是「包含」 |
+| `case` | `1` | 区分大小写（默认不区分，只折 ASCII 大写） |
+| `path` | 子目录 | 只在这个子目录里搜（工作区相对路径） |
+| `limit` | 数字 | 最多返回几条（默认 100，上限 500） |
+
+几个要说清楚的边界：
+
+- **只搜工作区里面**：路径不会跑出工作区根目录；`.tea_agent_run`、`node_modules`、`.git` 这些目录**不参与**搜索。
+- **有上限**：最多访问 10000 个文件、目录深度 12、单次最多读 32 MB 文本、单文件超过 2 MB 只搜文件名不搜内容、二进制文件（按扩展名或内容里有 NUL 字节）不搜内容。撞到上限时 `truncated` / `files_skipped` 为 true——**结果不完整时要说出来，不能装作这就是全部**。
+- `hits` 是内容命中的处数，`lines` 是命中的行号（1 起），`samples` / `preview` 是命中的那几行原文。
+
+网页的「文件」页左上角就是它（`文件` → 搜索框 → 回车）；agent 那边是 `toolkit_workspace_search` 工具。
 
 ---
 

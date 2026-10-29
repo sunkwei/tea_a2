@@ -76,6 +76,7 @@ python3 tests/smoke_utf8_roundtrip.py                     # 往返：模型的�
 bash scripts/test-all.sh                                  # 整套测试：并行 + 共用一个浏览器（~100 s）
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
+python3 tests/smoke_workspace_search.py                 # 工作区搜索：文件名/内容/完全匹配/不越界/工具那一半
 node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
 node tests/ui_workspace_delete.mjs                       # 删除工作区：确认框 + 只摘登记，文件不动（需 google-chrome）
 node tests/ui_workspace_access.mjs                        # 文件访问范围开关：受限 / 全局 / 命令行锁死（需 google-chrome）
@@ -93,6 +94,7 @@ python3 tests/smoke_export_html.py                        # 导出会话为单�
 node tests/ui_session_export.mjs                          # 导出按钮 → 下载 → 离线打开 → 导入（需 google-chrome）
 python3 tests/smoke_run_archive.py                        # 工作区归档下载：真 zip / 沙箱 / 超限跳过
 node tests/ui_files_download.mjs                          # 文件页「下载」按钮真的产出 zip（需 google-chrome）
+node tests/ui_workspace_search.mjs                      # 文件页搜索框：结果/点开文件/完全匹配/返回目录（需 google-chrome）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
 node tests/ui_queue.mjs                                   # 生成中 Enter 排队、取消、采纳（需 google-chrome）
 node tests/ui_sidebar.mjs                                 # 侧栏隐藏/显示与正文宽度自适应（需 google-chrome）
@@ -171,6 +173,17 @@ IMAP 这一层是协议级的：`CAPABILITY` / `LOGIN` / `SELECT`（UIDVALIDITY�
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的
 下一次请求里；`op=read/replace/scripts` 各自生效；超过 32 KB 的 append 报错并提示压缩且不
 改动文件；`GET/PUT /api/workspaces/{id}/agent-doc` 能读、能改、超限报 400。
+
+`tests/smoke_workspace_search.py` 覆盖工作区搜索：文件名命中、内容命中（并报出**行号**与
+原文）、`scope=name|content` 各自收窄、`exact=1` 只认整串相等（路径整串、整行整串，
+`main` 不匹配 `main.cpp`）、查询串是**字面量**（`.*` 与 `Ma[GT]*` 都只当普通字符）、
+搜不到工作区外面的文件、`path=` 只搜指定子目录、缺 `q` 与未知 `scope` 报 400、未知工作区 404；
+最后用一轮真对话确认 `toolkit_workspace_search` 工具跑得起来、结果里带着命中行号，而且这个工具
+确实出现在给模型的工具表里。
+
+`tests/ui_workspace_search.mjs` 在浏览器里操作文件页的搜索框：框、范围下拉、完全匹配开关、
+「返回目录」都在；搜内容出结果并显示命中行；点结果能打开那个文件；完全匹配下 `main` 不匹配
+`main.cpp`；「返回目录」把目录列表还回来并清空搜索框。
 
 `tests/smoke_system_prompt.py` 覆盖工作区级 system prompt：默认回落到内置规则（或
 `settings.yaml` 的 `system_prompt`）；`GET/PUT /api/workspaces/{id}/system-prompt` 能读能写，
