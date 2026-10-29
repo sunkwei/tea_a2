@@ -28,6 +28,7 @@ agent 完全不知道 Python 侧的存在。所以：
 | `fleet.py` | 机群引擎（命令行） | 一台服务器管一批设备 | [机群](#机群) |
 | `fleet_server.py` | 机群控制面（HTTP，8290） | 想让 agent/机器人驱动机群 | [机群](#机群) |
 | `asr_server.py` | 语音转写侧车（OpenAI 兼容，8284） | 想用麦克风说话 | [语音转写](#语音转写) |
+| `mail_watch.py` | 邮件看门狗：收信 → 判读 → 归档/起草 → 只在该我参与时通知 | 想让邮箱自己整理、只在要紧时打扰你 | [邮件看门狗](#邮件看门狗watcher) |
 | `bili.py` | B 站观看历史 → 摘要 → 周报（自用） | 想看「我最近在看什么」 | [个人工具](#个人工具) |
 | `zhihu.py` | 知乎抓取/阅读/发回答（自用） | 想抓知乎内容或自动答题 | [个人工具](#个人工具) |
 | `browser_login.py` + `login_state.mjs` | 两个工具共用的登录入口 | 登录态过期了 | [个人工具](#个人工具) |
@@ -39,7 +40,8 @@ agent 完全不知道 Python 侧的存在。所以：
 
 **开发者/自用**（不随包发布，但都在这个仓库里）：
 `fleet.py`、`fleet_server.py`、`channel.py`、`telegram_bot.py`、`asr_server.py`、
-`bili.py`、`zhihu.py`、`browser_login.py`、`login_state.mjs`。
+`mail_watch.py`、`mail-watch.template`、`bili.py`、`zhihu.py`、`browser_login.py`、
+`login_state.mjs`。
 
 ---
 
@@ -154,6 +156,30 @@ python3 sched/asr_server.py                   # 起服务（127.0.0.1:8284）
   所以模型级流式不存在（协议还是一次性的，想流式得分块累加重解码）。
 - 实测 int8 比实时快 30 倍（10s 音频 → 0.325s），等待时间约等于说话时间。
 
+## 邮件看门狗（watcher）
+
+`mail_watch.py` 是**第三个方向**的对接：不是 agent 去调别人、也不是别人来调它，而是
+**别人那边发生了事**（新邮件）自己走进来。它守着收件箱，一封信一次 `/api/llm/chat`：
+
+```bash
+python3 sched/mail_watch.py init              # 写配置模板到 ~/.tea_agent/mail/config
+python3 sched/mail_watch.py check             # 配置 / IMAP / agent 是否都通
+python3 sched/mail_watch.py peek --limit 3    # 只看判读，不动邮箱（调提示词用）
+python3 sched/mail_watch.py run --once --dry-run
+python3 sched/mail_watch.py run               # 常驻（默认 5 分钟一轮）
+python3 sched/mail_watch.py status            # 处理到哪儿了
+```
+
+- **不需要我参与的**：贴 `tea/done` 并移出收件箱（Gmail 是去掉 `\Inbox`，不删除），我这边一声不响；
+- **需要我参与的**：贴 `tea/needs-me`、留在收件箱、草稿写进 Gmail 草稿箱（**不发**），
+  才发一条 Telegram / webhook；
+- **要实际干活的**（判定里有 `follow_up`）：再排一个任务给队列，agent 做完通知我。
+
+判不准（模型不回 JSON）一律当成「需要我」：多打扰一次比漏一封信便宜。每一次动作都记在
+`~/.tea_agent/mail/digest/YYYY-MM-DD.md`。配置、Gmail 应用专用密码、systemd 单元、
+以及**怎么把同一套循环套到日历/RSS/Slack/工单**上，见
+[与其他应用对接](../docs/integrations.md)；测试是 `tests/smoke_mail_watch.py`。
+
 ## 个人工具
 
 两个自用工具，同一套结构：纯 HTTP + cookie 抓内容 → 送 LLM 出结构化摘要 → markdown digest。
@@ -221,7 +247,8 @@ python3 sched/zhihu.py post llm --yes              # 真投递到知乎专栏
 
 ### 状态目录
 
-都在 `~/.tea_agent/` 下：`bili/`、`zhihu/`（工具数据）、`asr/`（模型）、`fleet/`（台账+密钥）、
+都在 `~/.tea_agent/` 下：`bili/`、`zhihu/`（工具数据）、`mail/`（邮件看门狗：配置+书签+digest）、
+`asr/`（模型）、`fleet/`（台账+密钥）、
 `wechat/`、`telegram/`（各端状态）、`*-workspace/`（各端的固定工作区）、`provider.yaml`（LLM 配置）。
 
 ### 环境变量
@@ -232,7 +259,8 @@ agent / 队列：`TEA_AGENT_URL`、`TEA_AGENT_WORKSPACE`、`TEA_TASK_URL`、`TEA
 `TEA_FLEET_TIMEOUT`、`TEA_FLEET_CONCURRENCY`、`TEA_FLEET_TOKEN`；
 语音：`TEA_ASR_HOST`、`TEA_ASR_PORT`、`TEA_ASR_MODEL_DIR`；
 聊天端：`TEA_TELEGRAM_TOKEN`、`TEA_TELEGRAM_API`、`TEA_WECHAT_CDN`；
-个人工具：`BILI_STATE`/`BILI_HOME`、`ZHIHU_STATE`/`ZHIHU_HOME`。
+个人工具：`BILI_STATE`/`BILI_HOME`、`ZHIHU_STATE`/`ZHIHU_HOME`；
+邮件看门狗：`TEA_MAIL_HOME`（状态目录）、`TEA_MAIL_CONFIG`（配置文件）。
 
 ### 几条硬规矩
 
@@ -247,6 +275,7 @@ agent / 队列：`TEA_AGENT_URL`、`TEA_AGENT_WORKSPACE`、`TEA_TASK_URL`、`TEA
 
 `scripts/` 下现成的有：`a2.service`、`a2_task.service`、`a2_wechat.service`、
 `a2_telegram.service`、`a2_fleet.service`、`a2_fleet_collect.service` + `.timer`（每天采集）。
+邮件看门狗也能这么起，单元片段见 `docs/integrations.md`。
 安装见 `scripts/install-units.sh`。
 
 ### 打包

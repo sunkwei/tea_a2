@@ -857,3 +857,51 @@ text = "做完了 %s\n%s" % (task_id, (task.get("note") or (task.get("result") o
 - 测试要钉住「完整答案发出去」这件事本身（`tests/smoke_wechat_bot.py` /
   `tests/smoke_telegram_bot.py` 各加了四条：完整答案、note 不顶替答案、长答案分段、
   每个字都到）。
+
+## 与其他应用对接：watcher（2026-10-29）
+
+tea_a2 是被动的，缺的从来不是「再加一个内置功能」，而是**触发**和**出口**。三个方向
+（它调别人 = MCP、别人调它 = HTTP/级联、别人那边发生事 = watcher）在
+`docs/integrations.md` 里；落地的是第三个：`sched/mail_watch.py`（Gmail/任意 IMAP）。
+
+### 形状
+
+`fetch_new()` 拿新东西 + 书签 → `judge()` 一次 `/api/llm/chat` 出结构化 JSON →
+`apply_decision()` 动邮箱 → digest 留痕 → **只在 `needs_me` 时** `notify()` →
+`follow_up` 非空就排一个队给 tea_a2。
+
+### 几个刻意的取舍
+
+- **不发信**。最后一步是往草稿箱 `APPEND`（带 `In-Reply-To`/`References`，所以是同一线程的回复），
+  发不发由人按。自动发信不是待办功能，是边界。
+- **判不准就打扰**：模型不给 JSON / 空回复 / agent 连不上 → `needs_me=True, action=keep`，
+  留在收件箱、通知人。任何「猜一个 archive」的兜底都是静默丢信。
+- **Gmail 标签用 `X-GM-LABELS`**：归档就是 `-X-GM-LABELS (\Inbox)`（不删、不 COPY）；
+  没有这个扩展的服务器退回「建文件夹 + COPY + \Deleted」。`archive()` 里两条路。
+- **UIDVALIDITY 变了一切作废**（Gmail 会重置）；`n:*` 搜索在 n 超过最大 uid 时会返回最后一封，
+  所以 `uid > last` 要自己再筛一遍。这两条不写就会重复处理老信。
+- **`imaplib` 的日期不吃 locale**：`strftime("%d-%b-%Y")` 在 zh_CN 下给「26-10月-2026」，
+  服务器直接 NO。要自己拼英文月份（`imap_date()`）。
+- **dry-run 不推进书签**（否则真跑时那几封会被当成处理过）；**每次动作前都记账**，
+  通知失败也能从 digest 里查。
+- **单实例锁**（pid 文件，进程死了会被接管），否则两个 watcher 会把同一封信处理两遍。
+- 判读借 agent 的 `/api/llm/chat`，不自己读 provider.yaml —— 换模型只改一个键，
+  思考型 provider 的空正文也有 agent 那边兜着。
+
+### 测试怎么钉（`tests/smoke_mail_watch.py`，95 条）
+
+- **假 IMAP 服务器是真的协议对话**：CAPABILITY / LOGIN / SELECT（UIDVALIDITY）/
+  UID SEARCH / UID FETCH（literal，imap 的 `_command` 在 `self.literal` 上拼 `{n}`）/
+  UID STORE（`X-GM-LABELS` 加与减）/ APPEND（`+ Ready for literal data` 之后才发正文）。
+  这样「标签贴没贴上、信移没移出收件箱、草稿是不是回复」是按服务器记录验的。
+- 假 agent / 假队列 / 假 Telegram / 假 webhook 一个本地 `ThreadingHTTPServer` 全包
+  （路径分流 `bot*`、`/hook`、`/api/tasks`、`/api/llm/chat`）。
+- 陷阱：`BaseHTTPRequestHandler` 忘了继承 → `MockWorld() takes no arguments`；
+  Telegram 的域要可配（`telegram_api`），否则测试会去打真的 api.telegram.org（这台机器无网时
+  每封等 20 秒超时）。
+
+### 还缺的（排在 docs/integrations.md 文末）
+
+队列没有「只通知不干活」的记录类型（watcher 只好自己发通知，网页队列里看不到）；没有
+`watch.py` 基类（第二个源落地时再抽）；agent 侧没有 `callback_url`；Gmail 只有应用专用密码
+（Workspace 关了这条通道就得写 XOAUTH2）；回信之后没有标签闭环。

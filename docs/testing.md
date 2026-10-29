@@ -69,6 +69,7 @@ python3 tests/smoke_peer.py                                 # 级联：peers: �
                                                           # + exec 动作 + 旧版对端退回普通路由
 python3 tests/smoke_task_order.py                          # 任务单：解析/报错/命令行排队/模板可下载
 python3 tests/smoke_telegram_bot.py                        # Telegram 前端：轮询/命令/文件/白名单/offset
+python3 tests/smoke_mail_watch.py                          # 邮件看门狗：配置/解码/判定/动作/通知/书签/锁/digest（假邮箱+假 agent）
 python3 tests/smoke_utf8_truncation.py                    # 文件被截断在字符中间：轮次不崩/结果是合法 UTF-8
 python3 tests/smoke_invalid_utf8.py                       # 内容不是 UTF-8 的文件与命令输出：轮次不崩/字节被替换
 python3 tests/smoke_utf8_roundtrip.py                     # 往返：模型的坏字节不丢事件、压缩不切坏字符、落盘合法
@@ -154,6 +155,17 @@ data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/image
 `tests/smoke_telegram_bot.py` 覆盖 Telegram 这一端（Bot API 是假的，任务队列也是假的）：
 任务，`/tasks` `/status` `/result` `/start` `/cancel` `/answer` `/del` `/quota` `/retry` 都摸到
 队列的 API；`/tasks@botname`（群里发的那种）也认；**名单外的 chat 一句都不回**（bot 是公开的，
+
+`tests/smoke_mail_watch.py` 覆盖邮件看门狗（IMAP 用本地假服务器真跑一套协议对话，不动任何真邮箱）：
+配置格式（注释、`|` 块、写错键带行号）、一封信的解码（编码过的主题、砍掉引用、只有 HTML 的正文、
+附件不算正文）、判读（好 JSON / 坏 JSON / 根本没有 JSON 时按「需要我」兜底）、动作（贴标签、
+移出收件箱、写草稿、标已读，需要我的信绝不被归档）、通知（广告安静、合同提醒、每封只提醒一次）、
+交办（`follow_up` 变成带幂等键的队列任务）、书签（第二轮不重复、试运行不推进）、
+出口（telegram / webhook / file / none，坏掉的出口不丢这一轮）、单实例锁与 digest。
+IMAP 这一层是协议级的：`CAPABILITY` / `LOGIN` / `SELECT`（UIDVALIDITY）/ `UID SEARCH` /
+`UID FETCH`（literal）/ `UID STORE`（`X-GM-LABELS` 的加与减）/ `APPEND`（草稿）都真的走一遍，
+所以「标签贴没贴上、信有没有移出收件箱、草稿是不是同一线程的回复」按服务器的记录验。
+判读打的是**本地假 agent**，通知打的是**本地假 Telegram / webhook**。
 
 `tests/smoke_agent_doc.py` 覆盖工作区经验文件：打开工作区即生成带模板的 `agent.md` 与
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的
