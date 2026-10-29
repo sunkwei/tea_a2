@@ -812,3 +812,48 @@ cp build-win64/bin/tea_agent.exe .
 
 原因没查清（每个命令的路径都是对着暂存目录写的），但结论是可靠的：
 `ls -la release/` 之后应该是「一个 zip」的状态。
+
+---
+
+## 坑：任务做完时发到聊天端的消息不是完整答案（2026-10-29）
+
+用户报「测试发现实际收到的内容相比完整的最终回复，差了很多」。查下来不是模型的问题，
+是通知那一行取错了字段。
+
+### 根因
+
+`sched/channel.py` 的 `notify_event()`：
+
+```python
+text = "做完了 %s\n%s" % (task_id, (task.get("note") or (task.get("result") or "")[:300]))
+```
+
+- **`note` 排在前面**：那是模型汇报进度的**一句话**（`toolkit_task` 的 note 参数）。
+- **模型是被明确要求汇报进度的**：`src/agent.cpp` 的 `build_system_prompt()` 里，
+  `task_context` 非空就加一段「This turn works on a QUEUED TASK: … Report on the task
+  with toolkit_task (op=update): progress=0-100 and a one-line note of what you just did」。
+  → 所以排队任务的记录里**几乎总有 note** → 通知发出去的就是那句「我正在做 X」。
+- 没有 note 时才用 `result`，而且**只有前 300 字**。
+
+用真实队列里的 8 个已完成任务量了一下：修复前发出 57～209 字（全是 note），
+完整答案是 233～1894 字。
+
+### 修法
+
+- `notify_event()`：**只发最后的完整答案**（`result`），没有答案才退回那句 note
+  （不再把 note 当脚注附在后面——用户要的是「仅最后的完整消息」）。
+- `task_server.py` 那层**不用改**：`result` 存的就是 agent 的 `out.content`
+  （`agent.cpp` 的 `if (!chat.content.empty()) out.content = chat.content;` —— 最后一个
+  有内容的轮次 = 最后的完整消息），多轮任务（confirm 后继续）也是后一轮覆盖前一轮，
+  正好是「最后的」。实测记录里的 result 是 1600/1894 字这种完整答案 ✓。
+- **长答案分段发**（不截断）：`chunks()` 从 `telegram_bot.py` 挪到 `channel.py` 共用；
+  Telegram 每段 3800 字（原来就有），**微信原来是一条整发** → 现在也按 1800 字分段，
+  每段带同一个 `context_token`。
+
+### 教训
+
+- 「模型汇报进度」和「模型给出答案」是两个字段，通知要的是后者。**别让进度占住答案的位置。**
+- 平台限制要分段解决，**不要用「截前 N 字」糊弄**——那是静默丢答案。
+- 测试要钉住「完整答案发出去」这件事本身（`tests/smoke_wechat_bot.py` /
+  `tests/smoke_telegram_bot.py` 各加了四条：完整答案、note 不顶替答案、长答案分段、
+  每个字都到）。
