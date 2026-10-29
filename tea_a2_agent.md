@@ -900,6 +900,14 @@ tea_a2 是被动的，缺的从来不是「再加一个内置功能」，而是*
   Telegram 的域要可配（`telegram_api`），否则测试会去打真的 api.telegram.org（这台机器无网时
   每封等 20 秒超时）。
 
+### 现状：Gmail 这条路先搁着（2026-10-29，用户判断）
+
+从没对着真账号跑过。用户看过 Google 现在的风控（应用专用密码也不再是「有密码就能连」：
+账号、设备、IP、登录历史一起参与判断，新机器第一次连就可能被拦，拦了还要人工解），
+判断不值得为它继续投入 —— **不要再花时间试 Gmail 应用专用密码**。代码是通用 IMAP，
+换一家只是 `host`/`port`/`password` 三个值；要真接 Gmail 只剩 OAuth2（XOAUTH2 +
+refresh token + Google Cloud 的 OAuth 客户端），入口在 `ImapSource.connect()` 的 `login()`。
+
 ### 还缺的（排在 docs/integrations.md 文末）
 
 队列没有「只通知不干活」的记录类型（watcher 只好自己发通知，网页队列里看不到）；没有

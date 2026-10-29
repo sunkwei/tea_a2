@@ -7,9 +7,13 @@
 # 以 | 结尾的键，下面缩进的行是它的正文（rules / signature 用）。
 # 写错键会带行号报错，不会悄悄不生效。
 #
-# Gmail 的 password 是**应用专用密码**（16 位，像 abcd efgh ijkl mnop），
-# 不是账号密码：https://myaccount.google.com/apppasswords
-# 前提是账号开了两步验证。别的邮箱（QQ / Outlook / 自建）改 host / port 即可。
+# 这是通用 IMAP：任何一家（QQ / Outlook / 自建 / Gmail）都只是 host / port / password 不同。
+#
+# Gmail 的话 password 是**应用专用密码**（16 位，像 abcd efgh ijkl mnop，不是账号密码）：
+# https://myaccount.google.com/apppasswords ，前提是开了两步验证。
+# 但这条路 2026 年已经很不好走 —— Google 的风控看账号/设备/IP，新机器第一次连就可能被拦，
+# 而且这个脚本从没对着真账号跑过（见 docs/integrations.md 的「现状」）。想少踩坑就先用
+# 别的邮箱试：把 host / port 换成你有的那一家，别的键都不用动。
 # ===========================================================================
 
 # ---------------------------------------------------------------------------

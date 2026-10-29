@@ -57,13 +57,23 @@ tea_a2 是个**被动**的东西：有人跟它说话，它才动。要让它在
 
 ## 邮件：`sched/mail_watch.py`
 
-一个文件，标准库，1300 行左右（注释比代码多）。Gmail 走应用专用密码，别的 IMAP 服务器改 `host`/`port` 就行。
+一个文件，标准库，1300 行左右（注释比代码多）。协议是**通用 IMAP**：Gmail、QQ、Outlook、自建
+都只是 `host`/`port`/`password` 三个值不同。
 
-### 1. 拿应用专用密码（Gmail）
+> **现状（2026-10-29）：从没对着真账号跑过。** 写完之后判断过 Google 这条路：风控已经把
+> 「应用专用密码」变成一道过不去的墙（账号、设备、IP、登录历史一起参与判断，新机器第一次
+> 连就可能被拦，拦了还要人工解），不值得为它继续投入。所以这一节先留着当说明书 ——
+> 代码、协议、测试都是好的，缺的只是一个愿意配合的邮箱。要真跑，最省事的是**别的 IMAP**
+> （QQ 邮箱、Outlook、自建），配置一个键都不用加；Gmail 想要的话只剩 OAuth2 那条路
+> （见文末「还缺什么」）。
+
+### 1. 口令（Gmail 的话是应用专用密码）
 
 账号 → 安全 → 两步验证 → [应用专用密码](https://myaccount.google.com/apppasswords)，
-生成 16 位一串（`abcd efgh ijkl mnop`）。**不是账号密码**；Workplace 管理员关了应用专用密码
-的话，这条路走不通，得换成 OAuth2（见文末「还缺什么」）。
+生成 16 位一串（`abcd efgh ijkl mnop`）。**不是账号密码**。
+
+注意上面那个「现状」框：这条路现在很可能连不上（风控），别在一个已经被拦的账号上
+反复试 —— 试多了会让这个账号更难解。换一个 IMAP 服务商是更省事的做法。
 
 ### 2. 写配置
 
@@ -233,8 +243,10 @@ def judge(item):                               # 也可以用 mail_watch.Judge �
    应该把 `run_round` / `State` / `Lock` / `Notifier` 抽成 `sched/watch.py`，源只实现三个方法。
 3. **agent 侧没有回调**（`docs/pending_task.md` 里 FR-01 的 `callback_url` 还缺）。所以
    「任务做完」只能靠机器人前端或轮询知道。
-4. **Gmail 只有应用专用密码**。企业 Workspace 关了这条通道就得写 XOAUTH2（`imaplib.authenticate`，
-   要一个 refresh token 换 access token 的循环）—— 代码里留的是 `login()` 一个口子。
+4. **Gmail 只剩 OAuth2 这条路**（2026-10-29 的判断：应用专用密码已经不实用 —— 风控按账号/
+   设备/IP 一起判，新机器第一次连就可能被拦）。要接 Gmail 得写 XOAUTH2（`imaplib.authenticate`
+   加一个 refresh token 换 access token 的循环，还得在 Google Cloud 建 OAuth 客户端、走一次
+   同意页）。代码里留的口子就是 `ImapSource.connect()` 里的 `login()`；别的 IMAP 服务商不用动。
 5. **没有闭环**。我回了信之后，标签不会自动改；现在只按收件箱里的新信走。
 
 ---
