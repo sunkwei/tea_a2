@@ -376,7 +376,17 @@ def resolve_workspace_id(agent, wanted):
             return ws.get("id", "")
     known = ", ".join("%s (%s)" % (w.get("id", "?"), w.get("path", ""))
                       for w in workspaces) or "(agent 没有工作区)"
-    raise OrderError("agent 里没有这个工作区：%s；已知的：%s" % (text, known))
+    hint = ""
+    # The usual mistake: the order names a POSIX path, but the agent answered
+    # for another machine (a Windows one, another box) - its workspaces are
+    # all "C:\\...", so no path here will ever match.
+    if text.startswith("/") and workspaces and all(":\\" in (w.get("path") or "")
+                                                  for w in workspaces):
+        hint = ("\n（这个 agent 报的都是 Windows 路径，像是另一台机器上的；"
+                "要么用 --agent 指向本机的 agent，要么在任务单里写工作区 id。）")
+    raise task_order.OrderError(
+        "agent（%s）里没有这个工作区：%s；已知的：%s%s"
+        % (getattr(agent, "base", "?") or "?", text, known, hint))
 
 
 class Store:

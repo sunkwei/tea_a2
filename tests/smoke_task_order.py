@@ -9,6 +9,8 @@ it, when it may start, what it may touch, how it is filed). What is pinned:
   * a typo is an error with the line number, not a setting that silently
     disappears;
   * the command line queues it: --submit-order <file>;
+  * a workspace the agent does not know is a message with the list of what it
+    does know - not a traceback;
   * the web page offers the template as a download.
 
 Usage: python3 tests/smoke_task_order.py [path-to-tea_agent-binary]
@@ -16,9 +18,12 @@ Usage: python3 tests/smoke_task_order.py [path-to-tea_agent-binary]
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "sched"))
@@ -49,6 +54,15 @@ idempotency_key: abc
 meta:
   owner: sunwei
 """
+
+
+def free_port():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
 
 
 def main():
@@ -138,6 +152,75 @@ def main():
           not os.path.isdir(data_dir) or not [n for n in os.listdir(data_dir)
                                              if n.endswith(".json")],
           os.listdir(data_dir) if os.path.isdir(data_dir) else data_dir)
+
+    # ---- an agent that answers, but has other workspaces -------------------
+    # The queue may be pointed at the wrong agent (a Windows one, another box):
+    # then the workspace named in the order is simply not there. That must be a
+    # message, not a NameError - it used to be a traceback.
+    other_ws = os.path.join(tmp, "other-ws")
+    os.makedirs(other_ws, exist_ok=True)
+
+    class StubAgent(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.split("?")[0] == "/api/workspaces":
+                payload = {"workspaces": [{"id": "ws_other", "path": other_ws}]}
+            else:
+                payload = {}
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    stub_port = free_port()
+    stub = ThreadingHTTPServer(("127.0.0.1", stub_port), StubAgent)
+    stub_thread = threading.Thread(target=stub.serve_forever, daemon=True)
+    stub_thread.start()
+    try:
+        stub_base = "http://127.0.0.1:%d" % stub_port
+
+        def run_against_stub(path):
+            return subprocess.run(
+                [sys.executable, SERVER, "--submit-order", path, "--data-dir", data_dir,
+                 "--agent", stub_base, "--no-serve"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                timeout=60)
+
+        missing = run_against_stub(order)   # the order says /tmp/ws, the agent has other_ws
+        check("an unknown workspace is a message, not a crash",
+              "Traceback" not in missing.stdout, missing.stdout[-300:])
+        check("an unknown workspace names the agent it asked",
+              "cannot pick the workspace" in missing.stdout and stub_base in missing.stdout,
+              missing.stdout[-300:])
+        check("an unknown workspace lists what the agent does have",
+              "ws_other" in missing.stdout and other_ws in missing.stdout,
+              missing.stdout[-300:])
+        check("an unknown workspace queues nothing", missing.returncode == 2,
+              missing.returncode)
+
+        by_path = os.path.join(tmp, "by-path.order")
+        with open(by_path, "w", encoding="utf-8") as f:
+            f.write("title: 换个目录\nprompt: y\nworkspace: %s\n" % other_ws)
+        ok_run = run_against_stub(by_path)
+        check("a workspace the agent does have is queued",
+              "queued task" in ok_run.stdout and ok_run.returncode == 0,
+              ok_run.stdout[-300:])
+        records = [n for n in os.listdir(data_dir) if n.endswith(".json")] \
+            if os.path.isdir(data_dir) else []
+        check("the queued order is written down", bool(records), records)
+        if records:
+            with open(os.path.join(data_dir, records[0]), encoding="utf-8") as f:
+                record = json.load(f)
+            check("the record says which workspace it is for",
+                  record.get("workspace_id") == "ws_other",
+                  record.get("workspace_id"))
+    finally:
+        stub.shutdown()
+        stub.server_close()
 
     print("")
     print("%d/%d checks passed" % (len(checks) - len(failures), len(checks)))
