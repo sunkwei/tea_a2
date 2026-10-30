@@ -245,7 +245,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.17.3
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.17.4
 ```
 
 ### 常见错误的对照表
