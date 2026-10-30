@@ -23,7 +23,7 @@
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
 | `GET` | `/api/workspaces/{id}/search?q=` | **在工作区里搜东西**：文件名 + 文件内容。查询串按原样逐字节比较（**不做正则/模糊匹配**）。`scope=name\|content\|both`（默认 both）、`exact=1`（完全匹配：路径整串相等 / 整行相等）、`case=1`（区分大小写）、`path=`（只搜这个子目录）、`limit=`（最多几条，默认 100） |
-| `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件 |
+| `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件。`GET` 的回答里除了 `path` / `size` / `truncated` / `content`，还有 `binary`：文件里头 8 KB 有 NUL 字节就是 true（预览页据此说「预览不了」而不是显示一屏乱码） |
 | `GET` | `/api/workspaces/{id}/raw?path=` | 读文件原始字节（图片 / PDF 等，**16 MB 上限**，用于在页面里显示） |
 | `GET` | `/api/workspaces/{id}/download?path=` | 以附件形式下载文件（`Content-Disposition: attachment`），**从磁盘流式发送、无 16 MB 限制**；`&inline=1` 改为在浏览器里直接打开（视频 / PDF） |
 | `GET` | `/api/workspaces/{id}/sessions/search?q=` | **搜历史对话**：会话标题 + 说过的内容 + 轨迹里的工具输出。查询串按原样逐字节比较。`scope=all\|title\|messages\|trajectory`（默认 all）、`exact=1`（完全匹配）、`case=1`、`limit=` |

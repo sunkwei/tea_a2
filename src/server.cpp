@@ -1,5 +1,6 @@
 #include "server.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -274,6 +275,14 @@ bool json_bool(const nlohmann::json& j, const char* key, bool def = false) {
   auto it = j.find(key);
   if (it == j.end() || !it->is_boolean()) return def;
   return it->get<bool>();
+}
+
+/// A NUL byte in the first chunk means "this is not text". The same rule the
+/// workspace search uses (src/workspace.cpp): a file with a stray control
+/// character is still worth showing, a file full of zero bytes is not.
+bool looks_binary(const std::string& text) {
+  const std::size_t limit = std::min<std::size_t>(text.size(), 8192);
+  return text.substr(0, limit).find('\0') != std::string::npos;
 }
 
 /// One model of a provider, as the settings page needs it: everything the
@@ -2793,6 +2802,9 @@ void ApiServer::Impl::install_routes() {
             j["size"] = file_size(target);
             j["truncated"] = truncated;
             j["content"] = content;
+            // 二进制文件没有"内容"可言：把它们当文本显示出来只是一屏乱码，
+            // 预览页据此改成「这是二进制文件」加一个下载入口。
+            j["binary"] = looks_binary(content);
             send_json(res, j);
           });
 

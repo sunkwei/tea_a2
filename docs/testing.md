@@ -36,6 +36,7 @@ python3 tests/smoke_provider_models.py                     # 查模型 + 回填 
 python3 tests/smoke_model_config.py                        # 模型配置：改/清/加/删/换默认 + 这些参数真的进了请求
 python3 tests/smoke_no_iteration_cap.py                        # 没有轮数上限：配置里的 max_iterations 不再被读
 node tests/ui_provider_models.mjs                          # 设置页「更新模型」：列表、改数字、写入、热加载（需 google-chrome）
+node tests/ui_file_preview.mjs                            # 文件页右边：选中就预览（文本上色 / 图片 / 二进制）、预览↔编辑（需 google-chrome）
 node tests/ui_model_config.mjs                            # 设置页「模型配置」：改字段、加/删模型、换默认、热加载（需 google-chrome）
 node tests/ui_usage.mjs                                   # 顶栏额度徽标 + 设置页按 provider 查询（需 google-chrome）
 python3 tests/smoke_vision.py                             # 粘贴图片：校验/落盘/多模态请求体

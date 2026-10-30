@@ -744,6 +744,13 @@
     return apiUrl('api/workspaces/' + encodeURIComponent(state.workspace.id) +
       '/download?path=' + encodeURIComponent(path) + (inline ? '&inline=1' : ''));
   }
+  /// 把工作区里的一个文件存到本地。
+  function downloadWorkspaceFile(path) {
+    var a = document.createElement('a');
+    a.href = downloadUrl(path, false);
+    a.setAttribute('download', '');
+    a.click();
+  }
   /// 这一轮的产出：turn 为 0（导入的历史记录）时按「全部」处理，但只在最后一条
   /// 助手消息下显示一次。
   function artifactsForTurn(turn) {
@@ -3836,7 +3843,7 @@
       state.stats = emptyStats(); state.liveTokens = 0; state.liveStartAt = 0;
       state.turnSteps = 0; state.turnStartAt = 0;
       state.trajectory = []; state.lastTrajectoryId = null;
-      state.files = { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0, search: null };
+      state.files = { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, binary: false, size: 0, search: null };
       // 换工作区 = 换项目：上一个项目的搜索词没有意义，连框一起清掉。
       state.sessionSearch = null;
       var histInput = $('session-search');
@@ -4418,31 +4425,60 @@
     state.files.entries.forEach(function (en) { if (en.path === p) found = en; });
     return found;
   }
-  // 图片直接走 raw 路由显示；markdown 可以在「编辑 / 预览」之间切换。
+  // 选中了文件之后右边显示什么：
+  //   图片   → 图片本身（点一下看原图）
+  //   文本   → 预览（markdown 渲染、代码上色、其余纯文本）
+  //   二进制 → 一句人话 + 一个下载入口（显示出来只是一屏乱码）
+  // 「预览 / 编辑」按钮在文本文件上一直可用：预览是默认，编辑是另一件事。
   function renderFilePane() {
     var f = state.files;
     var image = !!f.path && isImagePath(f.path);
     var md = !!f.path && isMarkdownPath(f.path);
-    var showMd = md && !!f.preview;
-    var showPre = !image && !showMd && f.readOnly;
-    var showEditor = !image && !showMd && !f.readOnly;
+    var binary = !!f.binary;
+    var text = !!f.path && !image && !binary;
+    var editable = text && !f.readOnly;          // 截断的文件只能看
+    var preview = editable ? !!f.preview : true;
+    var showMd = md && preview;
+    var showPre = text && preview && !md;
+    var showEditor = editable && !preview;
+    var showBlank = binary;
     $('files-media').classList.toggle('hidden', !image);
     $('files-md').classList.toggle('hidden', !showMd);
     $('files-pre').classList.toggle('hidden', !showPre);
     $('files-editor').classList.toggle('hidden', !showEditor);
+    $('files-blank').classList.toggle('hidden', !showBlank);
     var toggle = $('files-preview-toggle');
-    toggle.classList.toggle('hidden', !md);
-    toggle.textContent = f.preview ? '编辑' : '预览';
+    toggle.classList.toggle('hidden', !editable);
+    toggle.textContent = preview ? '编辑' : '预览';
     var media = $('files-media');
     if (image) {
       clear(media);
       var img = document.createElement('img');
       img.src = fileRawUrl(f.path);
       img.alt = f.path;
+      img.title = '点开看原图';
+      img.onclick = function () { openImageViewer(fileRawUrl(f.path), f.path); };
       media.appendChild(img);
-      media.appendChild(el('span', 'hint', f.path + ' · ' + fmtBytes(f.size)));
+      var hint = el('span', 'hint', f.path + ' · ' + fmtBytes(f.size));
+      media.appendChild(hint);
+      // 图片多大：浏览器知道，服务器不用再读一遍。
+      var describe = function () {
+        if (!img.naturalWidth) return;
+        hint.textContent = f.path + ' · ' + fmtBytes(f.size) + ' · ' +
+          img.naturalWidth + ' × ' + img.naturalHeight + ' px · 点图看原图';
+      };
+      if (img.complete && img.naturalWidth) describe();
+      else img.onload = describe;
     } else if (media.firstChild) {
       clear(media);
+    }
+    if (showBlank) {
+      var blank = $('files-blank');
+      clear(blank);
+      blank.appendChild(el('div', 'empty-note', '这是二进制文件，预览不了'));
+      blank.appendChild(el('div', 'hint', f.path + ' · ' + fmtBytes(f.size)));
+      var dl = btn('btn', '下载', function () { downloadWorkspaceFile(f.path); });
+      blank.appendChild(dl);
     }
     if (showMd) {
       // 预览里的相对图片路径以该文件所在目录为基准。
@@ -4450,13 +4486,180 @@
       $('files-md').innerHTML = renderMarkdown($('files-editor').value);
       state.mdBase = '';
     }
+    if (showPre) {
+      // 预览的是编辑框里的内容：改了还没保存，预览里也看得见。
+      var src = $('files-editor').value;
+      var html = renderCodePreview(src, f.path);
+      if (html == null) {
+        $('files-pre').textContent = src;
+      } else {
+        $('files-pre').innerHTML = html;
+      }
+    }
   }
+  /* ---------- 9b) 文件预览：代码高亮 ---------- */
+  //
+  // 一个够用的高亮器，不引第三方库（单文件二进制是这套东西的卖点）：按语言
+  // 给关键字/类型，其余靠词法规则（注释、字符串、数字）。颜色在 app.css 里。
+  var HL_DEFS = (function () {
+    function def(line, block, strings, kw, ty) {
+      var k = {}, t = {};
+      (kw || '').split(' ').forEach(function (w) { if (w) k[w] = 1; });
+      (ty || '').split(' ').forEach(function (w) { if (w) t[w] = 1; });
+      return { c: line || [], b: block || null, s: strings || ['"', "'"], kw: k, ty: t };
+    }
+    return {
+      cpp: def(['//'], ['/*', '*/'], ['"', "'"],
+        'if else for while do switch case break continue return class struct union enum ' +
+        'public private protected virtual override final const constexpr static inline ' +
+        'explicit template typename using namespace new delete this nullptr true false ' +
+        'sizeof typedef operator friend throw try catch noexcept decltype mutable',
+        'int char long short float double void bool auto unsigned signed size_t string ' +
+        'vector map set unordered_map std wchar_t uint8_t uint32_t int64_t'),
+      js: def(['//'], ['/*', '*/'], ['"', "'", '`'],
+        'function return const let var if else for while do switch case break continue ' +
+        'new class extends super this typeof instanceof in of null undefined true false ' +
+        'async await try catch finally throw import export from default yield delete void ' +
+        'static get set',
+        'string number boolean object array any unknown never'),
+      py: def(['#'], null, ['"', "'"],
+        'def class return if elif else for while break continue pass import from as with ' +
+        'try except finally raise lambda None True False and or not in is global nonlocal ' +
+        'yield async await assert del',
+        'int str float bool list dict tuple set bytes object self print'),
+      sh: def(['#'], null, ['"', "'"],
+        'if then else elif fi for while do done case esac function return export local ' +
+        'readonly source echo cd exit set unset trap shift',
+        ''),
+      sql: def(['--'], ['/*', '*/'], ['"', "'"],
+        'select from where insert into values update set delete create table drop alter ' +
+        'join left right inner outer on group by order having limit offset union all ' +
+        'distinct as and or not null primary key foreign references index view begin ' +
+        'commit rollback',
+        'int varchar text date timestamp boolean count sum avg min max'),
+      go: def(['//'], ['/*', '*/'], ['"', '`'],
+        'func package import var const type struct interface map chan go defer if else ' +
+        'for range switch case default break continue return nil true false',
+        'string int int64 float64 bool byte rune error'),
+      json: def([], null, ['"'], 'true false null', ''),
+      yaml: def(['#'], null, ['"', "'"], 'true false null yes no on off', '')
+    };
+  })();
+
+  // 扩展名 → 语言。认不出来就退回纯文本（不猜：猜错了比不高亮更难看）。
+  var HL_EXT = {
+    c: 'cpp', h: 'cpp', cc: 'cpp', cpp: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp', hxx: 'cpp',
+    js: 'js', mjs: 'js', cjs: 'js', jsx: 'js', ts: 'js', tsx: 'js',
+    py: 'py', pyw: 'py', lua: 'py', rb: 'py', php: 'py',
+    sh: 'sh', bash: 'sh', zsh: 'sh', fish: 'sh',
+    sql: 'sql',
+    go: 'go', rs: 'go', java: 'go', kt: 'go', swift: 'go', cs: 'go', scala: 'go',
+    json: 'json', jsonc: 'json',
+    yaml: 'yaml', yml: 'yaml', toml: 'yaml', ini: 'yaml', cfg: 'yaml', conf: 'yaml'
+  };
+
+  function hlLanguage(path) {
+    var e = fileExt(path);
+    if (HL_EXT[e]) return HL_EXT[e];
+    if (e === 'html' || e === 'htm' || e === 'xml' || e === 'svg' || e === 'vue') return 'html';
+    if (e === 'css' || e === 'scss' || e === 'less') return 'css';
+    if (e === 'md' || e === 'markdown') return 'md';
+    return '';
+  }
+
+  /// 通用词法着色：注释、字符串、数字、关键字/类型、标点。
+  function hlGeneric(src, lang) {
+    var d = HL_DEFS[lang];
+    if (!d) return null;
+    var out = [], i = 0, n = src.length;
+    function push(cls, text) {
+      out.push(cls ? '<span class="tok-' + cls + '">' + esc(text) + '</span>' : esc(text));
+    }
+    while (i < n) {
+      var c = src.charAt(i), hit = false;
+      if (d.c) {                                   // 行注释
+        for (var k = 0; k < d.c.length; k++) {
+          if (src.substr(i, d.c[k].length) !== d.c[k]) continue;
+          var eol = src.indexOf('\n', i);
+          if (eol < 0) eol = n;
+          push('com', src.slice(i, eol));
+          i = eol; hit = true; break;
+        }
+        if (hit) continue;
+      }
+      if (d.b && src.substr(i, d.b[0].length) === d.b[0]) {   // 块注释
+        var end = src.indexOf(d.b[1], i + d.b[0].length);
+        var stop = end < 0 ? n : end + d.b[1].length;
+        push('com', src.slice(i, stop));
+        i = stop; continue;
+      }
+      for (var s = 0; s < d.s.length; s++) {        // 字符串
+        var q = d.s[s];
+        if (c !== q) continue;
+        var j = i + 1;
+        while (j < n) {
+          var ch = src.charAt(j);
+          if (ch === '\\') { j += 2; continue; }
+          if (ch === q) { j++; break; }
+          if (ch === '\n' && q !== '`') break;      // 普通引号不跨行
+          j++;
+        }
+        push('str', src.slice(i, j));
+        i = j; hit = true; break;
+      }
+      if (hit) continue;
+      if (/[0-9]/.test(c) && !(i > 0 && /[A-Za-z0-9_]/.test(src.charAt(i - 1)))) {
+        var num = /^[0-9][0-9a-fA-FxX._]*/.exec(src.slice(i));
+        push('num', num[0]); i += num[0].length; continue;
+      }
+      if (/[A-Za-z_$]/.test(c)) {
+        var w = /^[A-Za-z0-9_$]+/.exec(src.slice(i))[0];
+        push(d.kw[w] ? 'kw' : (d.ty[w] ? 'ty' : null), w);
+        i += w.length; continue;
+      }
+      if (/[{}()[\];,.:<>=+\-*\/%!&|^~?]/.test(c)) { push('pun', c); i++; continue; }
+      push(null, c); i++;
+    }
+    return out.join('');
+  }
+
+  /// HTML/XML：注释与标签。属性不拆——预览里那点差别不值当。
+  function hlHtml(src) {
+    return esc(src).replace(/(&lt;!--[\s\S]*?--&gt;)|(&lt;\/?)([a-zA-Z][\w:-]*)/g,
+      function (m, com, open, name) {
+        if (com) return '<span class="tok-com">' + com + '</span>';
+        return open + '<span class="tok-tag">' + name + '</span>';
+      });
+  }
+
+  /// CSS：注释、字符串、属性名。
+  function hlCss(src) {
+    return esc(src).replace(/(\/\*[\s\S]*?\*\/)|('[^'\n]*'|"[^"\n]*")|([a-zA-Z-]+)(?=\s*:)/g,
+      function (m, com, str, prop) {
+        if (com) return '<span class="tok-com">' + com + '</span>';
+        if (str) return '<span class="tok-str">' + str + '</span>';
+        return '<span class="tok-attr">' + prop + '</span>';
+      });
+  }
+
+  /// 给一段文本上色。认不出来的语言、太大的文件都退回纯文本（null）。
+  function renderCodePreview(text, path) {
+    var lang = hlLanguage(path);
+    if (!lang || lang === 'md') return null;
+    // 太大的文件不高亮：一屏几十万个 span 会把浏览器拖垮。
+    if (text.length > 200000) return null;
+    if (lang === 'html') return hlHtml(text);
+    if (lang === 'css') return hlCss(text);
+    return hlGeneric(text, lang);
+  }
+
   function openFile(p) {
     if (!state.workspace) return;
     var f = state.files;
     if (isImagePath(p)) {
       // 图片是二进制，走 raw 路由；`/file` 的 JSON 文本视图对它没有意义。
-      f.path = p; f.content = ''; f.original = ''; f.truncated = false; f.readOnly = true; f.preview = false;
+      f.path = p; f.content = ''; f.original = ''; f.truncated = false; f.readOnly = true;
+      f.preview = false; f.binary = false;
       var entry = fileEntry(p);
       f.size = entry ? num(entry.size) : 0;
       $('files-preview-head').textContent = p + (f.size ? '  ·  ' + fmtBytes(f.size) : '');
@@ -4471,7 +4674,10 @@
       f.original = f.content;
       f.truncated = !!d.truncated;
       f.readOnly = f.truncated;
-      f.preview = false;
+      // 选中文件先给人看它的内容（预览），要改再按「编辑」——这是文件浏览器
+      // 的老规矩：点一下是看，不是改。
+      f.preview = true;
+      f.binary = !!d.binary;
       f.size = num(d.size);
       $('files-preview-head').textContent = f.path + '  ·  ' + fmtBytes(d.size);
       $('files-editor').value = f.content;

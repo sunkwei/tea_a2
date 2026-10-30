@@ -619,6 +619,8 @@ button{font-family:inherit}
 .file-pane{
   border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg);
   background:var(--dsw-alias-bg-layer-1);overflow:hidden;min-width:0;
+  /* 换文件时面板不跟着跳：短文件也留出这么高 */
+  min-height:min(360px,calc(100vh - 320px));
 }
 .preview-head{
   height:32px;display:flex;align-items:center;padding:0 12px;font:12px/18px var(--ds-font-family-code);
@@ -1070,14 +1072,27 @@ button{font-family:inherit}
 }
 .md .md-table tbody tr:nth-child(even) td{background:var(--dsw-alias-bg-layer-1)}
 
-/* ---------- 文件预览：图片 / markdown ---------- */
+/* ---------- 文件预览：图片 / markdown / 代码 ---------- */
 .file-media{padding:12px;max-height:calc(100vh - 240px);overflow:auto;text-align:center}
 .file-media img{
   max-width:100%;height:auto;border-radius:var(--dsw-radius-md);
-  border:.5px solid var(--dsw-alias-border-l1);
+  border:.5px solid var(--dsw-alias-border-l1);cursor:zoom-in;
 }
 .file-media .hint{display:block;margin-top:8px}
 .file-md{padding:14px;max-height:calc(100vh - 240px);overflow:auto}
+/* 二进制文件：预览不了，就说实话 + 给一个下载入口 */
+.file-blank{padding:16px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
+.file-blank .hint{font-size:12px;color:var(--dsw-alias-label-caption)}
+
+/* 代码高亮的配色（预览页用）。不引第三方高亮库，单文件是这套东西的卖点。 */
+.tok-kw{color:#7aaaff}
+.tok-ty{color:#4ed17e}
+.tok-str{color:#f7ad31}
+.tok-num{color:#bc3fbc}
+.tok-com{color:#6b7280;font-style:italic}
+.tok-pun{color:#8b95a5}
+.tok-tag{color:#7aaaff}
+.tok-attr{color:#4ed17e}
 
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}
