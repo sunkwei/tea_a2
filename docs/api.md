@@ -720,6 +720,60 @@ trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; lim
 
 ---
 
+### 改模型配置：PUT /api/providers/{name}/models
+
+`GET /api/providers` 里每个 provider 都带一张 `model_info` 表：模型名 → 这个模型的
+完整配置。设置页的「**模型配置**」对话框就是它渲染出来的：
+
+```json
+{"providers":[{"name":"deepseek","models":["deepseek-chat","deepseek-reasoner"],
+  "model_info":{
+    "deepseek-chat":{"max_context_tokens":128000,"max_output_tokens":8192,
+      "supports_tools":true,"supports_reasoning":false,"supports_vision":false,
+      "reasoning_effort":"auto","has_temperature":false,"temperature":0.7,
+      "has_top_p":false,"top_p":0.9,"has_top_k":false,"top_k":0,
+      "has_frequency_penalty":false,"frequency_penalty":0,
+      "has_presence_penalty":false,"presence_penalty":0,
+      "has_seed":false,"seed":0,"note":""}}}]}
+```
+
+`has_*` 说的是「这个值到底设了没有」——采样参数**没设**和**设成 0**是两回事：
+没设的参数不会进到请求里（网关不认识的字段会回 400），设成 0 会。
+
+写回去用 `PUT /api/providers/{name}/models`，body 是 `{"models":[…]}`。和上面那个
+`POST` 不同，这个是**就地改**，不是换掉整个列表：
+
+| 请求里的写法 | 意思 |
+| --- | --- |
+| `{"id":"deepseek-chat"}` | 只改这一个模型；请求里没带的字段保持文件里的原值 |
+| `{"id":"x","temperature":null}` | 清掉这个值（那一行从 yaml 里消失） |
+| `{"id":"x","remove":true}` | 把这个模型从 provider 里去掉 |
+| `{"id":"x","default":true}` | 把它挪到第一位——第一个模型就是这个 provider 的默认模型 |
+| 请求里没提到的模型 | 原样留着，位置也不变 |
+
+能改的字段：`max_context_tokens`、`max_output_tokens`、`reasoning_effort`、
+`temperature`、`top_p`、`top_k`、`frequency_penalty`、`presence_penalty`、`seed`、
+`supports_tools`、`supports_reasoning`、`supports_vision`、`note`。
+
+```bash
+curl -s -X PUT http://127.0.0.1:8282/api/providers/deepseek/models \
+     -H 'Content-Type: application/json' \
+     -d '{"models":[{"id":"deepseek-reasoner","max_context_tokens":131072,
+                      "max_output_tokens":65536,"reasoning_effort":"high",
+                      "supports_reasoning":true,"temperature":0.3,"top_k":40,
+                      "default":true}]}'
+```
+
+写完同样只动这个 provider 的 `models:` 块，先校验再替换，然后热加载。
+值不合法（`temperature: 5`、`top_p: 3`、`top_k: -1`、重复的模型名、把模型全删光）
+会得到 400，**文件一个字都不会动**。
+
+> 思考强度只有在这个模型自己声明了 `supports_reasoning: true`、而且强度不是
+> `auto` 的时候，才会真的进到请求里（`reasoning_effort` 字段）。一个不会思考的
+> 模型不该被要求思考，而一个不认识的字段会让网关回 400。
+
+---
+
 ### MCP
 
 **和 provider.yaml 同目录**的 `mcp.yaml` 里配的 MCP 服务器（Model Context Protocol）是

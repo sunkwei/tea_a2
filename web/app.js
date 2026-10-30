@@ -4896,10 +4896,13 @@
         r.appendChild(el('span', 'mono', pair[1] || '—'));
         card.appendChild(r);
       });
+      // 「模型配置」：改这个 provider 每个模型的上下文长度、输出长度、思考
+      // 强度、温度、top_p / top_k……写进 provider.yaml 里它自己的 models 块。
       // 「更新模型」：问这个 provider 现在提供哪些模型，把默认配置列出来，
       // 确认后写进 provider.yaml。查询和写入都在服务端做。
       var mrow = el('div', 'row');
       mrow.appendChild(el('span', 'k', '模型列表'));
+      mrow.appendChild(btn('btn', '模型配置', function () { modelConfigDialog(p); }));
       mrow.appendChild(btn('btn', '更新模型', function () { updateModelsDialog(p); }));
       card.appendChild(mrow);
       if (p.supports_usage || p.usage_console_url) {
@@ -5148,7 +5151,384 @@
     });
   }
 
-  /* ---------- 12c) 终端（这台机器上的 shell） ----------
+  /* ---------- 12c) 模型配置：改一个 provider 的每个模型 ---------- */
+  //
+  // 「更新模型」是问 provider 现在提供哪些模型；这一页是**改配置**：上下文
+  // 长度、输出长度、思考强度、温度、top_p / top_k……都写进 provider.yaml 里
+  // 这个 provider 自己的 models: 块——别的 provider 和注释一个字不动。
+  //
+  // 样子参考 deepseek harness 的模型配置页：一个 provider 一张卡，每个模型
+  // 一行，点开就能改容量、思考档位和采样参数，保存后热加载生效。
+  // 思考强度的候选值。服务端也会给一份（/api/providers 的 reasoning_efforts），
+  // 那边是唯一的真相；这里的标签只是给人看的。
+  var MODEL_EFFORTS = [
+    ['auto', '自动（不发这个字段）'],
+    ['off', '关闭思考'],
+    ['minimal', '最低'],
+    ['low', '低'],
+    ['medium', '中'],
+    ['high', '高'],
+    ['xhigh', '很高'],
+    ['max', '最高']
+  ];
+  var MODEL_EFFORT_LABELS = {};
+  MODEL_EFFORTS.forEach(function (pair) { MODEL_EFFORT_LABELS[pair[0]] = pair[1]; });
+
+  // 容量可以写 128K / 1M：抄来的配置大多这么写。
+  function parseTokenCount(v) {
+    var s = String(v == null ? '' : v).trim().toLowerCase().replace(/[\s,_]/g, '');
+    if (!s) return 0;
+    var m = /^(\d*\.?\d+)([km])?$/.exec(s);
+    if (!m) return NaN;
+    var n = parseFloat(m[1]);
+    if (!isFinite(n) || n < 0) return NaN;
+    if (m[2] === 'k') n *= 1024;
+    else if (m[2] === 'm') n *= 1048576;
+    return Math.round(n);
+  }
+
+  function fmtTokenCount(n) {
+    n = Number(n) || 0;
+    if (n <= 0) return '—';
+    if (n >= 1048576 && n % 1048576 === 0) return (n / 1048576) + 'M';
+    if (n >= 1024 && n % 1024 === 0) return (n / 1024) + 'K';
+    return String(n);
+  }
+
+  // 一个数字输入框：空 = 不设置（写进 yaml 时就不带这个键）。
+  //
+  // 容量（上下文/输出长度）是文本框而不是数字框：数字框只收纯数字，写不进
+  // 「128K」「1M」这种写法——抄来的配置大多这么写。inputmode 让手机上的
+  // 键盘还是数字键盘。
+  function mcfgNum(label, value, placeholder, step, min, asText) {
+    var wrap = el('label', 'mcfg-field');
+    wrap.appendChild(el('span', 'mcfg-lab', label));
+    var input = el('input', 'ta mcfg-num');
+    if (asText) {
+      input.type = 'text';
+      input.inputMode = 'numeric';
+    } else {
+      input.type = 'number';
+      input.step = String(step || 1);
+      input.min = String(min == null ? 0 : min);
+    }
+    input.value = (value == null || value === '') ? '' : String(value);
+    input.placeholder = placeholder || '';
+    wrap.appendChild(input);
+    return { wrap: wrap, input: input };
+  }
+
+  function modelConfigDialog(p) {
+    var all = (state.providers && state.providers.providers) || [];
+    var prov = null;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].name === p.name) { prov = all[i]; break; }
+    }
+    if (!prov) { toast('这个提供方的信息不在了，刷新一下页面'); return; }
+
+    var infos = prov.model_info || {};
+    var names = (prov.models || []).slice();
+    Object.keys(infos).forEach(function (n) {
+      if (names.indexOf(n) < 0) names.push(n);
+    });
+
+    var body = el('div');
+    body.appendChild(el('div', 'desc',
+      '这个提供方的每个模型能配什么。改完写进 provider.yaml 里 ' + p.name +
+      ' 的 models 块——别的提供方、注释和设置都不动。第一个模型是这个提供方的默认模型。'));
+
+    // 预设：一键把这个提供方所有模型的同一类参数填好。
+    var PRESETS = [
+      { id: 'think', name: '全力思考', desc: '打开思考能力，思考强度设为「高」', apply: function (m) {
+          m.reasoning.checked = true; m.effort.value = 'high'; } },
+      { id: 'nothink', name: '关闭思考', desc: '思考强度设为「关闭」', apply: function (m) {
+          m.reasoning.checked = false; m.effort.value = 'off'; } },
+      { id: 'text', name: '纯文本', desc: '不看图', apply: function (m) {
+          m.vision.checked = false; } },
+      { id: 'stable', name: '采样：稳定', desc: 'temperature 0.2 / top_p 0.9', apply: function (m) {
+          m.temp.input.value = '0.2'; m.topP.input.value = '0.9'; } },
+      { id: 'free', name: '采样：发散', desc: 'temperature 1.0 / top_p 0.95', apply: function (m) {
+          m.temp.input.value = '1'; m.topP.input.value = '0.95'; } }
+    ];
+    var presetRow = el('div', 'mcfg-presets');
+    presetRow.appendChild(el('span', 'mcfg-lab', '预设'));
+    PRESETS.forEach(function (preset) {
+      var b = btn('btn', preset.name, function () {
+        rows.forEach(function (r) { if (!r.removed) preset.apply(r); });
+        rows.forEach(function (r) { r.refresh(); });
+        toast('已套用「' + preset.name + '」，保存后生效');
+      });
+      b.title = preset.desc;
+      presetRow.appendChild(b);
+    });
+    body.appendChild(presetRow);
+
+    var list = el('div', 'mcfg-list');
+    var rows = [];
+
+    function makeRow(name, info, isDefault) {
+      info = info || {};
+      var row = el('div', 'mcfg-row');
+      var head = el('div', 'mcfg-head');
+      var caret = el('button', 'mcfg-caret', '▸');
+      caret.type = 'button';
+      caret.title = '展开 / 收起';
+      head.appendChild(caret);
+      var nm = el('div', 'mcfg-name');
+      nm.appendChild(el('span', 'mono', name));
+      var defBadge = el('span', 'badge yes', '默认');
+      defBadge.classList.add('hidden');
+      nm.appendChild(defBadge);
+      head.appendChild(nm);
+      var sum = el('div', 'mcfg-sum');
+      head.appendChild(sum);
+      var acts = el('div', 'mcfg-acts');
+      var defBtn = btn('btn mcfg-act', '设为默认', function () {
+        rows.forEach(function (r) { r.isDefault = (r === entry); });
+        rows.forEach(function (r) { r.refresh(); });
+      });
+      var delBtn = btn('btn mcfg-act', '删除', function () {
+        if (!entry.removed) {
+          entry.removed = true;
+          delBtn.textContent = '撤销';
+          delBtn.classList.add('mcfg-danger');
+          row.classList.add('mcfg-removed');
+          toast('保存后这个模型会从 ' + p.name + ' 里去掉');
+        } else {
+          entry.removed = false;
+          delBtn.textContent = '删除';
+          delBtn.classList.remove('mcfg-danger');
+          row.classList.remove('mcfg-removed');
+        }
+      });
+      acts.appendChild(defBtn);
+      acts.appendChild(delBtn);
+      head.appendChild(acts);
+      row.appendChild(head);
+
+      var form = el('div', 'mcfg-form');
+      var ctx = mcfgNum('上下文长度', info.max_context_tokens || '', '128K / 1048576', 1024, 0, true);
+      var out = mcfgNum('输出长度', info.max_output_tokens || '', '8K / 8192', 1024, 0, true);
+      form.appendChild(ctx.wrap);
+      form.appendChild(out.wrap);
+
+      // 思考强度：下拉里是常见档位，也能自己填一个（网关各有各的叫法）。
+      var effortWrap = el('label', 'mcfg-field');
+      effortWrap.appendChild(el('span', 'mcfg-lab', '思考强度'));
+      var effort = el('input', 'ta mcfg-text');
+      effort.type = 'text';
+      // `input.list` is a read-only getter: the attribute is the way in.
+      effort.setAttribute('list', 'mcfg-effort-list');
+      effort.value = info.reasoning_effort || 'auto';
+      effort.placeholder = 'auto';
+      effortWrap.appendChild(effort);
+      var effortHint = el('span', 'mcfg-hint', '');
+      effortWrap.appendChild(effortHint);
+      form.appendChild(effortWrap);
+
+      var temp = mcfgNum('温度', info.has_temperature ? info.temperature : '', '不设置', 0.05, 0);
+      var topP = mcfgNum('top_p', info.has_top_p ? info.top_p : '', '不设置', 0.01, 0);
+      var topK = mcfgNum('top_k', info.has_top_k ? info.top_k : '', '不设置', 1, 0);
+      form.appendChild(temp.wrap);
+      form.appendChild(topP.wrap);
+      form.appendChild(topK.wrap);
+
+      var freq = mcfgNum('频率惩罚', info.has_frequency_penalty ? info.frequency_penalty : '', '不设置', 0.1, -2);
+      var pres = mcfgNum('存在惩罚', info.has_presence_penalty ? info.presence_penalty : '', '不设置', 0.1, -2);
+      var seed = mcfgNum('随机种子', info.has_seed ? info.seed : '', '不设置', 1, 0);
+      form.appendChild(freq.wrap);
+      form.appendChild(pres.wrap);
+      form.appendChild(seed.wrap);
+
+      var noteWrap = el('label', 'mcfg-field mcfg-wide');
+      noteWrap.appendChild(el('span', 'mcfg-lab', '备注'));
+      var note = el('input', 'ta mcfg-text');
+      note.type = 'text';
+      note.value = info.note || '';
+      note.placeholder = '给自己看的说明';
+      noteWrap.appendChild(note);
+      form.appendChild(noteWrap);
+
+      var caps = el('div', 'mcfg-field mcfg-wide');
+      caps.appendChild(el('span', 'mcfg-lab', '能力'));
+      var capRow = el('div', 'mcfg-caps');
+      var tools = el('input'), reasoning = el('input'), vision = el('input');
+      tools.type = 'checkbox'; reasoning.type = 'checkbox'; vision.type = 'checkbox';
+      tools.checked = info.supports_tools !== false;
+      reasoning.checked = !!info.supports_reasoning;
+      vision.checked = !!info.supports_vision;
+      [['tools', '工具调用', tools], ['reasoning', '思考', reasoning], ['vision', '看图', vision]]
+        .forEach(function (pair) {
+          var lab = el('label', 'mdl-cap');
+          lab.appendChild(pair[2]);
+          lab.appendChild(el('span', null, pair[1]));
+          capRow.appendChild(lab);
+        });
+      caps.appendChild(capRow);
+      form.appendChild(caps);
+      row.appendChild(form);
+
+      var entry = {
+        name: name, row: row, removed: false, isDefault: !!isDefault,
+        ctx: ctx.input, out: out.input, effort: effort, temp: temp.input,
+        topP: topP.input, topK: topK.input, freq: freq.input, pres: pres.input,
+        seed: seed.input, note: note, tools: tools, reasoning: reasoning, vision: vision
+      };
+
+      function refresh() {
+        defBadge.classList.toggle('hidden', !entry.isDefault);
+        defBtn.classList.toggle('hidden', entry.isDefault);
+        var parts = [];
+        parts.push('上下文 ' + fmtTokenCount(parseTokenCount(ctx.input.value)));
+        parts.push('输出 ' + fmtTokenCount(parseTokenCount(out.input.value)));
+        if (effort.value.trim() && effort.value.trim() !== 'auto') {
+          parts.push('思考 ' + effort.value.trim());
+        }
+        if (temp.input.value !== '') parts.push('温度 ' + temp.input.value);
+        if (topP.input.value !== '') parts.push('top_p ' + topP.input.value);
+        if (topK.input.value !== '') parts.push('top_k ' + topK.input.value);
+        sum.textContent = parts.join(' · ');
+        effortHint.textContent = reasoning.checked ? '' : '没勾「思考」，这个值不会发给 provider';
+        effortHint.classList.toggle('warn', !reasoning.checked);
+      }
+      entry.refresh = refresh;
+
+      caret.onclick = function () {
+        row.classList.toggle('mcfg-open');
+        caret.textContent = row.classList.contains('mcfg-open') ? '▾' : '▸';
+      };
+      ['input', 'change'].forEach(function (ev) {
+        [ctx.input, out.input, effort, temp.input, topP.input, topK.input,
+         freq.input, pres.input, seed.input, reasoning].forEach(function (n) {
+          n.addEventListener(ev, refresh);
+        });
+      });
+      refresh();
+      return entry;
+    }
+
+    names.forEach(function (n, idx) {
+      var r = makeRow(n, infos[n], idx === 0);
+      rows.push(r);
+      list.appendChild(r.row);
+    });
+    if (!rows.length) {
+      list.appendChild(el('div', 'empty-note', '这个提供方还没有模型——在下面加一个'));
+    }
+    body.appendChild(list);
+
+    // 加一个模型：只要 id，别的先空着。
+    var addRow = el('div', 'mcfg-add');
+    var addInput = el('input', 'ta mcfg-text');
+    addInput.type = 'text';
+    addInput.placeholder = '模型 id，例如 deepseek-chat';
+    addRow.appendChild(addInput);
+    addRow.appendChild(btn('btn', '添加模型', function () {
+      var id = addInput.value.trim();
+      if (!id) { addInput.focus(); return; }
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].name === id) { toast('这个模型已经在列表里了'); return; }
+      }
+      var r = makeRow(id, { supports_tools: true }, false);
+      rows.push(r);
+      list.appendChild(r.row);
+      r.row.classList.add('mcfg-open');
+      addInput.value = '';
+    }));
+    body.appendChild(addRow);
+
+    var err = el('div', 'form-error');
+    body.appendChild(err);
+
+    function numOrNull(input) {
+      var s = String(input.value).trim();
+      if (s === '') return null;
+      var n = Number(s);
+      return isFinite(n) ? n : null;
+    }
+
+    function submit() {
+      var payload = [];
+      rows.forEach(function (r) {
+        if (r.removed) { payload.push({ id: r.name, remove: true }); return; }
+        var m = {
+          id: r.name,
+          max_context_tokens: parseTokenCount(r.ctx.value) || 0,
+          max_output_tokens: parseTokenCount(r.out.value) || 0,
+          reasoning_effort: r.effort.value.trim() || 'auto',
+          supports_tools: r.tools.checked,
+          supports_reasoning: r.reasoning.checked,
+          supports_vision: r.vision.checked,
+          temperature: numOrNull(r.temp),
+          top_p: numOrNull(r.topP),
+          top_k: numOrNull(r.topK),
+          frequency_penalty: numOrNull(r.freq),
+          presence_penalty: numOrNull(r.pres),
+          seed: numOrNull(r.seed),
+          note: r.note.value.trim()
+        };
+        if (r.isDefault) m.default = true;
+        payload.push(m);
+      });
+      var live = rows.filter(function (r) { return !r.removed; });
+      if (!live.length) { err.textContent = '至少要留一个模型'; return; }
+      // 容量必须能写成数字：128K / 1M 都行，别的写法会被服务端拒绝。
+      for (var i = 0; i < live.length; i++) {
+        var c = parseTokenCount(live[i].ctx.value);
+        var o = parseTokenCount(live[i].out.value);
+        if (isNaN(c) || isNaN(o)) {
+          err.textContent = '模型 ' + live[i].name +
+            ' 的上下文/输出长度看不懂（可以写 128K 或 1048576）';
+          return;
+        }
+      }
+      err.textContent = '';
+      api('api/providers/' + encodeURIComponent(p.name) + '/models',
+          { method: 'PUT', body: { models: payload } })
+        .then(function (r) {
+          closeDialog();
+          toast('已保存 ' + p.name + ' 的模型配置');
+          loadProviders().then(function () {
+            // 换默认模型以后，服务器上的当前模型可能已经变了：跟着服务器走。
+            var a = r && r.active;
+            if (!a || !a.model) return;
+            var still = (state.models || []).some(function (m) {
+              return m.provider === a.provider && m.model === a.model;
+            });
+            var cur = state.model;
+            var curStill = cur && (state.models || []).some(function (m) {
+              return m.provider === cur.provider && m.model === cur.model;
+            });
+            if (still && !curStill) {
+              state.model = { provider: a.provider, model: a.model };
+              renderModelChip();
+              renderModelMenu();
+            }
+          });
+        }, function (e) { err.textContent = '保存失败：' + e.message; });
+    }
+
+    openDialog('模型配置 · ' + p.name, body, [
+      { label: '取消', onClick: closeDialog },
+      { label: '保存到 provider.yaml', primary: true, onClick: submit }
+    ]);
+
+    // 思考强度的候选值（datalist）：常见档位 + 自己填。服务端给的那份是
+    // 唯一的真相，这里只是给它配上中文标签。
+    var efforts = (state.providers && state.providers.reasoning_efforts) ||
+      MODEL_EFFORTS.map(function (pair) { return pair[0]; });
+    var dl = document.createElement('datalist');
+    dl.id = 'mcfg-effort-list';
+    efforts.forEach(function (v) {
+      var o = document.createElement('option');
+      o.value = v;
+      o.label = MODEL_EFFORT_LABELS[v] || v;
+      dl.appendChild(o);
+    });
+    body.appendChild(dl);
+  }
+
+  /* ---------- 12d) 终端（这台机器上的 shell） ----------
      这不是 agent 的功能，也不经过模型：浏览器直接驱动这台机器上的一个 shell
      （Linux 上是 bash，Windows 上是 PowerShell），它跑在一个真正的终端
      （pty / ConPTY）上。前端这一半是一个小型的 VT100 模拟器：把服务端送来的

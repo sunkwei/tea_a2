@@ -30,6 +30,17 @@ settings:
   web_tool_timeout_ms: 60000
   web_tool_max_calls_per_turn: 10   # billed calls per user turn
   max_assistant_content: 131072
+  # The sampling knobs. A model in provider.yaml may override them; a knob
+  # that is set neither here nor there stays OUT of the request - a gateway
+  # that does not know the field answers 400.
+  # reasoning_effort: auto      # off / minimal / low / medium / high / xhigh / max
+  # temperature: 0.7            # 0 - 2
+  # top_p: 0.9                  # 0 - 1
+  # top_k: 40                   # vLLM / Ollama and friends
+  # frequency_penalty: 0        # -2 - 2
+  # presence_penalty: 0         # -2 - 2
+  # seed: 42
+  # max_tokens: 8192            # the output limit of one answer
   # A provider that answers "I am busy right now" (HTTP 529, MiniMax's top-of-
   # the-hour rush) says it recovers in 1-5 minutes: the request has to wait,
   # not fail. These waits are minutes long and have their own budget; network

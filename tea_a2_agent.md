@@ -13,6 +13,7 @@
 > [代码里的坑](#这套代码里的坑) ·
 > [快捷通道](#首次运行快捷通道只填一个-api-key) ·
 > [额度查询](#额度查询provider-级) ·
+[模型配置页](#模型配置页设置页的模型配置) ·
 > [语音输入](#语音输入sensesvoicesmall) ·
 > [MCP](#mcpmodel-context-protocolagent-当客户端) ·
 > [平台差异](#平台差异) ·
@@ -309,6 +310,49 @@ turn ended」）。
 - 精确替换大文件不要手改：本地工作区里有 `.tea_agent_run/scripts/agent_edit.py`（按片段精确替换，
   每处必须命中一次）、`patch-block.py`（整体替换一个 JS 函数）、`replace-block.py`（替换两个标记行
   之间的块）。片段文件用 LF 写，脚本会自己保持目标的 CRLF/LF。
+
+---
+
+## 模型配置页（设置页的「模型配置」）
+
+参考 deepseek harness 的模型配置界面做的：设置页每个 provider 卡片上多了一个
+**「模型配置」**按钮，打开一个对话框，一个模型一行，点开就能改。
+
+改的东西：上下文长度、输出长度、思考强度（off/minimal/low/medium/high/xhigh/max）、
+温度、top_p、top_k、频率与存在惩罚、随机种子，外加「能不能用工具 / 思考 / 看图」和备注。
+还能加模型、删模型、把某个模型设成默认模型（= `models:` 里的第一个）。
+
+**几个设计决定，别改回去：**
+
+- **「没设」和「设成 0」是两回事。** 每个采样参数都有一个 `has_*` 标志：没设的
+  参数**不进请求**——网关不认识的字段会回 400。设成 0 会进请求。
+  `ModelInfo` 里的 `has_temperature` / `has_top_p` / `has_top_k` / `has_seed` 就是干这个的。
+- **`reasoning_effort` 以前是解析了但从不发出去的**（`agent.cpp` 里
+  `request.send_reasoning_effort = false` 写死了）。现在发了，但有三重闸：
+  值不是 `auto`、模型自己声明了 `supports_reasoning: true`、全局设置没有更优先的值。
+  一个不会思考的模型不该被要求思考。
+- **`auto` 的思考强度不发表。** 全局 `settings.reasoning_effort` 是**兜底**：模型自己的
+  值是 `auto` 或空的时候才用它。
+- **写文件有两个接口，语义不同**：
+  `POST /api/providers/{name}/models` = **换掉整个列表**（「更新模型」：问 provider 有哪些模型，
+  确认后整份替换）；`PUT /api/providers/{name}/models` = **就地改**（「模型配置」：没提到的
+  模型留着、没提到的字段保持原值、`null` 清掉、`remove` 删掉、`default` 挪到第一位）。
+  两个都只改这个 provider 的 `models:` 块，别的一个字节都不动。
+- **容量能写 `128K` / `1M`**，文件里存的是数字。界面上那两个框是 `type=text` 不是
+  `type=number`——数字框写不进 `K` / `M`，浏览器会把值清空。
+
+**踩过的坑：**
+
+- `input.list = 'x'` 在现代浏览器里是**只读 getter**，会抛
+  `TypeError: Cannot set property list`。用 `setAttribute('list', …)`。
+- 滚动容器（`max-height` + `overflow:auto`）里的 flex 子项会被**压扁**
+  （默认 `flex-shrink:1`），展开的行只剩一个标签。写 `flex:none`。
+- 行对象（entry）和 DOM 节点是两回事：按钮的回调里改的是 entry 上的字段
+  （`entry.removed` / `entry.isDefault`），不是 DOM 节点上的属性。写错了保存时
+  一点反应都没有。
+
+钉住它的测试：`tests/smoke_model_config.py`（55 条，含「这些参数真的进了请求」）和
+`tests/ui_model_config.mjs`（25 条，浏览器里点一遍）。
 
 ---
 

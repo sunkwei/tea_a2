@@ -1386,9 +1386,23 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         !usage_flag_supported) {
       request.include_usage = false;
     }
+    // How hard the model should think. The model's own value wins; "auto"
+    // (and the empty string) fall back to the global setting, and "auto"
+    // there as well means "say nothing" - a gateway that does not know
+    // `reasoning_effort` answers 400 when it sees the field.
+    std::string effort = model_info ? model_info->reasoning_effort : std::string();
+    if (effort.empty() || effort == "auto") effort = st.reasoning_effort;
+    request.reasoning_effort = effort;
     request.send_reasoning_effort = false;
-    request.reasoning_effort =
-        model_info ? model_info->reasoning_effort : st.reasoning_effort;
+    if (effort != "auto" && !effort.empty()) {
+      // A model that does not declare reasoning support is not asked to
+      // think: the field would be rejected by the gateway. The settings page
+      // ties the effort field to the same checkbox, so this can only happen
+      // in a hand-edited file.
+      if (!model_info || model_info->supports_reasoning) {
+        request.send_reasoning_effort = true;
+      }
+    }
     request.connect_timeout_ms = st.http_connect_timeout_ms;
     request.read_timeout_ms = st.http_read_timeout_ms;
 
@@ -1432,6 +1446,37 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     } else if (model_info && model_info->has_top_p) {
       request.has_top_p = true;
       request.top_p = model_info->top_p;
+    }
+    // The rest of the sampling knobs: the global setting wins, the model
+    // value is the fallback. A knob that was never set stays out of the
+    // request - some gateways answer 400 for a field they do not know.
+    if (st.top_k > 0) {
+      request.has_top_k = true;
+      request.top_k = st.top_k;
+    } else if (model_info && model_info->has_top_k) {
+      request.has_top_k = true;
+      request.top_k = model_info->top_k;
+    }
+    if (st.frequency_penalty >= 0) {
+      request.has_frequency_penalty = true;
+      request.frequency_penalty = st.frequency_penalty;
+    } else if (model_info && model_info->has_frequency_penalty) {
+      request.has_frequency_penalty = true;
+      request.frequency_penalty = model_info->frequency_penalty;
+    }
+    if (st.presence_penalty >= 0) {
+      request.has_presence_penalty = true;
+      request.presence_penalty = st.presence_penalty;
+    } else if (model_info && model_info->has_presence_penalty) {
+      request.has_presence_penalty = true;
+      request.presence_penalty = model_info->presence_penalty;
+    }
+    if (st.seed != 0) {
+      request.has_seed = true;
+      request.seed = st.seed;
+    } else if (model_info && model_info->has_seed) {
+      request.has_seed = true;
+      request.seed = model_info->seed;
     }
 
     DeltaCallback on_delta = [&emit](DeltaKind kind, const std::string& text) {

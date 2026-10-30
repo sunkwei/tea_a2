@@ -10,6 +10,15 @@
 #include "util.h"
 
 namespace tea {
+
+/// The reasoning levels tea_a2 offers. "auto" is the first one and means
+/// "do not send `reasoning_effort` at all" - the provider then decides, and
+/// a gateway that does not know the field never sees it.
+const char* const kReasoningEfforts[] = {
+    "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"};
+const int kReasoningEffortCount =
+    static_cast<int>(sizeof(kReasoningEfforts) / sizeof(kReasoningEfforts[0]));
+
 namespace {
 
 std::string ystr(const YAML::Node& node, const std::string& key, const std::string& def = "") {
@@ -302,6 +311,12 @@ void apply_settings(Settings& s, const YAML::Node& node,
   if (yhas(node, "reasoning_effort")) s.reasoning_effort = ystr(node, "reasoning_effort", s.reasoning_effort);
   if (yhas(node, "temperature")) s.temperature = ydouble(node, "temperature", s.temperature);
   if (yhas(node, "top_p")) s.top_p = ydouble(node, "top_p", s.top_p);
+  if (yhas(node, "frequency_penalty"))
+    s.frequency_penalty = ydouble(node, "frequency_penalty", s.frequency_penalty);
+  if (yhas(node, "presence_penalty"))
+    s.presence_penalty = ydouble(node, "presence_penalty", s.presence_penalty);
+  if (yhas(node, "top_k")) s.top_k = static_cast<int>(yint(node, "top_k", s.top_k));
+  if (yhas(node, "seed")) s.seed = yint(node, "seed", s.seed);
   if (yhas(node, "max_tokens")) s.max_tokens = yint(node, "max_tokens", s.max_tokens);
   if (yhas(node, "http_engine")) s.http_engine = ystr(node, "http_engine", s.http_engine);
   if (yhas(node, "command_timeout_ms"))
@@ -510,6 +525,22 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
             if (yhas(mn, "top_p")) {
               mi.has_top_p = true;
               mi.top_p = ydouble(mn, "top_p", 0.9);
+            }
+            if (yhas(mn, "top_k")) {
+              mi.has_top_k = true;
+              mi.top_k = static_cast<int>(yint(mn, "top_k", 0));
+            }
+            if (yhas(mn, "frequency_penalty")) {
+              mi.has_frequency_penalty = true;
+              mi.frequency_penalty = ydouble(mn, "frequency_penalty", 0.0);
+            }
+            if (yhas(mn, "presence_penalty")) {
+              mi.has_presence_penalty = true;
+              mi.presence_penalty = ydouble(mn, "presence_penalty", 0.0);
+            }
+            if (yhas(mn, "seed")) {
+              mi.has_seed = true;
+              mi.seed = yint(mn, "seed", 0);
             }
           }
           info.models.push_back(mname);

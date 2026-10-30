@@ -109,6 +109,40 @@ provider 卡片上的「**更新模型**」按钮做这件事——服务端拿 
 上游没有这个接口时（404、不是 JSON、空列表），界面照实说查询失败——不会静默地把列表清空。
 接口细节见 [HTTP 接口](api.md#查模型问-provider-有哪些模型回填-provideryaml)。
 
+### 改模型配置（设置页的「模型配置」）
+
+「更新模型」是问 provider **有哪些**模型；「模型配置」是改模型**怎么用**。设置页每个
+provider 卡片上的「**模型配置**」按钮打开一个对话框：这个 provider 的每个模型一行，
+点开就能改下面这些，写回同一个 `models:` 块（别的 provider、注释和设置一个字不动）。
+
+| 字段 | 意思 | 不填 |
+|---|---|---|
+| `max_context_tokens` | 上下文窗口 | 按 128000 估 |
+| `max_output_tokens` | 单次输出上限 | 用 provider 的默认 |
+| `reasoning_effort` | 思考强度：`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | `auto`：**不发这个字段** |
+| `temperature` | 采样温度（0–2） | 不带这个字段 |
+| `top_p` | 核采样（0–1） | 不带这个字段 |
+| `top_k` | 只取前 k 个（vLLM / Ollama 一类网关） | 不带这个字段 |
+| `frequency_penalty` / `presence_penalty` | 频率 / 存在惩罚（-2–2） | 不带这个字段 |
+| `seed` | 随机种子 | 不带这个字段 |
+| `supports_tools` / `supports_reasoning` / `supports_vision` | 这个模型会不会调工具 / 会不会思考 / 看不看图 | 工具默认开，另两个默认关 |
+| `note` | 给自己看的备注 | 空 |
+
+几条容易踩的：
+
+- **「不设置」和「设成 0」不是一回事。** 留空的采样参数**不会**出现在请求里；
+  设成 0 会。网关不认识的字段会回 400，所以没调过的参数宁可不发。
+- **`auto` 的思考强度同样不发。** 只有模型自己声明了 `supports_reasoning: true`，
+  而且强度不是 `auto` 时，`reasoning_effort` 才会真的进到请求里——一个不会思考的
+  模型不该被要求思考。
+- **容量可以写 `128K` / `1M`。** 界面两种都认，文件里存的是数字。
+- **第一个模型是这个 provider 的默认模型。** 对话框里的「设为默认」把它挪到第一位。
+- **改一个字段不会抹掉别的。** 请求里没带的字段保持文件里的原值；带 `null` 的字段
+  会被清掉（那一行从 yaml 里消失）。
+
+改完先校验再替换，配置随即热加载生效，不用重启。
+接口细节见 [HTTP 接口](api.md#改模型配置-put-apiprovidername-models)。
+
 ### 网页搜索与抓取（provider 级可选能力）
 
 DeepSeek 对所有 API 用户开放了两个原生端点（`POST /v1/tools/search`、`POST /v1/tools/fetch`，

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -59,6 +60,17 @@ struct ChatRequest {
   double temperature = 0.7;
   bool has_top_p = false;
   double top_p = 0.9;
+  /// top_k / frequency_penalty / presence_penalty / seed. Only a few
+  /// gateways take them, so each one is sent only when it was set - a
+  /// gateway that does not know the field answers 400.
+  bool has_top_k = false;
+  int top_k = 0;
+  bool has_frequency_penalty = false;
+  double frequency_penalty = 0.0;
+  bool has_presence_penalty = false;
+  double presence_penalty = 0.0;
+  bool has_seed = false;
+  int64_t seed = 0;
   long long max_tokens = 0;
   std::string reasoning_effort;
   int connect_timeout_ms = 30000;

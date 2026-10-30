@@ -38,12 +38,32 @@ providers:
     # tea_a2 asks for it by default (settings.stream_include_usage) and drops the
     # field for a provider that answers 400. Uncomment to decide per provider.
     # stream_include_usage: true
+    # Every model can be tuned. The settings page ("模型配置") writes exactly
+    # these keys into this block - the other providers, the comments and the
+    # settings block stay as they are.
+    #
+    # A sampling parameter that is NOT in the file is not sent with the
+    # request: a gateway that does not know `top_k` answers 400. That is why
+    # every one of them is commented out here - "not set" and "set to 0" are
+    # different things.
     models:
       deepseek-chat:
-        max_context_tokens: 128000
-        max_output_tokens: 8192
-        supports_tools: true
-        supports_reasoning: false
+        max_context_tokens: 128000     # the context window
+        max_output_tokens: 8192         # the output limit of one answer
+        supports_tools: true            # may the model call tools?
+        supports_reasoning: false       # may the model think?
+        supports_vision: false          # may the model look at pictures?
+        # How hard it should think: off / minimal / low / medium / high /
+        # xhigh / max. `auto` means "do not send the field at all" - the
+        # provider then uses its own default. It only reaches the provider
+        # when the model says supports_reasoning: true.
+        reasoning_effort: auto
+        # temperature: 0.7              # 0 - 2
+        # top_p: 0.9                    # 0 - 1
+        # top_k: 40                     # vLLM / Ollama and friends
+        # frequency_penalty: 0          # -2 - 2
+        # presence_penalty: 0           # -2 - 2
+        # seed: 42
         note: ''
       deepseek-reasoner:
         max_context_tokens: 128000

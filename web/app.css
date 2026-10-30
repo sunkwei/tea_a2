@@ -838,6 +838,66 @@ button{font-family:inherit}
 .mdl-cap{display:flex;align-items:center;gap:3px;font-size:12px;color:var(--dsw-alias-label-caption)}
 .mdl-src{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-caption);white-space:nowrap}
 
+/* ---------- 设置页：模型配置（改一个 provider 的每个模型） ---------- */
+/* 弹窗比默认宽：字段多，挤在一行里看不清 */
+.dialog:has(.mcfg-list){width:min(880px,96vw)}
+.mcfg-presets{
+  display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 8px;
+}
+.mcfg-presets .mcfg-lab{margin-right:2px}
+.mcfg-list{
+  display:flex;flex-direction:column;gap:6px;margin:8px 0;
+  max-height:min(56vh,460px);overflow:auto;
+}
+.mcfg-row{
+  /* flex:none —— 列表是有高度上限的滚动容器，不写这一条行会被压扁，
+     下面的输入框就只剩一个标签了 */
+  flex:none;
+  border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md);
+  background:var(--dsw-alias-bg-layer-2);overflow:hidden;
+}
+/* 标成「待删除」的行：淡出去，但还能撤销 */
+.mcfg-row.mcfg-removed{opacity:.5}
+.mcfg-head{
+  display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:7px 9px;
+}
+.mcfg-caret{
+  flex:none;width:20px;height:20px;padding:0;cursor:pointer;
+  background:transparent;border:0;color:var(--dsw-alias-label-caption);
+  font-size:12px;line-height:20px;
+}
+.mcfg-caret:hover{color:var(--dsw-alias-label-primary)}
+.mcfg-name{flex:1 1 160px;min-width:0;display:flex;align-items:center;gap:6px}
+.mcfg-name .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mcfg-name .badge{margin-left:0}
+.mcfg-sum{
+  flex:2 1 220px;min-width:0;font-size:11px;color:var(--dsw-alias-label-caption);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.mcfg-acts{flex:none;display:flex;gap:6px}
+.mcfg-act{font-size:11px;padding:2px 8px}
+.mcfg-danger{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
+.mcfg-form{
+  display:none;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;
+  padding:2px 9px 10px;border-top:.5px solid var(--dsw-alias-border-l1);
+}
+.mcfg-row.mcfg-open .mcfg-form{display:grid}
+.mcfg-field{display:flex;flex-direction:column;gap:3px;min-width:0}
+.mcfg-field.mcfg-wide{grid-column:1/-1}
+.mcfg-lab{font-size:11px;color:var(--dsw-alias-label-caption)}
+.mcfg-num,.mcfg-text{
+  width:100%;min-width:0;font-family:var(--ds-font-family-code);font-size:12px;
+  padding:6px 8px;resize:none;
+}
+.mcfg-hint{font-size:10px;line-height:14px;color:var(--dsw-alias-label-caption);min-height:14px}
+.mcfg-hint.warn{color:var(--dsw-alias-state-warn-label)}
+.mcfg-caps{display:flex;gap:12px;flex-wrap:wrap}
+.mcfg-add{
+  display:flex;gap:8px;align-items:center;margin:4px 0 8px;
+}
+.mcfg-add .mcfg-text{flex:1 1 auto}
+.mcfg-add .btn{flex:none;white-space:nowrap}
+
 /* ---------- 设置页：文件访问范围（受限工作区 / 全局） ---------- */
 .seg{display:flex;gap:8px;padding:0 12px 12px}
 .seg-item{

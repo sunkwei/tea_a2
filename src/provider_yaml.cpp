@@ -162,6 +162,24 @@ std::string render_models_block(int models_indent, const std::vector<ModelInfo>&
       os << m.top_p;
       out += pad3 + "top_p: " + os.str() + "\n";
     }
+    if (m.has_top_k && m.top_k > 0) {
+      out += pad3 + "top_k: " + std::to_string(m.top_k) + "\n";
+    }
+    if (m.has_frequency_penalty) {
+      std::ostringstream os;
+      os.precision(6);
+      os << m.frequency_penalty;
+      out += pad3 + "frequency_penalty: " + os.str() + "\n";
+    }
+    if (m.has_presence_penalty) {
+      std::ostringstream os;
+      os.precision(6);
+      os << m.presence_penalty;
+      out += pad3 + "presence_penalty: " + os.str() + "\n";
+    }
+    if (m.has_seed) {
+      out += pad3 + "seed: " + std::to_string(m.seed) + "\n";
+    }
     if (!m.note.empty()) {
       out += pad3 + "note: " + yaml_scalar(m.note) + "\n";
     }

@@ -507,6 +507,10 @@ ChatResult llm_chat(const ChatRequest& req, const DeltaCallback& on_delta,
   if (req.stream) body["stream"] = true;
   if (req.has_temperature) body["temperature"] = req.temperature;
   if (req.has_top_p) body["top_p"] = req.top_p;
+  if (req.has_top_k && req.top_k > 0) body["top_k"] = req.top_k;
+  if (req.has_frequency_penalty) body["frequency_penalty"] = req.frequency_penalty;
+  if (req.has_presence_penalty) body["presence_penalty"] = req.presence_penalty;
+  if (req.has_seed) body["seed"] = req.seed;
   if (req.max_tokens > 0) body["max_tokens"] = req.max_tokens;
   if (req.send_reasoning_effort && !req.reasoning_effort.empty() &&
       req.reasoning_effort != "auto") {

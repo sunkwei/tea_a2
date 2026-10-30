@@ -21,6 +21,17 @@ enum class ReasoningEcho {
   Strip   // never echo it
 };
 
+/// The reasoning levels the settings page offers. "auto" means "do not send
+/// the field at all": the provider then uses its own default, which is the
+/// only safe choice for a gateway that does not know `reasoning_effort`
+/// (it answers 400).
+///
+/// The names are the ones OpenAI uses; gateways that spell them differently
+/// (xhigh, max) are accepted as well - the value goes on the wire unchanged,
+/// so what the provider understands is what it gets.
+extern const char* const kReasoningEfforts[];
+extern const int kReasoningEffortCount;
+
 struct ModelInfo {
   std::string name;
   int64_t max_context_tokens = 0;
@@ -28,11 +39,24 @@ struct ModelInfo {
   bool supports_vision = false;
   bool supports_reasoning = false;
   bool supports_tools = true;
+  /// How hard the model should think: "auto" (say nothing), "off", "minimal",
+  /// "low", "medium", "high", "xhigh", "max".
   std::string reasoning_effort = "auto";
   bool has_temperature = false;
   double temperature = 0.7;
   bool has_top_p = false;
   double top_p = 0.9;
+  /// top_k: only a few gateways take it (vLLM, Ollama, some Chinese
+  /// gateways). It is kept out of the request unless it was set, because a
+  /// gateway that does not know the field answers 400.
+  bool has_top_k = false;
+  int top_k = 0;
+  bool has_frequency_penalty = false;
+  double frequency_penalty = 0.0;
+  bool has_presence_penalty = false;
+  double presence_penalty = 0.0;
+  bool has_seed = false;
+  int64_t seed = 0;
   std::string note;
 };
 
@@ -157,6 +181,12 @@ struct Settings {
   std::string reasoning_effort = "auto";
   double temperature = -1.0;  // < 0 => not set
   double top_p = -1.0;        // < 0 => not set
+  /// The rest of the sampling knobs. -1 / 0 => not set, so the field stays
+  /// out of the request: a gateway that does not know it answers 400.
+  double frequency_penalty = -1.0;
+  double presence_penalty = -1.0;
+  int top_k = 0;
+  int64_t seed = 0;           // 0 => not set
   int64_t max_tokens = 0;     // 0 => provider/model default
   int command_timeout_ms = 180000;
   int http_connect_timeout_ms = 30000;

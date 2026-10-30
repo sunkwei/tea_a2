@@ -276,6 +276,153 @@ bool json_bool(const nlohmann::json& j, const char* key, bool def = false) {
   return it->get<bool>();
 }
 
+/// One model of a provider, as the settings page needs it: everything the
+/// user can tune. The "has_" flags say whether a value was set at all -
+/// "not set" and "set to zero" are different things for a sampling knob
+/// (an unset knob stays out of the request, a zero one does not).
+nlohmann::json model_info_to_json(const ModelInfo& m) {
+  nlohmann::json j = nlohmann::json::object();
+  j["max_context_tokens"] = m.max_context_tokens;
+  j["max_output_tokens"] = m.max_output_tokens;
+  j["supports_tools"] = m.supports_tools;
+  j["supports_reasoning"] = m.supports_reasoning;
+  j["supports_vision"] = m.supports_vision;
+  j["reasoning_effort"] = m.reasoning_effort;
+  j["has_temperature"] = m.has_temperature;
+  j["temperature"] = m.temperature;
+  j["has_top_p"] = m.has_top_p;
+  j["top_p"] = m.top_p;
+  j["has_top_k"] = m.has_top_k;
+  j["top_k"] = m.top_k;
+  j["has_frequency_penalty"] = m.has_frequency_penalty;
+  j["frequency_penalty"] = m.frequency_penalty;
+  j["has_presence_penalty"] = m.has_presence_penalty;
+  j["presence_penalty"] = m.presence_penalty;
+  j["has_seed"] = m.has_seed;
+  j["seed"] = m.seed;
+  j["note"] = m.note;
+  return j;
+}
+
+/// Apply the fields a request carries to a model.
+///
+/// A field the request does not carry is left alone: a partial request must
+/// not silently reset it. A `null` clears a value that was set - that is how
+/// the settings page says "do not send a temperature any more".
+bool apply_model_json(const nlohmann::json& e, ModelInfo* m, std::string* err) {
+  if (!e.is_object()) {
+    if (err) *err = "a model must be an object";
+    return false;
+  }
+  const std::string name = m->name.empty() ? std::string("?") : m->name;
+  if (e.contains("max_context_tokens")) {
+    m->max_context_tokens = json_int(e, "max_context_tokens", 0);
+  }
+  if (e.contains("max_output_tokens")) {
+    m->max_output_tokens = json_int(e, "max_output_tokens", 0);
+  }
+  if (m->max_context_tokens < 0 || m->max_output_tokens < 0 ||
+      m->max_context_tokens > 100000000LL || m->max_output_tokens > 100000000LL) {
+    if (err) *err = "model '" + name + "' has an implausible token limit";
+    return false;
+  }
+  if (e.contains("supports_tools")) {
+    m->supports_tools = json_bool(e, "supports_tools", true);
+  }
+  if (e.contains("supports_reasoning")) {
+    m->supports_reasoning = json_bool(e, "supports_reasoning", false);
+  }
+  if (e.contains("supports_vision")) {
+    m->supports_vision = json_bool(e, "supports_vision", false);
+  }
+  if (e.contains("reasoning_effort")) {
+    const std::string v = trim(json_string(e, "reasoning_effort", "auto"));
+    m->reasoning_effort = v.empty() ? "auto" : v;
+  }
+  if (e.contains("note")) {
+    m->note = trim(json_string(e, "note"));
+  }
+  // The sampling knobs. `null` => not set any more (the field leaves the
+  // request); a number => set it.
+  struct NumField {
+    const char* key;
+    bool* has;
+    double* value;
+    double lo;
+    double hi;
+    const char* range;  // how the range reads in the error message
+  };
+  const NumField nums[] = {
+      {"temperature", &m->has_temperature, &m->temperature, 0.0, 2.0, "0 and 2"},
+      {"top_p", &m->has_top_p, &m->top_p, 0.0, 1.0, "0 and 1"},
+      {"frequency_penalty", &m->has_frequency_penalty, &m->frequency_penalty, -2.0, 2.0, "-2 and 2"},
+      {"presence_penalty", &m->has_presence_penalty, &m->presence_penalty, -2.0, 2.0, "-2 and 2"},
+  };
+  for (std::size_t i = 0; i < sizeof(nums) / sizeof(nums[0]); ++i) {
+    const NumField& f = nums[i];
+    if (!e.contains(f.key)) continue;
+    const nlohmann::json& v = e[f.key];
+    if (v.is_null()) {
+      *f.has = false;
+      continue;
+    }
+    if (!v.is_number()) {
+      if (err) *err = "model '" + name + "': " + f.key + " must be a number";
+      return false;
+    }
+    const double d = json_double(e, f.key, f.lo);
+    if (d < f.lo || d > f.hi) {
+      if (err) {
+        *err = "model '" + name + "': " + f.key + " must be between " + f.range;
+      }
+      return false;
+    }
+    *f.has = true;
+    *f.value = d;
+  }
+  if (e.contains("top_k")) {
+    const nlohmann::json& v = e["top_k"];
+    if (v.is_null()) {
+      m->has_top_k = false;
+      m->top_k = 0;
+    } else {
+      if (!v.is_number()) {
+        if (err) *err = "model '" + name + "': top_k must be a number";
+        return false;
+      }
+      const int64_t k = json_int(e, "top_k", 0);
+      if (k < 0 || k > 1000000) {
+        if (err) *err = "model '" + name + "': top_k must be between 0 and 1000000";
+        return false;
+      }
+      // top_k: 0 would mean "no token at all", so it is the same as "not
+      // set": the field stays out of the request and out of the file.
+      m->has_top_k = k > 0;
+      m->top_k = static_cast<int>(k);
+    }
+  }
+  if (e.contains("seed")) {
+    const nlohmann::json& v = e["seed"];
+    if (v.is_null()) {
+      m->has_seed = false;
+      m->seed = 0;
+    } else {
+      if (!v.is_number()) {
+        if (err) *err = "model '" + name + "': seed must be a number";
+        return false;
+      }
+      const int64_t sd = json_int(e, "seed", 0);
+      if (sd < 0 || sd > 2147483647LL) {
+        if (err) *err = "model '" + name + "': seed must be between 0 and 2147483647";
+        return false;
+      }
+      m->has_seed = true;
+      m->seed = sd;
+    }
+  }
+  return true;
+}
+
 /// One model, as the settings page needs it: the name, the configuration
 /// tea_a2 would write for it, and where the numbers came from.
 nlohmann::json model_to_json(const DiscoveredModel& m) {
@@ -1863,15 +2010,15 @@ void ApiServer::Impl::install_routes() {
       nlohmann::json model_info = nlohmann::json::object();
       for (std::size_t m = 0; m < p->models.size(); ++m) {
         const ModelInfo* info = p->find_model(p->models[m]);
-        nlohmann::json mi = nlohmann::json::object();
-        mi["max_context_tokens"] = info ? info->max_context_tokens : 0;
         if (info) {
-          mi["max_output_tokens"] = info->max_output_tokens;
-          mi["supports_tools"] = info->supports_tools;
-          mi["supports_reasoning"] = info->supports_reasoning;
-          mi["supports_vision"] = info->supports_vision;
+          model_info[p->models[m]] = model_info_to_json(*info);
+        } else {
+          // A model the provider lists but the config does not describe:
+          // the defaults, so the settings page has something to show.
+          ModelInfo empty;
+          empty.name = p->models[m];
+          model_info[p->models[m]] = model_info_to_json(empty);
         }
-        model_info[p->models[m]] = mi;
       }
       pj["model_info"] = model_info;
       pj["has_key"] = p->has_key();  // never expose the key itself
@@ -1899,6 +2046,14 @@ void ApiServer::Impl::install_routes() {
     search_provider["always"] = config->search.always;
     if (!config->search.error.empty()) search_provider["error"] = config->search.error;
     j["search_provider"] = search_provider;
+
+    // The reasoning levels the settings page offers. The client draws its
+    // dropdown from this list, so the values live in one place.
+    nlohmann::json efforts = nlohmann::json::array();
+    for (int i = 0; i < kReasoningEffortCount; ++i) {
+      efforts.push_back(kReasoningEfforts[i]);
+    }
+    j["reasoning_efforts"] = efforts;
 
     nlohmann::json settings = nlohmann::json::object();
     settings["max_tool_output"] = config->settings.max_tool_output;
@@ -2036,65 +2191,18 @@ void ApiServer::Impl::install_routes() {
         send_error(res, 400, "bad_request", "model '" + m.name + "' is listed twice");
         return;
       }
-      m.max_context_tokens = json_int(e, "max_context_tokens", 0);
-      m.max_output_tokens = json_int(e, "max_output_tokens", 0);
-      if (m.max_context_tokens < 0 || m.max_output_tokens < 0 ||
-          m.max_context_tokens > 100000000LL || m.max_output_tokens > 100000000LL) {
-        send_error(res, 400, "bad_request",
-                   "model '" + m.name + "' has an implausible token limit");
-        return;
-      }
-      m.supports_tools = json_bool(e, "supports_tools", true);
-      m.supports_reasoning = json_bool(e, "supports_reasoning", false);
-      m.supports_vision = json_bool(e, "supports_vision", false);
-      m.note = trim(json_string(e, "note"));
       // What the file already says about this model is kept: the sampling
       // parameters and the reasoning effort are the user's own tuning, not
       // something a provider can answer. A field the request does not carry is
       // left alone as well - the settings page sends all of them, but a
       // partial request must not silently reset the flags.
       const ModelInfo* existing = p->find_model(m.name);
-      if (existing) {
-        m.max_context_tokens = existing->max_context_tokens;
-        m.max_output_tokens = existing->max_output_tokens;
-        m.supports_tools = existing->supports_tools;
-        m.supports_reasoning = existing->supports_reasoning;
-        m.supports_vision = existing->supports_vision;
-        m.note = existing->note;
-        m.reasoning_effort = existing->reasoning_effort;
-        m.has_temperature = existing->has_temperature;
-        m.temperature = existing->temperature;
-        m.has_top_p = existing->has_top_p;
-        m.top_p = existing->top_p;
-      }
-      if (e.contains("max_context_tokens")) {
-        m.max_context_tokens = json_int(e, "max_context_tokens", 0);
-      }
-      if (e.contains("max_output_tokens")) {
-        m.max_output_tokens = json_int(e, "max_output_tokens", 0);
-      }
-      if (e.contains("supports_tools")) {
-        m.supports_tools = json_bool(e, "supports_tools", true);
-      }
-      if (e.contains("supports_reasoning")) {
-        m.supports_reasoning = json_bool(e, "supports_reasoning", false);
-      }
-      if (e.contains("supports_vision")) {
-        m.supports_vision = json_bool(e, "supports_vision", false);
-      }
-      if (e.contains("note")) {
-        m.note = trim(json_string(e, "note"));
-      }
-      if (e.contains("reasoning_effort")) {
-        m.reasoning_effort = trim(json_string(e, "reasoning_effort", "auto"));
-      }
-      if (e.contains("temperature")) {
-        m.has_temperature = true;
-        m.temperature = json_double(e, "temperature", 0.7);
-      }
-      if (e.contains("top_p")) {
-        m.has_top_p = true;
-        m.top_p = json_double(e, "top_p", 0.9);
+      if (existing) m = *existing;
+      m.name = trim(json_string(e, "id"));
+      std::string field_err;
+      if (!apply_model_json(e, &m, &field_err)) {
+        send_error(res, 400, "bad_request", field_err);
+        return;
       }
       models.push_back(m);
     }
@@ -2126,6 +2234,155 @@ void ApiServer::Impl::install_routes() {
     j["path"] = config->path;
     j["provider"] = provider_name;
     j["models"] = updated ? updated->models : std::vector<std::string>();
+    j["active"] = {{"provider", config->active_provider}, {"model", config->active_model}};
+    send_json(res, j);
+  });
+
+  // Edit the model configuration of a provider - the settings page's
+  // 「模型配置」.
+  //
+  // Unlike the POST above (which REPLACES the list with what the provider
+  // offers), this one edits in place: a model that is not mentioned stays
+  // where it was, a field that is not mentioned keeps its value, and
+  // `null` clears a value that was set. That is what a form needs: the
+  // browser sends what the user typed, not the whole file.
+  //
+  //   PUT /api/providers/{name}/models
+  //   { "models": [ { "id": "deepseek-chat",
+  //                   "max_context_tokens": 128000,
+  //                   "reasoning_effort": "high",
+  //                   "temperature": null,          // <- clear it
+  //                   "default": true },            // <- the default model
+  //                 { "id": "old-model", "remove": true } ] }
+  //
+  // The first model of a provider is its default one, so `default: true`
+  // moves that model to the front.
+  svr.Put(R"(/api/providers/([^/]+)/models)", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string name = req.matches[1];
+    const ProviderInfo* p = config->provider(name);
+    if (!p) {
+      send_error(res, 404, "not_found", "no provider named '" + name + "'");
+      return;
+    }
+    // The config is reloaded below, which frees the provider table: keep the
+    // name and a copy of the model list, not the pointer.
+    const std::string provider_name = p->name;
+    std::vector<ModelInfo> models;
+    std::vector<std::string> order = p->models;
+    for (std::size_t i = 0; i < order.size(); ++i) {
+      const ModelInfo* info = p->find_model(order[i]);
+      ModelInfo m;
+      if (info) m = *info;
+      m.name = order[i];
+      models.push_back(m);
+    }
+
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    auto it = body.find("models");
+    if (it == body.end() || !it->is_array()) {
+      send_error(res, 400, "bad_request", "'models' must be an array of model objects");
+      return;
+    }
+    if (it->size() > 512) {
+      send_error(res, 400, "too_many_models",
+                 "a provider with more than 512 models is not a provider");
+      return;
+    }
+
+    // A model that is added by the request goes to the end of the list; the
+    // ones that are already there keep their place.
+    std::string default_model;
+    std::set<std::string> seen;
+    for (std::size_t i = 0; i < it->size(); ++i) {
+      const nlohmann::json& e = (*it)[i];
+      const std::string at = "model #" + std::to_string(i + 1);
+      if (!e.is_object()) {
+        send_error(res, 400, "bad_request", at + " is not an object");
+        return;
+      }
+      const std::string mname = trim(json_string(e, "id"));
+      if (mname.empty()) {
+        send_error(res, 400, "bad_request", at + " has no id");
+        return;
+      }
+      if (mname.size() > 200) {
+        send_error(res, 400, "bad_request", at + " has an implausibly long name");
+        return;
+      }
+      if (!seen.insert(mname).second) {
+        send_error(res, 400, "bad_request", "model '" + mname + "' is listed twice");
+        return;
+      }
+      // Find the model in the list we are editing.
+      std::size_t idx = models.size();
+      for (std::size_t k = 0; k < models.size(); ++k) {
+        if (models[k].name == mname) { idx = k; break; }
+      }
+      if (idx == models.size()) {
+        ModelInfo fresh;
+        fresh.name = mname;
+        models.push_back(fresh);
+        idx = models.size() - 1;
+      }
+      if (json_bool(e, "remove", false)) {
+        models.erase(models.begin() + static_cast<long>(idx));
+        continue;
+      }
+      std::string field_err;
+      if (!apply_model_json(e, &models[idx], &field_err)) {
+        send_error(res, 400, "bad_request", field_err);
+        return;
+      }
+      if (json_bool(e, "default", false)) default_model = mname;
+    }
+    if (models.empty()) {
+      send_error(res, 400, "bad_request",
+                 "a provider needs at least one model");
+      return;
+    }
+
+    // The default model is the FIRST one in the list.
+    if (!default_model.empty()) {
+      std::size_t at = models.size();
+      for (std::size_t k = 0; k < models.size(); ++k) {
+        if (models[k].name == default_model) { at = k; break; }
+      }
+      if (at < models.size() && at != 0) {
+        const ModelInfo picked = models[at];
+        models.erase(models.begin() + static_cast<long>(at));
+        models.insert(models.begin(), picked);
+      }
+    }
+
+    std::string yaml_text;
+    if (!read_file(config->path, &yaml_text)) {
+      send_error(res, 500, "io_error", "cannot read " + config->path);
+      return;
+    }
+    std::string patched, patch_err;
+    if (!patch_provider_models(yaml_text, provider_name, models, &patched, &patch_err)) {
+      send_error(res, 400, "patch_failed", patch_err);
+      return;
+    }
+    if (!apply_config_yaml(patched, "model configuration update for provider '" + provider_name + "'",
+                           res)) {
+      return;
+    }
+    const ProviderInfo* updated = config->provider(provider_name);
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["path"] = config->path;
+    j["provider"] = provider_name;
+    j["models"] = updated ? updated->models : std::vector<std::string>();
+    nlohmann::json mi = nlohmann::json::object();
+    if (updated) {
+      for (std::size_t k = 0; k < updated->models.size(); ++k) {
+        const ModelInfo* info = updated->find_model(updated->models[k]);
+        if (info) mi[updated->models[k]] = model_info_to_json(*info);
+      }
+    }
+    j["model_info"] = mi;
     j["active"] = {{"provider", config->active_provider}, {"model", config->active_model}};
     send_json(res, j);
   });
