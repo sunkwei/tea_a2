@@ -494,7 +494,7 @@ std::string image_block(const Workspace& ws, const ImageAttachment& att,
            "（导出文件的图片总量已达上限，未内联）</figcaption></figure>";
   }
   std::string bytes;
-  if (!read_file(absolute, &bytes)) {
+  if (!read_file_binary(absolute, &bytes)) {
     return "<figure class=\"img missing\"><figcaption>图片无法读取：" + caption +
            "</figcaption></figure>";
   }

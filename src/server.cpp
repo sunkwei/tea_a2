@@ -2831,7 +2831,9 @@ void ApiServer::Impl::install_routes() {
               return;
             }
             std::string bytes;
-            if (!read_file(target, &bytes)) {
+            // The bytes of a picture go to the browser as they are: trimming
+            // them would hand out a file the browser cannot decode.
+            if (!read_file_binary(target, &bytes)) {
               send_error(res, 400, "read_failed", "cannot read " + rel);
               return;
             }

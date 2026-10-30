@@ -1056,7 +1056,10 @@ ToolResult tool_load_image(const nlohmann::json& args, const ToolContext& ctx) {
   }
   std::string bytes;
   bool too_big = false;
-  if (!read_file(path, &bytes, kMaxLoadedImageBytes + 1, &too_big) || too_big ||
+  // Bytes, not text: read_file() trims a trailing byte that looks like the
+  // start of a multi-byte character, and a JPEG ends with FF D9 - the copy
+  // would lose its last byte and the provider would reject the picture.
+  if (!read_file_binary(path, &bytes, kMaxLoadedImageBytes + 1, &too_big) || too_big ||
       bytes.size() > kMaxLoadedImageBytes) {
     result.output = "error: " + requested + " is larger than " +
                     human_size(kMaxLoadedImageBytes) +

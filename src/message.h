@@ -99,6 +99,22 @@ struct ToolCallRepair {
 /// messages stay as they are.
 ToolCallRepair repair_tool_calls(nlohmann::json* messages);
 
+/// How many image parts a wire message list carries.
+std::size_t count_image_parts(const nlohmann::json& messages);
+
+/// Drop every image part from a wire message list; returns how many were
+/// removed.
+///
+/// A picture the provider refuses (a truncated JPEG, a format it does not
+/// know) is rejected together with the *whole* request - and the picture
+/// stays in the session history, so every later request on that session is
+/// rejected the same way and the session is locked for good. Dropping the
+/// pictures turns that dead end into a turn that continues without them.
+///
+/// A turn that consisted of nothing but pictures gets a text note in their
+/// place: an empty content is rejected by some providers.
+std::size_t strip_image_parts(nlohmann::json* messages);
+
 /// One entry of a session's task list. A complex job is decomposed into steps,
 /// the agent keeps this list current with `toolkit_todo`, and the same list is
 /// what the Web UI (and the exported HTML) shows as progress - so "where is it

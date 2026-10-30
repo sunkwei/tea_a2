@@ -105,7 +105,7 @@ struct ZipWalker {
         continue;
       }
       std::string bytes;
-      if (!read_file(e.path, &bytes)) {
+      if (!read_file_binary(e.path, &bytes)) {
         skip(child, "it cannot be read");
         continue;
       }

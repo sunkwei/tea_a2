@@ -487,9 +487,14 @@ bool list_directory(const std::string& dir, std::vector<DirEntryInfo>* out, std:
 // ---------------------------------------------------------------------------
 namespace {
 constexpr size_t kUnboundedReadCap = 256u * 1024u * 1024u;
-}
 
-bool read_file(const std::string& path, std::string* out, size_t max_bytes, bool* truncated) {
+/// The shared body of read_file() and read_file_binary(): read at most
+/// `max_bytes` of the file. `trim_utf8` says what happens to a trailing byte
+/// that looks like the start of a multi-byte character - dropped for text
+/// (the JSON layer refuses invalid UTF-8), kept for bytes (an image must
+/// reach the provider exactly as it is on disk).
+bool read_file_impl(const std::string& path, std::string* out, size_t max_bytes, bool* truncated,
+                    bool trim_utf8) {
   if (truncated) *truncated = false;
   out->clear();
   if (path.empty() || !path_is_file(path)) return false;
@@ -521,7 +526,7 @@ bool read_file(const std::string& path, std::string* out, size_t max_bytes, bool
   CloseHandle(h);
   if (!read_ok) return false;
   out->resize(got);
-  trim_utf8_edges(out);
+  if (trim_utf8) trim_utf8_edges(out);
   return true;
 #else
   const int fd = ::open(path.c_str(), O_RDONLY);
@@ -550,9 +555,18 @@ bool read_file(const std::string& path, std::string* out, size_t max_bytes, bool
   // A cut in the middle of a multi-byte character would make the tool result
   // invalid UTF-8, and the JSON layer refuses to serialise that - the agent
   // would crash on a file whose size happens to land mid-character.
-  trim_utf8_edges(out);
+  if (trim_utf8) trim_utf8_edges(out);
   return true;
 #endif
+}
+}  // namespace
+
+bool read_file(const std::string& path, std::string* out, size_t max_bytes, bool* truncated) {
+  return read_file_impl(path, out, max_bytes, truncated, true);
+}
+
+bool read_file_binary(const std::string& path, std::string* out, size_t max_bytes, bool* truncated) {
+  return read_file_impl(path, out, max_bytes, truncated, false);
 }
 
 bool read_file_tail(const std::string& path, size_t max_bytes, std::string* out) {

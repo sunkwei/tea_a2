@@ -1136,6 +1136,7 @@ HTTP 引擎、轨迹开关等。
 | `409 turn_running` | 轮次正在跑，改名 / 删除 / 改任务列表会被拒。等它结束 |
 | `HTTP 529: 当前为整点高峰时段，服务器短暂繁忙` | provider 整点高峰拒绝了请求。**程序会自己等**：认出「繁忙」后按分钟退避重发（默认 1/2/4 分钟，最多 3 次），界面上显示「服务端繁忙（HTTP 529），稍后自动重试（第 1/3 次，还剩 N 秒）」。想自己控制就调 `settings.overload_retries` / `overload_backoff_ms`（`0` = 不等） |
 | `HTTP 400: invalid params, 400 (2013)`（MiniMax） | provider 对不上历史里的工具调用：同一个调用被答复了两次、结果没有对应的调用、调用没有答复。**发出去之前会自动修好**（日志里有一行 `repaired the tool-call structure`）；还是被拒就看日志里 `the request was rejected - N messages, ...` 那行——请求有多大、provider 原话是什么都在里面 |
+| 带图的请求被拒（也是 `invalid params, 400 (2013)`） | provider 不认这张图，多半是图本身坏了（文件少了一个字节就会这样，而且 provider 的拒绝还是**时灵时不灵**的：同一张坏图，10 次里可能 5 次被拒）。**程序会把图从请求里摘掉再试一次**，这一轮继续，只是模型这一次看不到图（日志里一行 `the picture(s) are dropped`）。会话不会再被锁死；要让模型重新看见，把完好的图重新放进工作区再 `toolkit_load_image` |
 | `409 turn_still_running` | 顶掉旧轮次时它 15 秒内没停下来（通常卡在一个停不掉的工具里）。先 `POST /api/chat/stop`，等它停了再顶 |
 | `409 no_active_turn` | 这个会话没有在跑的轮次。直接 `POST /api/chat` 就行，不用 `/api/chat/queue` |
 | `400 images_not_queued` | 排队路径不收图片（图片必须在请求时解码落盘）。等这一轮结束，或用 `interrupt` 顶掉 |

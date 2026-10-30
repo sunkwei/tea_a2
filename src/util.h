@@ -136,6 +136,19 @@ bool list_directory(const std::string& dir, std::vector<DirEntryInfo>* out, std:
 // --------------------------------------------------------------------------
 bool read_file(const std::string& path, std::string* out, size_t max_bytes = 0,
                bool* truncated = nullptr);
+/// Read a file as raw bytes. Same as read_file(), but the edges are NOT
+/// trimmed to valid UTF-8.
+///
+/// read_file() drops a trailing byte that looks like the start of a
+/// multi-byte character. That is right for text (the JSON layer refuses
+/// invalid UTF-8) and fatal for images: a JPEG ends with FF D9, and 0xD9 is
+/// the lead byte of a two-byte sequence, so the copy loses its last byte,
+/// the provider rejects the picture ("invalid params, 400 (2013)" on
+/// MiniMax) and the broken picture stays in the session history - every
+/// later request on that session is rejected the same way, so the session is
+/// locked for good.
+bool read_file_binary(const std::string& path, std::string* out, size_t max_bytes = 0,
+                      bool* truncated = nullptr);
 /// Read at most the last `max_bytes` of a file (used for log tails).
 bool read_file_tail(const std::string& path, size_t max_bytes, std::string* out);
 bool write_file(const std::string& path, const std::string& data, bool append = false,

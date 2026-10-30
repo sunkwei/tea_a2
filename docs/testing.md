@@ -131,6 +131,12 @@ id(x) not found`、`tool call and result not match`）。测试用一个按 Mini
 都要先修好（`src/message.cpp` 的 `repair_tool_calls`），轮次照常跑完；provider 复用了工具调用 id
 时（我们退回 `call_1` 这类名字时也会撞车）要改名，不能让历史里出现两份答复。
 
+`tests/smoke_image_integrity.py` 覆盖「图片的字节」：图片必须**一个字节都不差**地到达
+provider（JPEG 结尾是 `FF D9`，而 `0xD9` 又是 2 字节 UTF-8 序列的前导符——按文本读会把最后
+一个字节削掉，副本就成了坏图，provider 整个请求都拒：`invalid params, 400 (2013)`，2026-10-30
+在 api.minimax.cn 实测）；以及 provider 拒了带图的请求时，程序会**把图摘掉再试一次**，轮次
+照常跑完、会话不会被锁死。
+
 `tests/smoke_tool_images.py` 覆盖 `toolkit_load_image`：视觉模型的工具表里有它、纯文本模型没有；
 工具结果本身是文本（不是几百 KB 的 base64），图片作为 follow-up user 消息进入**下一次请求**，
 data URL 解码后与磁盘文件逐字节相同；副本落在 `artifacts/images/`，会话里存的是工作区相对路径、

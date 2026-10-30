@@ -236,6 +236,73 @@ ToolCallRepair repair_tool_calls(nlohmann::json* messages) {
   return report;
 }
 
+// ---------------------------------------------------------------------------
+// The images of a request
+// ---------------------------------------------------------------------------
+namespace {
+
+/// Is this content part a picture? "image_url" is the OpenAI spelling;
+/// some gateways say "image".
+bool is_image_part(const nlohmann::json& part) {
+  if (!part.is_object()) return false;
+  auto type = part.find("type");
+  if (type != part.end() && type->is_string()) {
+    const std::string t = type->get<std::string>();
+    if (t == "image_url" || t == "image") return true;
+  }
+  return part.find("image_url") != part.end() || part.find("image") != part.end();
+}
+
+}  // namespace
+
+std::size_t count_image_parts(const nlohmann::json& messages) {
+  if (!messages.is_array()) return 0;
+  std::size_t count = 0;
+  for (std::size_t i = 0; i < messages.size(); ++i) {
+    const nlohmann::json& m = messages[i];
+    if (!m.is_object()) continue;
+    auto content = m.find("content");
+    if (content == m.end() || !content->is_array()) continue;
+    for (std::size_t k = 0; k < content->size(); ++k) {
+      if (is_image_part((*content)[k])) ++count;
+    }
+  }
+  return count;
+}
+
+std::size_t strip_image_parts(nlohmann::json* messages) {
+  if (!messages || !messages->is_array()) return 0;
+  std::size_t removed = 0;
+  for (std::size_t i = 0; i < messages->size(); ++i) {
+    nlohmann::json& m = (*messages)[i];
+    if (!m.is_object()) continue;
+    auto content = m.find("content");
+    if (content == m.end() || !content->is_array()) continue;
+    nlohmann::json kept = nlohmann::json::array();
+    std::size_t dropped_here = 0;
+    for (std::size_t k = 0; k < content->size(); ++k) {
+      if (is_image_part((*content)[k])) {
+        ++dropped_here;
+        continue;
+      }
+      kept.push_back((*content)[k]);
+    }
+    if (!dropped_here) continue;
+    removed += dropped_here;
+    if (kept.empty()) {
+      // The turn was nothing but pictures. An empty content is rejected by
+      // some providers, so the turn gets a note instead.
+      nlohmann::json note = nlohmann::json::object();
+      note["type"] = "text";
+      note["text"] =
+          "(the attached image was left out of this request: the provider refused it)";
+      kept.push_back(note);
+    }
+    *content = kept;
+  }
+  return removed;
+}
+
 nlohmann::json Message::to_store() const {
   nlohmann::json j = nlohmann::json::object();
   j["role"] = role;

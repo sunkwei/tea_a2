@@ -168,6 +168,7 @@ struct RequestStats {
   std::size_t tool_calls = 0;
   std::size_t bytes = 0;
   int repairs = 0;
+  std::size_t images_dropped = 0;
 };
 
 /// Tool-call ids have to be unique inside a session. A provider may reuse an
@@ -1135,7 +1136,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         }
         std::string bytes;
         const std::string absolute = workspace.resolve_path(atts[i].path, nullptr);
-        if (absolute.empty() || !read_file(absolute, &bytes)) {
+        if (absolute.empty() || !read_file_binary(absolute, &bytes)) {
           LOG_WARN("agent: cannot read image attachment ", atts[i].path, "; skipping");
           continue;
         }
@@ -1494,11 +1495,16 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     // remember the answer for the rest of the process, and retry.
     ChatResult chat;
     bool overflow_recovered = false;
+    // A picture the provider refuses would kill every later request on this
+    // session (it stays in the history), so the pictures are dropped from the
+    // request and the turn goes on without them.
+    bool images_dropped = false;
     for (int attempt = 0;; ++attempt) {
       nlohmann::json wire_messages = nlohmann::json::array();
       for (std::size_t i = 0; i < context.size(); ++i) {
         wire_messages.push_back(context[i].to_wire(echo_reasoning, &image_urls));
       }
+      if (images_dropped) strip_image_parts(&wire_messages);
       // A provider maps every tool result back to the call it answers, and the
       // mapping has to be one-to-one. MiniMax rejects the whole request when
       // it is not - "invalid params, 400 (2013)", an error that says nothing
@@ -1566,6 +1572,24 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         break;
       }
 
+      // A request that carries a picture the provider refuses (a truncated
+      // JPEG, a format it does not know) is rejected as a whole - and the
+      // picture stays in the session history, so every later request on this
+      // session is rejected the same way and the session is locked for good
+      // ("invalid params, 400 (2013)", verified 2026-10-30 against
+      // api.minimax.cn). Drop the pictures and try again: the turn continues
+      // without them instead of dying.
+      if (!images_dropped && !produced_output && chat.http_status == 400 &&
+          count_image_parts(wire_messages) > 0) {
+        images_dropped = true;
+        request_stats.images_dropped += count_image_parts(wire_messages);
+        LOG_WARN("llm: the provider refused the request that carried ",
+                 request_stats.images_dropped,
+                 " image(s); the picture(s) are dropped and the request is retried without "
+                 "them - the turn goes on, but the model cannot see them this time");
+        continue;
+      }
+
       if (attempt >= 1 || produced_output) break;
       if (chat.http_status != 400 || !contains(failure, "reasoning_content")) break;
 
@@ -1587,6 +1611,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       LOG_WARN("llm: the request was rejected - ", request_stats.messages, " messages, ",
                request_stats.tool_calls, " tool calls, ~", request_stats.bytes, " bytes",
                request_stats.repairs ? " (the tool-call structure was repaired first)" : "",
+               request_stats.images_dropped ? " (the images were dropped first)" : "",
                "; the provider said: ", chat.detail.empty() ? chat.error : chat.detail);
       nlohmann::json event = nlohmann::json::object();
       event["type"] = "error";
@@ -1597,6 +1622,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       stats["tool_calls"] = request_stats.tool_calls;
       stats["bytes"] = request_stats.bytes;
       if (request_stats.repairs) stats["repaired"] = request_stats.repairs;
+      if (request_stats.images_dropped) stats["images_dropped"] = request_stats.images_dropped;
       event["request"] = stats;
       emit(event);
       break;
@@ -1752,7 +1778,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         }
         std::string bytes;
         const std::string absolute = workspace.resolve_path(att.path, nullptr);
-        if (absolute.empty() || !read_file(absolute, &bytes)) {
+        if (absolute.empty() || !read_file_binary(absolute, &bytes)) {
           tool_result.output += "\n(cannot read the stored image back; not attached)";
           LOG_WARN("agent: cannot read stored tool image ", att.path);
           continue;

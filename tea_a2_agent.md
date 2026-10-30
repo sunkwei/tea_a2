@@ -153,6 +153,29 @@ UTF-8）。但 JPEG 结尾是 `FF D9`，而 `0xD9` 正是 2 字节序列的前�
 模型回 `invalid params, 400` → 坏图留在会话历史里 → 之后每个请求都同样 400，整个会话锁死**。
 图片路径一律用 `read_file_binary()`（不修剪）。
 
+**2026-10-30 已修**（`src/util.h` / `src/platform_fs.cpp`）：`read_file_binary()` 这次真的存在了，
+图片这条路上全换过去——`toolkit_load_image` 存副本、agent 把图编成 data: URL、导出 HTML 内联
+图片、`/raw` 给浏览器送字节、归档打包，统统按字节读，一个字节都不削。
+
+那次的现场：微信工作区里「搜索 DL20 推理卡的相关介绍」那个会话，加载了一张
+`analysis_terminal_01.jpg`（51150 字节，结尾 `FF D9`）。副本存成了 51149 字节——少了最后一个
+字节。MiniMax 收到这张坏图，整个请求被拒：`invalid params, 400 (2013)`。
+
+**而且它的拒绝是时灵时不灵的**：2026-10-30 在 api.minimax.cn 实测，同一张坏图发 10 次，5 次
+被拒、5 次通过；完好的图发 10 次全过。所以「这个会话续不上」不是每轮都死，而是**看运气**——
+坏图留在会话历史里，每一轮都要重发它，那一轮就有大约一半的机会被拒。截图里那句
+`request_id` 就是这么来的。
+
+### provider 拒了带图的请求：丢图再试，别锁死会话
+
+坏图已经躺在会话历史里的时候，光修代码救不回那个会话——历史里那张图还在，每一轮都会被拒。
+所以请求被拒时（HTTP 400）如果带着图，就把图从请求里摘掉再试一次：这一轮继续，只是模型这一
+次看不到图（`src/agent.cpp` 的 `strip_image_parts`；日志里一行 `the picture(s) are dropped and
+the request is retried without them`）。会话因此还能接着用——这比「每个请求都 400」强得多。
+
+注意：**摘图只是止血**，模型这一轮真的看不见那张图。坏图要另外修（把完好的源文件重新拷进
+`.tea_agent_run/artifacts/images/`），下一轮模型才又能看见。
+
 ### 上下文超窗（长回合被 400 打死）
 
 `HTTP 400 invalid params, context window exceeds limit` 有三条根因：
