@@ -10,6 +10,14 @@ cmake-build-*/
 # Scratch build temp (some sandboxes deny writes to the real %TEMP%)
 .tmp/
 
+# Release packages are **not** in git (2026-10-30): they are published to the
+# Baidu Netdisk instead (sched/pan_publish.py). Keeping a 6-40 MB zip per
+# version in the repo slows every clone and turns `git log` into noise.
+# The build output stays local; the release zip lives in release/ and on the
+# netdisk (/tea_a2/releases/<version>/).
+release/*.zip
+release/tmp/
+
 # Editor / OS noise
 .vscode/
 .idea/

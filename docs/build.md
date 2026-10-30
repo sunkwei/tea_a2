@@ -272,7 +272,55 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.17.3
 
 ---
 
+## 发版：包传到百度网盘，不进 git
 
+**发布产物（zip）不再提交到 git**（2026-10-30 起）。仓库里只留源码和文档；每一版的包
+传到**百度网盘**，远端路径写进发版记录。
+
+```bash
+# 打包 + 上传 + 清理旧版本，一步到位（这台机器上的流程）
+.tea_agent_run/scripts/release.sh 0.17.4
+
+# 等价于这三步：
+# 1. 打包（暂存目录里打，只 strip 暂存副本，release/ 里最后只剩那个 zip）
+.tea_agent_run/scripts/pack_release.sh 0.17.4
+# 2. 传到网盘 /tea_a2/releases/0.17.4/，并把网盘上旧版本清到只剩 5 个
+python3 sched/pan_publish.py release/tea_a2-0.17.4.zip --version 0.17.4 \
+    --remote-dir /tea_a2/releases/0.17.4 --keep 5
+# 3. 提交源码（**不**提交 release/ 里的 zip —— .gitignore 已经挡了）
+git add -A && git commit -m "release: 0.17.4"
+```
+
+**网盘上最多留 5 个发布包**：传完按版本号（`0.17.10 > 0.17.3`，按数字比不是按字符串）排，
+最新的 5 个留下，其余的目录连包带清单删掉。想看现在有哪些：
+
+```bash
+python3 sched/pan_publish.py --list            # /tea_a2/releases 下有哪些版本、多大、什么时候传的
+```
+
+`pan_publish.py` 会：
+
+- 按 **4MB 一片**上传（百度网盘的上传接口就是 4MB 分片，最后一片是余数；
+  小于 4MB 的文件走单片），分片数 = `ceil(大小 / 4MB)`；
+- 传完**回读校验**（把网盘上的文件下下来比对 sha256）—— 发版的东西不能只看
+  「上传成功」；
+- 在远端写一份 `release-manifest.json`（版本号、时间、机器、每个文件的
+  sha256 / md5 / 大小 / 分片数）。
+
+配置和令牌跟[配置同步](pan-sync.md)共用一套（`~/.tea_agent/pan-sync/config`）。
+
+清理网盘上的旧版本（`opera=delete` 在查询串里，`filelist` 是路径的 JSON 数组）：
+
+```python
+import os, sys; sys.path.insert(0, "sched")
+import pan_sync
+cfg = pan_sync.load_config()
+c = pan_sync.PanClient(cfg.text("app_key"), cfg.text("app_secret"),
+                       token_path=os.path.expanduser("~/.tea_agent/pan-sync/token.json"))
+c.delete_path("/tea_a2/releases/0.17.3")
+```
+
+---
 
 ---
 

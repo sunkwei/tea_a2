@@ -47,6 +47,7 @@ HTTP/SSE API, so a larger agent can drive real work on the device.**
 | **独立运行** | 设备或开发机上直接打开内置 Web UI，人机对话 |
 | **级联** | 一台 `tea_a2` 直接控制另一台（`toolkit_peer`）：问它自己的 agent、让它跑命令、看它的状态。见 [级联](docs/peer.md) |
 | **看门狗** | 别人那边发生的事自己走进来（邮件/日历/告警）：`sched/mail_watch.py` 判读、归档、起草，**只在需要你参与时通知你**。见 [与其他应用对接](docs/integrations.md) |
+| **配置同步** | 多台机器共用一份配置：`sched/pan_sync.py` 把 provider.yaml 等**加密**后传到百度网盘，另一台再拉下来；两边都改了就停手。见 [百度网盘同步配置](docs/pan-sync.md) |
 
 设计上的取舍都是为「一个文件丢上设备就能跑」：
 
@@ -333,7 +334,7 @@ servers:
 | | |
 | --- | --- |
 | [使用手册](docs/tea_a2_manual.md) | **命令清单**：命令行参数、curl 配方、队列命令、微信命令、脚本、环境变量 |
-| [Python 侧脚本](sched/README.md) | **sched/ 目录说明**：任务队列、聊天前端（微信/Telegram）、机群、语音转写、邮件看门狗、自用工具（B 站 / 知乎） |
+| [Python 侧脚本](sched/README.md) | **sched/ 目录说明**：任务队列、聊天前端（微信/Telegram）、机群、语音转写、邮件看门狗、百度网盘同步配置、自用工具（B 站 / 知乎） |
 | [用起来](docs/using.md) | 界面导览：配置对话框、工作区、主题地址、分叉、图片、**工作区搜索**、**历史搜索** |
 | [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照 |
 | [构建与跨平台编译](docs/build.md) | 依赖、本机构建、交叉编译（aarch64 / Windows）、产物校验 |
@@ -344,6 +345,7 @@ servers:
 | [内置工具与上下文](docs/tools.md) | 每个工具、文件访问范围、上下文预算、轨迹 |
 | [MCP](docs/mcp.md) | **把别的程序接进来当工具**：配置、接口、和 Windows 上的 uiautomation-mcp 联调 |
 | [与其他应用对接](docs/integrations.md) | **三个方向**：它调别人（MCP）/ 别人调它（HTTP、级联）/ 别人那边发生事（watcher）。Gmail 看门狗、通知策略、换一个应用的配方 |
+| [百度网盘同步配置](docs/pan-sync.md) | **多台机器共用一份配置**：加密后传到网盘、冲突不覆盖、删除不传播、备份 |
 | [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、system prompt、销毁、导出、合并两个工作区 |
 | [配置](docs/config.md) | `provider.yaml`、额度与搜索抓取、按工作区覆盖、请求头 |
 | [源码结构](docs/source.md) | 每个文件干什么、第三方依赖 |

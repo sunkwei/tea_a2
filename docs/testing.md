@@ -73,6 +73,8 @@ python3 tests/smoke_peer.py                                 # 级联：peers: �
 python3 tests/smoke_task_order.py                          # 任务单：解析/报错/命令行排队/模板可下载
 python3 tests/smoke_telegram_bot.py                        # Telegram 前端：轮询/命令/文件/白名单/offset
 python3 tests/smoke_mail_watch.py                          # 邮件看门狗：配置/解码/判定/动作/通知/书签/锁/digest（假邮箱+假 agent）
+python3 tests/smoke_pan_sync.py                           # 百度网盘同步配置：配置/加密/打包/授权/推拉/冲突/备份/两台机器
+                                                     #（假开放平台：设备码、令牌、列目录、建目录、预上传、分片、合并、下载地址）
 python3 tests/smoke_utf8_truncation.py                    # 文件被截断在字符中间：轮次不崩/结果是合法 UTF-8
 python3 tests/smoke_invalid_utf8.py                       # 内容不是 UTF-8 的文件与命令输出：轮次不崩/字节被替换
 python3 tests/smoke_utf8_roundtrip.py                     # 往返：模型的坏字节不丢事件、压缩不切坏字符、落盘合法
@@ -179,6 +181,20 @@ IMAP 这一层是协议级的：`CAPABILITY` / `LOGIN` / `SELECT`（UIDVALIDITY�
 `UID FETCH`（literal）/ `UID STORE`（`X-GM-LABELS` 的加与减）/ `APPEND`（草稿）都真的走一遍，
 所以「标签贴没贴上、信有没有移出收件箱、草稿是不是同一线程的回复」按服务器的记录验。
 判读打的是**本地假 agent**，通知打的是**本地假 Telegram / webhook**。
+
+`tests/smoke_pan_sync.py` 覆盖百度网盘同步配置（网盘是一个**协议级的假服务器**，不动真网盘）：
+配置格式（注释、`|` 块、写错键带行号、文件名不得带路径）、加密（密文里没有明文、口令错就解不开、
+篡改一个字节就验过不过、不对的口令只说「口令不对」）、打包（往返、名字干净、校验对不上报错）、
+授权（设备码换令牌、令牌落盘 0600、过期用 refresh_token 续）、推（先传包再传清单、清单写的是谁推的）、
+拉（写之前先备份、文件是 0600）、冲突（**两边都改了就停手**，两边都不动；`--force` 才覆盖）、
+删除不传播（删了本地的，拉不会删别的机器那份）、两台机器（一台推、一台拉，拉完两边的 provider.yaml 一模一样）、
+命令行（`status` / `check` 真跑一下）、没口令就不推、**同步范围**：默认名单里没有
+workspaces.json、拉取只写白名单里的文件（名单外的跳过并报出来）、范围改小会重推一份、
+**发布产物**（`sched/pan_publish.py`）：传上去、清单里有 sha256/md5/分片数、5MB 的包
+按 4MB 切成 2 片、传上去的字节和本地一致、发布完能删掉。
+假服务器把开放平台的每一个接口都实现了：设备码、令牌、令牌刷新、用户信息、列目录、建目录（已存在返回 errno -8）、
+预上传、**问上传域名（locateupload —— 上传域名是动态的）**、分片上传（multipart，
+分片参数 path/uploadid/partseq/type 在查询串里、体里只有 file）、合并、下载地址（dlink）、下载。
 
 `tests/smoke_agent_doc.py` 覆盖工作区经验文件：打开工作区即生成带模板的 `agent.md` 与
 `scripts/`；每次模型请求的 system prompt 都带着它；`op=append` 落盘带日期并立刻出现在同一轮的

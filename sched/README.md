@@ -29,6 +29,8 @@ agent 完全不知道 Python 侧的存在。所以：
 | `fleet_server.py` | 机群控制面（HTTP，8290） | 想让 agent/机器人驱动机群 | [机群](#机群) |
 | `asr_server.py` | 语音转写侧车（OpenAI 兼容，8284） | 想用麦克风说话 | [语音转写](#语音转写) |
 | `mail_watch.py` | 邮件看门狗：收信 → 判读 → 归档/起草 → 只在该我参与时通知 | 想让邮箱自己整理、只在要紧时打扰你 | [邮件看门狗](#邮件看门狗watcher) |
+| `pan_sync.py` | 百度网盘同步配置：多台机器共用一份 provider.yaml（加密 + 冲突不覆盖） | 换机器不用重抄配置 | [配置同步](#配置同步百度网盘) |
+| `pan_publish.py` | 把发布产物传到百度网盘（4MB 分片 + 回读校验）—— 包不再提交到 git | 发版 | [配置同步](#配置同步百度网盘) |
 | `bili.py` | B 站观看历史 → 摘要 → 周报（自用） | 想看「我最近在看什么」 | [个人工具](#个人工具) |
 | `zhihu.py` | 知乎抓取/阅读/发回答（自用） | 想抓知乎内容或自动答题 | [个人工具](#个人工具) |
 | `browser_login.py` + `login_state.mjs` | 两个工具共用的登录入口 | 登录态过期了 | [个人工具](#个人工具) |
@@ -40,8 +42,8 @@ agent 完全不知道 Python 侧的存在。所以：
 
 **开发者/自用**（不随包发布，但都在这个仓库里）：
 `fleet.py`、`fleet_server.py`、`channel.py`、`telegram_bot.py`、`asr_server.py`、
-`mail_watch.py`、`mail-watch.template`、`bili.py`、`zhihu.py`、`browser_login.py`、
-`login_state.mjs`。
+`mail_watch.py`、`mail-watch.template`、`pan_sync.py`、`pan_publish.py`、`pan-sync.template`、
+`bili.py`、`zhihu.py`、`browser_login.py`、`login_state.mjs`。
 
 ---
 
@@ -179,6 +181,47 @@ python3 sched/mail_watch.py status            # 处理到哪儿了
 `~/.tea_agent/mail/digest/YYYY-MM-DD.md`。配置、Gmail 应用专用密码、systemd 单元、
 以及**怎么把同一套循环套到日历/RSS/Slack/工单**上，见
 [与其他应用对接](../docs/integrations.md)；测试是 `tests/smoke_mail_watch.py`。
+
+## 配置同步（百度网盘）
+
+`pan_sync.py` 让**多台机器共用一份配置**：provider.yaml、tea_agent.yaml、mcp.yaml
+这些「跟谁说话、怎么干活」的文件，打包、加密，传到百度网盘的一个固定目录；另一台机器
+再拉下来。**同步的是配置，不是历史、也不是清单** —— 会话记录、记忆、日志一律不同步；
+`workspaces.json`（工作区清单，里面是本机绝对路径）也不同步。
+
+```bash
+python3 sched/pan_sync.py auth                # 授权一次（给个网址 + 用户码）
+python3 sched/pan_sync.py check               # 配置 / 令牌 / 网盘通不通
+python3 sched/pan_sync.py status              # 本地和远端各是什么，有没有冲突
+python3 sched/pan_sync.py push                # 把本地配置推上去
+python3 sched/pan_sync.py pull                # 把远端配置拉下来
+python3 sched/pan_sync.py sync                # 先拉后推（日常用这个）
+python3 sched/pan_sync.py watch --interval 300
+```
+
+- **推上去之前先加密**：provider.yaml 里有 API key。口令用 PBKDF2 派生密钥，整包加密 +
+  HMAC 校验（encrypt-then-MAC）；没口令不推。
+- **两边都改了就停手**：远端比上次同步新、本地也改了 —— 谁覆盖谁都是猜，脚本不动任何
+  一边，把两边说清楚，让人来定（`--force` 才覆盖）。同步工具最忌讳默默覆盖。
+- **写之前先备份**：旧版本存进 `~/.tea_agent/pan-sync/backup/<时间戳>/`。
+- **删除不传播**：本地删了文件，远端的包里就没有它了；但拉取不会删掉别的机器上那份。
+- **只同步「配置」，不碰「清单」**：`workspaces.json` 是每台机器自己的（里面是本机的绝对
+  路径和会话计数），**不在默认名单里**；拉取时也只写名单里的文件，远端包里名单外的会被跳过。
+
+配置在 `~/.tea_agent/pan-sync/config`（模板 `sched/pan-sync.template`），令牌在
+`token.json`（0600），状态在 `state.json`。细节（百度网盘接口、加密做法、配额、坑）
+见 [百度网盘同步配置](../docs/pan-sync.md)；测试是 `tests/smoke_pan_sync.py`。
+
+**发布产物也走这里**（2026-10-30 起包不再提交到 git）：
+
+```bash
+python3 sched/pan_publish.py release/tea_a2-0.17.4.zip     # → /tea_a2/releases/0.17.4/
+```
+
+按 4MB 一片上传（分片数 = ceil(大小/4MB)，最后一片是余数，小文件走单片），传完**回读校验**
+sha256，远端留一份 `release-manifest.json`。`--keep 5` 让网盘上只留最新的 5 个发布包
+（按版本号排），`--list` 看现在有哪些版本。发版流程见
+[构建与跨平台编译](../docs/build.md#发版包传到百度网盘不进-git)。
 
 ## 个人工具
 

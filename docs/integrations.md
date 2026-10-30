@@ -232,6 +232,23 @@ def judge(item):                               # 也可以用 mail_watch.Judge �
 
 ---
 
+## 配置共享：多台机器（不是 watcher）
+
+watcher 处理的是「别人那边发生了事」。还有一件不同的事：**配置本身要共享**。
+provider.yaml 里有 API key、有模型顺序、有 peers 的令牌 —— 换一台机器就要重抄一遍，
+抄错一个 key 就是「这台机器的 agent 答不上来」。
+
+`sched/pan_sync.py` 用**百度网盘开放平台**做这件事：本地打包 → 加密 → 传到网盘的固定
+目录；另一台机器再拉下来。几条和 watcher 一样的取舍：
+
+- **只共享「跟谁说话、怎么干活」**，不共享会话记录、记忆、日志（那是每台机器自己的历史）；
+- **推上去之前先加密**（provider.yaml 里有 API key）；
+- **两边都改了就停手**，不默默覆盖 —— 覆盖了没人知道，是同步工具最糟的失败方式。
+
+细节（接口、加密做法、配额、坑）见 [百度网盘同步配置](pan-sync.md)。
+
+---
+
 ## 还缺什么
 
 诚实清单，按值得做的顺序：
@@ -255,7 +272,8 @@ def judge(item):                               # 也可以用 mail_watch.Judge �
 
 ```bash
 python3 tests/smoke_mail_watch.py     # 95 条：配置、解码、判定、动作、通知、书签、锁、digest
-python3 tests/smoke_py36.py           # mail_watch 也要能在 3.6 上跑（只标准库）
+python3 tests/smoke_pan_sync.py       # 97 条：配置、加密、打包、授权、推拉、冲突、备份、两台机器
+python3 tests/smoke_py36.py           # Python 侧也要能在 3.6 上跑（只标准库）
 ```
 
 测试里没有真邮箱（不该为了跑测试去动别人的收件箱），但 IMAP 这一层是**真的协议对话**：

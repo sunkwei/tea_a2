@@ -1079,3 +1079,119 @@ refresh token + Google Cloud 的 OAuth 客户端），入口在 `ImapSource.conn
 队列没有「只通知不干活」的记录类型（watcher 只好自己发通知，网页队列里看不到）；没有
 `watch.py` 基类（第二个源落地时再抽）；agent 侧没有 `callback_url`；Gmail 只有应用专用密码
 （Workspace 关了这条通道就得写 XOAUTH2）；回信之后没有标签闭环。
+
+## 百度网盘同步配置（2026-10-30）
+
+用户的需求：**多台机器共用一份 tea_a2 配置**。配置住在机器本地（`<tea_home>/provider.yaml`
+等），换机器就要重抄一遍，而 provider.yaml 里有 API key、模型顺序、peers 令牌。
+
+### 放在 Python 侧（`sched/pan_sync.py`）
+
+和任务队列、watcher 同一个理由：同步哪些文件、远端放哪、冲突了怎么办，都是**策略**，
+改一行配置就该生效，不该重新编译；而且同步挂了不影响本体。它不用 C++ 的 HTTP 栈，
+只用标准库（urllib / hashlib / hmac / zlib），所以能在没 pip 的机器上跑。
+
+### 百度网盘开放平台的要点（查文档 + 官方 MCP Server 的源码得来的）
+
+- 三种授权：**授权码 / 简化 / 设备码**。这里用**设备码**（`/oauth/2.0/device/code`）：
+  终端里不用粘 code，给个网址 + 用户码就行；`scope=basic,netdisk` 必填。
+- **access_token 30 天过期**；**refresh_token 只能用一次**，刷新响应里给的是**新的**
+  refresh_token —— 所以刷新后必须马上落盘（旧的那个已经废了）。
+- 上传是三步：`precreate`（拿 uploadid，rtype=3=覆盖）→ `superfile2` 传分片（4MB 一片，
+  multipart，字段名 `file`）→ `create`（isdir=0，合并）。少一步文件就是坏的。
+  **两个真机才发现的坑**（2026-10-30 联调）：①**上传域名是动态的** —— 官方文档明说「必须通过
+  获取上传域名接口获取，不要在生产代码中固定使用示例域名」；把 `superfile2` 打在
+  `pan.baidu.com` 上是 `HTTP 403 页面不存在`（网页前端的 404 页），要打在
+  `d.pcs.baidu.com`，更好是先问 `GET d.pcs.baidu.com/rest/2.0/pcs/file?method=locateupload
+  &appid=250528&access_token=…&path=…&uploadid=…&upload_version=2.0`（返回 host/servers）。
+  ②**分片参数的位置**：`path`/`uploadid`/`partseq`/`type` 都是**查询参数**，multipart 体里只有
+  `file`（官方 SDK 的 `location_map` 也是这么写的）。照文档写，别照别人的 SDK 抄。
+- 建目录也是 `create`（isdir=1），**目录已存在返回 errno -8**，当成功处理。
+- 下载：先 `filemetas`（`fsids` 是 JSON 数组，URL 编码，`dlink=1`）拿 dlink，再顺着 dlink
+  下载（dlink 里没有 access_token 要自己补）。
+- 错误码：鉴权类的 20016（过期）/ 20017（无效，要重新授权）/ -6（token 无效或 scope 不对）；
+  31034 = 风控要验证。errno != 0 一律当失败，不重试到死。
+- 官方还发了一个 MCP Server（`github.com/baidu-netdisk/mcp`，SSE 在
+  `https://mcp-pan.baidu.com/sse`）—— 要更细的网盘能力（分享、转存、搜索）接它更划算。
+- **文档说 precreate「仅支持访问 /apps/{appname} 目录下的文件」**，但官方 MCP Server 传的是
+  普通目录（`/来自：mcp_server`）—— 所以普通目录大概率能用。真账号上如果不行，把
+  `remote_dir` 改成 `/apps/<应用名>/tea_a2`。
+
+### 三个刻意的取舍
+
+- **只同步配置，不同步历史、也不同步清单**。provider.yaml / tea_agent.yaml / mcp.yaml 同步；
+  会话记录、记忆、日志不同步（每台机器自己的历史）；**`workspaces.json` 也不同步** ——
+  它是**工作区清单**，里面是本机的绝对路径（`/home/sunkw/...`）和会话计数，搬到另一台上
+  （Windows 那台的路径是 `C:\...`）会把它的清单覆盖成一堆不存在的路径。
+  **拉取时只写 `files:` 白名单里的文件**：远端包里名单外的（比如上一版留下的
+  workspaces.json）跳过并报出来，不写进 tea home；范围改了（少一个文件）会重推一份，
+  远端包里不留旧文件。
+- **推之前先加密**。provider.yaml 里有 API key，明文躺在网盘里等于把钥匙挂在门上。
+  口令 → PBKDF2-HMAC-SHA256（200000 轮 + 16 字节随机盐）→ 64 字节密钥 →
+  HMAC-SHA256 当伪随机流做计数器模式加密 → encrypt-then-MAC（标签覆盖 magic+盐+随机数+密文）。
+  没口令不推（`allow_plain: yes` 才明文）。
+- **两边都改了就不动手**。远端比上次同步新、本地也改了 —— 谁覆盖谁都是猜。判据是三样：
+  本地每个文件的 sha256、远端清单（谁在什么时候推的）、本地 state.json（上次两边什么样）。
+  冲突时两边都不动，把话说清楚，`--force` 才覆盖。**默默覆盖是同步工具最糟的失败方式。**
+  另外：拉之前先备份到 `~/.tea_agent/pan-sync/backup/<时间戳>/`；删除不传播（拉取不会删
+  别的机器上的文件）；顺序永远先拉后推。
+
+### 测试怎么钉（`tests/smoke_pan_sync.py`，97 条）
+
+- **假开放平台是协议级的**：设备码、换令牌、刷新、用户信息、列目录、建目录（已存在返 -8）、
+  预上传、分片上传（multipart 要自己解析）、合并、filemetas 拿 dlink、下载，一个不落地实现。
+  协议写错（比如把 `isdir` 当 1/0 传反）在测试里就会露。
+- 钉住的是：配置格式（写错键带行号）、加密（密文里没有明文、口令错解不开、篡改一个字节
+  验不过）、打包（名字不许带路径、校验对不上要报错）、授权（令牌 0600、过期会刷新）、
+  推拉、**冲突不动手**、`--force` 才覆盖、备份、删除不传播、两台机器拉到同一份、
+  **新机器第一次拉**（不该被「冲突」挡住，但本地那份要先备份）、**本地有远端没有的文件**
+  （下一次 push 要把它带上去 —— 少了这条它永远传不上去）、**同步范围**：默认名单里没有
+  workspaces.json、拉取只写白名单里的文件（名单外的跳过并报出来）、范围改小要重推一份。
+- 陷阱：`Syncer` 的状态文件是**每台机器一份**（`home` 参数），不是每个网盘账号一份 ——
+  一开始写成全局的，测试里两台机器共用一个 state，冲突永远测不出来。
+
+### 发版：包传到百度网盘，不进 git（2026-10-30 起）
+
+**发布产物（zip）不再提交到 git。** 仓库只留源码和文档；每一版的包传到网盘的
+`/tea_a2/releases/<版本>/`，远端留一份 `release-manifest.json`。理由很直白：每版一个
+6~40MB 的二进制塞在版本库里，clone 变慢、`git log` 变成噪声，而源码和产物混在一起，
+回头想「这版到底发了什么」都不好翻。
+
+```bash
+.tea_agent_run/scripts/release.sh 0.17.4                      # 打包 + 上传 + 清理旧版本，一步到位
+git add -A && git commit -m "release: 0.17.4"                 # **不**提交 release/*.zip
+```
+
+`release.sh` 是这台机器上的流程（`.tea_agent_run/scripts/`，不进 git）：打包 → 传到
+`/tea_a2/releases/<版本>/` → **网盘上只留最新的 5 个发布包**（按版本号排，`0.17.10` 比
+`0.17.3` 新；像版本号的目录才算发布目录，手工建的目录不碰）。
+
+- `.gitignore` 加了 `release/*.zip` 和 `release/tmp/`；旧的那一版 zip 已经
+  `git rm --cached`（文件还在本地，也还在网盘上）。
+- **4MB 分片**：百度网盘的上传接口按 4MB 一片传（`partseq` 是片号，`block_list` 给每片
+  md5）。分片数 = `ceil(大小 / 4MB)`，整 4MB 一片、最后一片是余数；**小于 4MB 的文件走
+  单片**（官方文档那条「首片不得小于 4MB」说的是「非最后一片」；官方 MCP Server 的
+  小文件分支也是单片）。实测：6.6MB = 2 片、12MB = 3 片，回读校验都对。
+- **回读校验**：传完把网盘上的文件下下来比对 sha256 —— 发版的东西不能只看「上传成功」。
+- 清理旧版本：`PanClient.delete_path()`（`opera=delete` 在**查询串**里，`filelist` 是
+  路径的 JSON 数组在表单里；照表单发会 errno=2）。删目录要连里面的东西一起删（先删目录，
+  再删残留，再删目录）。
+- 看网盘上有哪些版本：`python3 sched/pan_publish.py --list`。
+
+### 现状：对着真账号跑通了（2026-10-30）
+
+授权（设备码，扫码）→ 推送 → 远端目录 `/tea_a2/default` 里出现 `config.tea`（加密，2146 字节，
+明文里搜不到 API key）+ `manifest.json`（明文清单）→ 另一台机器（空 tea home）拉下来，
+两边的 provider.yaml sha256 完全一样 → 冲突检测也验过（两边都改 → 停手，两边都不动）。
+
+**普通目录能用**：文档说 precreate「仅支持访问 /apps/{appname} 目录下的文件」，实测
+`/tea_a2/default` 下建目录、上传、下载都正常，不用绕到 `/apps/`。
+
+还没验的：令牌 30 天过期后的自动刷新（真账号上要等 30 天）、配额上限、多账号多组、
+大文件（>4MB 的分片）——配置包才 2KB，真实场景里 provider.yaml 也只有几 KB。
+
+### 还缺的
+
+没有「远端更新了就通知我」——现在只有 `watch` 的日志；要通知就把它挂到 watcher 那套出口上。
+没有多账号（一个网盘账号只能同步一个 profile，要多组就多账号或者改远端目录）。
+没有同步「工作区的 `.tea_agent_run/settings.yaml`」（工作区路径各机器不同，没做映射）。

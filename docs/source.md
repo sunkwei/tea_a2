@@ -57,6 +57,9 @@ sched/fleet.py               机群引擎（Python，可选）：设备台账 + 
 sched/fleet_server.py        机群管控服务（Python，可选）：把上面的引擎变成 HTTP API，
                               供服务器级 a2（toolkit_fleet）、机器人和定时任务调用
 sched/tea_api.py            HTTP 客户端封装（纯标准库）：Tea 说 agent，Queue 说任务队列
+sched/pan_sync.py           百度网盘同步配置（Python，可选）：加密后传到网盘，多台机器共用
+                              一份 provider.yaml；两边都改了就停手（不默默覆盖）
+sched/pan-sync.template     pan_sync.py 的配置模板（应用凭证 + 加密口令 + 同步范围）
 sched/wechat_bot.py          微信那一端：iLink 协议（扫码登录、长轮询、CDN 媒体）
 sched/telegram_bot.py        Telegram 那一端：Bot API（长轮询、getFile/sendDocument、chat 白名单）
 CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
@@ -79,7 +82,7 @@ commit 则是**构建期元数据**，它既不在源码里、也不在二进制
 
 ```
 # tea_agent.buildinfo（与二进制放在一起）
-version=0.17.3
+version=0.17.4
 commit=678cd2c1f014        # 工作区有未提交改动时是 <hash>-dirty
 ```
 
