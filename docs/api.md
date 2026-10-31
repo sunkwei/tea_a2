@@ -19,8 +19,8 @@
 | `POST` | `/api/peer/exec` | **对端通道**：`/api/exec` 的令牌版镜像 |
 | `GET` | `/api/peer/tools` | **对端通道**：对端有哪些工具（能力探测） |
 | `GET` | `/api/peer/workspaces` | **对端通道**：对端的工作区 |
-| `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`） |
-| `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}` |
+| `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`）。每条带 `writable`（这个工作区进程**能不能写**）与 `write_error`（不能写的原因，带着操作系统自己的话） |
+| `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}`（可加 `"create":true` 让服务端先把目录建出来）。回答里带 `warning` 就说明工作区写不进去、或者索引 `workspaces.json` 没写成功（重启后这条登记就没了） |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
 | `GET` | `/api/workspaces/{id}/search?q=` | **在工作区里搜东西**：文件名 + 文件内容。查询串按原样逐字节比较（**不做正则/模糊匹配**）。`scope=name\|content\|both`（默认 both）、`exact=1`（完全匹配：路径整串相等 / 整行相等）、`case=1`（区分大小写）、`path=`（只搜这个子目录）、`limit=`（最多几条，默认 100） |
 | `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件。`GET` 的回答里除了 `path` / `size` / `truncated` / `content`，还有 `binary`：文件里头 8 KB 有 NUL 字节就是 true（预览页据此说「预览不了」而不是显示一屏乱码） |
@@ -63,6 +63,33 @@
 | `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
+
+### 工作区：能不能写进去
+
+一个工作区**能读**不等于**能用**：会话文件、日志、记忆都写在 `<工作区>/.tea_agent_run/`
+里。进程被沙箱框住（只允许写某一个目录）、目录在只读挂载上、或者 ACL 里有拒绝项时，路径
+在、内容读得到，但会话写不进去——这种工作区在列表里会标出来，而不是等到第一次发消息
+才炸：
+
+```bash
+curl -s http://127.0.0.1:8282/api/workspaces | jq '.workspaces[] | {name, writable, write_error}'
+# {"name":"proj","writable":true}
+# {"name":"locked","writable":false,"write_error":"cannot create /srv/locked/.tea_agent_run: Windows error 5: 拒绝访问。"}
+```
+
+- `writable`：服务端**真的写了一次**（在 `.tea_agent_run` 里建目录、试写一个临时文件）才知道，
+  所以它不猜；
+- `write_error`：不能写的原因，带着操作系统自己的话（`Access is denied` / `拒绝访问`）。
+
+`POST /api/workspaces` 的回答里如果带 `warning`，说的是同一件事的两面：
+
+| `warning` 里的内容 | 意思 |
+| --- | --- |
+| `the workspace cannot be written to: …` | 工作区登记成功了，但**写不进去**：里面的会话都会失败 |
+| `the workspace index could not be saved (…)` | 索引 `workspaces.json` **没写成功**：这次登记**重启后就没了** |
+
+回归：`python tests/smoke_workspace_writable.py`（6 项）、
+`python tests/smoke_workspace_add_warning.py`（13 项）。
 
 ## 机器对机器的通道（级联：一台 a2 控制另一台）
 

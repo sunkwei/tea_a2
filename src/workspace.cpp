@@ -64,6 +64,34 @@ nlohmann::json read_json_file(const std::string& path, bool* ok) {
   }
 }
 
+/// Can the process really write into this workspace? A real write, because
+/// "readable" and "usable" are different things here: the sessions, the log
+/// and the memory all live in `<workspace>/.tea_agent_run/`. A sandbox, a
+/// read-only mount or a deny ACE leaves the project readable and the
+/// workspace unusable, and the only honest way to know is to try.
+///
+/// The probe writes into the run directory (the agent's own space), never
+/// into the project tree, and takes the file away again.
+bool probe_writable(const std::string& run_dir, std::string* err) {
+  std::string reason;
+  if (!make_dirs(run_dir, &reason)) {
+    if (err) *err = "cannot create " + run_dir + (reason.empty() ? "" : ": " + reason);
+    return false;
+  }
+  std::string stamp = now_iso8601();
+  for (std::size_t i = 0; i < stamp.size(); ++i) {
+    if (stamp[i] == ':') stamp[i] = '-';
+  }
+  const std::string probe = path_join(run_dir, ".tea_agent_write_probe-" + stamp);
+  std::string write_err;
+  if (!write_file(probe, "probe\n", false, &write_err)) {
+    if (err) *err = write_err.empty() ? ("cannot write into " + run_dir) : write_err;
+    return false;
+  }
+  remove_path(probe, false, nullptr);
+  return true;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -80,6 +108,8 @@ nlohmann::json WorkspaceEntry::to_json() const {
   if (!last_session_id.empty()) j["last_session_id"] = last_session_id;
   j["exists"] = exists;
   j["sessions"] = sessions;
+  j["writable"] = writable;
+  if (!write_error.empty()) j["write_error"] = write_error;
   return j;
 }
 
@@ -100,6 +130,12 @@ WorkspaceEntry WorkspaceEntry::from_json(const nlohmann::json& j) {
   e.last_session_id = str_of("last_session_id");
   e.exists = path_is_dir(e.path);
   if (e.run_dir.empty() && !e.path.empty()) e.run_dir = path_join(e.path, kRunDirName);
+  // The flags on disk are only a cache: refresh_flags() re-probes them, so a
+  // workspace that was read-only yesterday and is writable today is reported
+  // as writable.
+  auto writable_it = j.find("writable");
+  if (writable_it != j.end() && writable_it->is_boolean()) e.writable = writable_it->get<bool>();
+  e.write_error = str_of("write_error");
   return e;
 }
 
@@ -151,7 +187,16 @@ bool WorkspaceRegistry::save(std::string* err) const {
   root["workspaces"] = list;
   const std::string parent = path_parent(index_path_);
   if (!parent.empty()) make_dirs(parent);
-  return write_file_atomic(index_path_, dump_json(root, 2) + "\n", err);
+  std::string write_err;
+  if (!write_file_atomic(index_path_, dump_json(root, 2) + "\n", &write_err)) {
+    // Remember it: the caller has to tell the user that the registration is
+    // not on disk, because it is gone after a restart.
+    last_save_error_ = write_err;
+    if (err) *err = write_err;
+    return false;
+  }
+  last_save_error_.clear();
+  return true;
 }
 
 void WorkspaceRegistry::refresh_flags() {
@@ -159,6 +204,19 @@ void WorkspaceRegistry::refresh_flags() {
     WorkspaceEntry& e = entries_[i];
     e.exists = path_is_dir(e.path);
     if (e.run_dir.empty()) e.run_dir = path_join(e.path, kRunDirName);
+    e.writable = true;
+    e.write_error.clear();
+    if (!e.exists) {
+      e.writable = false;
+      e.write_error = "workspace directory does not exist: " + e.path;
+    } else {
+      // A real write, so the answer is the truth and not a guess.
+      std::string reason;
+      if (!probe_writable(e.run_dir, &reason)) {
+        e.writable = false;
+        e.write_error = reason;
+      }
+    }
     e.sessions = 0;
     const std::string sessions_dir = path_join(e.run_dir, "sessions");
     if (path_is_dir(sessions_dir)) {
@@ -309,8 +367,11 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
   dirs.push_back(scripts_dir());
   for (std::size_t i = 0; i < dirs.size(); ++i) {
     if (dirs[i].empty()) continue;
-    if (!make_dirs(dirs[i])) {
-      if (err) *err = "cannot create " + dirs[i];
+    std::string reason;
+    if (!make_dirs(dirs[i], &reason)) {
+      // The OS reason travels with the message: "Access is denied" points at
+      // the sandbox or the read-only mount, a bare path does not.
+      if (err) *err = "cannot create " + dirs[i] + (reason.empty() ? "" : ": " + reason);
       return false;
     }
   }

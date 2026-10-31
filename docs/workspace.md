@@ -119,6 +119,33 @@ bool write_file_atomic(const std::string& path, const std::string& data, std::st
 - 保存空白（或与默认完全相同的文本）同样等于「没有覆盖」，不会把今天的默认值钉死在
   工作区里。
 
+### 只读的工作区：路径在，写不进去
+
+工作区**能读**不等于**能用**：会话、日志、记忆都在 `<工作区>/.tea_agent_run/` 里。进程
+被沙箱框住（只允许写某一个目录）、目录在只读挂载上、或者 ACL 里有拒绝项时，路径在、
+内容读得到，但会话写不进去。
+
+这种工作区在列表里会标出来（下拉里那一行写「只读」，悬停能看到原因）：
+
+```bash
+curl -s http://127.0.0.1:8282/api/workspaces | jq '.workspaces[] | {name, writable, write_error}'
+# {"name":"proj","writable":true}
+# {"name":"locked","writable":false,"write_error":"cannot create /srv/locked/.tea_agent_run: Windows error 5: 拒绝访问。"}
+```
+
+`writable` 是**真的写了一次**才知道的（在 `.tea_agent_run` 里建目录、试写一个临时文件），
+不是猜的；`write_error` 带着操作系统自己的话。
+
+添加工作区时如果写不进去，这条登记**照样加上**（路径本身是对的），但回答里带 `warning`，
+把两件「以后才会出事」的事当场说清楚：
+
+- `the workspace cannot be written to: …`：工作区登记成功，但里面的会话都会失败；
+- `the workspace index could not be saved (…)`：索引 `workspaces.json` 没写成功，
+  **这次登记重启后就没了**——换个能写的目录、或者给进程写权限，再重新添加一次。
+
+回归：`python tests/smoke_workspace_writable.py`（6 项）、
+`python tests/smoke_workspace_add_warning.py`（13 项）。
+
 ### 合并两个工作区：把一份 `.tea_agent_run` 并进另一份
 
 工作区搬家（换机器、换盘），或者两台机器各干了一半想把历史收到一处时，**不能直接拷目录**：
@@ -214,7 +241,7 @@ curl -s -X POST http://127.0.0.1:8282/api/destroy   -H 'Content-Type: applicatio
 | 文件 | 用途 |
 | --- | --- |
 | `provider.yaml` | provider / 模型 / api_key（只读） |
-| `workspaces.json` | 工作区索引：id、名称、路径、创建/最近使用时间、会话数 |
+| `workspaces.json` | 工作区索引：id、名称、路径、创建/最近使用时间、会话数（也记着上次的可写标记，启动时会重新探测） |
 | `logs/tea_agent.log` | 全局日志（>8MB 自动轮转） |
 | `tea_agent.yaml` | 可选，C++ 版专属 settings 覆盖 |
 

@@ -126,14 +126,17 @@ std::wstring win_path(const std::string& utf8) {
 }
 
 std::string win_error_text(DWORD code) {
-  char message[256];
-  message[0] = '\0';
-  const DWORD n = FormatMessageA(
+  // FormatMessageW, not the A variant: the A one hands back bytes in the
+  // system ANSI code page (GBK on a Chinese Windows), and the whole program
+  // speaks UTF-8 - the reason would arrive as "??????" instead of text.
+  wchar_t message[256];
+  message[0] = L'\0';
+  const DWORD n = FormatMessageW(
       FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, code,
-      MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), message, sizeof(message) - 1, nullptr);
+      MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), message, 255, nullptr);
   std::string detail;
   if (n > 0) {
-    detail = trim(std::string(message, n));
+    detail = trim(wide_to_utf8(std::wstring(message, n)));
   }
   char buffer[512];
   if (detail.empty()) {
@@ -350,25 +353,45 @@ bool path_is_file(const std::string& p) {
 #endif
 }
 
-bool make_dirs(const std::string& p) {
-  if (p.empty()) return false;
+bool make_dirs(const std::string& p) { return make_dirs(p, nullptr); }
+
+bool make_dirs(const std::string& p, std::string* err) {
+  if (p.empty()) {
+    if (err) *err = "the path is empty";
+    return false;
+  }
   if (path_is_dir(p)) return true;
 #ifdef _WIN32
   if (CreateDirectoryW(win_path(p).c_str(), nullptr)) return true;
-  const DWORD err = GetLastError();
-  if (err == ERROR_ALREADY_EXISTS) return true;
+  DWORD code = GetLastError();
+  if (code == ERROR_ALREADY_EXISTS) return true;
   const std::string parent = path_parent(p);
-  if (parent.empty() || parent == p) return false;
-  if (!path_is_dir(parent) && !make_dirs(parent)) return false;
+  if (parent.empty() || parent == p) {
+    if (err) *err = win_error_text(code);
+    return false;
+  }
+  if (!path_is_dir(parent) && !make_dirs(parent, err)) return false;
   if (CreateDirectoryW(win_path(p).c_str(), nullptr)) return true;
-  return GetLastError() == ERROR_ALREADY_EXISTS;
+  code = GetLastError();
+  if (code == ERROR_ALREADY_EXISTS) return true;
+  // The reason is the useful half of the message: "Access is denied" (a
+  // sandbox, a read-only mount, a deny ACE) is a different problem from a
+  // path that does not exist.
+  if (err) *err = win_error_text(code);
+  return false;
 #else
   if (::mkdir(p.c_str(), 0777) == 0) return true;
   if (errno == EEXIST) return path_is_dir(p);
+  const int code = errno;
   const std::string parent = path_parent(p);
-  if (parent.empty() || parent == p) return false;
-  if (!path_is_dir(parent) && !make_dirs(parent)) return false;
-  return ::mkdir(p.c_str(), 0777) == 0;
+  if (parent.empty() || parent == p) {
+    if (err) *err = std::strerror(code);
+    return false;
+  }
+  if (!path_is_dir(parent) && !make_dirs(parent, err)) return false;
+  if (::mkdir(p.c_str(), 0777) == 0) return true;
+  if (err) *err = std::strerror(errno);
+  return false;
 #endif
 }
 
@@ -643,8 +666,12 @@ bool write_file_atomic(const std::string& path, const std::string& data, std::st
 
   // The temporary file lives next to the target on purpose: rename is only
   // atomic within one filesystem, and %TEMP% frequently is a different one.
-  if (!write_file(tmp, data, false, nullptr)) {
-    if (err) *err = "cannot write " + tmp;
+  // The reason the write failed is the useful half of the message: "Access is
+  // denied" says the process may not write there (a sandbox, a read-only
+  // mount, a deny ACE), which a bare "cannot write <path>" hides.
+  std::string write_err;
+  if (!write_file(tmp, data, false, &write_err)) {
+    if (err) *err = write_err.empty() ? ("cannot write " + tmp) : write_err;
     return false;
   }
   // Replace-on-rename: a reader sees either the previous complete file or the new
@@ -663,8 +690,12 @@ bool write_file(const std::string& path, const std::string& data, bool append, s
     return false;
   }
   const std::string parent = path_parent(path);
-  if (!parent.empty() && !make_dirs(parent)) {
-    if (err) *err = "cannot create directory: " + parent;
+  std::string dir_err;
+  if (!parent.empty() && !make_dirs(parent, &dir_err)) {
+    if (err) {
+      *err = "cannot create directory: " + parent +
+             (dir_err.empty() ? "" : " (" + dir_err + ")");
+    }
     return false;
   }
 
@@ -828,8 +859,12 @@ bool remove_path(const std::string& path, bool recursive, std::string* err) {
 
 bool move_path(const std::string& from, const std::string& to, std::string* err) {
   const std::string parent = path_parent(to);
-  if (!parent.empty() && !make_dirs(parent)) {
-    if (err) *err = "cannot create directory: " + parent;
+  std::string dir_err;
+  if (!parent.empty() && !make_dirs(parent, &dir_err)) {
+    if (err) {
+      *err = "cannot create directory: " + parent +
+             (dir_err.empty() ? "" : " (" + dir_err + ")");
+    }
     return false;
   }
 #ifdef _WIN32

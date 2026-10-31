@@ -209,11 +209,13 @@
     return fmtTime(iso).slice(0, 10);
   }
   var toastTimer = null;
-  function toast(msg) {
+  // ms：默认 2.2 秒。要紧的话（工作区写不进去、索引没保存）留久一点，
+  // 不然它一闪而过，等用户看清已经没了。
+  function toast(msg, ms) {
     var t = $('toast');
     t.textContent = msg; t.classList.remove('hidden');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { t.classList.add('hidden'); }, 2200);
+    toastTimer = setTimeout(function () { t.classList.add('hidden'); }, ms || 2200);
   }
   function legacyCopy(text) {
     try {
@@ -3094,7 +3096,10 @@
   }
   function renderWorkspaceChip() {
     $('ws-chip-text').textContent = state.workspace ? state.workspace.name : '选择工作区';
-    $('ws-chip').title = state.workspace ? state.workspace.path : '';
+    $('ws-chip').title = state.workspace
+      ? (state.workspace.path + (state.workspace.writable === false && state.workspace.write_error
+          ? '（只读：' + state.workspace.write_error + '）' : ''))
+      : '';
     updateTitle();
     // 面包屑曾经只在 showView() 里刷新，于是启动时（工作区/会话还没加载）画出来的
     // 「无工作区 / 新会话」会一直留着。工作区变了就重画，和标签页标题同一个时机。
@@ -3113,7 +3118,12 @@
         // 正在跟随一轮时切工作区：先离开（服务端照跑），别拦着人。
         if (!state.workspace || state.workspace.id !== w.id) selectWorkspace(w.id);
       });
-      it.appendChild(el('span', 'sub', w.exists === false ? '路径不存在' : (w.sessions || 0) + ' 会话'));
+      // 只读的工作区要标出来：路径在、能读，但会话文件写不进去。等到发消息
+      // 失败才看到报错，用户只会以为「程序坏了」。
+      var sub = w.exists === false ? '路径不存在'
+              : (w.writable === false ? '只读' : (w.sessions || 0) + ' 会话');
+      it.appendChild(el('span', 'sub', sub));
+      if (w.writable === false && w.write_error) it.title = w.write_error;
       row.appendChild(it);
       var del = btn('dd-del', '✕', function (e) {
         e.stopPropagation();
@@ -3947,6 +3957,10 @@
     return api('api/workspaces', { method: 'POST', body: { path: path, name: name, create: !!create } })
       .then(function (entry) {
         toast('已添加工作区：' + (entry && entry.name ? entry.name : name));
+        // 服务端在这里说出两件「以后才会出事」的事：工作区写不进去（沙箱、
+        // 只读挂载），或者索引写不进去（重启后这条登记就没了）。别让它淹没
+        // 在上面那条一闪而过的提示里。
+        if (entry && entry.warning) toast(entry.warning, 9000);
         return loadWorkspaces().then(function () {
           if (entry && entry.id) return selectWorkspace(entry.id);
         });

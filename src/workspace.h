@@ -27,6 +27,14 @@ struct WorkspaceEntry {
   bool exists = false;
   int sessions = 0;
   std::string run_dir;
+  /// Can the process really write into this workspace? A workspace can be
+  /// perfectly readable and still unusable: a sandbox (or a read-only mount,
+  /// or a deny ACE) lets the agent read the project but not create the
+  /// session files in `<workspace>/.tea_agent_run/`. The list says so up
+  /// front instead of failing on the first request with a raw OS error.
+  bool writable = true;
+  /// Why it is not writable (empty when it is). Shown to the user verbatim.
+  std::string write_error;
 
   nlohmann::json to_json() const;
   static WorkspaceEntry from_json(const nlohmann::json& j);
@@ -144,9 +152,16 @@ class WorkspaceRegistry {
   std::string index_path() const { return index_path_; }
   void refresh_flags();
 
+  /// The last failure of save(): the index could not be written. Empty when
+  /// the last save worked. A workspace that is not in the index does not
+  /// survive a restart, so the HTTP layer reports this instead of quietly
+  /// losing the registration.
+  const std::string& last_save_error() const { return last_save_error_; }
+
  private:
   std::string index_path_;
   std::vector<WorkspaceEntry> entries_;
+  mutable std::string last_save_error_;
 };
 
 class Workspace {

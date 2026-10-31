@@ -2633,7 +2633,25 @@ void ApiServer::Impl::install_routes() {
       if (!ws.open(*entry, config->settings, &open_err)) {
         LOG_WARN("workspace: ", open_err);
       }
-      send_json(res, entry->to_json());
+      nlohmann::json out = entry->to_json();
+      // Two things can go wrong that do not show up on their own later, so
+      // they are reported here, where the user is looking:
+      //   * the workspace cannot be written to (a sandbox, a read-only mount):
+      //     every session in it would fail;
+      //   * the index could not be written: the registration is gone after
+      //     the next restart.
+      std::string warning;
+      if (!entry->writable && !entry->write_error.empty()) {
+        warning = "the workspace cannot be written to: " + entry->write_error;
+      }
+      if (!registry->last_save_error().empty()) {
+        if (!warning.empty()) warning += "; ";
+        warning += "the workspace index could not be saved (" + registry->index_path() +
+                   "): " + registry->last_save_error() +
+                   " - the registration is lost when the app restarts";
+      }
+      if (!warning.empty()) out["warning"] = warning;
+      send_json(res, out);
     }
   });
 

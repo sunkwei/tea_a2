@@ -82,8 +82,10 @@ bash scripts/test-all.sh                                  # 整套测试：并�
 python3 tests/smoke_agent_doc.py                          # 工作区经验 agent.md：注入/写入/上限
 python3 tests/smoke_system_prompt.py                      # 工作区 system prompt：读写/下一轮生效/上限
 python3 tests/smoke_workspace_search.py                 # 工作区搜索：文件名/内容/完全匹配/不越界/工具那一半
+python3 tests/smoke_workspace_writable.py               # 只读工作区：列表里说得出「写不进去」和原因
+python3 tests/smoke_workspace_add_warning.py           # 添加工作区：写不进去 / 索引没保存，都要当场说
 python3 tests/smoke_history_search.py                  # 历史搜索：对话/轨迹/标题/完全匹配/不跨工作区/工具那一半
-node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建
+node tests/ui_workspace_add.mjs                           # 新增工作区：完整路径 + 就地提示 + 创建 + 只读标记
 node tests/ui_workspace_delete.mjs                       # 删除工作区：确认框 + 只摘登记，文件不动（需 google-chrome）
 node tests/ui_workspace_access.mjs                        # 文件访问范围开关：受限 / 全局 / 命令行锁死（需 google-chrome）
 node tests/smoke_turn_resume.mjs                          # 断线不取消轮次：回放 / 续播 / stop 仍然有效
@@ -220,6 +222,14 @@ Esc 回到普通会话列表，搜索框同时清空。
 搜不到工作区外面的文件、`path=` 只搜指定子目录、缺 `q` 与未知 `scope` 报 400、未知工作区 404；
 最后用一轮真对话确认 `toolkit_workspace_search` 工具跑得起来、结果里带着命中行号，而且这个工具
 确实出现在给模型的工具表里。
+
+`tests/smoke_workspace_writable.py` 覆盖「工作区读得到、写不进去」：列表里每个工作区都带
+`writable`；普通工作区是 true（而且真的能建会话），被 ACL 拒绝写的工作区是 false，并给出
+`write_error`（带着操作系统自己的话）。
+
+`tests/smoke_workspace_add_warning.py` 覆盖添加工作区时的两声提醒：写不进去的工作区照样登记，
+但回答里的 `warning` 说得出「写不进去」；索引（`workspaces.json`）写不成功时，`warning` 点名
+那个文件并说明「重启后这条登记就没了」，而磁盘上确实没有那个索引文件。
 
 `tests/ui_workspace_search.mjs` 在浏览器里操作文件页的搜索框：框、范围下拉、完全匹配开关、
 「返回目录」都在；搜内容出结果并显示命中行；点结果能打开那个文件；完全匹配下 `main` 不匹配

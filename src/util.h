@@ -115,6 +115,10 @@ bool path_exists(const std::string& p);
 bool path_is_dir(const std::string& p);
 bool path_is_file(const std::string& p);
 bool make_dirs(const std::string& p);
+/// Same, but reports *why* it failed: `err` gets the OS reason ("Access is
+/// denied"). A bare "cannot create <path>" hides the difference between a
+/// missing parent and a directory the process may not write to.
+bool make_dirs(const std::string& p, std::string* err);
 bool path_is_within(const std::string& child, const std::string& parent);
 uint64_t file_size(const std::string& p);
 std::string file_mtime_iso(const std::string& p);

@@ -10,7 +10,7 @@
 //   node tests/ui_workspace_add.mjs [path-to-tea_agent-binary]
 //
 // Requires google-chrome (or CHROME_BIN) and node >= 18.
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
@@ -262,6 +262,38 @@ try {
   check('the rejected relative path was not created', !fs.existsSync(path.join(tmp, 'proj_rel')));
   const abs = await postJson(agentPort, '/api/workspaces', { path: path.join(tmp, 'proj_a'), name: 'a' });
   check('POST /api/workspaces still accepts a full path', abs.status === 200, 'HTTP ' + abs.status);
+
+  // ---- 10) a workspace the process cannot write to says so -------------
+  // The agent cannot write into the workspace (a sandbox, a read-only mount,
+  // a deny ACE): the path is there and readable, but every session in it
+  // would fail. The list has to say so instead of failing on the first
+  // request.
+  const locked = path.join(tmp, 'locked');
+  fs.mkdirSync(locked, { recursive: true });
+  const account = process.env.USERDOMAIN + '\\' + process.env.USERNAME;
+  const icacls = (dir, args) => {
+    try { execFileSync('icacls', [dir].concat(args), { stdio: 'ignore' }); } catch {}
+  };
+  icacls(locked, ['/deny', account + ':(OI)(CI)(W)']);
+  const ro = await postJson(agentPort, '/api/workspaces', { path: locked, name: 'locked' });
+  const roBody = JSON.parse(ro.body || '{}');
+  check('a read-only workspace is added', ro.status === 200, 'HTTP ' + ro.status);
+  check('the response says it is not writable', roBody.writable === false, ro.body.slice(0, 200));
+  check('the response explains why', !!roBody.write_error, ro.body.slice(0, 200));
+  check('the response warns about it',
+    !!(roBody.warning && roBody.warning.indexOf('cannot be written to') >= 0), roBody.warning);
+  // Reload, so the menu is drawn from the fresh list.
+  await send('Page.navigate', { url: `http://127.0.0.1:${agentPort}/` });
+  await sleep(1600);
+  const roMenu = await evalJs(`(function(){
+    document.getElementById('ws-chip').click();
+    var d = document.getElementById('ws-dropdown');
+    return Array.from(d.children).map(function (c) { return c.textContent.trim(); });
+  })()`);
+  check('the menu marks the read-only workspace',
+    (roMenu || []).some((t) => t.indexOf('只读') >= 0), (roMenu || []).join(' | '));
+  await evalJs(`document.getElementById('ws-chip').click(); true`);
+  icacls(locked, ['/remove:d', account]);   // take the deny away again
 } catch (e) {
   console.error('harness error:', e.message);
   results.push({ name: 'harness', ok: false });
