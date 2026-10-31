@@ -144,7 +144,28 @@ curl -s http://127.0.0.1:8282/api/workspaces | jq '.workspaces[] | {name, writab
   **这次登记重启后就没了**——换个能写的目录、或者给进程写权限，再重新添加一次。
 
 回归：`python tests/smoke_workspace_writable.py`（6 项）、
-`python tests/smoke_workspace_add_warning.py`（13 项）。
+`python tests/smoke_workspace_add_warning.py`（16 项）。
+
+### tea home 写不进去：启动时就说
+
+家目录是用户自己的，进程理应能往里写。但**沙箱**（或者低完整性级别的进程）会拦下来：
+ACL 看着是「完全控制」，Windows 的强制性完整性控制却不许低完整性进程写高完整性对象，
+报错是 `Windows error 5: 拒绝访问`。这种情况以前只有日志里一句 WARN，界面上完全看不出来。
+
+现在启动时就会检查一次，并在横幅和控制台里直说：
+
+```
+warning: the tea home is not writable: C:\Users\Hetin\.tea_agent
+         (cannot open for writing: ... (Windows error 5: 拒绝访问。))
+         the workspace index and the global log cannot be written;
+         point --tea-home at a writable directory, or start the agent
+         with normal integrity (a low-integrity process may not write there).
+```
+
+- 横幅里多一行 `Tea home    : …   NOT WRITABLE: <原因>`；
+- `GET /api/health` 带 `tea_home_writable` 与 `tea_home_error`，网页顶部挂一条横幅；
+- **两条出路**：把 `--tea-home` 指到一个写得进去的目录（agent 的状态可以放在工作区里，
+  例如 `<工作区>/.tea_agent_run/home`），或者用正常完整性级别启动这个进程。
 
 ### 合并两个工作区：把一份 `.tea_agent_run` 并进另一份
 

@@ -223,6 +223,14 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Can this process really write into the tea home? The user's home
+  // directory is theirs - but a sandboxed (or low-integrity) process may read
+  // it and still not be allowed to write there, and then the workspace index
+  // and the global log fail later and silently. Find out now, say it out
+  // loud, and offer the two ways out.
+  std::string tea_home_error;
+  const bool tea_home_writable = probe_dir_writable(tea_home, &tea_home_error);
+
   // Two thresholds on purpose: the log file keeps the full story (INFO by
   // default) while the terminal stays quiet unless something is actually wrong.
   // A server left running in a console tab should not scroll per-request INFO
@@ -252,6 +260,14 @@ int main(int argc, char** argv) {
            log_level_name(level), ")");
   LOG_INFO("tea home: ", tea_home);
   LOG_INFO("log file: ", log_file);
+  if (!tea_home_writable) {
+    LOG_WARN("the tea home is not writable: ", tea_home, " (", tea_home_error, ")");
+    console_write_line("warning: the tea home is not writable: " + tea_home + " (" +
+                       tea_home_error + ")");
+    console_write_line("         the workspace index and the global log cannot be written;");
+    console_write_line("         point --tea-home at a writable directory, or start the agent");
+    console_write_line("         with normal integrity (a low-integrity process may not write there).");
+  }
   LOG_INFO("http engines available: ", http_available_engines());
 
   // ---- TLS ---------------------------------------------------------------
@@ -462,6 +478,11 @@ int main(int argc, char** argv) {
       }
       banner += "\n";
     }
+    // Where the mutable state lives (the workspace index, the global log) -
+    // and whether this process may write there at all.
+    banner += "  Tea home    : " + tea_home;
+    if (!tea_home_writable) banner += "   NOT WRITABLE: " + tea_home_error;
+    banner += "\n";
     banner += "  Config      : " + config.path +
               (config.loaded ? std::string("\n")
                              : std::string("  (missing - upload it in the web UI)\n"));

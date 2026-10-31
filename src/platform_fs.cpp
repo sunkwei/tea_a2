@@ -395,6 +395,32 @@ bool make_dirs(const std::string& p, std::string* err) {
 #endif
 }
 
+bool probe_dir_writable(const std::string& dir, std::string* err) {
+  if (dir.empty()) {
+    if (err) *err = "the path is empty";
+    return false;
+  }
+  std::string reason;
+  if (!make_dirs(dir, &reason)) {
+    if (err) *err = "cannot create " + dir + (reason.empty() ? "" : ": " + reason);
+    return false;
+  }
+  // A real write, and then take the file away again. The name carries the
+  // time so two probes in the same second do not fight over one file.
+  std::string stamp = now_iso8601();
+  for (std::size_t i = 0; i < stamp.size(); ++i) {
+    if (stamp[i] == ':') stamp[i] = '-';
+  }
+  const std::string probe = path_join(dir, ".tea_agent_write_probe-" + stamp);
+  std::string write_err;
+  if (!write_file(probe, "probe\n", false, &write_err)) {
+    if (err) *err = write_err.empty() ? ("cannot write into " + dir) : write_err;
+    return false;
+  }
+  remove_path(probe, false, nullptr);
+  return true;
+}
+
 bool path_is_within(const std::string& child, const std::string& parent) {
   std::string c = path_canonical(child);
   std::string p = path_canonical(parent);

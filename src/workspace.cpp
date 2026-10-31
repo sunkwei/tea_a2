@@ -64,34 +64,6 @@ nlohmann::json read_json_file(const std::string& path, bool* ok) {
   }
 }
 
-/// Can the process really write into this workspace? A real write, because
-/// "readable" and "usable" are different things here: the sessions, the log
-/// and the memory all live in `<workspace>/.tea_agent_run/`. A sandbox, a
-/// read-only mount or a deny ACE leaves the project readable and the
-/// workspace unusable, and the only honest way to know is to try.
-///
-/// The probe writes into the run directory (the agent's own space), never
-/// into the project tree, and takes the file away again.
-bool probe_writable(const std::string& run_dir, std::string* err) {
-  std::string reason;
-  if (!make_dirs(run_dir, &reason)) {
-    if (err) *err = "cannot create " + run_dir + (reason.empty() ? "" : ": " + reason);
-    return false;
-  }
-  std::string stamp = now_iso8601();
-  for (std::size_t i = 0; i < stamp.size(); ++i) {
-    if (stamp[i] == ':') stamp[i] = '-';
-  }
-  const std::string probe = path_join(run_dir, ".tea_agent_write_probe-" + stamp);
-  std::string write_err;
-  if (!write_file(probe, "probe\n", false, &write_err)) {
-    if (err) *err = write_err.empty() ? ("cannot write into " + run_dir) : write_err;
-    return false;
-  }
-  remove_path(probe, false, nullptr);
-  return true;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -212,7 +184,7 @@ void WorkspaceRegistry::refresh_flags() {
     } else {
       // A real write, so the answer is the truth and not a guess.
       std::string reason;
-      if (!probe_writable(e.run_dir, &reason)) {
+      if (!probe_dir_writable(e.run_dir, &reason)) {
         e.writable = false;
         e.write_error = reason;
       }

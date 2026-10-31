@@ -2811,6 +2811,15 @@
     } else {
       applyStatus('ok', '已连接' +
         (state.health && state.health.version ? ' v' + state.health.version : ''));
+      // 服务端写不进自己的 tea home：工作区索引和全局日志会丢，而且没有别的
+      // 提示。与其让人在「为什么重启后工作区没了」里猜，不如在这里说清楚。
+      if (state.health && state.health.tea_home_writable === false) {
+        $('banner-text').textContent = '服务端写不进它的 tea home（' +
+          (state.health.tea_home || '') + '）：' +
+          (state.health.tea_home_error || '未知原因') +
+          '。工作区索引和全局日志会丢；把 --tea-home 指到可写的目录，或用正常完整性级别启动服务端。';
+        $('banner').classList.remove('hidden');
+      }
     }
     renderSetupUi();
   }

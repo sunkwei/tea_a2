@@ -245,7 +245,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.17.5
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.17.6
 ```
 
 ### 常见错误的对照表
@@ -279,16 +279,16 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.17.5
 
 ```bash
 # 打包 + 上传 + 清理旧版本，一步到位（这台机器上的流程）
-.tea_agent_run/scripts/release.sh 0.17.5
+.tea_agent_run/scripts/release.sh 0.17.6
 
 # 等价于这三步：
 # 1. 打包（暂存目录里打，只 strip 暂存副本，release/ 里最后只剩那个 zip）
-.tea_agent_run/scripts/pack_release.sh 0.17.5
-# 2. 传到网盘 /tea_a2/releases/0.17.5/，并把网盘上旧版本清到只剩 5 个
-python3 sched/pan_publish.py release/tea_a2-0.17.5.zip --version 0.17.5 \
-    --remote-dir /tea_a2/releases/0.17.5 --keep 5
+.tea_agent_run/scripts/pack_release.sh 0.17.6
+# 2. 传到网盘 /tea_a2/releases/0.17.6/，并把网盘上旧版本清到只剩 5 个
+python3 sched/pan_publish.py release/tea_a2-0.17.6.zip --version 0.17.6 \
+    --remote-dir /tea_a2/releases/0.17.6 --keep 5
 # 3. 提交源码（**不**提交 release/ 里的 zip —— .gitignore 已经挡了）
-git add -A && git commit -m "release: 0.17.5"
+git add -A && git commit -m "release: 0.17.6"
 ```
 
 **网盘上最多留 5 个发布包**：传完按版本号（`0.17.10 > 0.17.3`，按数字比不是按字符串）排，

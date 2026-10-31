@@ -1039,6 +1039,12 @@ struct ApiServer::Impl {
   /// The shared secret for /api/exec (see ServerOptions::api_token).
   std::string api_token;
 
+  /// Can this process write into the tea home? Probed once at start-up: the
+  /// workspace index and the global log live there, and they are lost - with
+  /// no error anywhere - when it cannot.
+  bool tea_home_writable = true;
+  std::string tea_home_error;
+
   std::mutex mu;  // guards registry access and `turns`
   std::map<std::string, std::shared_ptr<ChatTurn>> turns;
   /// Turns displaced by a newer turn on the same session. ~ChatTurn joins its
@@ -1522,6 +1528,10 @@ void ApiServer::Impl::install_routes() {
     // Where the mutable state lives; the settings page shows it next to
     // "销毁" so it is obvious what that button is about to delete.
     j["tea_home"] = config->tea_home;
+    // Can this process write into the tea home? The UI shows it, because the
+    // workspace index and the global log are lost - silently - when it cannot.
+    j["tea_home_writable"] = tea_home_writable;
+    if (!tea_home_error.empty()) j["tea_home_error"] = tea_home_error;
     send_json(res, j);
   });
 
@@ -4874,6 +4884,13 @@ ApiServer::ApiServer(AppConfig* config, ToolRegistry* tools, WorkspaceRegistry* 
   impl_->tools = tools;
   impl_->registry = registry;
   impl_->mcp = mcp;
+  // Probed once: the UI shows the verdict and the reason, because the
+  // workspace index and the global log are lost silently when it cannot.
+  {
+    std::string reason;
+    impl_->tea_home_writable = probe_dir_writable(config->tea_home, &reason);
+    impl_->tea_home_error = reason;
+  }
 }
 
 ApiServer::~ApiServer() { stop(); }

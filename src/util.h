@@ -119,6 +119,11 @@ bool make_dirs(const std::string& p);
 /// denied"). A bare "cannot create <path>" hides the difference between a
 /// missing parent and a directory the process may not write to.
 bool make_dirs(const std::string& p, std::string* err);
+/// Can the process really write into `dir`? A real write (a probe file that is
+/// taken away again), because "readable" and "usable" are different things: a
+/// sandboxed or low-integrity process may read a directory and still not be
+/// allowed to write there ("Windows error 5: Access is denied").
+bool probe_dir_writable(const std::string& dir, std::string* err = nullptr);
 bool path_is_within(const std::string& child, const std::string& parent);
 uint64_t file_size(const std::string& p);
 std::string file_mtime_iso(const std::string& p);

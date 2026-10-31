@@ -155,6 +155,10 @@ def main():
               by_path.get(locked, {}).get("write_error"))
         check("a writable workspace is still writable",
               by_path.get(good, {}).get("writable") is True, by_path.get(good))
+        # a tea home that can be written to says so
+        status, health = call(port, "GET", "/api/health")
+        check("the health endpoint reports a writable tea home",
+              health and health.get("tea_home_writable") is True, health)
     finally:
         try:
             proc.terminate()
@@ -182,6 +186,12 @@ def main():
         check("the index really is not on disk",
               not os.path.exists(os.path.join(home2, "workspaces.json")),
               safe_list(home2))
+        # and the server says so up front, not only when a request fails
+        status, health = call(port2, "GET", "/api/health")
+        check("the health endpoint reports the tea home as not writable",
+              health and health.get("tea_home_writable") is False, health)
+        check("the health endpoint gives the reason",
+              health and health.get("tea_home_error"), health and health.get("tea_home_error"))
     finally:
         try:
             proc2.terminate()
