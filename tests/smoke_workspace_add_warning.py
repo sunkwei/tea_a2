@@ -159,6 +159,22 @@ def main():
         status, health = call(port, "GET", "/api/health")
         check("the health endpoint reports a writable tea home",
               health and health.get("tea_home_writable") is True, health)
+
+        # A project the process may not write to is still a usable workspace:
+        # the runtime data (sessions, log, memory) moves to the tea home, so
+        # a conversation can be created and kept.
+        status, sess = call(port, "POST", "/api/workspaces/%s/sessions" % data["id"],
+                            {"title": "probe"})
+        check("a session can be created in a read-only workspace",
+              status == 200 and (sess or {}).get("id"), (status, sess))
+        run_in_home = os.path.join(home, "workspaces", data["id"])
+        check("the runtime data lives in the tea home",
+              os.path.isdir(os.path.join(run_in_home, "sessions")), run_in_home)
+        status, listing = call(port, "GET", "/api/workspaces")
+        by_path = {w.get("path"): w for w in (listing or {}).get("workspaces") or []}
+        check("the list points at the new runtime directory",
+              by_path.get(locked, {}).get("run_dir") == run_in_home,
+              by_path.get(locked, {}).get("run_dir"))
     finally:
         try:
             proc.terminate()

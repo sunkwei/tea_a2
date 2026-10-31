@@ -283,6 +283,15 @@ WorkspaceEntry* WorkspaceRegistry::add(const std::string& path_in, const std::st
   return &entries_.back();
 }
 
+bool WorkspaceRegistry::set_run_dir(const std::string& id, const std::string& dir) {
+  WorkspaceEntry* e = find(id);
+  if (!e) return false;
+  e->run_dir = dir;
+  std::string save_err;
+  if (!save(&save_err)) LOG_WARN("workspaces: cannot update the index: ", save_err);
+  return true;
+}
+
 bool WorkspaceRegistry::remove(const std::string& id, std::string* err) {
   for (std::size_t i = 0; i < entries_.size(); ++i) {
     if (entries_[i].id != id) continue;
@@ -325,7 +334,10 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
     return false;
   }
   entry_.path = root_;
-  run_dir_ = path_join(root_, kRunDirName);
+  // The runtime data normally lives inside the project, but it may point
+  // elsewhere: a project the process may not write to is still a usable
+  // workspace, with its sessions, log and memory in the tea home.
+  run_dir_ = entry_.run_dir.empty() ? path_join(root_, kRunDirName) : entry_.run_dir;
 
   // NOTE: keep these as owned strings - taking c_str() from temporaries here
   // used to leave the array full of dangling pointers.

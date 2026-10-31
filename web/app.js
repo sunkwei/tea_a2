@@ -3132,7 +3132,13 @@
       var sub = w.exists === false ? '路径不存在'
               : (w.writable === false ? '只读' : (w.sessions || 0) + ' 会话');
       it.appendChild(el('span', 'sub', sub));
-      if (w.writable === false && w.write_error) it.title = w.write_error;
+      // 运行数据不在项目里（在 tea home 里，因为项目写不进去）：说清楚它在哪儿，
+      // 不然用户以为会话丢了。
+      var tip = (w.writable === false && w.write_error) ? w.write_error : '';
+      if (w.run_dir && w.path && w.run_dir.indexOf(w.path) !== 0) {
+        tip += (tip ? '；' : '') + '运行数据在 ' + w.run_dir;
+      }
+      if (tip) it.title = tip;
       row.appendChild(it);
       var del = btn('dd-del', '✕', function (e) {
         e.stopPropagation();

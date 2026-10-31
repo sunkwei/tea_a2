@@ -1104,7 +1104,27 @@ struct ApiServer::Impl {
       }
       copy = *entry;
     }
-    return out->open(copy, config->settings, err);
+    if (out->open(copy, config->settings, err)) return true;
+
+    // The project directory may not be writable (a sandbox, a read-only
+    // mount, a deny ACE). The runtime data does not have to live inside the
+    // project: the sessions, the log and the memory can live in the tea home,
+    // and the workspace is usable all the same. The project files themselves
+    // stay read-only for the agent - that is the operating system, not us.
+    const std::string fallback = path_join(path_join(config->tea_home, "workspaces"), id);
+    const std::string first_err = *err;
+    copy.run_dir = fallback;
+    if (!out->open(copy, config->settings, err)) {
+      *err = first_err + "; the fallback (" + fallback + ") failed too: " + *err;
+      return false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      registry->set_run_dir(id, fallback);
+    }
+    LOG_INFO("workspace ", id, ": the project directory is not writable, the runtime data ",
+             "lives in ", fallback);
+    return true;
   }
 
   /// The persona a workspace falls back to when `system_prompt.md` is empty:

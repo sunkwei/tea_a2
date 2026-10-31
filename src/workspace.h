@@ -149,6 +149,13 @@ class WorkspaceRegistry {
   WorkspaceEntry* add(const std::string& path, const std::string& name, std::string* err);
   bool remove(const std::string& id, std::string* err);
 
+  /// Point a workspace's runtime directory somewhere else. The runtime data
+  /// (sessions, log, memory, agent.md) normally lives inside the project, but
+  /// a project the process may not write to is still worth using as a
+  /// workspace - then the data lives in the tea home instead. The choice is
+  /// written to the index, so it survives a restart.
+  bool set_run_dir(const std::string& id, const std::string& dir);
+
   std::string index_path() const { return index_path_; }
   void refresh_flags();
 

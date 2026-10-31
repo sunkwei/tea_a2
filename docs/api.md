@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.17.6`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
+| `GET` | `/api/health` | 探活、版本（`0.17.7`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/peer/health` | **对端通道**：`/api/health` 的令牌版镜像（见下「机器对机器的通道」） |
@@ -19,7 +19,7 @@
 | `POST` | `/api/peer/exec` | **对端通道**：`/api/exec` 的令牌版镜像 |
 | `GET` | `/api/peer/tools` | **对端通道**：对端有哪些工具（能力探测） |
 | `GET` | `/api/peer/workspaces` | **对端通道**：对端的工作区 |
-| `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`）。每条带 `writable`（这个工作区进程**能不能写**）与 `write_error`（不能写的原因，带着操作系统自己的话） |
+| `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`）。每条带 `writable`（这个工作区进程**能不能写**）与 `write_error`（不能写的原因，带着操作系统自己的话）；`run_dir` 是运行数据的位置——项目目录写不进去时它落在 tea home 里 |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}`（可加 `"create":true` 让服务端先把目录建出来）。回答里带 `warning` 就说明工作区写不进去、或者索引 `workspaces.json` 没写成功（重启后这条登记就没了） |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
 | `GET` | `/api/workspaces/{id}/search?q=` | **在工作区里搜东西**：文件名 + 文件内容。查询串按原样逐字节比较（**不做正则/模糊匹配**）。`scope=name\|content\|both`（默认 both）、`exact=1`（完全匹配：路径整串相等 / 整行相等）、`case=1`（区分大小写）、`path=`（只搜这个子目录）、`limit=`（最多几条，默认 100） |

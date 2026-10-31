@@ -5,14 +5,14 @@
 git 里放源码和文档，二进制包（几十 MB，每版一个）进版本库只会让 clone 变慢、`git log`
 变成噪声。所以发布改成：**打包 → 传到网盘 → 仓库里只留一条「这一版发在哪儿」的记录**。
 
-    python3 sched/pan_publish.py release/tea_a2-0.17.6.zip
-    python3 sched/pan_publish.py release/tea_a2-0.17.6.zip --remote-dir /tea_a2/releases/0.17.6
-    python3 sched/pan_publish.py release/tea_a2-0.17.6.zip --no-verify     # 不回读校验
+    python3 sched/pan_publish.py release/tea_a2-0.17.7.zip
+    python3 sched/pan_publish.py release/tea_a2-0.17.7.zip --remote-dir /tea_a2/releases/0.17.7
+    python3 sched/pan_publish.py release/tea_a2-0.17.7.zip --no-verify     # 不回读校验
 
 远端长这样：
 
-    /tea_a2/releases/0.17.6/
-      tea_a2-0.17.6.zip     发布产物
+    /tea_a2/releases/0.17.7/
+      tea_a2-0.17.7.zip     发布产物
       manifest.json         谁在什么时候传的、每个文件的 sha256/md5/大小
 
 **4MB 分片**：百度网盘的上传接口按 4MB 一片传 —— 一次请求一片，`partseq` 是片号，
@@ -71,7 +71,7 @@ def md5_file(path):
 
 
 def guess_version(paths):
-    """从文件名里认版本：tea_a2-0.17.6.zip → 0.17.6。"""
+    """从文件名里认版本：tea_a2-0.17.7.zip → 0.17.7。"""
     for path in paths:
         name = os.path.basename(path)
         stem = name[:-4] if name.endswith(".zip") else name
