@@ -215,7 +215,7 @@ python3 sched/pan_sync.py watch --interval 300
 **发布产物也走这里**（2026-10-30 起包不再提交到 git）：
 
 ```bash
-python3 sched/pan_publish.py release/tea_a2-0.17.4.zip     # → /tea_a2/releases/0.17.4/
+python3 sched/pan_publish.py release/tea_a2-0.17.5.zip     # → /tea_a2/releases/0.17.5/
 ```
 
 按 4MB 一片上传（分片数 = ceil(大小/4MB)，最后一片是余数，小文件走单片），传完**回读校验**

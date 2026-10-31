@@ -1158,8 +1158,8 @@ refresh token + Google Cloud 的 OAuth 客户端），入口在 `ImapSource.conn
 回头想「这版到底发了什么」都不好翻。
 
 ```bash
-.tea_agent_run/scripts/release.sh 0.17.4                      # 打包 + 上传 + 清理旧版本，一步到位
-git add -A && git commit -m "release: 0.17.4"                 # **不**提交 release/*.zip
+.tea_agent_run/scripts/release.sh 0.17.5                      # 打包 + 上传 + 清理旧版本，一步到位
+git add -A && git commit -m "release: 0.17.5"                 # **不**提交 release/*.zip
 ```
 
 `release.sh` 是这台机器上的流程（`.tea_agent_run/scripts/`，不进 git）：打包 → 传到
