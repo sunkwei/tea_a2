@@ -179,6 +179,32 @@ warning: the tea home is not writable: C:\Users\Hetin\.tea_agent
 项目文件**本身**的写入仍然由操作系统说话——app 改不了那个（把标签降下来或者用正常
 完整性级别运行进程才行）。
 
+### 被沙箱框住时：把要用的目录降标签
+
+进程被沙箱框住（只能写某一棵目录）时，它写别处会得到 `Windows error 5: 拒绝访问`——
+而 ACL 看着是「完全控制」，因为挡住它的**不是权限，是完整性级别**：Windows 不许低完整性
+进程写高完整性对象（no write up）。家目录、别的项目目录默认都是 medium，所以写不进去。
+
+两条出路：
+
+- **把要用的目录降标签**（需要一个 medium+ 的进程：管理员，或者这个 agent 自己的终端——
+  `/api/shell` 开出来的 shell 继承 app 的令牌）：
+
+  ```bat
+  icacls "C:\Users\Hetin\work\git\my-project" /setintegritylevel "(OI)(CI)L" /T
+  icacls "C:\Users\Hetin\work\git\my-project" /grant "S-1-16-4096:(OI)(CI)(M)" /T
+  ```
+
+  仓库里的 `scripts/grant-low-write.cmd` 就是这件事（管理员运行一次；默认处理 tea home
+  和 `work\git`，也可以带别的目录参数）。降完之后，目录里的东西**仍然只属于你**——ACL 一行
+  没动，只是不再禁止低完整性进程写它。
+
+- **或者用正常完整性级别启动这个进程**：`scripts/start-local.ps1` 继承你启动它那个 shell
+  的级别（从资源管理器/自己的终端起，就是正常的；被沙箱的启动器拉起来，就是 low）。
+
+还有第三招：**只读的项目照样能当工作区用**——运行数据（会话、日志、记忆）会搬到 tea home
+里的 `<tea_home>/workspaces/<工作区 id>/`，见上一节。
+
 ### 合并两个工作区：把一份 `.tea_agent_run` 并进另一份
 
 工作区搬家（换机器、换盘），或者两台机器各干了一半想把历史收到一处时，**不能直接拷目录**：
