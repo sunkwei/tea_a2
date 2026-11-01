@@ -343,7 +343,7 @@ servers:
 | [部署](docs/deploy.md) | 嵌入式设备、静态单文件、TLS 证书、Windows 自启、systemd 单元 |
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |
 | [多级协同与机群运维](docs/fleet.md) | **一台服务器管 40 台设备**：台账、每日采集、灰度升级、审计、让设备自己的 a2 判断 |
-| [Router 与 Watchdog](docs/router-watchdog.md) | **规划**：Super-agent 那套架构里我们缺的两层——把人和任务连起来的 Router，和在外面盯着 Worker 的 Watchdog。分 M1~M4 四个阶段，每阶段可验收 |
+| [Router 与 Watchdog](docs/router-watchdog.md) | **触发器入口 / Router / 看门狗**：外部事件统一进门、跨会话的线索上下文、在外面盯着卡住的任务与跑偏的 worker（Super-agent 那套架构里我们原来缺的两层，M0~M5 已全部落地） |
 | [级联：一台 a2 控制另一台](docs/peer.md) | **让一台 tea_a2 控制另一台**：`peers:` 配置、`toolkit_peer`、机器对机器的通道 `/api/peer/*`、安全边界 |
 | [内置工具与上下文](docs/tools.md) | 每个工具、文件访问范围、上下文预算、轨迹 |
 | [MCP](docs/mcp.md) | **把别的程序接进来当工具**：配置、接口、和 Windows 上的 uiautomation-mcp 联调 |

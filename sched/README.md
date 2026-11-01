@@ -115,11 +115,10 @@ cat ~/.tea_agent/router/speech.jsonl       # router 都说了什么
 - **一个声音**：router 把每个事件说成一句话，**递到队列的事件流**里（`speech` 事件）。
   聊天前端加 `--speech` 就只递 router 的话，不再自己翻译原始事件（默认还是老路）。
   router 挂了用户就听不见，所以前端会提醒「router 沉默 N 分钟」。
-- 常驻用 systemd：`scripts/a2_router.service`。
-
 - **模型能按需读线索**：线索的完整记录写在工作区的
   `.tea_agent_run/threads/<id>.md`，下一个同线索的任务被告知了这个路径——模型用
   `toolkit_file` 就能读更早的事，不用加新工具。
+- 常驻用 systemd：`scripts/a2_router.service`（`scripts/install-units.sh` 会一起装）。
 
 深层说明：`docs/router-watchdog.md`。
 

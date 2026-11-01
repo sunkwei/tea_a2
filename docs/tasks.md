@@ -76,7 +76,7 @@ curl http://127.0.0.1:8283/api/tasks
 | `POST` | `/api/tasks/{id}/start?workspace_id=` | 现在就做这件事（同样过额度闸门） |
 | `POST` | `/api/tasks/{id}/cancel?workspace_id=` | 停掉正在跑的那个（`POST /api/chat/stop`） |
 | `POST` | `/api/tasks/{id}/confirm?workspace_id=` | 回答一个「等你确认」的任务：`{message}`，答案会成为同一会话的下一轮 |
-| `GET` | `/api/events` | 生命周期事件流（SSE）：`task_created` / `task_updated` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled` |
+| `GET` | `/api/events` | 生命周期事件流（SSE）：`task_created` / `task_updated` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled`，以及 `trigger_received` / `trigger_decided`（触发器入口）、`watchdog_alert`（看门狗）、`speech`（router 的一句话）、`queue_paused` / `queue_resumed`、`thread_summarized` |
 
 ### 使用手册：排队与撤销
 
@@ -253,6 +253,7 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
 | 投一条外部事件 | `POST /api/triggers {"source": "webhook", "text": "…", "dedup_key": "…"}`——**触发器入口**：同一个 key 是同一件事（不重复排），规则先判（`~/.tea_agent/triggers.conf`），规则没定音才问模型一次；答 `accept` 才变成任务。`GET /api/triggers` 看都来了什么，`GET /api/threads` 看线索 |
 | 让 router 替队列说话 | 队列事件流里的 `speech` 事件（router 写的，一句话一个事件）：聊天前端加 `--speech` 就只递 router 的话，不再自己翻译原始事件 |
 | 看一条线索知道什么 | `GET /api/threads/{id}/context`——窗口（最近 8 步）、掉出窗口的旧进展、以及下一个同线索任务会拿到的 prompt。`POST /api/threads` 手工开一条线索 |
+| 写回线索的摘要 | `POST /api/threads/{id}/spill {"summary": "…", "count": N}`（router 用；只有本机操作员能写——摘要会进 prompt） |
 | 交一份任务单 | `python3 sched/task_server.py --submit-order <文件>`，或把 `*.order` 文件发给微信 bot |
 
 ### 任务单：一个文件交一份活儿

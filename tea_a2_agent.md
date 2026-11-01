@@ -696,27 +696,31 @@ cp build-win64/bin/tea_agent.exe .
 
 ---
 
-## Router 与 Watchdog（规划中，2026-11-01 起）
+## Router 与 Watchdog（2026-11-01 落地，M0~M5 全做完）
 
-DeepSeek Harness 团队 2026-10-31 发了《Super-agent 设计探索》，里面有两个角色我们**完全没有**：
-把人和任务连起来的 **Router**（全局上下文 + 分派 + 对外说话），和在外面盯着 Worker 的
-**Watchdog**（外部控制回路）。完整的对象模型、接口与验收标准在
-[docs/router-watchdog.md](docs/router-watchdog.md)。
+DeepSeek Harness 团队 2026-10-31 发了《Super-agent 设计探索》，里面有两个角色我们原来
+**完全没有**：把人和任务连起来的 **Router**（全局上下文 + 分派 + 对外说话），和在外面盯着
+Worker 的 **Watchdog**（外部控制回路）。现在都落地了：
+**触发器入口**（`sched/triggers.py`）、**Router**（`sched/router.py`）、**看门狗**
+（`sched/watchdog.py`），使用文档在 [docs/router-watchdog.md](docs/router-watchdog.md)。
 
-先记住三件事，写代码时别跑偏：
+改这块时记住这几件事：
 
-1. **顺序是 M1→M2→M3，别跳**。M1（Watchdog）是纯增量，不改现有行为，而且立刻解决
-   「任务卡住没人管」这个真问题；M3（Router）要动「谁跟人说话」，风险最大，放最后。
-2. **Watchdog 默认不动手**。默认动作只有 escalate（告警），`--auto` 才允许 fail / retry，
+1. **Watchdog 默认不动手**。默认动作只有 escalate（告警），`--auto` 才允许 fail / retry，
    而且每次动作都写审计。误杀一个正在跑的长任务，代价比晚发现大得多。
    判「卡住」要**双阈值**：`updated_at` 过了 **且** `progress` 没变——只看时间会误杀正在
    慢慢干活的任务。
-3. **别动 agent 内核**。Worker 还是现在这个 agent、session 还是隔离的；Router 和 Watchdog
+2. **别动 agent 内核**。Worker 还是现在这个 agent、session 还是隔离的；Router 和 Watchdog
    都在**外面**。Watchdog 必须是**独立进程**：它要是跑在 agent 里，一个卡死的 Worker 就能
    把它一起关掉。
+3. **线索的记录由队列写，router 只做「要判断或要花钱」的事**（收拢摘要、说话）。
+   这样 router 挂了线索照样记——只是没人收拢、没人说话。
+4. **模型只产建议，不动手**：看门狗问模型「跑偏了没有」，模型说跑偏也只是**说一声**，
+   动作仍然由规则决定。
 
 可以复用的零件（别重写）：`sched/channel.py` 的 `Queue`（队列 API 客户端）、
-agent 的 `POST /api/llm/chat`（一次模型调用，判读用）、队列记录里已有的
+agent 的 `POST /api/llm/chat`（一次模型调用，判读用）、agent 的
+`GET /api/sessions/{id}/trajectory`（轨迹，判「跑偏了没有」用）、队列记录里已有的
 `updated_at` / `progress` / `note`、机群 `run_job()` 的金丝雀+验证+回滚。
 
 ---
