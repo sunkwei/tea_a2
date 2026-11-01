@@ -250,6 +250,7 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
 | 把一个卡死的任务判死 | `POST /api/tasks/{id}/fail {"reason": "…"}`（看门狗用；必须带原因） |
 | 往事件流里塞一条事件 | `POST /api/events {"type": "watchdog_alert", "task_id": "…", …}`（只有本机操作员能塞；看门狗的告警就走这条路） |
 | 投一条外部事件 | `POST /api/triggers {"source": "webhook", "text": "…", "dedup_key": "…"}`——**触发器入口**：同一个 key 是同一件事（不重复排），规则先判（`~/.tea_agent/triggers.conf`），规则没定音才问模型一次；答 `accept` 才变成任务。`GET /api/triggers` 看都来了什么，`GET /api/threads` 看线索 |
+| 让 router 替队列说话 | 队列事件流里的 `speech` 事件（router 写的，一句话一个事件）：聊天前端加 `--speech` 就只递 router 的话，不再自己翻译原始事件 |
 | 看一条线索知道什么 | `GET /api/threads/{id}/context`——窗口（最近 8 步）、掉出窗口的旧进展、以及下一个同线索任务会拿到的 prompt。`POST /api/threads` 手工开一条线索 |
 | 交一份任务单 | `python3 sched/task_server.py --submit-order <文件>`，或把 `*.order` 文件发给微信 bot |
 
@@ -459,9 +460,9 @@ toolkit_task op=update needs_confirmation=true question="可以删掉旧构建�
   默认只告警不动手，`--auto` 才允许 fail/retry。
 - **M2 Trigger 入口**（已做）：`POST /api/triggers` 统一收事件，去重 → 规则 → 模型判断
   要不要做；`POST /api/tasks` 继续留着当退路。
-- **M3 Router**（已做 v1）：跨 session 的共享上下文（thread）——下一个同线索的任务会被
-  告知「之前发生了什么」；掉出窗口的进展由 router 收拢成摘要。**对外说话还在影子模式**
-  （话术写进 `~/.tea_agent/router/speech.jsonl`，聊天前端暂时还自己说话）。
+- **M3 Router**（已做 v1/v2）：跨 session 的共享上下文（thread）——下一个同线索的任务会被
+  告知「之前发生了什么」；掉出窗口的进展由 router 收拢成摘要。**v2：router 说话**
+  （话术进队列事件流的 `speech` 事件），聊天前端加 `--speech` 就只递 router 的话。
 
 完整的对象模型、接口和验收标准见 [Router 与 Watchdog](router-watchdog.md)。
 

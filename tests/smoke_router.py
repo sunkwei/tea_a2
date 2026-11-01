@@ -235,6 +235,7 @@ def main():
                               "dedup_key": "chat:1", "thread_key": "chat:1"})
         trigger = (body or {}).get("data", {}).get("trigger") or {}
         thread_id = trigger.get("thread_id") or ""
+        first_task = trigger.get("task_id") or ""
         if not thread_id:
             failures.append("the trigger did not get a thread: %r" % trigger)
             return 1
@@ -295,6 +296,60 @@ def main():
             data = (body or {}).get("data") or {}
             if "修好了" not in (data.get("prompt") or ""):
                 failures.append("the summary did not reach the prompt: %r" % data.get("prompt"))
+
+        # ---- the router's line goes into the queue's event stream ---------
+        def speech_in_the_bus():
+            status, body = call(queue_port, "GET", "/api/tasks/%s/events" % first_task)
+            for event in ((body or {}).get("data") or {}).get("events") or []:
+                payload = event.get("payload") or {}
+                if payload.get("type") == "speech" and payload.get("line"):
+                    return payload
+            return None
+
+        line = wait_until(speech_in_the_bus, 40) and speech_in_the_bus()
+        if not line:
+            failures.append("the router did not hand its sentence to the queue")
+        else:
+            if "做完了" not in (line.get("line") or ""):
+                failures.append("the sentence is not about the finished work: %r" % line)
+            if line.get("speech_of") != "task_done":
+                failures.append("the sentence does not say which event it is about: %r" % line)
+
+            # ---- the chat front end delivers the router's words ----------
+            sys.path.insert(0, os.path.join(REPO_ROOT, "sched"))
+            import channel  # noqa: E402  (the path is only known here)
+
+            class FakeChannel(channel.TaskChannel):
+                def __init__(self):
+                    self.args = type("Args", (), {"tasks": "", "agent": "", "workspace_path": "",
+                                                  "workspace_name": "", "speech": True,
+                                                  "provider": "", "allow_path": []})()
+                    self.queue = None
+                    self.agent = None
+                    self.workspace_id = "ws_mock"
+                    self.owner = {first_task: "u1"}
+                    self.sent = []
+
+                def send_text(self, user_id, text):
+                    self.sent.append((user_id, text))
+                    return True
+
+            front = FakeChannel()
+            if not front.notify_event({"type": "speech", "line": line.get("line"),
+                                       "speech_of": "task_done",
+                                       "task": {"id": first_task, "workspace_id": "ws_mock",
+                                                "meta": {"user_id": "u1"}}}):
+                failures.append("the chat front end did not deliver the router's sentence")
+            elif not front.sent or front.sent[0][0] != "u1":
+                failures.append("the sentence went to the wrong person: %r" % (front.sent,))
+
+            # The raw events are somebody else's business now.
+            front.sent = []
+            front.notify_event({"type": "task_done", "task": {"id": first_task,
+                                                              "workspace_id": "ws_mock",
+                                                              "meta": {"user_id": "u1"}}})
+            if front.sent:
+                failures.append("the front end still speaks for itself: %r" % (front.sent,))
 
         # ---- the router says something about every event -----------------
         speech_path = os.path.join(router_dir, "speech.jsonl")

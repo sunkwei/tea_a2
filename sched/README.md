@@ -111,8 +111,9 @@ cat ~/.tea_agent/router/speech.jsonl       # router 都说了什么
 
 - **窗口 + 摘要**：最近 8 步直接进下一个任务的 prompt；掉出窗口的旧进展由 router 用模型
   收拢成一句摘要顶掉（prompt 还是那么大，更早的事也还在）。
-- **影子模式**：router 把每个事件说成一句话写进 `speech.jsonl`，但**聊天前端还自己说话**
-  ——先对比话术，再切。
+- **一个声音**：router 把每个事件说成一句话，**递到队列的事件流**里（`speech` 事件）。
+  聊天前端加 `--speech` 就只递 router 的话，不再自己翻译原始事件（默认还是老路）。
+  router 挂了用户就听不见，所以前端会提醒「router 沉默 N 分钟」。
 - 常驻用 systemd：`scripts/a2_router.service`。
 
 深层说明：`docs/router-watchdog.md`。
@@ -133,6 +134,9 @@ python3 sched/watchdog.py --fleet http://127.0.0.1:8290   # 连带看机群设�
 - **默认只说不动手**：告警走队列的事件流，微信/Telegram 那一端会把它推给对应的人。
   `--auto` 才允许 `fail` / `retry`——误杀一个快要干完的活儿，代价比晚一点发现大得多。
 - **「卡住」要两个条件**：记录安静够久（`--stall-after`）**而且**两次巡检之间进度没动。
+- **模型版判读**（`--drift`）：问模型「这个 worker 还在推进吗、方向跑偏了吗」（读 agent
+  的轨迹 `/api/sessions/{id}/trajectory`）。**只产建议**：写进审计、跑偏了说一声，动作
+  仍然由规则决定。
 - 审计在 `~/.tea_agent/watchdog/audit.jsonl`（只追加），状态在 `state.json`。
 - 常驻用 systemd：`scripts/a2_watchdog.service`（`scripts/install-units.sh` 会一起装）。
 

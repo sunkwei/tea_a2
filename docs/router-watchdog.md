@@ -117,8 +117,8 @@ Inline & Spill 的意思是：**近期的进展直接放进上下文窗口，超
 | M0 | 这份文档 | ✅ |
 | M1 | Watchdog v1（独立进程，默认只告警） | ✅ 已实现（`sched/watchdog.py`） |
 | M2 | Trigger 统一入口（`POST /api/triggers`） | ✅ 已实现（`sched/triggers.py`） |
-| M3 | Router（跨会话的上下文 + 对外说话） | ✅ v1 已实现（`sched/router.py`，说话仍是影子模式） |
-| M4 | 模型版 Watchdog（判断跑偏了没有） | ⏳ 未开始 |
+| M3 | Router（跨会话的上下文 + 对外说话） | ✅ v1/v2 已实现（`sched/router.py`；v2：router 说话、渠道 `--speech` 递话） |
+| M4 | 模型版 Watchdog（判断跑偏了没有） | ✅ 已实现（`--drift`，只产建议） |
 | M5 | Router 接到机群（可选） | ⏳ 未开始 |
 
 ### M0：这份文档（已完成）
@@ -362,25 +362,54 @@ curl http://127.0.0.1:8283/api/threads/<id>/context   # 一条线索现在知道
 - 掉出窗口的进展被收拢成了一句摘要，摘要进了下一个任务的 prompt；
 - router 每个事件说一句话（`speech.jsonl` 里有「做完了 …」）。
 
-#### 还没做的（M3 v2）
+#### M3 v2：router 说话，渠道只递话 —— ✅ 已实现
 
-- **渠道切给 router 说话**：现在聊天前端还在自己按事件推送。等 router 的话术在
-  `speech.jsonl` 里跟用户实际收到的话对比过之后再切。
+**v1 里 router 的话只是记下来**（`speech.jsonl`），聊天前端还在自己按事件翻译。现在
+router 把每句话**交到队列的事件流**里（`speech` 事件），聊天前端加了 `--speech` 开关：
+开了之后它**只递 router 的话**，不再自己翻译队列的原始事件。
+
+- **一个声音**：话术只写一遍（router 里），微信和 Telegram 说同样的话。
+- **谁该听**：带任务的话 → 排这个任务的人；不带任务的话（agent 挂了、队列停了）→ 所有
+  跟 bot 说过话的人。做完了的那句话后面照旧跟着这个任务做出的文件。
+- **router 挂了用户就听不见**：这是这个模式的代价，所以前端会**提醒**
+  （`the router has been quiet for N minutes`）。前端不能替 router 说话——那正是这个
+  模式的意义。
+- **默认还是老路**：不加 `--speech` 就是今天的行为（前端自己翻译）。切之前先用
+  `speech.jsonl` 里的记录跟用户实际收到的话比一比。
+
+#### 还没做的（M3 v3）
+
 - **模型读的「更早的事」**：摘要进了 prompt，但模型还不能**按需**去读某条线索的全部原文
   （那需要一个工具，或者把线索写进工作区让它用 `toolkit_file` 读）。
 - **跨线索的长期记忆**：一个线索的上下文不会流到另一个线索去——这是有意的（串味比
   忘事更糟）。
+- **router 说话时的「线索感」**：现在一句话里只有任务号；等 M3 v3 有了「按需读线索」，
+  话术里可以说「接着上次的字体那件事」。
 
-### M4：模型版 Watchdog（判断「跑偏了没有」）
+### M4：模型版 Watchdog（判断「跑偏了没有」）—— ✅ 已实现
 
 规则版只能发现「没动静」，发现不了「在忙但方向错了」。这一步用 agent 的
-`POST /api/llm/chat` 读任务的轨迹（`<run_dir>/trajectories/<session_id>.jsonl`，agent 已经在写了），
-问两个问题：**这个 Worker 还在推进吗？方向跑偏了吗？**
+`POST /api/llm/chat` 读任务的轨迹（agent 已经在写了，接口是
+`GET /api/sessions/{id}/trajectory`），问两个问题：**这个 Worker 还在推进吗？方向跑偏了吗？**
 
-- 产出的**只是建议**，动作仍由规则决定（除非显式 `--auto-drift`）。
-- 建议写进审计，人可以在 UI/渠道里看到「watchdog 认为这个任务跑偏了」。
+**产出的只是建议**：模型的话写进审计，跑偏了就说一声（`watchdog_alert`，check=`drift`），
+**动作仍然由规则决定**——模型说「跑偏了」也不能结束谁的工作。
 
-**验收**：`tests/smoke_watchdog.py` 加一组用例（mock `/api/llm/chat` 的回答）。
+**什么时候问**：
+- 规则判定「卡住」的任务 → 问一次（**动手之前**问：判完就没得问了）；
+- `--drift-after N` 的话，跑超过 N 分钟的任务也会被问（这就是「在忙但方向错了」那类）；
+- 同一个进度值只问一次（任务不动就不会每轮烧一次模型调用）。
+
+**怎么用**：
+
+```bash
+python3 sched/watchdog.py --drift                 # 只问「卡住」的那些
+python3 sched/watchdog.py --drift --drift-after 30 # 跑超过半小时的也问
+```
+
+**验收**：`tests/smoke_watchdog.py`
+- 模型被问了，判读结果写进了审计（模型说跑偏 → 有一条 drift 的告警）；
+- 模型说「正常推进」→ **没有** drift 告警（不打扰人）。
 
 ### M5（可选）：把 Router 接到机群
 

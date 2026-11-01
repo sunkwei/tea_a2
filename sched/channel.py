@@ -800,10 +800,60 @@ class TaskChannel:
                 log("cannot send the watchdog alert: %s" % exc)
         return sent
 
+    def deliver_speech(self, event):
+        """Hand the router's sentence to the person it is about.
+
+        The router is the one who speaks (one wording for every front end).
+        The sentence about a task goes to the person who queued it; a
+        sentence without a task is about the whole machine and goes to
+        everybody this bot has talked to.
+        """
+        line = str(event.get("line") or "").strip()
+        if not line:
+            return False
+        task = event.get("task") or {}
+        task_id = task.get("id", "")
+        if task_id:
+            user_id = self.owner.get(task_id) or (task.get("meta") or {}).get(self.META_USER_KEY)
+            users = [user_id] if user_id else []
+        else:
+            users = []
+            for user_id in list(self.owner.values()):
+                if user_id not in users:
+                    users.append(user_id)
+        if not users:
+            return False
+        sent = False
+        for user_id in users:
+            try:
+                if self.send_text(user_id, line):
+                    sent = True
+            except ChannelError as exc:
+                log("cannot send the router\'s line: %s" % exc)
+        # The files of a finished task go out with the answer: a result the
+        # user cannot open on their phone is only half an answer.
+        if event.get("speech_of") == "task_done" and task_id:
+            user_id = self.owner.get(task_id) or (task.get("meta") or {}).get(self.META_USER_KEY)
+            if user_id:
+                try:
+                    count = self.send_task_files(user_id, task)
+                except ChannelError as exc:
+                    log("cannot send the files: %s" % exc)
+                else:
+                    if count:
+                        log("sent %d file(s) to %s" % (count, user_id))
+        return sent
+
     def notify_event(self, event):
         """Tell the user about one task event. Returns True when a message
         went out."""
         kind = event.get("type", "")
+        if getattr(self.args, "speech", False):
+            # The router speaks: the front end only delivers its sentences.
+            # The raw events are somebody else's business now.
+            if kind != "speech":
+                return False
+            return self.deliver_speech(event)
         if kind == "watchdog_alert":
             return self.notify_watchdog(event)
         if kind not in ("task_done", "task_failed", "task_waiting_confirmation"):
@@ -842,10 +892,28 @@ class TaskChannel:
 
     def watch_tasks(self):
         """Tell the user when their work is done."""
+        last_speech = 0.0
         while True:
             try:
                 for event in self.queue.events(workspace_id=self.ensure_workspace()):
+                    if event.get("type") == "speech":
+                        last_speech = time.time()
                     self.notify_event(event)
             except Exception as exc:  # noqa: BLE001 - the watcher may not die
                 log("task watcher: %s" % exc)
                 time.sleep(5)
+            self.warn_if_router_silent(last_speech)
+
+    def warn_if_router_silent(self, last_speech):
+        """In speech mode a silent router means the users hear nothing.
+
+        The front end cannot speak for the router - that is the whole point
+        of the mode - so the operator has to be told.
+        """
+        if not getattr(self.args, "speech", False) or not last_speech:
+            return
+        quiet = time.time() - last_speech
+        if quiet < getattr(self.args, "speech_timeout", 900):
+            return
+        log("the router has been quiet for %d minutes - nobody hears anything "
+            "until it speaks again" % int(quiet // 60))

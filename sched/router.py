@@ -134,8 +134,15 @@ class Router(object):
             return "一条线索收拢成了一句摘要"
         return ""
 
-    def say(self, line):
-        """Write down what the router said (shadow mode)."""
+    def say(self, line, event=None):
+        """Write down what the router said, and hand it to the queue.
+
+        The chat front ends deliver this sentence instead of translating the
+        raw events themselves: that is the "one voice" part - the wording
+        lives in one place. `speech_of` says which event the sentence is
+        about, so the front end can still attach the files of a finished
+        task.
+        """
         if not line:
             return
         log(line)
@@ -146,6 +153,19 @@ class Router(object):
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError:
             pass
+        if not self.args.publish:
+            return
+        body = {"type": "speech", "line": line}
+        if event:
+            body["speech_of"] = event.get("type") or ""
+            task = event.get("task") or {}
+            if task.get("id"):
+                body["task_id"] = task.get("id")
+                body["workspace_id"] = task.get("workspace_id") or ""
+        status, answer = http_json(self.tasks_url + "/api/events", "POST", body,
+                                   timeout=self.args.timeout)
+        if status == 0 or status >= 400:
+            log("cannot hand the line to the queue: %s" % (answer or {}).get("error"))
 
     # ---- the events --------------------------------------------------------
     def follow_events(self):
@@ -172,7 +192,7 @@ class Router(object):
                 self.handle(event)
 
     def handle(self, event):
-        self.say(self.speak(event))
+        self.say(self.speak(event), event)
 
     # ---- the threads -------------------------------------------------------
     def threads(self):
@@ -283,6 +303,11 @@ def build_parser():
                         help="seconds between two attempts to follow the event stream")
     parser.add_argument("--interval", type=float, default=30.0,
                         help="seconds between two checks of the threads")
+    parser.add_argument("--publish", dest="publish", action="store_true", default=True,
+                        help="hand every sentence to the queue's event stream, so the chat "
+                             "front ends deliver the router's words (default: on)")
+    parser.add_argument("--no-publish", dest="publish", action="store_false",
+                        help="only write the sentences down (shadow mode)")
     parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
                         help="where the speech log lives")
     parser.add_argument("--speech", default="", help="the speech log (default: under --data-dir)")

@@ -480,6 +480,8 @@ def build_parser():
                         help="the provider whose quota gates the work (default: the queue's)")
     parser.add_argument("--allow-path", action="append", default=[],
                         help="a directory the Telegram tasks may touch (repeatable)")
+    parser.add_argument("--speech", action="store_true",
+                        help="let the router speak: the front end delivers the router's sentences instead of translating the queue's events itself")
     parser.add_argument("--triggers", action="store_true",
                         help="go through the queue's trigger entry: the queue decides\n                             (rules first, then the model) whether a message is work")
     parser.add_argument("--allow-chat", action="append", default=[],

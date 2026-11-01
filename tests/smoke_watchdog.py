@@ -54,7 +54,8 @@ class MockAgent(BaseHTTPRequestHandler):
 
     stopped = False
     ws_dir = ""
-    records = {"chat": 0, "stop": 0, "usage": 0}
+    verdict = '{"progressing": false, "drifted": true, "reason": "它在原地反复读同一个文件"}'
+    records = {"chat": 0, "stop": 0, "usage": 0, "llm": 0}
 
     def log_message(self, *args):
         pass
@@ -77,6 +78,17 @@ class MockAgent(BaseHTTPRequestHandler):
         if self.path.startswith("/api/providers/"):
             MockAgent.records["usage"] += 1
             return self._json({"window": {"remaining_percent": 95.0}})
+        if self.path.startswith("/api/sessions/") and self.path.endswith("/trajectory"):
+            # The agent's own audit trail: one turn with a few steps.
+            return self._json([{
+                "turn_id": "turn_1", "started_at": "2026-11-01T00:00:00Z",
+                "elapsed_ms": 45000, "ok": True, "iterations": 12,
+                "steps": [
+                    {"kind": "model", "tool_calls": ["toolkit_exec", "toolkit_file"]},
+                    {"kind": "tool", "name": "toolkit_exec"},
+                    {"kind": "tool", "name": "toolkit_file"},
+                ],
+            }])
         return self._json({"error": "unknown path " + self.path}, 404)
 
     def do_POST(self):  # noqa: N802 (http.server API)
@@ -98,6 +110,11 @@ class MockAgent(BaseHTTPRequestHandler):
             while not MockAgent.stopped and time.time() < deadline:
                 time.sleep(0.2)
             return
+        if self.path == "/api/llm/chat":
+            MockAgent.records["llm"] += 1
+            return self._json({"ok": True, "provider": "mock", "model": "mock",
+                               "content": MockAgent.verdict, "reasoning": "",
+                               "finish_reason": "stop"})
         if self.path == "/api/chat/stop":
             MockAgent.stopped = True
             MockAgent.records["stop"] += 1
@@ -286,6 +303,7 @@ def main():
                 "0.05",          # three seconds
                 "--interval",
                 "1",
+                "--drift",       # ask the model about the worker as well
                 "--data-dir",
                 watchdog_dir,
             ],
@@ -318,6 +336,62 @@ def main():
                 payload = alerts[-1].get("payload") or {}
                 if payload.get("check") != "stalled_task" or not payload.get("reason"):
                     failures.append("the alert does not say what happened: %r" % payload)
+
+        # ---- the model says whether the worker is going the right way ----
+        if MockAgent.records["llm"] < 1:
+            failures.append("the model was not asked about the stuck worker")
+        else:
+            entries = read_audit(audit_path)
+            advice = [e for e in entries if e.get("check") == "drift"
+                      and e.get("action") == "advise"]
+            if not advice:
+                failures.append("the verdict of the model was not written down")
+            elif not advice[-1].get("detail", {}).get("drifted"):
+                failures.append("the verdict was not the one the model gave: %r" % advice[-1])
+            alerts = [e for e in entries if e.get("check") == "drift"
+                      and e.get("action") == "escalate"]
+            if not alerts:
+                failures.append("the drift was not said out loud")
+
+        # ---- a worker that is fine gets no drift alert --------------------
+        MockAgent.verdict = '{"progressing": true, "drifted": false, "reason": "在正常推进"}'
+        quiet_dir = os.path.join(tmp, "watchdog_quiet")
+        quiet = subprocess.Popen(
+            [
+                sys.executable,
+                WATCHDOG,
+                "--tasks",
+                "http://127.0.0.1:%d" % queue_port,
+                "--agent",
+                "http://127.0.0.1:%d" % agent_port,
+                "--stall-after",
+                "0.05",
+                "--interval",
+                "1",
+                "--drift",
+                "--data-dir",
+                quiet_dir,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            if not wait_until(lambda: MockAgent.records["llm"] >= 2, 40):
+                failures.append("the model was not asked about the worker the second time")
+            else:
+                time.sleep(2)
+                drifts = [e for e in read_audit(os.path.join(quiet_dir, "audit.jsonl"))
+                          if e.get("check") == "drift" and e.get("action") == "escalate"]
+                if drifts:
+                    failures.append("a worker that is fine got a drift alert: %r" % drifts)
+        finally:
+            quiet.terminate()
+            try:
+                quiet.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                quiet.kill()
+        MockAgent.verdict = ('{"progressing": false, "drifted": true, '
+                             '"reason": "它在原地反复读同一个文件"}')
 
         # ---- with --auto the watchdog may act ---------------------------
         watchdog.terminate()

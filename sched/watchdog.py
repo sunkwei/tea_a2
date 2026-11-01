@@ -41,9 +41,11 @@ import argparse
 import calendar
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_TASKS = os.environ.get("TEA_TASK_URL", "http://127.0.0.1:8283")
@@ -51,6 +53,45 @@ DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8282")
 DEFAULT_FLEET = os.environ.get("TEA_FLEET_URL", "")
 DEFAULT_DATA_DIR = os.environ.get(
     "TEA_WATCHDOG_DATA", os.path.join("~", ".tea_agent", "watchdog"))
+
+# The model check: is the worker still going the right way? The verdict is
+# advice only - the actions stay with the rules. A model that says "drifted"
+# must not be able to end anybody's work.
+DRIFT_SYSTEM = (
+    "你在看一个后台任务的执行轨迹，判断两件事：\n"
+    "1) 它还在推进吗（工具在动、事情在往前做），还是卡在原地反复打转；\n"
+    "2) 它的方向对吗（做的还是不是交给它的那件事）。\n"
+    "宁可保守：说不准就说 progressing=true、drifted=false。\n"
+    "只输出一个 JSON 对象，不要解释，不要 markdown 代码块：\n"
+    "{\"progressing\": true 或 false, \"drifted\": true 或 false, \"reason\": \"一句话\"}")
+
+
+def parse_verdict(text):
+    """The model's answer about a worker: progressing / drifted / reason."""
+    content = (text or "").strip()
+    if not content:
+        return {}
+    try:
+        data = json.loads(content)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        def truthy(value):
+            if isinstance(value, bool):
+                return value
+            return str(value or "").strip().lower() in ("true", "yes", "1")
+        return {"progressing": truthy(data.get("progressing")),
+                "drifted": truthy(data.get("drifted")),
+                "reason": str(data.get("reason") or "")[:300]}
+    low = content.lower()
+    out = {}
+    for key in ("progressing", "drifted"):
+        found = re.search(r'"%s"\s*:\s*(true|false)' % key, low)
+        if found:
+            out[key] = found.group(1) == "true"
+    out["reason"] = content[:300]
+    return out
+
 
 # The actions the watchdog may take on a stuck task.
 ESCALATE = "escalate"
@@ -237,6 +278,108 @@ class Watchdog(object):
             return self.retry_task(task, reason)
         return self.escalate("stalled_task", reason, task)
 
+    # ---- the model check (advice, never an action) -----------------------
+    def ask_model(self, prompt, system):
+        status, body = http_json(self.agent_url + "/api/llm/chat", "POST", {
+            "prompt": prompt, "system": system, "temperature": 0.0,
+            "max_tokens": 400, "stream": False,
+        }, timeout=self.args.model_timeout)
+        if status == 0 or status >= 400:
+            log("the model did not answer: %s" % ((body or {}).get("error") or status))
+            return ""
+        if not isinstance(body, dict):
+            return ""
+        return (body.get("content") or body.get("reasoning") or "").strip()
+
+    def digest_of(self, task):
+        """What this worker has been doing: its trajectory and its own notes.
+
+        The trajectory is the agent\'s own audit trail (one JSONL per
+        session); the agent serves it at /api/sessions/{id}/trajectory.
+        """
+        lines = []
+        prompt = str(task.get("prompt") or "").strip()
+        if prompt:
+            lines.append("要做的事：%s" % prompt[:300])
+        notes = []
+        for step in (task.get("steps") or []):
+            if not isinstance(step, dict):
+                continue
+            note = str(step.get("note") or "").strip()
+            if note:
+                notes.append(note)
+        if notes:
+            lines.append("它自己报的进展：%s" % "；".join(notes[-8:]))
+        session_id = task.get("session_id") or ""
+        if session_id:
+            url = ("%s/api/sessions/%s/trajectory?full=1"
+                   % (self.agent_url, urllib.parse.quote(session_id)))
+            status, body = http_json(url, timeout=self.args.model_timeout)
+            turns = body if isinstance(body, list) else []
+            for turn in turns[:2]:
+                if not isinstance(turn, dict):
+                    continue
+                steps = turn.get("steps") or []
+                names = []
+                for step in steps:
+                    if not isinstance(step, dict):
+                        continue
+                    if step.get("kind") == "tool" and step.get("name"):
+                        name = str(step["name"])
+                    elif step.get("kind") == "model":
+                        name = ""
+                        for called in (step.get("tool_calls") or []):
+                            if called not in names:
+                                names.append(str(called))
+                        continue
+                    else:
+                        continue
+                    if name and name not in names:
+                        names.append(name)
+                lines.append("最近一轮：%d 步，%d 秒，用了 %s"
+                             % (len(steps), int(turn.get("elapsed_ms") or 0) // 1000,
+                                "、".join(names[:8]) or "没有工具调用"))
+        return "\n".join(lines)
+
+    def check_drift(self, task):
+        """Ask the model whether the worker is still going the right way.
+
+        The verdict is advice: it is written down and (when it matters) said
+        out loud, but the actions stay with the rules. The check runs once
+        per progress value, so a task that sits still does not cost a model
+        call per pass.
+        """
+        if not self.args.drift:
+            return False
+        task_id = task.get("id") or ""
+        progress = int(task.get("progress") or 0)
+        seen = (self.state.get("drift") or {}).get(task_id) or {}
+        if seen.get("progress") == progress and seen.get("at"):
+            return False            # already asked about this state
+        digest = self.digest_of(task)
+        if not digest:
+            return False
+        answer = self.ask_model("这个任务的执行情况：\n%s" % digest, DRIFT_SYSTEM)
+        verdict = parse_verdict(answer)
+        if not verdict:
+            self.audit("drift", task_id, "advise", "模型没答上来",
+                       {"answer": answer[:200]})
+            return False
+        self.state.setdefault("drift", {})[task_id] = {
+            "progress": progress, "at": now_iso()}
+        reason = verdict.get("reason") or ""
+        drifted = bool(verdict.get("drifted"))
+        progressing = bool(verdict.get("progressing"))
+        self.audit("drift", task_id, "advise", reason,
+                   {"progressing": progressing, "drifted": drifted})
+        if drifted:
+            self.escalate("drift", "看门狗觉得这个任务跑偏了：%s" % (reason or "方向不对"), task)
+            return True
+        if not progressing:
+            self.escalate("drift", "看门狗觉得这个任务没在推进：%s" % (reason or "没有进展"), task)
+            return True
+        return False
+
     # ---- the checks --------------------------------------------------------
     def running_tasks(self):
         """The tasks the queue says are running right now."""
@@ -301,6 +444,9 @@ class Watchdog(object):
                       % (waited, progress, (task.get("note") or "-")[:80]))
             self.state["tasks"][task_id] = {"progress": progress, "seen_at": now_iso(),
                                             "alerted": True}
+            # Ask the model first (its answer is advice only), then act: after
+            # the action there is nothing left to ask about.
+            self.check_drift(task)
             self.act_on(task, reason)
             out.append(task)
         # Forget the tasks that are not running any more.
@@ -308,6 +454,29 @@ class Watchdog(object):
         for task_id in list(self.state["tasks"].keys()):
             if task_id not in alive:
                 del self.state["tasks"][task_id]
+        return out
+
+    def check_running_drift(self):
+        """The tasks that run for a long time: are they still going the right way?
+
+        The rule-based check only sees "nothing moved". This one asks about
+        the workers that are busy but suspicious - a task that keeps calling
+        tools without getting anywhere looks exactly like one that is working.
+        """
+        if not self.args.drift or not self.args.drift_after:
+            return []
+        tasks, error = self.running_tasks()
+        if tasks is None:
+            return []
+        now = time.time()
+        out = []
+        for task in tasks:
+            stamp = parse_iso(task.get("started_at") or task.get("updated_at") or "")
+            age = (now - stamp) if stamp is not None else 0
+            if age < self.args.drift_after * 60:
+                continue
+            if self.check_drift(task):
+                out.append(task)
         return out
 
     def check_agent(self):
@@ -382,6 +551,7 @@ class Watchdog(object):
         self.check_agent()
         self.check_quota()
         self.check_stalled()
+        self.check_running_drift()
         self.check_devices()
         self._write_state()
 
@@ -411,6 +581,14 @@ def build_parser():
     parser.add_argument("--min-quota", type=float, default=0.0,
                         help="the quota percentage below which the queue is warned about "
                              "(0 = do not watch the quota)")
+    parser.add_argument("--drift", action="store_true",
+                        help="ask the model whether a worker is still going the right way "
+                             "(advice only - the actions stay with the rules)")
+    parser.add_argument("--drift-after", type=float, default=0.0,
+                        help="minutes a task may run before the model is asked about it "
+                             "(0 = only ask about the tasks that look stuck)")
+    parser.add_argument("--model-timeout", type=float, default=120.0,
+                        help="seconds for the model call that judges a worker")
     parser.add_argument("--action", default=ESCALATE, choices=list(ACTIONS),
                         help="what to do about a stuck task: escalate (say so), "
                              "fail it, or fail it and queue it again")

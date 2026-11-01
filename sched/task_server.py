@@ -2207,7 +2207,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self._check_project(task):
                 return self._forbid("task %s" % task_id)
             event["task"] = task
-        for key in ("check", "level", "reason", "action", "source"):
+        for key in ("check", "level", "reason", "action", "source",
+                    # The router's words: one sentence per event. The chat
+                    # front ends deliver them instead of translating the
+                    # events themselves (that is the "one voice" part).
+                    "line", "speech_of"):
             if key in body:
                 event[key] = body[key]
         self.app.events.publish(event)

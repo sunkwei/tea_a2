@@ -133,7 +133,8 @@ provider 不能搜时工具照样出现、请求发给 search provider 并用它
 `tests/smoke_watchdog.py` 起一个**真的队列**和一个**假的 agent**（agent 那一轮永远不结束，
 所以任务一直 running、一直不 progress），然后跑真的看门狗：默认它只把「卡住了」说出来
 （任务还在跑），带 `--auto --action fail` 才把任务判死（审计里有原因）；队列能暂停
-（暂停时**一个请求都不发给 agent**）和恢复；agent 停了会报 `agent_down`；告警进了任务的事件
+（暂停时**一个请求都不发给 agent**）和恢复；agent 停了会报 `agent_down`；**模型版判读**（`--drift`）模型被问了一次、判读写进
+审计，模型说跑偏就有 `drift` 告警、说「正常推进」就没有；告警进了任务的事件
 日志，渠道那一半（`sched/channel.py`）会把它推给对应的人。
 
 `tests/smoke_triggers.py` 覆盖触发器入口（真的队列 + 假的 agent + 真的触发器）：
@@ -144,7 +145,8 @@ provider 不能搜时工具照样出现、请求发给 search provider 并用它
 `tests/smoke_router.py` 覆盖 Router（真的队列 + 假的 agent + 真的 router）：任务的进度进了
 线索；**同线索的第二个任务被告知了之前的事**（mock agent 收到的 `task_context` 里有
 「这条线索之前的事」）；掉出窗口的旧进展被收拢成一句摘要，摘要进了下一个任务的 prompt；
-router 每个事件说一句话（`speech.jsonl`）。
+router 每个事件说一句话（`speech.jsonl`）；**router 的话进了队列的事件流**（`speech`
+事件），聊天前端加 `--speech` 后只递这句话、不再自己翻译原始事件。
 
 `tests/smoke_tool_call_structure.py` 覆盖「请求里的工具调用结构」：provider 要把每条工具结果
 对回它答复的那次调用，而且必须一对一。MiniMax 对不是一对一的历史整个请求都拒
