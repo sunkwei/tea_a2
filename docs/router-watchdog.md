@@ -116,7 +116,7 @@ Inline & Spill 的意思是：**近期的进展直接放进上下文窗口，超
 | --- | --- | --- |
 | M0 | 这份文档 | ✅ |
 | M1 | Watchdog v1（独立进程，默认只告警） | ✅ 已实现（`sched/watchdog.py`） |
-| M2 | Trigger 统一入口（`POST /api/triggers`） | ⏳ 未开始 |
+| M2 | Trigger 统一入口（`POST /api/triggers`） | ✅ 已实现（`sched/triggers.py`） |
 | M3 | Router（thread 上下文 + 统一对外说话） | ⏳ 未开始 |
 | M4 | 模型版 Watchdog（判断跑偏了没有） | ⏳ 未开始 |
 | M5 | Router 接到机群（可选） | ⏳ 未开始 |
@@ -216,34 +216,91 @@ watchdog 把一个任务判死时，**先写结论再停那一轮**：worker 那
 - 告警进了任务的事件日志，渠道那一半（`sched/channel.py`）会把它推给对应的人；
 - 看门狗自己挂了不影响队列（它是独立进程）。
 
-### M2：Trigger 统一入口
+### M2：Trigger 统一入口 —— ✅ 已实现
 
 **为什么**：现在每个渠道各写一套投递逻辑，「这个事件要不要做」的判断散在渠道里
 （`mail_watch.py` 用 `/api/llm/chat` 判读邮件就是个孤立的例子）。统一之后，
 「规则 + 模型判断」只写一次。
 
-**落点**：队列新增 `POST /api/triggers`（`sched/task_server.py`），渠道改造
-（`sched/wechat_bot.py`、`sched/telegram_bot.py`、`sched/mail_watch.py`）。
+**落点**：新文件 `sched/triggers.py`（规则、触发器记录、线索记录、决策流程），
+队列新增接口（`sched/task_server.py`），聊天前端多一个开关
+（`sched/channel.py` + 两个 bot 的 `--triggers`）。
 
-**流程**：
+#### 怎么用
 
-1. 渠道投一条 trigger：`{source, dedup_key, text, workspace_id}`。
-2. **去重**：`dedup_key` 见过 → 直接返回原来那条（幂等，不重复建任务）。
-3. **规则过滤**（先于模型，省钱）：`triggers:` 配置里按 source 写 `ignore` / `require` 关键词
-   或正则。命中 ignore → `ignored`；命中 require → 直接 `accepted`。
-4. **模型判断**（规则没定音时）：借 agent 的 `POST /api/llm/chat` 问一句「这件事要不要做」，
-   返回 `accept` / `ignore` + 理由。只有 accept 才建 task。
-5. 建 task 时带上 `trigger_id` 和 `thread_id`（同一 dedup 前缀或同一渠道会话 → 同一 thread）。
+```bash
+# 一个外部系统（CI、GitHub、自己的脚本）投一条事件
+curl -X POST http://127.0.0.1:8283/api/triggers \
+  -H 'Content-Type: application/json' \
+  -d '{"source": "webhook", "dedup_key": "ci:build:1234",
+       "text": "构建失败了：单元测试报错",
+       "workspace_id": "ws_xxx"}'
+# → {"duplicate": false, "trigger": {"decision": "accept", "task_id": "t_…", …}}
 
-**保留退路**：`POST /api/tasks` 继续能用（脚本、cron、老代码都在用）。Trigger 入口是**新增的
+# 看今天都来了什么、怎么判的
+curl http://127.0.0.1:8283/api/triggers
+curl http://127.0.0.1:8283/api/threads          # 线索（同一段对话）
+```
+
+规则写在 `~/.tea_agent/triggers.conf`（模板：`sched/triggers.template`）：
+
+```ini
+[webhook]
+require = 部署
+ignore  = 广告
+
+[mail]
+require = /CI (failed|error)/i
+ignore  = 订阅, newsletter
+```
+
+#### 流程（顺序是有讲究的）
+
+1. **去重**：`dedup_key` 见过 → 直接返回原来那条（幂等，不重复建任务）。没带 key 时，
+   key = 来源 + 文本的哈希（同一个来源的同一段话算同一件事；要排两次就自己带不同的 key）。
+2. **规则**（先于模型，省钱）：命中 `ignore` → 不管；命中 `require` → 受理。
+   **`ignore` 优先于 `require`**：「这条不是活儿」是明确的决定，而漏掉一条真活儿的
+   代价比多问一句大。
+3. **模型**（规则没定音时）：借 agent 的 `POST /api/llm/chat` 问一句「这件事要不要做」，
+   答 `accept` / `ignore` + 理由。**模型没答上来时按「受理」处理**——宁可多排一个能取消的
+   任务，也不让一条真活儿悄悄消失。
+4. **受理的触发器变成任务**：带上 `trigger_id` 和 `thread_id`。
+5. **线索（thread）**：同一个来源 + 同一个会话（`thread_key`，没带就从 `dedup_key` 的前缀推）
+   → 同一条线索，线索里有它的任务和触发器。Router（M3）的上下文就长在这里。
+
+#### 与计划的出入
+
+- **规则文件不是 yaml**：`~/.tea_agent/triggers.conf`，一段一个来源，`key = 值`。
+  这台机器上没人装 pyyaml（队列和机群都是自己解析的）。文件改了自动生效，不用重启。
+- **多了一个 `--triggers` 开关**：聊天前端默认**不走**触发器入口。白名单里的人跟 bot
+  说话通常就是有活儿干，问一遍模型既花钱又可能判错。要走入口就加 `--triggers`。
+- **邮件看门狗没有改**：它有自己的一套判读（更专业：分广告/账单/私人，还要起草回复），
+  再套一层通用判断就是花两次钱、可能得出两个结论。等它自己想走入口时再改。
+- **决策的词是 `accept` / `ignore`**（模型的原话），不是 `accepted` / `ignored`——
+  模型的答案可以原样用。
+
+#### 接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/triggers` | 投一条事件；答 `{"duplicate": bool, "trigger": {…}}` |
+| `GET` | `/api/triggers` | 触发器列表（`source` / `decision` / `workspace_id` / `limit`） |
+| `GET` | `/api/triggers/{id}` | 一条触发器 |
+| `GET` | `/api/threads` | 线索列表 |
+| `GET` | `/api/threads/{id}` | 一条线索（带它的任务） |
+
+**事件**：`trigger_received` / `trigger_decided`（带 `decision`）。
+
+**保留退路**：`POST /api/tasks` 继续能用（脚本、cron、老代码都在用）。触发器入口是**新增的
 入口**，不是替换。
 
-**事件**：`trigger_received` / `trigger_decided`（accepted|ignored）。
+#### 验收：`tests/smoke_triggers.py`
 
-**验收**：`tests/smoke_triggers.py`
-- 同一个 `dedup_key` 投两次 → 只有一条 trigger、一个任务；
-- 命中 `require` 规则 → 建任务，**没有**调用模型（用 mock 计数）；
-- 规则没命中 → 调模型判读，accept 才建任务，ignore 不建；
+- 命中 `require` → 建任务，**模型一次都没被问**（用 mock 计数）；
+- 命中 `ignore` → 不建任务，同样不问模型；
+- 规则没命中 → 问模型，模型说 accept 才建任务，说 ignore 就不建；
+- 同一个 `dedup_key` 投两次 → 第二条是 duplicate，**没有**排第二个任务；
+- 同一段对话的两个触发器 → 同一条线索，线索里有这两个任务；
 - 老路 `POST /api/tasks` 仍然工作。
 
 ### M3：Router 进程（全局上下文 + 对外说话）

@@ -49,6 +49,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler
 
 import task_order
+import triggers
 
 try:
     # Python 3.7+
@@ -265,6 +266,30 @@ class Agent:
     def stop(self, session_id):
         return self._request("POST", "/api/chat/stop", {"session_id": session_id})
 
+    def llm_chat(self, prompt=None, system=None, provider=None, model=None,
+                 temperature=None, max_tokens=None, timeout=60):
+        """One model call - no agent loop, no tool is executed.
+
+        The queue uses it to judge a trigger: "is this worth doing?". It is
+        the same call the mail watcher makes, on the same endpoint, so there
+        is one way to ask the model a question in this repository.
+        """
+        body = {}
+        if prompt is not None:
+            body["prompt"] = prompt
+        if system is not None:
+            body["system"] = system
+        if provider is not None:
+            body["provider"] = provider
+        if model is not None:
+            body["model"] = model
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        body["stream"] = False
+        return self._request("POST", "/api/llm/chat", body, timeout=timeout)
+
     def register_workspace(self, path, name=""):
         """Add a workspace to the agent's index (it is the agent's registry)."""
         return self._request("POST", "/api/workspaces", {"path": path, "name": name})
@@ -354,6 +379,10 @@ def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
         "not_before_text": not_before_text,
         "idempotency_key": key,
         "pending_message": "",
+        # The trigger this task came from (empty when it was submitted
+        # directly) and the thread it belongs to (the conversation).
+        "trigger_id": "",
+        "thread_id": "",
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "started_at": "",
@@ -1425,6 +1454,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._projects()
         if path == "/api/queue/state":
             return self._queue_state()
+        if path == "/api/triggers":
+            return self._list_triggers()
+        if path == "/api/threads":
+            return self._list_threads()
+        if path.startswith("/api/triggers/"):
+            return self._get_trigger(path[len("/api/triggers/"):])
+        if path.startswith("/api/threads/"):
+            return self._get_thread(path[len("/api/threads/"):])
         if path == "/api/task-order-template":
             return self._task_order_template()
         if path.startswith("/api/tasks/"):
@@ -1453,6 +1490,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._queue_pause(False)
         if path == "/api/events":
             return self._publish_event()
+        if path == "/api/triggers":
+            return self._submit_trigger()
         if path.startswith("/api/tasks/"):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
@@ -1942,6 +1981,78 @@ class Handler(BaseHTTPRequestHandler):
                                "task %s is already finished" % task.get("id"))
         self._json(200, self.app.decorate(written))
 
+    def _submit_trigger(self):
+        """One outside event comes in; the queue decides what to do with it.
+
+        The trigger entry is the door every outside event comes through: a
+        webhook, a mail, a chat. It decides (rules first, then the model)
+        and only an accepted trigger becomes a task.
+        """
+        body = self._body()
+        if body is None:
+            return self._error(400, "bad_request", "the request body is not JSON")
+        workspace_id = str(body.get("workspace_id") or "").strip()
+        caller = self._project_of_caller()
+        if caller and workspace_id and workspace_id != caller:
+            return self._forbid("project %s" % workspace_id)
+        if not workspace_id:
+            workspace_id = self.app.default_workspace()
+        if not workspace_id:
+            return self._error(400, "bad_request",
+                               "'workspace_id' is required (the agent has no workspace)")
+        if caller and workspace_id != caller:
+            return self._forbid("project %s" % workspace_id)
+        body["workspace_id"] = workspace_id
+        try:
+            trigger, duplicate = self.app.trigger_service.submit(body)
+        except triggers.TriggerError as exc:
+            return self._error(400, "bad_request", str(exc))
+        if not duplicate:
+            self.app.events.publish({"type": "trigger_received", "trigger": trigger})
+            self.app.events.publish({"type": "trigger_decided", "trigger": trigger})
+            self.app.store.audit("trigger", trigger.get("id") or "",
+                                 {"source": trigger.get("source") or "",
+                                  "decision": trigger.get("decision") or "",
+                                  "task_id": trigger.get("task_id") or ""})
+        self._json(200, {"duplicate": duplicate, "trigger": trigger})
+
+    def _list_triggers(self):
+        caller = self._project_of_caller()
+        workspace_id = caller or self._one("workspace_id")
+        items = self.app.trigger_store.list_triggers(
+            source=self._one("source"), decision=self._one("decision"),
+            workspace_id=workspace_id, limit=self._int("limit", 100) or 100)
+        self._json(200, {"triggers": items, "count": len(items)})
+
+    def _get_trigger(self, trigger_id):
+        trigger = self.app.trigger_store.load_trigger(trigger_id)
+        if trigger is None:
+            return self._error(404, "not_found", "no trigger %r" % trigger_id)
+        if not self._check_project({"workspace_id": trigger.get("workspace_id") or ""}):
+            return self._forbid("trigger %s" % trigger_id)
+        self._json(200, trigger)
+
+    def _list_threads(self):
+        caller = self._project_of_caller()
+        workspace_id = caller or self._one("workspace_id")
+        items = self.app.trigger_store.list_threads(workspace_id=workspace_id)
+        self._json(200, {"threads": items, "count": len(items)})
+
+    def _get_thread(self, thread_id):
+        thread = self.app.trigger_store.load_thread(thread_id)
+        if thread is None:
+            return self._error(404, "not_found", "no thread %r" % thread_id)
+        if not self._check_project({"workspace_id": thread.get("workspace_id") or ""}):
+            return self._forbid("thread %s" % thread_id)
+        thread = dict(thread)
+        tasks = []
+        for task_id in thread.get("task_ids") or []:
+            task = self.app.store.load("", task_id)
+            if task:
+                tasks.append(self.app.decorate(task))
+        thread["tasks"] = tasks
+        self._json(200, thread)
+
     def _queue_state(self):
         """Is the scheduler paused, and why."""
         state = self.app.store.state()
@@ -2064,9 +2175,12 @@ class Handler(BaseHTTPRequestHandler):
         projects are doing.
         """
         task = event.get("task")
-        if not task:
-            return True
-        return (task.get("workspace_id") or "") == workspace_id
+        if task:
+            return (task.get("workspace_id") or "") == workspace_id
+        trigger = event.get("trigger")
+        if trigger:
+            return (trigger.get("workspace_id") or "") == workspace_id
+        return True
 
 
 class App:
@@ -2084,6 +2198,74 @@ class App:
         self.agent = Agent(args.agent, chat_timeout=getattr(args, "chat_timeout", 3600))
         self.events = Events(self.store)
         self.engine = Engine(self.store, self.agent, self.events, args)
+        # The trigger entry: one door for every outside event (a webhook, a
+        # mail, a chat). The records live in their own directories next to
+        # the task records.
+        self.trigger_store = triggers.TriggerStore(data_dir)
+        self.trigger_rules = triggers.Rules(getattr(args, "trigger_config", ""))
+        self.trigger_service = triggers.TriggerService(
+            self.trigger_store, self.trigger_rules,
+            judge=self.judge_trigger, make_task=self.make_task_from_trigger)
+
+    def judge_trigger(self, trigger):
+        """Ask the model whether this trigger is worth doing.
+
+        The rules already had their say; this is the last word and it costs
+        money, so the call is as small as it can be. When the model cannot
+        be reached the decision is left empty - the service then keeps the
+        work rather than losing it, and says so in the reason.
+        """
+        system = ("你是任务分派助手。有人会给一条外部消息（可能是工作请求，也可能是闲聊、"
+                 "通知、广告）。判断这条消息值不值得让 agent 去做一件事。\n"
+                 "值得做的：有人明确要求做事、报告了故障或失败、需要一个决定。\n"
+                 "不值得做的：打招呼、广告、订阅摘要、自动通知、跟这里的事无关的闲聊。\n"
+                 "只输出一个 JSON 对象，不要解释，不要 markdown 代码块：\n"
+                 "{\"decision\": \"accept\" 或 \"ignore\", \"reason\": \"一句话\"}")
+        prompt = "外部消息（来源：%s）：\n%s" % (trigger.get("source") or "?", trigger.get("text") or "")
+        try:
+            answer = self.agent.llm_chat(
+                prompt=prompt, system=system,
+                provider=self.args.provider or None,
+                temperature=0.0, max_tokens=300,
+                timeout=getattr(self.args, "trigger_timeout", 60))
+        except AgentError as exc:
+            return "", "模型没答上来：%s" % str(exc)[:160]
+        content = answer.get("content") or ""
+        if not content:
+            # Some models put the answer in their thinking and leave the body
+            # empty - the mail watcher learned that the hard way.
+            content = answer.get("reasoning") or ""
+        decision, reason = triggers.parse_decision(content)
+        return decision, reason
+
+    def make_task_from_trigger(self, trigger, body):
+        """The task an accepted trigger becomes."""
+        meta = {}
+        if isinstance(body.get("meta"), dict):
+            meta = dict(body["meta"])
+        meta["trigger_id"] = trigger.get("id") or ""
+        meta["source"] = trigger.get("source") or ""
+        not_before = ""
+        not_before_text = ""
+        if body.get("not_before"):
+            not_before_text = str(body["not_before"]).strip()
+            not_before = parse_not_before(not_before_text) or ""
+        task = new_task({
+            "prompt": trigger.get("text") or "",
+            "title": str(body.get("title") or "")[:80],
+            "provider": str(body.get("provider") or ""),
+            "model": str(body.get("model") or ""),
+        }, trigger.get("workspace_id") or "",
+            priority=int(body.get("priority") or 0),
+            not_before=not_before, not_before_text=not_before_text, meta=meta)
+        task["trigger_id"] = trigger.get("id") or ""
+        task["thread_id"] = trigger.get("thread_id") or ""
+        self.store.create(task)
+        self.publish("task_created", task)
+        self.store.audit("submit", task["id"],
+                         {"prompt": task.get("prompt", "")[:200],
+                          "trigger_id": task["trigger_id"]})
+        return task
 
     def page_html(self):
         """The page, read once at startup (it is a static file next to us)."""
@@ -2376,6 +2558,11 @@ def main(argv=None):
                              "a slot any more")
     parser.add_argument("--interval", type=float, default=2.0,
                         help="seconds between rounds (default: 2)")
+    parser.add_argument("--trigger-config", default=triggers.DEFAULT_RULES_PATH,
+                        help="the rules of the trigger entry: which outside events are "
+                             "work and which are not (see docs/router-watchdog.md)")
+    parser.add_argument("--trigger-timeout", type=float, default=60.0,
+                        help="seconds for the model call that judges a trigger")
     parser.add_argument("--chat-timeout", type=float, default=3600.0,
                         help="how long a turn may take before the queue gives up on it "
                              "(seconds; 0 = no limit)")

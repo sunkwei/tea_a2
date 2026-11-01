@@ -22,6 +22,7 @@ agent 完全不知道 Python 侧的存在。所以：
 | `task_order.py` | 任务单文本格式的解析 | 想用文件提交任务 | [任务队列](#任务队列) |
 | `task_ui.html` | 队列的网页界面 | 想在浏览器里看队列 | [任务队列](#任务队列) |
 | `watchdog.py` | **任务看门狗**：在 agent 和队列外面盯着卡住的任务、agent 的健康、额度 | 想知道「是不是卡住了」「它还活着吗」 | [任务看门狗](#任务看门狗watchdog) |
+| `triggers.py` | **触发器入口**：外部事件（webhook / 邮件 / 聊天）的统一入口——去重 + 规则 + 模型判断 | 想让外部系统直接派活儿 | [触发器入口](#触发器入口triggers) |
 | `tea_api.py` | 调 agent / 队列的客户端库 | 想写自己的脚本 | [客户端库](#客户端库tea_apy) |
 | `channel.py` | 聊天前端的共用半边 | 想加第三种聊天前端 | [聊天前端](#聊天前端) |
 | `wechat_bot.py` | 微信端（iLink 协议，扫码登录） | 想用微信排任务 | [聊天前端](#聊天前端) |
@@ -71,6 +72,29 @@ python3 sched/task_server.py --submit "把 README 的构建例子跑一遍"
 - 网页界面：`sched/task_ui.html`（由队列服务托管）。
 
 深层说明：`docs/tasks.md`。
+
+## 触发器入口（triggers）
+
+**所有外部事件走同一个门。** 一个 webhook、一封邮件、一条聊天消息，本质上是同一件事：
+「外面来了个东西，要不要让 agent 去办」。以前每个渠道自己判断一遍，现在只写一次。
+
+```bash
+# 外部系统投一条事件
+curl -X POST http://127.0.0.1:8283/api/triggers -H 'Content-Type: application/json' \
+  -d '{"source": "webhook", "dedup_key": "ci:build:1234", "text": "构建失败了"}'
+
+curl http://127.0.0.1:8283/api/triggers     # 都来了什么、怎么判的
+curl http://127.0.0.1:8283/api/threads      # 线索（同一段对话）
+```
+
+- **顺序**：去重（同一个 key 是同一件事）→ 规则（`~/.tea_agent/triggers.conf`，先于模型，
+  省钱也稳）→ 模型（规则没定音才问一次「要不要做」）。
+- **受理才变任务**：模型没答上来时按「受理」处理——宁可多排一个能取消的任务，也不让
+  一条真活儿悄悄消失。
+- **规则模板**：`sched/triggers.template`（每段一个来源，`ignore` 优先于 `require`）。
+- 聊天前端默认**不走**这里（白名单里的人说话通常就是有活儿）；要走就加 `--triggers`。
+
+深层说明：`docs/router-watchdog.md`。
 
 ## 任务看门狗（watchdog）
 

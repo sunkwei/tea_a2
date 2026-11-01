@@ -262,6 +262,29 @@ class Queue:
         headers = {"Idempotency-Key": key} if key else None
         return self._request("POST", "/api/tasks", body, headers=headers)
 
+    def trigger(self, source, text, workspace_id=None, dedup_key="", title="", meta=None,
+                thread_key="", not_before=""):
+        """One outside event through the trigger entry.
+
+        The trigger entry decides whether it is work at all (the rules
+        first, then the model) and only an accepted trigger becomes a task.
+        The answer carries the trigger, so the caller can say what happened.
+        """
+        body = {"source": source, "text": text}
+        if workspace_id:
+            body["workspace_id"] = workspace_id
+        if dedup_key:
+            body["dedup_key"] = dedup_key
+        if title:
+            body["title"] = title
+        if meta:
+            body["meta"] = meta
+        if thread_key:
+            body["thread_key"] = thread_key
+        if not_before:
+            body["not_before"] = not_before
+        return self._request("POST", "/api/triggers", body)
+
     def list(self, workspace_id=None, status=None):
         query = {}
         if workspace_id:
@@ -588,6 +611,11 @@ class TaskChannel:
         text, not_before = split_schedule(text)
         if not text:
             return "（没看懂：发一句话就是排一个任务，/help 有全部命令）"
+        if getattr(self.args, "triggers", False):
+            # Through the trigger entry: the queue decides whether this is
+            # work at all. Off by default - a whitelisted person talking to
+            # the bot usually means it, and asking the model costs money.
+            return self.handle_as_trigger(text, user_id, not_before)
         try:
             task = self.queue.create(
                 text, workspace_id=self.ensure_workspace(), title=text[:40],
@@ -604,6 +632,35 @@ class TaskChannel:
         if when:
             return ("已排队 %s\n「%s」\n%s 之后才能开工，额度有余量就自动做。"
                     % (task_id, text[:60], when))
+        return ("已排队 %s\n「%s」\n额度有余量就自动开工，做完我告诉你。"
+                % (task_id, text[:60]))
+
+    def handle_as_trigger(self, text, user_id, not_before=""):
+        """The message goes through the trigger entry.
+
+        The queue answers with a decision: accept (it became a task) or
+        ignore (it was not work). Either way the user gets an answer that
+        says what happened - a message that vanished is worse than one that
+        was refused.
+        """
+        try:
+            answer = self.queue.trigger(
+                self.channel_name(), text, workspace_id=self.ensure_workspace(),
+                dedup_key=idempotency_key(user_id, text),
+                title=text[:40], meta={self.META_USER_KEY: user_id},
+                thread_key="%s:%s" % (self.channel_name(), user_id),
+                not_before=not_before)
+        except ChannelError as exc:
+            return "排队失败：%s" % exc
+        trigger = answer.get("trigger") or {}
+        decision = trigger.get("decision") or ""
+        reason = trigger.get("reason") or ""
+        task_id = trigger.get("task_id") or ""
+        if decision == "ignore":
+            return "这条我先不管：%s" % (reason or "不是活儿")
+        if not task_id:
+            return "这条我先收下了，但还没排上队（%s）" % (reason or "没有结论")
+        self.owner[task_id] = user_id
         return ("已排队 %s\n「%s」\n额度有余量就自动开工，做完我告诉你。"
                 % (task_id, text[:60]))
 

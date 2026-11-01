@@ -249,6 +249,7 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
 | 让队列停下 / 继续 | `POST /api/queue/pause {"reason": "…"}` / `POST /api/queue/resume`；`GET /api/queue/state` 看现在是不是停着。**暂停写在文件里**，服务重启也还是停着的——队列不该自己又开始干活 |
 | 把一个卡死的任务判死 | `POST /api/tasks/{id}/fail {"reason": "…"}`（看门狗用；必须带原因） |
 | 往事件流里塞一条事件 | `POST /api/events {"type": "watchdog_alert", "task_id": "…", …}`（只有本机操作员能塞；看门狗的告警就走这条路） |
+| 投一条外部事件 | `POST /api/triggers {"source": "webhook", "text": "…", "dedup_key": "…"}`——**触发器入口**：同一个 key 是同一件事（不重复排），规则先判（`~/.tea_agent/triggers.conf`），规则没定音才问模型一次；答 `accept` 才变成任务。`GET /api/triggers` 看都来了什么，`GET /api/threads` 看线索 |
 | 交一份任务单 | `python3 sched/task_server.py --submit-order <文件>`，或把 `*.order` 文件发给微信 bot |
 
 ### 任务单：一个文件交一份活儿
@@ -455,8 +456,8 @@ toolkit_task op=update needs_confirmation=true question="可以删掉旧构建�
 
 - **M1 Watchdog（先做）**：独立进程巡检 running 的任务、agent 的健康、额度和设备；
   默认只告警不动手，`--auto` 才允许 fail/retry。
-- **M2 Trigger 入口**：`POST /api/triggers` 统一收事件，规则过滤 + 模型判断要不要做；
-  `POST /api/tasks` 继续留着当退路。
+- **M2 Trigger 入口**（已做）：`POST /api/triggers` 统一收事件，去重 → 规则 → 模型判断
+  要不要做；`POST /api/tasks` 继续留着当退路。
 - **M3 Router**：跨 session 的共享上下文（thread），以及统一对外说话。
 
 完整的对象模型、接口和验收标准见 [Router 与 Watchdog](router-watchdog.md)。
