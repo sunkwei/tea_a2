@@ -246,6 +246,9 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
 | 看指标 | `GET /api/health` 的 `metrics`（队列长度、平均排队时长、失败率……） |
 | 看审计 | `GET /api/audit?task_id=…` |
 | 拿任务单模板 | `GET /api/task-order-template`（网页上就是那个「下载任务单模板」） |
+| 让队列停下 / 继续 | `POST /api/queue/pause {"reason": "…"}` / `POST /api/queue/resume`；`GET /api/queue/state` 看现在是不是停着。**暂停写在文件里**，服务重启也还是停着的——队列不该自己又开始干活 |
+| 把一个卡死的任务判死 | `POST /api/tasks/{id}/fail {"reason": "…"}`（看门狗用；必须带原因） |
+| 往事件流里塞一条事件 | `POST /api/events {"type": "watchdog_alert", "task_id": "…", …}`（只有本机操作员能塞；看门狗的告警就走这条路） |
 | 交一份任务单 | `python3 sched/task_server.py --submit-order <文件>`，或把 `*.order` 文件发给微信 bot |
 
 ### 任务单：一个文件交一份活儿

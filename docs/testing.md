@@ -65,6 +65,7 @@ python3 tests/smoke_prompt_queue.py                       # 消息插队：采�
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
 python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果/串行/幂等/事件/导出
 python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）
+python3 tests/smoke_watchdog.py                             # 看门狗：卡住的任务（默认只告警）/ --auto 才判死 / 队列暂停与恢复 / agent 不通
                                                           # + 审计 + 机群服务 API + 真二进制的 /api/status 与 /api/exec
                                                           # + 多级链路（服务器 a2 → toolkit_fleet → 机群服务 → 设备 a2）
 python3 tests/smoke_peer.py                                 # 级联：peers: 配置 + 对端通道（令牌/白名单/404）+
@@ -126,6 +127,12 @@ chat 与 `/v1/tools/{search,fetch}`，覆盖：工具按 provider 声明才出�
 能中断传输中的请求；以及独立的 search provider（`provider.yaml` 顶层 `search:` 段）：对话
 provider 不能搜时工具照样出现、请求发给 search provider 并用它的 key、`always: true` 时连
 「自己能搜」的 provider 也让位、段写错（provider 不存在）时报错且不给工具。
+
+`tests/smoke_watchdog.py` 起一个**真的队列**和一个**假的 agent**（agent 那一轮永远不结束，
+所以任务一直 running、一直不 progress），然后跑真的看门狗：默认它只把「卡住了」说出来
+（任务还在跑），带 `--auto --action fail` 才把任务判死（审计里有原因）；队列能暂停
+（暂停时**一个请求都不发给 agent**）和恢复；agent 停了会报 `agent_down`；告警进了任务的事件
+日志，渠道那一半（`sched/channel.py`）会把它推给对应的人。
 
 `tests/smoke_tool_call_structure.py` 覆盖「请求里的工具调用结构」：provider 要把每条工具结果
 对回它答复的那次调用，而且必须一对一。MiniMax 对不是一对一的历史整个请求都拒

@@ -711,10 +711,44 @@ class TaskChannel:
         return "不认识的命令：%s\n%s" % (cmd, self.HELP)
 
     # -- the notifications ------------------------------------------------
+    def notify_watchdog(self, event):
+        """Tell the user what the watchdog saw.
+
+        An alert about one task goes to the person who queued it. An alert
+        without a task (the agent is down, the quota ran out) is about the
+        whole machine: it goes to everybody this bot has talked to.
+        """
+        check = event.get("check") or "watchdog"
+        reason = event.get("reason") or ""
+        task = event.get("task") or {}
+        task_id = task.get("id", "")
+        users = []
+        if task_id:
+            user_id = self.owner.get(task_id) or (task.get("meta") or {}).get(self.META_USER_KEY)
+            if user_id:
+                users = [user_id]
+        else:
+            for user_id in list(self.owner.values()):
+                if user_id not in users:
+                    users.append(user_id)
+        if not users:
+            return False
+        text = "看门狗：%s%s：%s" % (check, ("（任务 %s）" % task_id) if task_id else "", reason)
+        sent = False
+        for user_id in users:
+            try:
+                if self.send_text(user_id, text):
+                    sent = True
+            except ChannelError as exc:
+                log("cannot send the watchdog alert: %s" % exc)
+        return sent
+
     def notify_event(self, event):
         """Tell the user about one task event. Returns True when a message
         went out."""
         kind = event.get("type", "")
+        if kind == "watchdog_alert":
+            return self.notify_watchdog(event)
         if kind not in ("task_done", "task_failed", "task_waiting_confirmation"):
             return False
         task = event.get("task") or {}

@@ -505,6 +505,44 @@ class Store:
             pass
         return out
 
+    # ---- the queue's own state ------------------------------------------
+    def _state_path(self):
+        return os.path.join(self.root, "queue_state.json")
+
+    def state(self):
+        """The queue's own switches. Right now: is the scheduler paused?
+
+        The pause lives in a file, not in memory: it is an operator decision
+        ("stop working until I say so") and it has to survive a restart of
+        the service - a queue that starts working again by itself the moment
+        it is restarted is a queue nobody can trust to stay quiet.
+        """
+        data = {}
+        try:
+            with open(self._state_path(), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        return {
+            "paused": bool(data.get("paused")),
+            "reason": str(data.get("reason") or ""),
+            "paused_at": str(data.get("paused_at") or ""),
+        }
+
+    def set_paused(self, paused, reason=""):
+        state = self.state()
+        state["paused"] = bool(paused)
+        state["reason"] = str(reason or "") if paused else ""
+        state["paused_at"] = now_iso() if paused else ""
+        try:
+            with open(self._state_path(), "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+        return state
+
     # ---- the audit log -------------------------------------------------
     def audit(self, action, task_id="", detail=None, actor=""):
         """One line in the audit log: who did what to which task."""
@@ -794,7 +832,7 @@ class Engine:
         self.agent = agent
         self.events = events
         self.args = args
-        self.running = {}     # task id -> {"session_id":..., "thread":...}
+        self.running = {}     # task id -> {"thread":..., "workspace_id":...}
         self._quota = (None, None, 0.0)   # (percent, window, read_at)
 
     # ---- the quota gate ---------------------------------------------------
@@ -840,6 +878,11 @@ class Engine:
         that is still running when the next round comes up must keep its slot.
         A record that says "running" but was not touched for a while is a
         leftover from a crashed process - it does not hold a slot for ever.
+
+        The threads of THIS process count as well, even when their record
+        already says "failed": the watchdog can mark a stuck task failed
+        while its worker is still winding down, and the project's slot must
+        not be handed out twice.
         """
         mine = set(self.running)
         out = []
@@ -849,6 +892,13 @@ class Engine:
                 if stamp is not None and time.time() - stamp > self.args.stale_after:
                     continue
             out.append(task)
+        for task_id, info in list(self.running.items()):
+            if task_id in mine and any(t.get("id") == task_id for t in out):
+                continue
+            out.append({"id": task_id,
+                        "workspace_id": (info or {}).get("workspace_id", ""),
+                        "status": RUNNING,
+                        "note": "the worker is still winding down"})
         return out
 
     def running_count(self, workspace_id=None):
@@ -868,6 +918,13 @@ class Engine:
 
     # ---- one round --------------------------------------------------------
     def round(self):
+        # A paused queue starts nothing. The pause is an operator decision
+        # ("stop working until I say so"), so it also survives a restart of
+        # this service - see Store.set_paused.
+        state = self.store.state()
+        if state.get("paused"):
+            log("the queue is paused: %s" % (state.get("reason") or "no reason given"))
+            return 0
         provider = self.args.provider
         queued = self.store.list(status=QUEUED)
         if not queued:
@@ -978,6 +1035,66 @@ class Engine:
                 self.events.publish({"type": "task_failed", "task": task})
         return recovered
 
+    # ---- the final word about a task --------------------------------------
+    def _finalize(self, workspace_id, task_id, status, fields=None):
+        """Write the final status of a task - unless somebody else already did.
+
+        A watchdog can mark a stuck task failed while its worker is still
+        streaming; when that worker's stream ends it would overwrite the
+        verdict with "done" and the record would claim a success that never
+        happened. The first verdict wins: a task that is already finished
+        stays finished.
+
+        Returns the written record, or None when the task was already
+        finished (then the caller must not publish anything either).
+        """
+        task = self.store.load(workspace_id, task_id)
+        if task is None:
+            return None
+        if task.get("status") in TERMINAL:
+            return None
+
+        def apply(t):
+            if callable(fields):
+                fields(t)
+            elif isinstance(fields, dict):
+                t.update(fields)
+            t["status"] = status
+
+        self.store.update(workspace_id, task_id, apply)
+        return self.store.load(workspace_id, task_id)
+
+    def fail_task(self, workspace_id, task_id, reason, actor="watchdog"):
+        """Mark a running task failed - for the watchdog.
+
+        The worker of a stuck task may still be streaming: the verdict is
+        written first (so the worker's late "done" cannot overwrite it) and
+        the turn is stopped afterwards, so the slot is really free and the
+        provider does not keep burning tokens on a task nobody watches.
+        """
+        task = self.store.load(workspace_id, task_id)
+        if task is None:
+            return None
+        if task.get("status") in TERMINAL:
+            return None
+        reason = str(reason or "").strip() or "marked failed"
+        written = self._finalize(workspace_id, task_id, FAILED, {
+            "error": reason,
+            "finished_at": now_iso(),
+            "note": "failed: " + reason[:80],
+        })
+        if written is None:
+            return None
+        session_id = task.get("session_id")
+        if session_id:
+            try:
+                self.agent.stop(session_id)
+            except AgentError as exc:
+                log("could not stop the turn of %s: %s" % (task_id, exc))
+        self.events.publish({"type": "task_failed", "task": written})
+        self.store.audit("fail", task_id, {"reason": reason, "actor": actor})
+        return written
+
     # ---- running one task -------------------------------------------------
     def start_task(self, task, provider=None):
         """Run a task now: the turn goes through the agent, the record follows."""
@@ -1007,7 +1124,7 @@ class Engine:
         thread = threading.Thread(target=self._run,
                                   args=(workspace_id, task_id, provider, context, pending or None),
                                   daemon=True)
-        self.running[task_id] = thread
+        self.running[task_id] = {"thread": thread, "workspace_id": workspace_id}
         thread.start()
         log("  started task %s (%s)" % (task_id, task.get("title") or task.get("prompt", "")[:40]))
         return True
@@ -1070,32 +1187,38 @@ class Engine:
             elif kind == "done":
                 answer = event.get("content") or answer
                 status = WAITING if report["needs_confirmation"] else DONE
-                self.store.update(workspace_id, task_id, lambda t: t.update({
-                    "status": status,
-                    "progress": 100 if status == DONE else t.get("progress", 0),
-                    "result": answer,
-                    "finished_at": now_iso(),
-                    "error": "",
-                }))
-                self.events.publish({"type": "task_done" if status == DONE else "task_waiting_confirmation",
-                                      "task": self.store.load(workspace_id, task_id)})
+
+                def done_fields(t):
+                    t["progress"] = 100 if status == DONE else t.get("progress", 0)
+                    t["result"] = answer
+                    t["finished_at"] = now_iso()
+                    t["error"] = ""
+
+                written = self._finalize(workspace_id, task_id, status, done_fields)
+                if written is not None:
+                    self.events.publish(
+                        {"type": "task_done" if status == DONE else "task_waiting_confirmation",
+                         "task": written})
                 return
             elif kind == "error":
-                self.store.update(workspace_id, task_id, lambda t: t.update({
-                    "status": FAILED, "error": event.get("message") or "the turn failed",
-                    "finished_at": now_iso()}))
-                self.events.publish({"type": "task_failed", "task": self.store.load(workspace_id, task_id)})
+                written = self._finalize(workspace_id, task_id, FAILED, {
+                    "error": event.get("message") or "the turn failed",
+                    "finished_at": now_iso()})
+                if written is not None:
+                    self.events.publish({"type": "task_failed", "task": written})
                 return
             elif kind == "stopped":
-                self.store.update(workspace_id, task_id, lambda t: t.update({
-                    "status": CANCELLED, "finished_at": now_iso()}))
-                self.events.publish({"type": "task_cancelled", "task": self.store.load(workspace_id, task_id)})
+                written = self._finalize(workspace_id, task_id, CANCELLED, {
+                    "finished_at": now_iso()})
+                if written is not None:
+                    self.events.publish({"type": "task_cancelled", "task": written})
                 return
         # The stream ended without a verdict (the agent died, the connection broke).
-        self.store.update(workspace_id, task_id, lambda t: t.update({
-            "status": FAILED, "error": "the turn ended without an answer",
-            "finished_at": now_iso()}))
-        self.events.publish({"type": "task_failed", "task": self.store.load(workspace_id, task_id)})
+        written = self._finalize(workspace_id, task_id, FAILED, {
+            "error": "the turn ended without an answer",
+            "finished_at": now_iso()})
+        if written is not None:
+            self.events.publish({"type": "task_failed", "task": written})
 
     def _apply_report(self, workspace_id, task_id, event, report):
         """The agent's own report (toolkit_task): progress, note, a question."""
@@ -1300,6 +1423,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._audit()
         if path == "/api/projects":
             return self._projects()
+        if path == "/api/queue/state":
+            return self._queue_state()
         if path == "/api/task-order-template":
             return self._task_order_template()
         if path.startswith("/api/tasks/"):
@@ -1322,6 +1447,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._create()
         if path == "/api/projects":
             return self._project_key()
+        if path == "/api/queue/pause":
+            return self._queue_pause(True)
+        if path == "/api/queue/resume":
+            return self._queue_pause(False)
+        if path == "/api/events":
+            return self._publish_event()
         if path.startswith("/api/tasks/"):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
@@ -1709,6 +1840,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._confirm(workspace_id, task)
         if action == "retry":
             return self._retry(workspace_id, task)
+        if action == "fail":
+            return self._fail(workspace_id, task)
         return self._error(404, "not_found", "no such action: %s" % action)
 
     def _start(self, workspace_id, task):
@@ -1787,6 +1920,87 @@ class Handler(BaseHTTPRequestHandler):
         self.app.store.audit("retry", task.get("id"))
         self._json(200, self.app.decorate(self.app.store.load(workspace_id, task.get("id")) or task))
 
+    def _fail(self, workspace_id, task):
+        """Mark a running task failed - the watchdog's way to stop a stuck one.
+
+        The reason is required: a failed task without a reason is a task
+        somebody has to guess about later.
+        """
+        body = self._body()
+        if body is None:
+            return self._error(400, "bad_request", "the request body is not JSON")
+        reason = str(body.get("reason") or "").strip()
+        if not reason:
+            return self._error(400, "bad_request", "'reason' is required")
+        if task.get("status") in TERMINAL:
+            return self._error(409, "already_finished",
+                               "task %s is %s - it cannot be failed"
+                               % (task.get("id"), task.get("status")))
+        written = self.app.engine.fail_task(workspace_id, task.get("id"), reason)
+        if written is None:
+            return self._error(409, "already_finished",
+                               "task %s is already finished" % task.get("id"))
+        self._json(200, self.app.decorate(written))
+
+    def _queue_state(self):
+        """Is the scheduler paused, and why."""
+        state = self.app.store.state()
+        state["counts"] = self.app.store.counts()
+        self._json(200, state)
+
+    def _queue_pause(self, paused):
+        """Stop (or start) the scheduler.
+
+        The pause is an operator decision and it lives in a file, so it
+        survives a restart of this service: a queue that starts working again
+        by itself is a queue nobody can trust to stay quiet.
+        """
+        body = self._body() or {}
+        reason = str(body.get("reason") or "").strip()
+        state = self.app.store.set_paused(paused, reason)
+        # No task on the event: this is about the whole queue, so every
+        # channel may hear it.
+        self.app.events.publish({"type": "queue_paused" if paused else "queue_resumed",
+                                 "reason": reason})
+        self.app.store.audit("queue_pause" if paused else "queue_resume", "",
+                             {"reason": reason})
+        self._json(200, state)
+
+    def _publish_event(self):
+        """Let an outside service put an event into the queue's stream.
+
+        The watchdog needs it: an alert about a stuck task has to reach the
+        person who queued it, and the event stream is already the road to
+        that person (the chat front ends listen to it).
+
+        Only the local operator may do this. A project key must not be able
+        to forge events - "task_done" for somebody else's task would be a
+        lie that the queue believes.
+        """
+        if self._key():
+            return self._error(403, "forbidden",
+                               "only the local operator may publish events")
+        body = self._body()
+        if body is None:
+            return self._error(400, "bad_request", "the request body is not JSON")
+        kind = str(body.get("type") or "").strip()
+        if not kind:
+            return self._error(400, "bad_request", "'type' is required")
+        event = {"type": kind}
+        task_id = str(body.get("task_id") or "").strip()
+        if task_id:
+            task = self.app.store.load(str(body.get("workspace_id") or ""), task_id)
+            if task is None:
+                return self._error(404, "not_found", "no task %r" % task_id)
+            if not self._check_project(task):
+                return self._forbid("task %s" % task_id)
+            event["task"] = task
+        for key in ("check", "level", "reason", "action", "source"):
+            if key in body:
+                event[key] = body[key]
+        self.app.events.publish(event)
+        self._json(200, {"ok": True, "type": kind})
+
     def _events(self):
         """The queue's event stream (SSE).
 
@@ -1841,8 +2055,17 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _event_belongs_to(event, workspace_id):
-        """Does this event belong to that project?"""
-        task = event.get("task") or {}
+        """Does this event belong to that project?
+
+        An event WITHOUT a task is an operator-level event (the queue is
+        paused, the agent is down, the watchdog saw something): it carries no
+        project data, so it goes to everybody. An event WITH a task only goes
+        to the project that owns it - a key must not learn what the other
+        projects are doing.
+        """
+        task = event.get("task")
+        if not task:
+            return True
         return (task.get("workspace_id") or "") == workspace_id
 
 

@@ -1,0 +1,36 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装：
+# 它会把这几个单元装到 ~/.config/systemd/user/ 并把仓库路径换掉。
+#
+# 看门狗：在 agent 和任务队列**外面**盯着它们。
+#   * 卡住的任务（记录很久没动、进度也没动）→ 告警（默认只说不动手）
+#   * agent 挂了 / 额度见底 → 告警
+#   * 配了 --fleet 的话，顺带看机群设备
+# 告警走队列的事件流，微信/Telegram 那一端会把它推给对应的人。
+#
+# 默认不动手：--auto 才允许把卡死的任务判死。要开就在这里加 --auto。
+[Unit]
+Description=tea_a2 watchdog (watches the task queue and the agent from the outside)
+Documentation=file://%h/work/git/tea_a2/docs/router-watchdog.md
+After=network-online.target
+Wants=network-online.target
+After=a2_task.service
+Wants=a2_task.service
+
+[Service]
+Type=exec
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/watchdog.py --tasks http://localhost:8283 --agent http://localhost:8383 --stall-after 15
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+# 这台机器的 journald 是 Storage=none，user 单元的输出 journalctl --user 读不到
+# （已实测），所以直接 append 到文件。
+StandardOutput=append:%h/.tea_agent/logs/a2_watchdog.log
+StandardError=append:%h/.tea_agent/logs/a2_watchdog.log
+
+[Install]
+WantedBy=default.target

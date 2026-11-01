@@ -56,6 +56,8 @@ sched/fleet.py               机群引擎（Python，可选）：设备台账 + 
                               （灰度/分批/失败阈值/回滚）+ 审计日志 + 每日快照与报表
 sched/fleet_server.py        机群管控服务（Python，可选）：把上面的引擎变成 HTTP API，
                               供服务器级 a2（toolkit_fleet）、机器人和定时任务调用
+sched/watchdog.py           看门狗（Python，可选）：独立进程巡检卡住的任务、agent 的健康、
+                              额度和机群设备；默认只告警不动手（--auto 才允许 fail/retry）
 sched/tea_api.py            HTTP 客户端封装（纯标准库）：Tea 说 agent，Queue 说任务队列
 sched/pan_sync.py           百度网盘同步配置（Python，可选）：加密后传到网盘，多台机器共用
                               一份 provider.yaml；两边都改了就停手（不默默覆盖）

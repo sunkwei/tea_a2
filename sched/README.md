@@ -21,6 +21,7 @@ agent 完全不知道 Python 侧的存在。所以：
 | `task_server.py` | 任务队列（HTTP 服务，8283） | 想让活儿排队、等有额度时再做 | [任务队列](#任务队列) |
 | `task_order.py` | 任务单文本格式的解析 | 想用文件提交任务 | [任务队列](#任务队列) |
 | `task_ui.html` | 队列的网页界面 | 想在浏览器里看队列 | [任务队列](#任务队列) |
+| `watchdog.py` | **任务看门狗**：在 agent 和队列外面盯着卡住的任务、agent 的健康、额度 | 想知道「是不是卡住了」「它还活着吗」 | [任务看门狗](#任务看门狗watchdog) |
 | `tea_api.py` | 调 agent / 队列的客户端库 | 想写自己的脚本 | [客户端库](#客户端库tea_apy) |
 | `channel.py` | 聊天前端的共用半边 | 想加第三种聊天前端 | [聊天前端](#聊天前端) |
 | `wechat_bot.py` | 微信端（iLink 协议，扫码登录） | 想用微信排任务 | [聊天前端](#聊天前端) |
@@ -70,6 +71,30 @@ python3 sched/task_server.py --submit "把 README 的构建例子跑一遍"
 - 网页界面：`sched/task_ui.html`（由队列服务托管）。
 
 深层说明：`docs/tasks.md`。
+
+## 任务看门狗（watchdog）
+
+**在 agent 和队列外面盯着它们。** agent 很会干活，但它不会注意到自己停了：一次卡住的工具
+调用、一个跟队列一起死掉的 worker、一个额度用光还在烧钱的 provider——这些都不会自己说话。
+得有个外面的人看。
+
+```bash
+python3 sched/watchdog.py --tasks http://127.0.0.1:8283 --agent http://127.0.0.1:8282
+python3 sched/watchdog.py --stall-after 3 --once      # 3 分钟没动静就算卡住，只跑一遍
+python3 sched/watchdog.py --auto --action fail        # 允许它把卡死的任务判死（默认只告警）
+python3 sched/watchdog.py --fleet http://127.0.0.1:8290   # 连带看机群设备
+```
+
+- **默认只说不动手**：告警走队列的事件流，微信/Telegram 那一端会把它推给对应的人。
+  `--auto` 才允许 `fail` / `retry`——误杀一个快要干完的活儿，代价比晚一点发现大得多。
+- **「卡住」要两个条件**：记录安静够久（`--stall-after`）**而且**两次巡检之间进度没动。
+- 审计在 `~/.tea_agent/watchdog/audit.jsonl`（只追加），状态在 `state.json`。
+- 常驻用 systemd：`scripts/a2_watchdog.service`（`scripts/install-units.sh` 会一起装）。
+
+队列那边还多了两个口子给人和脚本用：`POST /api/queue/pause` / `resume`（**暂停写在文件里，
+服务重启也还是停着的**）、`POST /api/tasks/{id}/fail`（必须带原因）。
+
+深层说明：`docs/router-watchdog.md`。
 
 ## 客户端库（tea_api.py）
 

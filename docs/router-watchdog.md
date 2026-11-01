@@ -112,12 +112,21 @@ Inline & Spill 的意思是：**近期的进展直接放进上下文窗口，超
 每一阶段都能单独上线，都有自己的测试文件。**M1 先做**：Watchdog 不改任何现有行为，纯增量，
 而且立刻解决真问题（任务卡住没人管）。
 
+| 阶段 | 是什么 | 状态 |
+| --- | --- | --- |
+| M0 | 这份文档 | ✅ |
+| M1 | Watchdog v1（独立进程，默认只告警） | ✅ 已实现（`sched/watchdog.py`） |
+| M2 | Trigger 统一入口（`POST /api/triggers`） | ⏳ 未开始 |
+| M3 | Router（thread 上下文 + 统一对外说话） | ⏳ 未开始 |
+| M4 | 模型版 Watchdog（判断跑偏了没有） | ⏳ 未开始 |
+| M5 | Router 接到机群（可选） | ⏳ 未开始 |
+
 ### M0：这份文档（已完成）
 
 产出：本文。冻结对象名、接口草案、分阶段顺序。
 验收：文档进 `README.md` 的文档表，`tea_a2_agent.md` 里留一条指路。
 
-### M1：Watchdog v1（规则版，独立进程）
+### M1：Watchdog v1（规则版，独立进程）—— ✅ 已实现
 
 **为什么先做它**：它是 Super-agent 里最值钱、也最容易在我们这儿落地的一块——「Worker 卡住了
 没人知道」是现在最疼的问题，而且不需要动 agent 内核、不需要改渠道行为。
@@ -125,38 +134,87 @@ Inline & Spill 的意思是：**近期的进展直接放进上下文窗口，超
 **落点**：新文件 `sched/watchdog.py`（纯标准库，跟 `fleet.py` 一个风格：没有 pip 依赖，设备上
 也能跑）。
 
-**巡检什么**（配置在 YAML 里，默认全关，逐条开）：
+#### 怎么用
+
+```bash
+# 只说不动手（默认）：盯住队列、agent 和额度
+python3 sched/watchdog.py --tasks http://127.0.0.1:8283 --agent http://127.0.0.1:8282
+
+# 盯紧一点：3 分钟没动静就算卡住；只跑一遍就退出（给 cron 用）
+python3 sched/watchdog.py --stall-after 3 --once
+
+# 允许它动手：把卡死的任务判死（只建议在盯着的时候用）
+python3 sched/watchdog.py --auto --action fail
+
+# 连带看机群设备
+python3 sched/watchdog.py --fleet http://127.0.0.1:8284
+```
+
+审计与状态默认写在 `~/.tea_agent/watchdog/`（`audit.jsonl` 只追加，`state.json` 记上次看到什么）。
+
+#### 巡检什么
 
 | 检查 | 判据 | 动作 |
 | --- | --- | --- |
-| `stalled_task` | 队列里 `running` 的任务：`updated_at` 超过 `--stall-after` 分钟**且** `progress` 没变 | `escalate`（通知人）/ `retry`（换一个 provider 重排）/ `fail` |
-| `agent_down` | `GET /api/health` 不通或超时 | `escalate` |
-| `quota_low` | 队列的额度接口返回的剩余低于阈值 | `escalate` + 建议暂停队列 |
-| `device_offline` | 机群设备连不上（有 fleet_url 才查） | 记审计（日报里已有） |
+| `stalled_task` | 队列里 `running` 的任务：`updated_at` 超过 `--stall-after` 分钟**且**两次巡检之间 `progress` 没动 | `escalate`（默认）/ `fail` / `retry`（`--auto` 才准） |
+| `agent_down` | `GET /api/health` 不通或超时 | `escalate`（整台机器的事，不带任务） |
+| `quota_low` | 队列的 `/api/health` 里的 `quota_percent` 低于 `--min-quota` | `escalate` |
+| `device_offline` | 机群设备连不上（配了 `--fleet` 才查） | 只记审计（日报里本来就有） |
+
+**「卡住」要两个条件**：记录安静够久（`--stall-after`），**而且**两次巡检之间进度没动。
+只看时间会误杀正在慢慢干活的活儿；只看一次也不算数——一次慢工具调用不是卡死。
 
 **动作的默认是保守的**：`escalate`（把情况告诉人），**不自动 fail、不自动 delete**。
 `--auto` 才允许 `fail` / `retry`，而且 `fail` 必须带原因写进审计。理由：watchdog 误杀一个正在
 跑的长任务，代价比晚一点发现大得多。
 
-**队列侧要新增的接口**（`sched/task_server.py`）：
+#### 队列侧新增的接口（`sched/task_server.py`）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/tasks/{id}/fail` | 把 running 的任务标成 failed（带 reason）。watchdog 专用 |
+| `POST` | `/api/tasks/{id}/fail` | 把 running 的任务标成 failed（**必须带 `reason`**）。watchdog 专用 |
 | `POST` | `/api/queue/pause` | 暂停调度（`{reason}`）；`Engine.round()` 开头检查，暂停时不取任务 |
 | `POST` | `/api/queue/resume` | 恢复调度 |
-| `GET` | `/api/queue/state` | `{paused, reason, paused_at}` |
+| `GET` | `/api/queue/state` | `{paused, reason, paused_at, counts}` |
+| `POST` | `/api/events` | 往事件流里塞一条事件（`{"type": "watchdog_alert", …}`）。**只有本机操作员能塞**——项目的 key 不许伪造事件 |
 
-**事件**：新增 `watchdog_alert`（`{task_id, check, level, reason, action}`）。
-渠道那条 `watch_tasks` 轮询链路认这个事件类型，把告警推给对应的人——**不新增通知通道**。
+暂停写在数据目录的 `queue_state.json` 里，**服务重启也还是停着的**：一个「先别干活」的
+决定不该因为进程重启就自己失效。
 
-**验收**：`tests/smoke_watchdog.py`
-- 造一个 running 且 `updated_at` 很旧的任务 → watchdog 判定 stalled → 默认动作是 escalate
-  （发事件、写审计），**没有**把任务标 failed；
-- 带 `--auto` 时才 fail，且审计里有原因；
-- `POST /api/queue/pause` 之后调度器不再起新任务，`resume` 之后恢复；
+#### 告警怎么到人手里
+
+看门狗把告警塞进队列的事件流（`watchdog_alert`），渠道那条 `watch_tasks` 轮询链路认这个
+事件类型，把告警推给对应的人——**不新增通知通道**：
+
+- 带任务的告警 → 推给排这个任务的人（任务 meta 里的 `user_id`）；
+- 不带任务的告警（agent 挂了、额度见底）→ 推给所有跟 bot 说过话的人（整台机器的事）。
+
+事件的过滤规则也改了：**不带任务的事件 everybody 都收**（它不含任何项目的内容），带任务的
+事件仍然只到它自己的项目——项目的 key 不许看见别的项目在干什么。
+
+#### 「先判后写」
+
+watchdog 把一个任务判死时，**先写结论再停那一轮**：worker 那一轮的最后一句「done」晚到时，
+不能把结论改回去。队列里这条规矩叫「先到先算」（`Engine._finalize`）。
+
+#### 与计划的出入
+
+- **配置走命令行，不走 YAML**：这台机器上没人装 pyyaml（`fleet.py` 也是自己解析的）。
+  `--stall-after 0` 不看卡住的任务，`--min-quota 0` 不看额度，不给 `--fleet` 不看设备。
+- **多了一个接口 `POST /api/events`**：计划里只写了「新增 `watchdog_alert` 事件」，但看门狗是
+  **外面**的进程，它得有个门能把告警塞进事件流。
+- **`retry` 的实现是「先判死再重排」**：队列的 `retry` 只接受已经结束的任务，所以「重来一次」
+  = fail + retry（attempt + 1）。
+
+#### 验收：`tests/smoke_watchdog.py`
+
+- 造一个 running 且很久没动静的任务 → 看门狗判定 stalled → 默认动作是 escalate
+  （发事件、写审计），**任务还在跑**；
+- 带 `--auto --action fail` 时才判死，且审计里有原因；
+- `POST /api/queue/pause` 之后调度器不再起新任务（**一个请求都不发给 agent**），`resume` 之后恢复；
 - agent 不通时产生 `agent_down` 告警；
-- watchdog 自己挂了不影响队列（它是独立进程）。
+- 告警进了任务的事件日志，渠道那一半（`sched/channel.py`）会把它推给对应的人；
+- 看门狗自己挂了不影响队列（它是独立进程）。
 
 ### M2：Trigger 统一入口
 
