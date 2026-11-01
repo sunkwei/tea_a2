@@ -856,11 +856,15 @@ class Events:
 class Engine:
     """The scheduler: what to work on, and when."""
 
-    def __init__(self, store, agent, events, args):
+    def __init__(self, store, agent, events, args, trigger_store=None):
         self.store = store
         self.agent = agent
         self.events = events
         self.args = args
+        # The threads (the conversations a task belongs to). The scheduler
+        # needs them: the next task of a thread has to know what happened
+        # before it.
+        self.triggers = trigger_store
         self.running = {}     # task id -> {"thread":..., "workspace_id":...}
         self._quota = (None, None, 0.0)   # (percent, window, read_at)
 
@@ -1158,15 +1162,39 @@ class Engine:
         log("  started task %s (%s)" % (task_id, task.get("title") or task.get("prompt", "")[:40]))
         return True
 
-    @staticmethod
-    def context_for(task):
-        """What the agent is told about the task: id, title, request."""
+    def context_for(self, task):
+        """What the agent is told about the task: id, title, request.
+
+        And the thread it belongs to: the previous steps of the same
+        conversation. Without it every task starts from nothing, and the
+        model cannot tell that it has already done half of the work.
+        """
         out = task.get("id") or ""
         if task.get("title"):
             out += " (%s)" % task["title"]
         if task.get("prompt"):
             out += ": " + task["prompt"]
+        thread_id = task.get("thread_id") or ""
+        if thread_id and self.triggers is not None:
+            before = self.triggers.context_of(thread_id)
+            if before:
+                out += "\n\n[这条线索之前的事]\n" + before
         return out
+
+    def note_thread(self, task, kind, text):
+        """Put one step of a task into its thread (the cross-session memory).
+
+        The queue does this itself: it sees every event of every task, and
+        the thread belongs to the task records anyway. The router
+        (sched/router.py) only compresses what falls out of the window.
+        """
+        thread_id = (task or {}).get("thread_id") or ""
+        if not thread_id or not text or self.triggers is None:
+            return
+        try:
+            self.triggers.add_context(thread_id, kind, text, (task or {}).get("id") or "")
+        except OSError:
+            pass
 
     def _run(self, workspace_id, task_id, provider, context, message=None):
         try:
@@ -1228,6 +1256,10 @@ class Engine:
                     self.events.publish(
                         {"type": "task_done" if status == DONE else "task_waiting_confirmation",
                          "task": written})
+                    if status == DONE:
+                        self.note_thread(written, "result", answer)
+                    else:
+                        self.note_thread(written, "question", report.get("question") or "")
                 return
             elif kind == "error":
                 written = self._finalize(workspace_id, task_id, FAILED, {
@@ -1235,6 +1267,7 @@ class Engine:
                     "finished_at": now_iso()})
                 if written is not None:
                     self.events.publish({"type": "task_failed", "task": written})
+                    self.note_thread(written, "error", event.get("message") or "这一轮失败了")
                 return
             elif kind == "stopped":
                 written = self._finalize(workspace_id, task_id, CANCELLED, {
@@ -1286,7 +1319,10 @@ class Engine:
                 t["question"] = question
 
         self.store.update(workspace_id, task_id, apply)
-        self.events.publish({"type": "task_updated", "task": self.store.load(workspace_id, task_id)})
+        fresh = self.store.load(workspace_id, task_id)
+        self.events.publish({"type": "task_updated", "task": fresh})
+        if note:
+            self.note_thread(fresh, "note", note)
 
     # ---- the loop ---------------------------------------------------------
     def run_forever(self):
@@ -1461,7 +1497,10 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/triggers/"):
             return self._get_trigger(path[len("/api/triggers/"):])
         if path.startswith("/api/threads/"):
-            return self._get_thread(path[len("/api/threads/"):])
+            rest = path[len("/api/threads/"):]
+            if rest.endswith("/context"):
+                return self._thread_context(rest[:-len("/context")])
+            return self._get_thread(rest)
         if path == "/api/task-order-template":
             return self._task_order_template()
         if path.startswith("/api/tasks/"):
@@ -1492,6 +1531,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._publish_event()
         if path == "/api/triggers":
             return self._submit_trigger()
+        if path == "/api/threads":
+            return self._create_thread()
+        if path.startswith("/api/threads/") and path.endswith("/spill"):
+            return self._thread_spill(path[len("/api/threads/"):-len("/spill")])
         if path.startswith("/api/tasks/"):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
@@ -2053,6 +2096,64 @@ class Handler(BaseHTTPRequestHandler):
         thread["tasks"] = tasks
         self._json(200, thread)
 
+    def _create_thread(self):
+        """Open a thread by hand - a conversation that did not start with a trigger."""
+        body = self._body() or {}
+        key = str(body.get("key") or "").strip()
+        if not key:
+            return self._error(400, "bad_request", "'key' is required")
+        workspace_id = str(body.get("workspace_id") or "").strip()
+        caller = self._project_of_caller()
+        if caller and workspace_id and workspace_id != caller:
+            return self._forbid("project %s" % workspace_id)
+        if not workspace_id:
+            workspace_id = self.app.default_workspace()
+        if not workspace_id:
+            return self._error(400, "bad_request",
+                               "'workspace_id' is required (the agent has no workspace)")
+        thread_id = self.app.trigger_store.thread_id(workspace_id, key)
+        thread = self.app.trigger_store.attach(thread_id, workspace_id, key)
+        self._json(200, thread)
+
+    def _thread_context(self, thread_id):
+        """What a thread knows: the window, what fell out of it, and the prompt
+        the next task of this thread would get."""
+        thread = self.app.trigger_store.load_thread(thread_id)
+        if thread is None:
+            return self._error(404, "not_found", "no thread %r" % thread_id)
+        if not self._check_project({"workspace_id": thread.get("workspace_id") or ""}):
+            return self._forbid("thread %s" % thread_id)
+        self._json(200, {
+            "id": thread_id,
+            "key": thread.get("key") or "",
+            "workspace_id": thread.get("workspace_id") or "",
+            "task_ids": thread.get("task_ids") or [],
+            "context": thread.get("context") or [],
+            "spill": thread.get("spill") or [],
+            "prompt": self.app.trigger_store.context_of(thread_id),
+        })
+
+    def _thread_spill(self, thread_id):
+        """The router writes the summary of what fell out of the window.
+
+        Only the local operator may do this: a summary is part of what the
+        model is told, and a project key must not be able to write it.
+        """
+        if self._key():
+            return self._error(403, "forbidden",
+                               "only the local operator may write a thread summary")
+        body = self._body() or {}
+        summary = str(body.get("summary") or "").strip()
+        if not summary:
+            return self._error(400, "bad_request", "'summary' is required")
+        thread = self.app.trigger_store.load_thread(thread_id)
+        if thread is None:
+            return self._error(404, "not_found", "no thread %r" % thread_id)
+        written = self.app.trigger_store.set_summary(thread_id, summary,
+                                                      int(body.get("count") or 0))
+        self.app.events.publish({"type": "thread_summarized", "thread": written})
+        self._json(200, written)
+
     def _queue_state(self):
         """Is the scheduler paused, and why."""
         state = self.app.store.state()
@@ -2197,11 +2298,11 @@ class App:
         self.store = Store(data_dir)
         self.agent = Agent(args.agent, chat_timeout=getattr(args, "chat_timeout", 3600))
         self.events = Events(self.store)
-        self.engine = Engine(self.store, self.agent, self.events, args)
         # The trigger entry: one door for every outside event (a webhook, a
         # mail, a chat). The records live in their own directories next to
         # the task records.
         self.trigger_store = triggers.TriggerStore(data_dir)
+        self.engine = Engine(self.store, self.agent, self.events, args, self.trigger_store)
         self.trigger_rules = triggers.Rules(getattr(args, "trigger_config", ""))
         self.trigger_service = triggers.TriggerService(
             self.trigger_store, self.trigger_rules,

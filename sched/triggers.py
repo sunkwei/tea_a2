@@ -314,6 +314,92 @@ class TriggerStore(object):
             return None
         return self._read(self._thread_path(thread_id))
 
+    # ---- the context of a thread ------------------------------------------
+    # How many of the recent entries stay in the window, and how many of the
+    # older ones are kept as raw text outside it. The window is what goes
+    # into the prompt; the rest is what the model can ask for.
+    CONTEXT_MAX = 8
+    SPILL_MAX = 40
+
+    def add_context(self, thread_id, kind, text, task_id=""):
+        """One step of a thread: a progress note, a result, a question.
+
+        The window is small on purpose - it is pasted into the prompt of the
+        next task of this thread. What falls out of the window is not lost:
+        it moves to the spill, and the router (sched/router.py) compresses
+        that into a summary when there is enough of it.
+        """
+        thread = self.load_thread(thread_id)
+        if thread is None:
+            return None
+        entry = {"at": now_iso(), "task_id": task_id or "", "kind": kind or "note",
+                 "text": str(text or "")[:1000]}
+        if not entry["text"].strip():
+            return thread
+        context = thread.setdefault("context", [])
+        spill = thread.setdefault("spill", [])
+        context.append(entry)
+        while len(context) > self.CONTEXT_MAX:
+            spill.append(context.pop(0))
+        while len(spill) > self.SPILL_MAX:
+            spill.pop(0)
+        thread["updated_at"] = now_iso()
+        self._write(self._thread_path(thread_id), thread)
+        return thread
+
+    def set_summary(self, thread_id, summary, count=0):
+        """Replace the oldest raw entries of the spill with one summary.
+
+        The router does this: summarizing is a model call, and the queue
+        should not spend money on it (nor wait for it).
+        """
+        thread = self.load_thread(thread_id)
+        if thread is None:
+            return None
+        spill = thread.setdefault("spill", [])
+        text = str(summary or "").strip()
+        if not text:
+            return thread
+        replaced = 0
+        out = []
+        for entry in spill:
+            if replaced < count and not entry.get("summary"):
+                replaced += 1
+                continue
+            out.append(entry)
+        out.insert(0, {"at": now_iso(), "kind": "summary", "text": text[:2000]})
+        thread["spill"] = out[:self.SPILL_MAX]
+        thread["updated_at"] = now_iso()
+        self._write(self._thread_path(thread_id), thread)
+        return thread
+
+    def context_of(self, thread_id, limit=2000):
+        """What the next task of this thread is told about the past.
+
+        The window first, then the summary of what fell out of it. Nothing
+        else: the prompt is precious.
+        """
+        thread = self.load_thread(thread_id)
+        if thread is None:
+            return ""
+        lines = []
+        for entry in thread.get("context") or []:
+            text = str(entry.get("text") or "").strip()
+            if text:
+                lines.append("- [%s] %s" % (entry.get("kind") or "note", text))
+        for entry in thread.get("spill") or []:
+            if entry.get("kind") != "summary":
+                continue
+            text = str(entry.get("text") or "").strip()
+            if text:
+                lines.insert(0, "- (更早的事) " + text)
+        if not lines:
+            return ""
+        out = "\n".join(lines)
+        if len(out) > limit:
+            out = out[:limit] + "…"
+        return out
+
     def attach(self, thread_id, workspace_id, key, task_id="", trigger_id=""):
         """Put a task (and its trigger) into a thread."""
         thread = self.load_thread(thread_id) or {}

@@ -117,7 +117,7 @@ Inline & Spill 的意思是：**近期的进展直接放进上下文窗口，超
 | M0 | 这份文档 | ✅ |
 | M1 | Watchdog v1（独立进程，默认只告警） | ✅ 已实现（`sched/watchdog.py`） |
 | M2 | Trigger 统一入口（`POST /api/triggers`） | ✅ 已实现（`sched/triggers.py`） |
-| M3 | Router（thread 上下文 + 统一对外说话） | ⏳ 未开始 |
+| M3 | Router（跨会话的上下文 + 对外说话） | ✅ v1 已实现（`sched/router.py`，说话仍是影子模式） |
 | M4 | 模型版 Watchdog（判断跑偏了没有） | ⏳ 未开始 |
 | M5 | Router 接到机群（可选） | ⏳ 未开始 |
 
@@ -303,36 +303,73 @@ ignore  = 订阅, newsletter
 - 同一段对话的两个触发器 → 同一条线索，线索里有这两个任务；
 - 老路 `POST /api/tasks` 仍然工作。
 
-### M3：Router 进程（全局上下文 + 对外说话）
+### M3：Router（跨会话的上下文 + 对外说话）—— ✅ 已实现（v1）
 
 **为什么**：Super-agent 的核心不是「多开几个会话」，而是**上下文同步从人手上移到系统层面**。
 我们现在每个 session 是孤立的：微信里聊过的事，队列里的另一个任务不知道。
 
-**落点**：新文件 `sched/router.py`（常驻进程，订阅队列的 `/api/events` SSE）。
+**落点**：新文件 `sched/router.py`（常驻进程，订阅队列的 `/api/events`），
+线索的记录在 `sched/triggers.py`（M2 留下的），队列负责把进展记进去。
 
-**做什么**：
+#### v1 做了什么（两件事）
 
-1. **维护 thread 上下文**：一个 thread 的进展写进 `context`（Inline，最近 N 条），
-   超出预算或太旧的摘要进 `spill`（Spill）。下一个属于这个 thread 的任务，创建时把这份
-   上下文作为 `task_context` 的一部分交给 agent（队列的 `context_for()` 已经是干这个的位置）。
-2. **统一对外说话**（先影子运行）：Router 订阅事件，把「任务完成 / 需要确认 / 卡住 / 告警」
-   翻译成一句人话，**记**下来但**不接管**渠道推送。
-3. 渠道改造（第二阶段再切）：`TaskChannel` 不再直接轮询任务状态，改成收 Router 的回话。
+1. **线索记得住**：任务每报一次进度、给出结果、提一个问题，都记进它所属的**线索**。
+   下一个同线索的任务，prompt 里就带着「这条线索之前的事」——**这就是 M3 的核心**。
+   - 窗口（`context`）留最近 8 条，直接进 prompt；
+   - 掉出窗口的进 `spill`（还在，只是outside了 prompt）；
+   - `spill` 攒够了由 **router 用模型收拢成一句摘要**（router 唯一的一次模型调用），
+     摘要顶掉那些原文——prompt 还是那么大，但更早的事也还在。
+2. **对外说话（影子模式）**：router 把每个事件说成一句话，写进
+   `~/.tea_agent/router/speech.jsonl`。**聊天前端暂时还自己说话**——先把话术记下来，
+   对比一段时间，确认说得更好再切（切的那一刻才动渠道的行为，风险最大的一步留到最后）。
 
-**队列侧新增**：
+#### 队列侧新增
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/threads` | 线索列表 |
-| `GET` | `/api/threads/{id}` | 一条线索 + 它的任务 |
-| `GET` | `/api/threads/{id}/context` | Inline + Spill（给 prompt 用） |
-| `POST` | `/api/threads` | 手工开一条线索 |
+| `GET` | `/api/threads/{id}/context` | 线索的窗口、spill 和给下一个任务的 prompt |
+| `POST` | `/api/threads` | 手工开一条线索（`{"key": "…"}`） |
+| `POST` | `/api/threads/{id}/spill` | router 写回摘要（**只有本机操作员能写**：摘要会进 prompt） |
 
-**验收**：`tests/smoke_router.py`
-- 同一 thread 的第二个任务能拿到第一个任务的进展摘要；
-- 不同 thread 的上下文**不串**（串味是最容易犯的错，必须有测试钉住）；
-- 溢出的摘要落盘、可读回；
-- 影子模式下渠道推送行为**没有变化**。
+`GET /api/threads`、`GET /api/threads/{id}` 是 M2 已经有的。
+
+#### 与计划的出入
+
+- **线索的记录由队列写，不由 router 写**：队列本来就看得见每个任务的每一步（它自己发的
+  事件），线索本来就属于任务记录。router 只做两件**花钱或需要判断**的事：收拢摘要、说话。
+  这样 router 挂了，线索照样记，只是没人收拢、没人说话。
+- **spill 里放的是原文，不是摘要**：收拢是 router 的活，队列不替它做主。摘要写回时，
+  原文被一条摘要条目顶掉（`kind: summary`）。
+- **摘要没有单独的模型调用预算**：router 每 `--interval` 秒扫一遍线索，攒够
+  `--spill-after` 条才收拢一次。
+
+#### 怎么用
+
+```bash
+python3 sched/router.py                      # 跟着队列，攒上下文、收拢摘要、说话
+python3 sched/router.py --spill-after 2      # 两条就收拢（默认 4）
+cat ~/.tea_agent/router/speech.jsonl         # router 都说了什么
+curl http://127.0.0.1:8283/api/threads/<id>/context   # 一条线索现在知道什么
+```
+
+常驻用 systemd：`scripts/a2_router.service`（`scripts/install-units.sh` 会一起装）。
+
+#### 验收：`tests/smoke_router.py`
+
+- 任务的进度进了线索（`GET /api/threads/{id}/context` 看得见）；
+- **同线索的第二个任务被告知了之前的事**（mock agent 收到的 `task_context` 里有
+  「这条线索之前的事」和前一个任务的进展）；
+- 掉出窗口的进展被收拢成了一句摘要，摘要进了下一个任务的 prompt；
+- router 每个事件说一句话（`speech.jsonl` 里有「做完了 …」）。
+
+#### 还没做的（M3 v2）
+
+- **渠道切给 router 说话**：现在聊天前端还在自己按事件推送。等 router 的话术在
+  `speech.jsonl` 里跟用户实际收到的话对比过之后再切。
+- **模型读的「更早的事」**：摘要进了 prompt，但模型还不能**按需**去读某条线索的全部原文
+  （那需要一个工具，或者把线索写进工作区让它用 `toolkit_file` 读）。
+- **跨线索的长期记忆**：一个线索的上下文不会流到另一个线索去——这是有意的（串味比
+  忘事更糟）。
 
 ### M4：模型版 Watchdog（判断「跑偏了没有」）
 

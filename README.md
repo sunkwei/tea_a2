@@ -325,6 +325,7 @@ servers:
 | `a2_wechat.service` | 队列的微信前端 | — |
 | `a2_telegram.service` | 队列的 Telegram 前端 | — |
 | `a2_watchdog.service` | 看门狗：在 agent 和队列**外面**盯着卡住的任务、agent 的健康、额度 | — |
+| `a2_router.service` | Router：把分开的工作区会话串成一条线索（下一个任务知道之前发生了什么） | — |
 
 单元文件在 `scripts/` 里，是**跟机器无关的模板**（路径用 `%h`，也就是运行单元的用户的主目录）。
 装的时候用 `scripts/install-units.sh [仓库路径]`：它把单元装到 `~/.config/systemd/user/` 并把仓库

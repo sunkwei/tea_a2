@@ -1,0 +1,36 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装：
+# 它会把这几个单元装到 ~/.config/systemd/user/ 并把仓库路径换掉。
+#
+# Router：把分开的工作区会话串成一条线索。
+#   * 订阅队列的事件流；
+#   * 每个任务的一步（进度、结果、提问）记进它所属的线索，下一个同线索的
+#     任务会被告知「之前发生了什么」；
+#   * 掉出窗口的旧进展收拢成一句摘要（唯一的一次模型调用）；
+#   * 每个事件说一句话，写进 ~/.tea_agent/router/speech.jsonl
+#     （影子模式：聊天前端还在自己说话，先把话术记下来对比）。
+[Unit]
+Description=tea_a2 router (keeps the threads together and speaks for the work)
+Documentation=file://%h/work/git/tea_a2/docs/router-watchdog.md
+After=network-online.target
+Wants=network-online.target
+After=a2_task.service
+Wants=a2_task.service
+
+[Service]
+Type=exec
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/router.py --tasks http://localhost:8283 --agent http://localhost:8383 --spill-after 4
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+# 这台机器的 journald 是 Storage=none，user 单元的输出 journalctl --user 读不到
+# （已实测），所以直接 append 到文件。
+StandardOutput=append:%h/.tea_agent/logs/a2_router.log
+StandardError=append:%h/.tea_agent/logs/a2_router.log
+
+[Install]
+WantedBy=default.target

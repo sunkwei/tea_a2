@@ -67,6 +67,7 @@ python3 tests/smoke_task_server.py                         # 任务队列（Pyth
 python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）
 python3 tests/smoke_watchdog.py                             # 看门狗：卡住的任务（默认只告警）/ --auto 才判死 / 队列暂停与恢复 / agent 不通
 python3 tests/smoke_triggers.py                            # 触发器入口：规则先于模型 / 去重 / 线索 / 老路仍然能排任务
+python3 tests/smoke_router.py                             # Router：线索记住每一步 / 下一个任务被告知之前发生了什么 / 旧进展收拢成摘要
                                                           # + 审计 + 机群服务 API + 真二进制的 /api/status 与 /api/exec
                                                           # + 多级链路（服务器 a2 → toolkit_fleet → 机群服务 → 设备 a2）
 python3 tests/smoke_peer.py                                 # 级联：peers: 配置 + 对端通道（令牌/白名单/404）+
@@ -139,6 +140,11 @@ provider 不能搜时工具照样出现、请求发给 search provider 并用它
 规则命中 `require` 就建任务而且**模型一次都没被问**，命中 `ignore` 就不建；规则没命中才问
 模型，模型说 accept 才建任务；同一个 `dedup_key` 投两次只有一条触发器、一个任务；同一段
 对话的两个触发器落进同一条线索；老的 `POST /api/tasks` 仍然能排任务。
+
+`tests/smoke_router.py` 覆盖 Router（真的队列 + 假的 agent + 真的 router）：任务的进度进了
+线索；**同线索的第二个任务被告知了之前的事**（mock agent 收到的 `task_context` 里有
+「这条线索之前的事」）；掉出窗口的旧进展被收拢成一句摘要，摘要进了下一个任务的 prompt；
+router 每个事件说一句话（`speech.jsonl`）。
 
 `tests/smoke_tool_call_structure.py` 覆盖「请求里的工具调用结构」：provider 要把每条工具结果
 对回它答复的那次调用，而且必须一对一。MiniMax 对不是一对一的历史整个请求都拒

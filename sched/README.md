@@ -23,6 +23,7 @@ agent 完全不知道 Python 侧的存在。所以：
 | `task_ui.html` | 队列的网页界面 | 想在浏览器里看队列 | [任务队列](#任务队列) |
 | `watchdog.py` | **任务看门狗**：在 agent 和队列外面盯着卡住的任务、agent 的健康、额度 | 想知道「是不是卡住了」「它还活着吗」 | [任务看门狗](#任务看门狗watchdog) |
 | `triggers.py` | **触发器入口**：外部事件（webhook / 邮件 / 聊天）的统一入口——去重 + 规则 + 模型判断 | 想让外部系统直接派活儿 | [触发器入口](#触发器入口triggers) |
+| `router.py` | **Router**：把分开的工作区会话串成一条线索——记住每一步、收拢旧进展、给每个事件说一句话 | 想让「接着刚才那件事继续」真的接得上 | [Router](#router) |
 | `tea_api.py` | 调 agent / 队列的客户端库 | 想写自己的脚本 | [客户端库](#客户端库tea_apy) |
 | `channel.py` | 聊天前端的共用半边 | 想加第三种聊天前端 | [聊天前端](#聊天前端) |
 | `wechat_bot.py` | 微信端（iLink 协议，扫码登录） | 想用微信排任务 | [聊天前端](#聊天前端) |
@@ -93,6 +94,26 @@ curl http://127.0.0.1:8283/api/threads      # 线索（同一段对话）
   一条真活儿悄悄消失。
 - **规则模板**：`sched/triggers.template`（每段一个来源，`ignore` 优先于 `require`）。
 - 聊天前端默认**不走**这里（白名单里的人说话通常就是有活儿）；要走就加 `--triggers`。
+
+深层说明：`docs/router-watchdog.md`。
+
+## Router
+
+**把分开的工作区会话串成一条线索。** 每个任务都是自己的 session，谁也不知道谁——
+「接着刚才那件事继续」对模型来说就是从零开始。Router 记住每一步，下一个同线索的任务
+就被告知之前发生了什么。
+
+```bash
+python3 sched/router.py                    # 跟着队列，攒上下文、收拢摘要、说话
+python3 sched/router.py --spill-after 2    # 两条就收拢（默认 4）
+cat ~/.tea_agent/router/speech.jsonl       # router 都说了什么
+```
+
+- **窗口 + 摘要**：最近 8 步直接进下一个任务的 prompt；掉出窗口的旧进展由 router 用模型
+  收拢成一句摘要顶掉（prompt 还是那么大，更早的事也还在）。
+- **影子模式**：router 把每个事件说成一句话写进 `speech.jsonl`，但**聊天前端还自己说话**
+  ——先对比话术，再切。
+- 常驻用 systemd：`scripts/a2_router.service`。
 
 深层说明：`docs/router-watchdog.md`。
 

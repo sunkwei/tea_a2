@@ -59,6 +59,8 @@ sched/fleet_server.py        机群管控服务（Python，可选）：把上面
 sched/triggers.py           触发器入口（Python，可选）：外部事件统一入口——去重 + 规则 +
                               模型判断，决定要不要变成任务；顺带维护「线索」（thread）
 sched/triggers.template     触发器规则的模板（ignore / require，按来源分段）
+sched/router.py             Router（Python，可选）：把分开的工作区会话串成一条线索——
+                              记住每一步、收拢掉出窗口的旧进展、给每个事件说一句话
 sched/watchdog.py           看门狗（Python，可选）：独立进程巡检卡住的任务、agent 的健康、
                               额度和机群设备；默认只告警不动手（--auto 才允许 fail/retry）
 sched/tea_api.py            HTTP 客户端封装（纯标准库）：Tea 说 agent，Queue 说任务队列
