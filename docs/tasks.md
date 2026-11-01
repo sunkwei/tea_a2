@@ -444,4 +444,20 @@ toolkit_task op=update needs_confirmation=true question="可以删掉旧构建�
 
 ---
 
+## 往后：Router 与 Watchdog
+
+这个队列现在只做一件事：**把排进来的活儿按规矩做完**。它没有「谁跟人说话」这一层（Router），
+也没有「谁盯着别卡住」这一层（Watchdog）——DeepSeek Harness 团队的 Super-agent 架构把这两层
+拆了出来，我们打算照着补上：
+
+- **M1 Watchdog（先做）**：独立进程巡检 running 的任务、agent 的健康、额度和设备；
+  默认只告警不动手，`--auto` 才允许 fail/retry。
+- **M2 Trigger 入口**：`POST /api/triggers` 统一收事件，规则过滤 + 模型判断要不要做；
+  `POST /api/tasks` 继续留着当退路。
+- **M3 Router**：跨 session 的共享上下文（thread），以及统一对外说话。
+
+完整的对象模型、接口和验收标准见 [Router 与 Watchdog](router-watchdog.md)。
+
+---
+
 ← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)
