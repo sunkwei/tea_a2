@@ -373,6 +373,47 @@ class TriggerStore(object):
         self._write(self._thread_path(thread_id), thread)
         return thread
 
+    def history_md(self, thread_id, limit=40000):
+        """The whole thread as one markdown document.
+
+        This is what the model reads when it wants more than the window:
+        the queue writes it into the workspace's run directory and points
+        the task at it, so no new tool is needed - toolkit_file can read it.
+        """
+        thread = self.load_thread(thread_id)
+        if thread is None:
+            return ""
+        lines = ["# 线索 %s" % (thread.get("title") or thread.get("key") or thread_id),
+                 "",
+                 "- id: %s" % thread_id,
+                 "- key: %s" % (thread.get("key") or ""),
+                 "- 工作区: %s" % (thread.get("workspace_id") or ""),
+                 "- 任务: %s" % (", ".join(thread.get("task_ids") or []) or "（还没有）"),
+                 ""]
+        for entry in thread.get("spill") or []:
+            if entry.get("kind") != "summary":
+                continue
+            lines.append("## 摘要")
+            lines.append(str(entry.get("text") or ""))
+            lines.append("")
+        lines.append("## 经过的步骤")
+        lines.append("")
+        for entry in thread.get("context") or []:
+            lines.append("- %s [%s] %s" % (entry.get("at") or "", entry.get("kind") or "note",
+                                          str(entry.get("text") or "").replace("\n", " ")))
+        old = [e for e in (thread.get("spill") or []) if e.get("kind") != "summary"]
+        if old:
+            lines.append("")
+            lines.append("## 更早的（原文）")
+            lines.append("")
+            for entry in old:
+                lines.append("- %s [%s] %s" % (entry.get("at") or "", entry.get("kind") or "note",
+                                              str(entry.get("text") or "").replace("\n", " ")))
+        out = "\n".join(lines)
+        if len(out) > limit:
+            out = out[:limit] + "\n…（记录太长，截断了）\n"
+        return out
+
     def context_of(self, thread_id, limit=2000):
         """What the next task of this thread is told about the past.
 
@@ -400,14 +441,21 @@ class TriggerStore(object):
             out = out[:limit] + "…"
         return out
 
-    def attach(self, thread_id, workspace_id, key, task_id="", trigger_id=""):
-        """Put a task (and its trigger) into a thread."""
+    def attach(self, thread_id, workspace_id, key, task_id="", trigger_id="", title=""):
+        """Put a task (and its trigger) into a thread.
+
+        The title is what people (and the router) call the thread: the
+        first thing that happened in it. The key is a machine name
+        ("wechat:u42"), the title is a human one ("把字体拆成三行").
+        """
         thread = self.load_thread(thread_id) or {}
         if not thread:
-            thread = {"id": thread_id, "key": key or "", "title": key or "",
+            thread = {"id": thread_id, "key": key or "", "title": "",
                       "workspace_id": workspace_id or "",
                       "task_ids": [], "trigger_ids": [],
                       "created_at": now_iso()}
+        if title and not (thread.get("title") or "").strip():
+            thread["title"] = str(title)[:120]
         if task_id and task_id not in thread["task_ids"]:
             thread["task_ids"].append(task_id)
         if trigger_id and trigger_id not in thread["trigger_ids"]:
@@ -558,5 +606,6 @@ class TriggerService(object):
                     trigger["thread_id"] = task["thread_id"]
         self.store.save_trigger(trigger)
         self.store.attach(trigger["thread_id"], trigger["workspace_id"],
-                          trigger["thread_key"], trigger["task_id"], trigger["id"])
+                          trigger["thread_key"], trigger["task_id"], trigger["id"],
+                          title=(body.get("title") or trigger.get("text") or "")[:60])
         return trigger, False

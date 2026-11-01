@@ -246,6 +246,7 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
 | 看指标 | `GET /api/health` 的 `metrics`（队列长度、平均排队时长、失败率……） |
 | 看审计 | `GET /api/audit?task_id=…` |
 | 拿任务单模板 | `GET /api/task-order-template`（网页上就是那个「下载任务单模板」） |
+| 让活儿跑在设备上 | 排队时带 `target: "fleet"`（和 `fleet: {names|groups|labels, timeout_s}`）——设备自己的 a2 回答，队列把设备的回答收成结果。队列要知道机群：`--fleet-url` / `--fleet-token` |
 | 让队列停下 / 继续 | `POST /api/queue/pause {"reason": "…"}` / `POST /api/queue/resume`；`GET /api/queue/state` 看现在是不是停着。**暂停写在文件里**，服务重启也还是停着的——队列不该自己又开始干活 |
 | 把一个卡死的任务判死 | `POST /api/tasks/{id}/fail {"reason": "…"}`（看门狗用；必须带原因） |
 | 往事件流里塞一条事件 | `POST /api/events {"type": "watchdog_alert", "task_id": "…", …}`（只有本机操作员能塞；看门狗的告警就走这条路） |
@@ -460,6 +461,8 @@ toolkit_task op=update needs_confirmation=true question="可以删掉旧构建�
   默认只告警不动手，`--auto` 才允许 fail/retry。
 - **M2 Trigger 入口**（已做）：`POST /api/triggers` 统一收事件，去重 → 规则 → 模型判断
   要不要做；`POST /api/tasks` 继续留着当退路。
+- **M5 机群**（已做 v1）：任务带 `target: fleet` 就跑在设备自己的 a2 上，设备的回答收成
+  任务的结果（没答上来的设备也写进结果）。
 - **M3 Router**（已做 v1/v2）：跨 session 的共享上下文（thread）——下一个同线索的任务会被
   告知「之前发生了什么」；掉出窗口的进展由 router 收拢成摘要。**v2：router 说话**
   （话术进队列事件流的 `speech` 事件），聊天前端加 `--speech` 就只递 router 的话。

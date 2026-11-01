@@ -266,6 +266,52 @@ class Agent:
     def stop(self, session_id):
         return self._request("POST", "/api/chat/stop", {"session_id": session_id})
 
+    def fleet_ask(self, fleet_url, token, prompt, groups=None, names=None, labels=None,
+                  timeout_s=300, timeout=360):
+        """Let the devices' own agents answer the prompt.
+
+        This is the multi-level path: the server does not have to know how a
+        device is put right, the device does. The queue only collects the
+        answers.
+        """
+        base = (fleet_url or "").rstrip("/")
+        if not base:
+            raise AgentError(0, "no fleet service is configured")
+        body = {"prompt": prompt, "timeout_s": int(timeout_s or 300)}
+        if groups:
+            body["groups"] = list(groups)
+        if names:
+            body["names"] = list(names)
+        if labels:
+            body["labels"] = dict(labels)
+        req = urllib.request.Request(
+            base + "/api/fleet/ask", data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        if token:
+            req.add_header("Authorization", "Bearer " + token)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            message = raw
+            try:
+                message = (json.loads(raw).get("message") or raw)
+            except ValueError:
+                pass
+            raise AgentError(exc.code, message[:300]) from None
+        except urllib.error.URLError as exc:
+            raise AgentError(0, "cannot reach the fleet service %s: %s" % (base, exc.reason)) from None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            raise AgentError(0, "the fleet service did not answer with JSON") from None
+        if isinstance(data, dict) and "data" in data and "code" in data:
+            if data.get("code"):
+                raise AgentError(0, str(data.get("message") or "the fleet service refused")[:300])
+            data = data.get("data") or {}
+        return data
+
     def llm_chat(self, prompt=None, system=None, provider=None, model=None,
                  temperature=None, max_tokens=None, timeout=60):
         """One model call - no agent loop, no tool is executed.
@@ -383,6 +429,10 @@ def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
         # directly) and the thread it belongs to (the conversation).
         "trigger_id": "",
         "thread_id": "",
+        # Where the work runs: "" = the local agent, "fleet" = the devices'
+        # own agents (each device answers with its own provider and context).
+        "target": "",
+        "fleet": {},
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "started_at": "",
@@ -856,7 +906,8 @@ class Events:
 class Engine:
     """The scheduler: what to work on, and when."""
 
-    def __init__(self, store, agent, events, args, trigger_store=None):
+    def __init__(self, store, agent, events, args, trigger_store=None, thread_writer=None,
+                 thread_file=None, decorate_event=None):
         self.store = store
         self.agent = agent
         self.events = events
@@ -865,6 +916,14 @@ class Engine:
         # needs them: the next task of a thread has to know what happened
         # before it.
         self.triggers = trigger_store
+        # Called after a thread changed: the queue writes the full record
+        # into the workspace so the model can read the older part on demand.
+        self.thread_writer = thread_writer
+        # The path of the thread's record, relative to the workspace.
+        self.thread_file = thread_file or (lambda workspace_id, thread_id: "")
+        # Adds the thread (its title) to an event before it goes out: the
+        # router says things about conversations, not only about task ids.
+        self.decorate_event = decorate_event or (lambda event: event)
         self.running = {}     # task id -> {"thread":..., "workspace_id":...}
         self._quota = (None, None, 0.0)   # (percent, window, read_at)
 
@@ -1065,8 +1124,12 @@ class Engine:
             recovered.append(self.store.load(workspace_id, task_id))
         for task in recovered:
             if task is not None:
-                self.events.publish({"type": "task_failed", "task": task})
+                self._publish({"type": "task_failed", "task": task})
         return recovered
+
+    def _publish(self, event):
+        """Publish an event, with the thread it belongs to attached."""
+        self.events.publish(self.decorate_event(event))
 
     # ---- the final word about a task --------------------------------------
     def _finalize(self, workspace_id, task_id, status, fields=None):
@@ -1124,7 +1187,7 @@ class Engine:
                 self.agent.stop(session_id)
             except AgentError as exc:
                 log("could not stop the turn of %s: %s" % (task_id, exc))
-        self.events.publish({"type": "task_failed", "task": written})
+        self._publish({"type": "task_failed", "task": written})
         self.store.audit("fail", task_id, {"reason": reason, "actor": actor})
         return written
 
@@ -1179,6 +1242,13 @@ class Engine:
             before = self.triggers.context_of(thread_id)
             if before:
                 out += "\n\n[这条线索之前的事]\n" + before
+            # The full record is a file in the workspace: the model can read
+            # the older part of this conversation when it needs it, with the
+            # file tool it already has.
+            rel = self.thread_file(task.get("workspace_id") or "", thread_id)
+            if rel:
+                out += ("\n这条线索的完整记录在 %s（相对工作区）；要看更早的事，"
+                        "用 toolkit_file 读它。" % rel)
         return out
 
     def note_thread(self, task, kind, text):
@@ -1194,20 +1264,29 @@ class Engine:
         try:
             self.triggers.add_context(thread_id, kind, text, (task or {}).get("id") or "")
         except OSError:
-            pass
+            return
+        if self.thread_writer is not None:
+            try:
+                self.thread_writer(thread_id)
+            except OSError:
+                pass
 
     def _run(self, workspace_id, task_id, provider, context, message=None):
         try:
-            self._consume(workspace_id, task_id, provider, context, message)
+            task = self.store.load(workspace_id, task_id) or {}
+            if (task.get("target") or "") == "fleet":
+                self._consume_fleet(workspace_id, task_id, provider, context, message)
+            else:
+                self._consume(workspace_id, task_id, provider, context, message)
         except AgentError as exc:
             self.store.update(workspace_id, task_id, lambda t: t.update({
                 "status": FAILED, "error": str(exc), "finished_at": now_iso()}))
-            self.events.publish({"type": "task_failed", "task": self.store.load(workspace_id, task_id)})
+            self._publish({"type": "task_failed", "task": self.store.load(workspace_id, task_id)})
         except Exception as exc:  # noqa: BLE001 - the queue must not die on one task
             self.store.update(workspace_id, task_id, lambda t: t.update({
                 "status": FAILED, "error": "%s: %s" % (type(exc).__name__, exc),
                 "finished_at": now_iso()}))
-            self.events.publish({"type": "task_failed", "task": self.store.load(workspace_id, task_id)})
+            self._publish({"type": "task_failed", "task": self.store.load(workspace_id, task_id)})
         finally:
             self.running.pop(task_id, None)
 
@@ -1253,7 +1332,7 @@ class Engine:
 
                 written = self._finalize(workspace_id, task_id, status, done_fields)
                 if written is not None:
-                    self.events.publish(
+                    self._publish(
                         {"type": "task_done" if status == DONE else "task_waiting_confirmation",
                          "task": written})
                     if status == DONE:
@@ -1266,21 +1345,67 @@ class Engine:
                     "error": event.get("message") or "the turn failed",
                     "finished_at": now_iso()})
                 if written is not None:
-                    self.events.publish({"type": "task_failed", "task": written})
+                    self._publish({"type": "task_failed", "task": written})
                     self.note_thread(written, "error", event.get("message") or "这一轮失败了")
                 return
             elif kind == "stopped":
                 written = self._finalize(workspace_id, task_id, CANCELLED, {
                     "finished_at": now_iso()})
                 if written is not None:
-                    self.events.publish({"type": "task_cancelled", "task": written})
+                    self._publish({"type": "task_cancelled", "task": written})
                 return
         # The stream ended without a verdict (the agent died, the connection broke).
         written = self._finalize(workspace_id, task_id, FAILED, {
             "error": "the turn ended without an answer",
             "finished_at": now_iso()})
         if written is not None:
-            self.events.publish({"type": "task_failed", "task": written})
+            self._publish({"type": "task_failed", "task": written})
+
+    def _consume_fleet(self, workspace_id, task_id, provider, context, message=None):
+        """Run the task on the devices: each device's OWN agent answers.
+
+        The server does not have to know how a device is put right - the
+        device does. The queue collects the answers and records them as the
+        task's result, exactly like a local turn.
+        """
+        task = self.store.load(workspace_id, task_id) or {}
+        prompt = message if message is not None else (task.get("prompt") or "")
+        if context:
+            prompt = "%s\n\n（%s）" % (prompt, context)
+        selection = task.get("fleet") or {}
+        who = selection.get("names") or selection.get("groups") or "所有设备"
+        self.store.update(workspace_id, task_id, lambda t: t.update({
+            "note": "在机群上问 %s" % who, "progress": 10}))
+        self._publish({"type": "task_updated",
+                             "task": self.store.load(workspace_id, task_id)})
+        try:
+            answer = self.agent.fleet_ask(
+                self.args.fleet_url, self.args.fleet_token, prompt,
+                groups=selection.get("groups") or [],
+                names=selection.get("names") or [],
+                labels=selection.get("labels") or {},
+                timeout_s=int(selection.get("timeout_s") or 300))
+        except AgentError as exc:
+            self._finalize(workspace_id, task_id, FAILED,
+                           {"error": "机群没答上来：%s" % str(exc)[:200],
+                            "finished_at": now_iso()})
+            self._publish({"type": "task_failed",
+                                 "task": self.store.load(workspace_id, task_id)})
+            return
+        rows = answer.get("devices") or []
+        lines = []
+        for row in rows:
+            name = row.get("device") or "?"
+            if row.get("ok"):
+                lines.append("【%s】%s" % (name, str(row.get("content") or "").strip()))
+            else:
+                lines.append("【%s】（没答上来）%s" % (name, row.get("error") or ""))
+        text = "\n\n".join(lines) or "机群没有回答。"
+        written = self._finalize(workspace_id, task_id, DONE, {
+            "progress": 100, "result": text, "finished_at": now_iso(), "error": ""})
+        if written is not None:
+            self._publish({"type": "task_done", "task": written})
+            self.note_thread(written, "result", text[:1000])
 
     def _apply_report(self, workspace_id, task_id, event, report):
         """The agent's own report (toolkit_task): progress, note, a question."""
@@ -1320,7 +1445,7 @@ class Engine:
 
         self.store.update(workspace_id, task_id, apply)
         fresh = self.store.load(workspace_id, task_id)
-        self.events.publish({"type": "task_updated", "task": fresh})
+        self._publish({"type": "task_updated", "task": fresh})
         if note:
             self.note_thread(fresh, "note", note)
 
@@ -1880,6 +2005,10 @@ class Handler(BaseHTTPRequestHandler):
         task = new_task(body, workspace_id, allow_paths=allow_paths, priority=priority,
                         not_before=not_before, not_before_text=not_before_text, key=key,
                         meta=body.get("meta") if isinstance(body.get("meta"), dict) else {})
+        # Where the work runs: "" = the local agent, "fleet" = the devices'.
+        task["target"] = str(body.get("target") or "").strip()
+        if isinstance(body.get("fleet"), dict):
+            task["fleet"] = dict(body["fleet"])
         self.app.store.create(task)
         self.app.publish("task_created", task)
         self.app.store.audit("submit", task["id"], {"prompt": prompt[:200], "key": key})
@@ -2306,7 +2435,9 @@ class App:
         # mail, a chat). The records live in their own directories next to
         # the task records.
         self.trigger_store = triggers.TriggerStore(data_dir)
-        self.engine = Engine(self.store, self.agent, self.events, args, self.trigger_store)
+        self.engine = Engine(self.store, self.agent, self.events, args, self.trigger_store,
+                             self.write_thread_file, self.thread_file_path,
+                             self.decorate_event)
         self.trigger_rules = triggers.Rules(getattr(args, "trigger_config", ""))
         self.trigger_service = triggers.TriggerService(
             self.trigger_store, self.trigger_rules,
@@ -2365,12 +2496,57 @@ class App:
             not_before=not_before, not_before_text=not_before_text, meta=meta)
         task["trigger_id"] = trigger.get("id") or ""
         task["thread_id"] = trigger.get("thread_id") or ""
+        # Where the work runs: "" = the local agent, "fleet" = the devices'.
+        task["target"] = str(body.get("target") or "").strip()
+        if isinstance(body.get("fleet"), dict):
+            task["fleet"] = dict(body["fleet"])
         self.store.create(task)
         self.publish("task_created", task)
         self.store.audit("submit", task["id"],
                          {"prompt": task.get("prompt", "")[:200],
                           "trigger_id": task["trigger_id"]})
         return task
+
+    def thread_file_path(self, workspace_id, thread_id):
+        """Where the full record of a thread lives, relative to the workspace.
+
+        It goes into the workspace's own run directory: that is the one place
+        the agent can reach with the tools it already has (toolkit_file), so
+        "read the older part of this conversation" needs no new tool.
+        """
+        if not workspace_id or not thread_id:
+            return ""
+        return ".tea_agent_run/threads/%s.md" % thread_id
+
+    def write_thread_file(self, thread_id):
+        """Write the thread's full record into the workspace.
+
+        The queue writes into the agent's run directory on purpose: it is
+        the agent's own directory, and the agent's file tools can read it
+        by path. If the workspace is gone (or the agent is down) the record
+        simply is not written - the inline context still works.
+        """
+        thread = self.trigger_store.load_thread(thread_id)
+        if thread is None:
+            return False
+        workspace_id = thread.get("workspace_id") or ""
+        rel = self.thread_file_path(workspace_id, thread_id)
+        if not rel:
+            return False
+        root = self.workspace_path(workspace_id)
+        if not root:
+            return False
+        path = os.path.join(root, rel)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            body = self.trigger_store.history_md(thread_id)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(body)
+            os.replace(tmp, path)
+        except OSError:
+            return False
+        return True
 
     def page_html(self):
         """The page, read once at startup (it is a static file next to us)."""
@@ -2383,11 +2559,28 @@ class App:
                 self._page = ""
         return self._page
 
+    def decorate_event(self, event):
+        """Add the thread (its title) to an event.
+
+        The router says things about conversations, not only about task ids:
+        "做完了 t_x（字体设置）" says more than "做完了 t_x".
+        """
+        task = event.get("task") or {}
+        thread_id = task.get("thread_id") or ""
+        if not thread_id or event.get("thread"):
+            return event
+        thread = self.trigger_store.load_thread(thread_id)
+        if thread:
+            event["thread"] = {"id": thread_id,
+                               "title": thread.get("title") or "",
+                               "key": thread.get("key") or ""}
+        return event
+
     def publish(self, event_type, task, **extra):
         """Tell everybody who is listening (and write the event down)."""
         event = {"type": event_type, "task": task}
         event.update(extra)
-        self.events.publish(event)
+        self.events.publish(self.decorate_event(event))
         return event
 
     def decorate(self, task, full=False, order=None):
@@ -2663,6 +2856,11 @@ def main(argv=None):
                              "a slot any more")
     parser.add_argument("--interval", type=float, default=2.0,
                         help="seconds between rounds (default: 2)")
+    parser.add_argument("--fleet-url", default=os.environ.get("TEA_FLEET_URL", ""),
+                        help="the fleet service's HTTP API (a task with target=fleet runs "
+                             "on the devices' own agents)")
+    parser.add_argument("--fleet-token", default=os.environ.get("TEA_FLEET_TOKEN", ""),
+                        help="the token for the fleet service")
     parser.add_argument("--trigger-config", default=triggers.DEFAULT_RULES_PATH,
                         help="the rules of the trigger entry: which outside events are "
                              "work and which are not (see docs/router-watchdog.md)")

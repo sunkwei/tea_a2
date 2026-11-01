@@ -24,6 +24,7 @@ agent 完全不知道 Python 侧的存在。所以：
 | `watchdog.py` | **任务看门狗**：在 agent 和队列外面盯着卡住的任务、agent 的健康、额度 | 想知道「是不是卡住了」「它还活着吗」 | [任务看门狗](#任务看门狗watchdog) |
 | `triggers.py` | **触发器入口**：外部事件（webhook / 邮件 / 聊天）的统一入口——去重 + 规则 + 模型判断 | 想让外部系统直接派活儿 | [触发器入口](#触发器入口triggers) |
 | `router.py` | **Router**：把分开的工作区会话串成一条线索——记住每一步、收拢旧进展、给每个事件说一句话 | 想让「接着刚才那件事继续」真的接得上 | [Router](#router) |
+| （队列的一个能力） | **任务跑在设备上**：排队时带 `target: fleet`，设备自己的 a2 回答，队列把设备的回答收成结果 | 想让活儿在那批机器上干 | [机群](fleet.md) |
 | `tea_api.py` | 调 agent / 队列的客户端库 | 想写自己的脚本 | [客户端库](#客户端库tea_apy) |
 | `channel.py` | 聊天前端的共用半边 | 想加第三种聊天前端 | [聊天前端](#聊天前端) |
 | `wechat_bot.py` | 微信端（iLink 协议，扫码登录） | 想用微信排任务 | [聊天前端](#聊天前端) |
@@ -115,6 +116,10 @@ cat ~/.tea_agent/router/speech.jsonl       # router 都说了什么
   聊天前端加 `--speech` 就只递 router 的话，不再自己翻译原始事件（默认还是老路）。
   router 挂了用户就听不见，所以前端会提醒「router 沉默 N 分钟」。
 - 常驻用 systemd：`scripts/a2_router.service`。
+
+- **模型能按需读线索**：线索的完整记录写在工作区的
+  `.tea_agent_run/threads/<id>.md`，下一个同线索的任务被告知了这个路径——模型用
+  `toolkit_file` 就能读更早的事，不用加新工具。
 
 深层说明：`docs/router-watchdog.md`。
 

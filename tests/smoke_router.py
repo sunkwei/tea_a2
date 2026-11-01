@@ -297,6 +297,20 @@ def main():
             if "修好了" not in (data.get("prompt") or ""):
                 failures.append("the summary did not reach the prompt: %r" % data.get("prompt"))
 
+        # ---- the full record of the thread is a file the model can read ---
+        record = os.path.join(ws_dir, ".tea_agent_run", "threads", "%s.md" % thread_id)
+        if not wait_until(lambda: os.path.exists(record), 30):
+            failures.append("the record of the thread was not written into the workspace")
+        else:
+            with open(record, encoding="utf-8") as f:
+                body = f.read()
+            if "第 " not in body:
+                failures.append("the record does not carry the steps: %r" % body[:200])
+            # The next task is told where the record is.
+            contexts = [c.get("task_context") or "" for c in MockAgent.records["chat"]]
+            if not any(".tea_agent_run/threads/%s.md" % thread_id in c for c in contexts):
+                failures.append("no task was told where the record of the thread is")
+
         # ---- the router's line goes into the queue's event stream ---------
         def speech_in_the_bus():
             status, body = call(queue_port, "GET", "/api/tasks/%s/events" % first_task)
@@ -312,6 +326,9 @@ def main():
         else:
             if "做完了" not in (line.get("line") or ""):
                 failures.append("the sentence is not about the finished work: %r" % line)
+            if "字体" not in (line.get("line") or ""):
+                failures.append("the sentence does not say which conversation it is about: %r"
+                                % line)
             if line.get("speech_of") != "task_done":
                 failures.append("the sentence does not say which event it is about: %r" % line)
 

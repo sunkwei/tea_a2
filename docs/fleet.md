@@ -312,6 +312,24 @@ python3 sched/fleet.py --group classroom-a ask \
 这就是「多级」的意思：**每一级都有自己的一颗脑子和自己的上下文**，
 上一级做决策，下一级做执行，出了问题下一级自己处理。
 
+### 从队列里派给设备（0.12.2 起）
+
+队列里的任务也可以不在本机做，而是**交给设备的 a2**：
+
+```bash
+# 任务带上 target: fleet 就跑在设备上（本机 agent 一个请求都不发）
+curl -X POST http://127.0.0.1:8283/api/tasks -H 'Content-Type: application/json' \
+  -d '{"prompt": "把服务重启一下", "target": "fleet",
+       "fleet": {"names": ["class-a-01"], "timeout_s": 300}}'
+```
+
+队列把 prompt 交给机群服务（`POST /api/fleet/ask`），机群服务让每台设备自己的
+a2 回答，**队列把设备的回答收成任务的结果**——没答上来的设备也会写进结果里
+（藏起来就等于藏了一台坏掉的设备）。
+
+队列要知道机群在哪儿：`--fleet-url`（默认取环境变量 `TEA_FLEET_URL`）和
+`--fleet-token`（`TEA_FLEET_TOKEN`）。
+
 ---
 
 ## 七、三个入口

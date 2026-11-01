@@ -100,25 +100,39 @@ class Router(object):
         self.summarized = {}     # thread id -> how many entries are done
 
     # ---- what the router says --------------------------------------------
+    @staticmethod
+    def thread_label(event):
+        """The conversation this event is about, in a few words.
+
+        A task id says nothing to a human; "（字体设置）" does. The title
+        comes with the event (the queue adds it), so the router does not
+        have to ask.
+        """
+        thread = event.get("thread") or {}
+        title = str(thread.get("title") or "").strip()
+        return ("（%s）" % title) if title else ""
+
     def speak(self, event):
         """One event, one sentence. What the router would tell the people."""
         kind = event.get("type") or ""
         task = event.get("task") or {}
         trigger = event.get("trigger") or {}
         task_id = task.get("id") or ""
+        label = self.thread_label(event)
         if kind == "task_created":
             title = task.get("title") or task.get("prompt") or ""
-            return "排了一个活儿%s：%s" % (("（%s）" % task_id) if task_id else "",
-                                          str(title)[:60])
+            return "排了一个活儿%s%s：%s" % (("（%s）" % task_id) if task_id else "",
+                                            label, str(title)[:60])
         if kind == "task_done":
             answer = str(task.get("result") or "").strip()
-            return "做完了 %s%s" % (task_id, ("：%s" % answer[:60]) if answer else "")
+            return "做完了 %s%s%s" % (task_id, label,
+                                     ("：%s" % answer[:60]) if answer else "")
         if kind == "task_failed":
-            return "失败了 %s：%s" % (task_id, task.get("error") or "原因不明")
+            return "失败了 %s%s：%s" % (task_id, label, task.get("error") or "原因不明")
         if kind == "task_waiting_confirmation":
-            return "%s 在等回答：%s" % (task_id, task.get("question") or "")
+            return "%s%s 在等回答：%s" % (task_id, label, task.get("question") or "")
         if kind == "task_cancelled":
-            return "%s 停了" % task_id
+            return "%s%s 停了" % (task_id, label)
         if kind == "watchdog_alert":
             return "看门狗：%s：%s" % (event.get("check") or "", event.get("reason") or "")
         if kind == "trigger_decided":

@@ -68,6 +68,7 @@ python3 tests/smoke_fleet.py                                 # 机群：台账 +
 python3 tests/smoke_watchdog.py                             # 看门狗：卡住的任务（默认只告警）/ --auto 才判死 / 队列暂停与恢复 / agent 不通
 python3 tests/smoke_triggers.py                            # 触发器入口：规则先于模型 / 去重 / 线索 / 老路仍然能排任务
 python3 tests/smoke_router.py                             # Router：线索记住每一步 / 下一个任务被告知之前发生了什么 / 旧进展收拢成摘要
+python3 tests/smoke_fleet_tasks.py                        # 任务跑在设备上：target=fleet / 设备的回答收成结果 / 没答上来的设备也在结果里
                                                           # + 审计 + 机群服务 API + 真二进制的 /api/status 与 /api/exec
                                                           # + 多级链路（服务器 a2 → toolkit_fleet → 机群服务 → 设备 a2）
 python3 tests/smoke_peer.py                                 # 级联：peers: 配置 + 对端通道（令牌/白名单/404）+
@@ -147,6 +148,14 @@ provider 不能搜时工具照样出现、请求发给 search provider 并用它
 「这条线索之前的事」）；掉出窗口的旧进展被收拢成一句摘要，摘要进了下一个任务的 prompt；
 router 每个事件说一句话（`speech.jsonl`）；**router 的话进了队列的事件流**（`speech`
 事件），聊天前端加 `--speech` 后只递这句话、不再自己翻译原始事件。
+**M3 v3**：线索的完整记录写进了工作区（`.tea_agent_run/threads/<id>.md`），下一个任务被
+告知了这个路径（模型用 `toolkit_file` 就能读）；router 的话里带上了线索的标题
+（「做完了 t_x（字体设置）」）。
+
+`tests/smoke_fleet_tasks.py` 覆盖「任务跑在设备上」（真的队列 + 假的机群服务 + 假的本机
+agent）：带 `target: fleet` 的任务**不问本机 agent**，设备的回答收成任务的结果；**没答上来
+的设备也在结果里**（藏起来就等于藏了一台坏掉的设备）；设备的选择和 prompt 到了机群服务；
+不带 target 的任务照旧在本机做。
 
 `tests/smoke_tool_call_structure.py` 覆盖「请求里的工具调用结构」：provider 要把每条工具结果
 对回它答复的那次调用，而且必须一对一。MiniMax 对不是一对一的历史整个请求都拒
