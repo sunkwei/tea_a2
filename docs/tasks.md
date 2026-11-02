@@ -254,7 +254,44 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
 | 让 router 替队列说话 | 队列事件流里的 `speech` 事件（router 写的，一句话一个事件）：聊天前端加 `--speech` 就只递 router 的话，不再自己翻译原始事件 |
 | 看一条线索知道什么 | `GET /api/threads/{id}/context`——窗口（最近 8 步）、掉出窗口的旧进展、以及下一个同线索任务会拿到的 prompt。`POST /api/threads` 手工开一条线索 |
 | 写回线索的摘要 | `POST /api/threads/{id}/spill {"summary": "…", "count": N}`（router 用；只有本机操作员能写——摘要会进 prompt） |
+| 交一个**计划**（复杂活儿拆成几步） | `POST /api/plans {"title": "…", "goal": "…", "steps": [{"key": "s1", "title": "…", "prompt": "…", "depends_on": []}]}`——计划变成一个父任务（装最终结果）+ 每步一个任务；`depends_on` 里的步骤没做完，这一步就不启动。`GET /api/plans` / `GET /api/plans/{id}` 看计划，`POST /api/plans/{id}/cancel` 取消 |
 | 交一份任务单 | `python3 sched/task_server.py --submit-order <文件>`，或把 `*.order` 文件发给微信 bot |
+
+### 计划：一个复杂活儿拆成几步
+
+`POST /api/plans` 交的不是一件事，是**一件事的拆法**。它变成：
+
+- 一个**父任务**（`kind: "plan"`）：不干活，只装最终结果。进度是「几步完成了」；
+- 每一步一个**子任务**：真的干活，可以有依赖（`depends_on` 写的是同计划里别的步骤的 `key`）。
+
+队列只启动「等够了」的步骤：依赖的步骤没做完，这一步就在队列里等着（不占位置、不挡别人）。
+哪一步失败了，依赖它的步骤会被停掉（不会永远等）；全做完了，队列用**一次模型调用**把各步的
+结果合成一份最终交付物，写进父任务的 `result`。
+
+几步是**同一条线索**：router 记得住谁做了什么，下一步的 prompt 里带着上一步的结果。
+
+```bash
+# 交一个计划
+curl -X POST http://127.0.0.1:8283/api/plans -H 'Content-Type: application/json' -d '{
+  "title": "写一份上手指南",
+  "goal": "让新用户 5 分钟会用 tea_a2",
+  "steps": [
+    {"key": "read",   "title": "读 README", "prompt": "读 README.md，列出关键事实"},
+    {"key": "write",  "title": "写指南",   "prompt": "写成一份上手指南", "depends_on": ["read"]}
+  ]}'
+# → {"plan": {…}, "parent": {父任务}, "steps": [{key, title, task}, …]}
+```
+
+规划本身是**独立的一步**（`sched/planner.py`）：一次模型调用出计划，写成 JSON 文件，
+人可以改过再交：
+
+```bash
+python3 sched/planner.py --goal "把 30 个文件分类并写一份报告" --out /tmp/plan.json
+$EDITOR /tmp/plan.json          # 改一改（步骤、依赖、每步的 prompt）
+python3 sched/planner.py --submit /tmp/plan.json
+```
+
+**计划是建议，不是命令**：模型拆的步不一定对，所以中间有人——改完再交。
 
 ### 任务单：一个文件交一份活儿
 
@@ -467,6 +504,9 @@ toolkit_task op=update needs_confirmation=true question="可以删掉旧构建�
 - **M3 Router**（已做 v1/v2）：跨 session 的共享上下文（thread）——下一个同线索的任务会被
   告知「之前发生了什么」；掉出窗口的进展由 router 收拢成摘要。**v2：router 说话**
   （话术进队列事件流的 `speech` 事件），聊天前端加 `--speech` 就只递 router 的话。
+- **M6 计划**（已做）：`POST /api/plans` 把一个复杂活儿拆成几步（父任务 + 子任务 + 依赖），
+  队列只启动「等够了」的步，全做完了合成最终结果；`sched/planner.py` 负责出计划（一次模型
+  调用，写成 JSON 给人改过再交）。
 
 完整的对象模型、接口和验收标准见 [Router 与 Watchdog](router-watchdog.md)。
 

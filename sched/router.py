@@ -121,6 +121,11 @@ class Router(object):
         label = self.thread_label(event)
         if kind == "task_created":
             title = task.get("title") or task.get("prompt") or ""
+            if task.get("kind") == "plan":
+                # A plan is not one job but a few: say so, and say how many.
+                steps = len(task.get("children") or []) or int(task.get("child_count") or 0)
+                return "排了一个计划%s%s（%d 步）：%s" % (
+                    ("（%s）" % task_id) if task_id else "", label, steps, str(title)[:60])
             return "排了一个活儿%s%s：%s" % (("（%s）" % task_id) if task_id else "",
                                             label, str(title)[:60])
         if kind == "task_done":

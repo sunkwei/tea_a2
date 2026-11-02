@@ -291,6 +291,21 @@ python3 sched/pan_publish.py release/tea_a2-0.18.0.zip --version 0.18.0 \
 git add -A && git commit -m "release: 0.18.0"
 ```
 
+### 包里 `tasks/` 该有哪些文件
+
+打包脚本（`.tea_agent_run/scripts/pack_release.sh`，**它不进 git**，每台机器各有一份）要把
+这些文件复制进 zip 的 `tasks/`：
+
+```
+task_server.py  task_order.py  task-order.template  task_ui.html
+tea_api.py  wechat_bot.py  channel.py
+triggers.py  plans.py  planner.py
+```
+
+**`task_server.py` import 的模块必须一起进包**（`triggers.py`、`plans.py`）：少了哪个，
+终端用户拿到包就是一次 ImportError——`0.17.4` 的包就少了 `triggers.py`（发版时补上）。
+Python 侧每加一个 `import`，打包清单就要跟着改。
+
 **网盘上最多留 5 个发布包**：传完按版本号（`0.17.10 > 0.17.3`，按数字比不是按字符串）排，
 最新的 5 个留下，其余的目录连包带清单删掉。想看现在有哪些：
 

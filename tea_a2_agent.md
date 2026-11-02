@@ -1224,3 +1224,64 @@ git add -A && git commit -m "release: 0.18.0"                 # **不**提交 re
 没有「远端更新了就通知我」——现在只有 `watch` 的日志；要通知就把它挂到 watcher 那套出口上。
 没有多账号（一个网盘账号只能同步一个 profile，要多组就多账号或者改远端目录）。
 没有同步「工作区的 `.tea_agent_run/settings.yaml`」（工作区路径各机器不同，没做映射）。
+
+## 计划：复杂活儿拆成几步，做完汇总（M6，2026-11-02）
+
+Super-agent 的原型里，Worker 各干各的；我们这边多一层：**步骤之间可以互相等**，而且做完要有
+一个人把它们**合成**一份交付物。问的是「能不能自主规划、分解、汇总」——答案是能，但**差三样
+东西**，这次把它们补上了。
+
+### 原来差什么（2026-11-02 之前的代码事实）
+
+- 队列里**没有父子、没有依赖、没有汇总**：`sched/task_server.py` 里 grep `parent_id` /
+  `depends_on` / `aggregate` 全是空的；任务记录只有 `trigger_id` / `thread_id` 两个关系字段。
+- **只有一个 workspace 时任务是串行的**：`round()` 里「一个工作区同时一个任务」
+  （`One task at a time per project`）。所以「并行子任务」不是加个字段的事——子任务得分到
+  不同工作区（机群设备各有各的），或者给计划单开一条并发口子。这次没做，记在这里。
+- **只有触发器创建的任务才带 `thread_id`**（`make_task_from_trigger` 才设，`new_task()` 恒为空）。
+  直接 `POST /api/tasks` 排的任务不在任何线索里，router 记不住它们。这次计划里的步骤是队列自己
+  建的，所以显式挂了 `thread_id`。
+- agent 内核的 `toolkit_todo` 是**会话内**的计划：同一个 session 里自己列步骤自己做。它不是
+  「一个计划拆成 N 个队列任务」。
+
+### 这次的取舍
+
+| 决定 | 为什么 |
+| --- | --- |
+| 汇总放在**队列**里，不放 router | router 有「线索」容器和唯一那次模型调用，看起来该归它；但**队列知道最后一步什么时候做完的**，router 只是隔 30 秒看一眼。汇总放队列，计划才不会因为 router 恰好不在就悬着。router 照旧负责**说话**（`task_done` → `speech`） |
+| 父任务状态用 `queued` + `kind: "plan"` | 父任务是容器，不干活。**不能用 `running`**：`running_tasks()` 按工作区数运行中的任务，父任务占着槽位的话，同工作区的步骤就永远排不上 |
+| 依赖失败 → 依赖它的步骤被**取消** | 等一个永远等不到的东西，就是永远排队。停掉（`cancelled` + 原因）比挂着强 |
+| 规划是**独立一步**（`sched/planner.py`），计划写成 JSON 给人改 | 模型拆的步不一定对，而且它不知道这台机器今天能做什么。**计划是建议，不是命令**——中间留人 |
+| 步骤数上限 32（`plans.MAX_STEPS`），规划器默认 6 | 「自主」最容易变成「拆出 40 步烧钱」 |
+| 汇总只用 `content`，**永远不把 `reasoning` 当答案** | 踩过的坑：deepseek-flash 先思考（reasoning 2000+ 字符），`max_tokens=1200` 被思考吃光 → `content` 空 → 当时回退到 reasoning，**把思考过程写进了最终交付物**。现在：只用 content；空了就重试；`finish_reason == "length"` 就把预算加倍（4000 → 8000 → 16000）再试 |
+| 汇总失败重试 3 次，然后计划判失败 | 一个永远汇总不出来的计划不该永远挂着；3 次之后父任务 `failed` 并写明原因 |
+| 看门狗加 `plan_stuck` | 步骤都做完了、父任务却一直没写结果——这种「工作做完了但没人交差」的状态，规则化的「卡住」检查看不见（它只看 `running` 的任务）。看门狗是从外面看的那双眼睛 |
+
+### 新的接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/plans` | 交一个计划：`{title, goal, steps:[{key,title,prompt,depends_on[]}], workspace_id?, thread_key?, aggregate_prompt?}`。变成一个父任务（`kind: "plan"`）+ 每步一个子任务（带 `parent_id` / `plan_id` / `depends_on`）。同一个 `Idempotency-Key` 只排一次 |
+| `GET` | `/api/plans` | 计划列表 |
+| `GET` | `/api/plans/{id}` | 计划 + 父任务 + 每步的任务 |
+| `POST` | `/api/plans/{id}/cancel` | 取消计划：停掉还在跑的步骤和父任务 |
+
+计划的记录在 `<数据目录>/plans/<id>.json`（**不放根目录**：队列的任务列表会读数据目录下每一个
+`*.json`，计划不是任务）。校验在 `sched/plans.py`（不联网，能单测）：步骤要有内容、依赖要存在、
+不许互相对着等成环。
+
+### 发版清单的坑（顺手修的）
+
+`release/tea_a2-0.17.4.zip` 里的 `tasks/` 有 `task_server.py`，**却没有它 `import` 的
+`triggers.py`** —— 终端用户拿到包，`python3 tasks/task_server.py` 直接 ImportError。
+`pack_release.sh` 现在把 `task_server.py` import 的模块（`triggers.py`、`plans.py`）一起打进去，
+外加 `planner.py`（用户用得上的规划器）。**以后加一个 `import` 就要看一眼发版清单。**
+
+### 还没做的
+
+- **网页上看不到计划**：队列的页面（`sched/task_ui.html`）只画普通任务卡，父任务现在显示成
+  「排队中」的一个任务。计划要能点开看几步、谁在等谁，UI 得改。
+- **计划不能中途改**：模型拆错了只能取消重来，没有「replan」（把没开始的步骤换掉）。
+- **步骤之间不能传数据**：只能靠同一条线索的上下文（prompt 里带上前一步的结果）。要显式传
+  产物（比如第 1 步写了个文件，第 2 步要知道路径），得有个「步骤的产出」字段。
+- **并行**：同一工作区的步骤还是串行（见上）。要并行得让步骤分到不同工作区。

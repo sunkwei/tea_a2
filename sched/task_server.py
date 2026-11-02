@@ -48,6 +48,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 
+import plans
 import task_order
 import triggers
 
@@ -104,6 +105,12 @@ ERROR_CODES = {
     "export_failed": CODE_EXPORT,
     "internal": CODE_INTERNAL,
 }
+
+AGGREGATE_SYSTEM = (
+    "你在给一个复杂任务做最终汇总。下面是这个任务的目标和每个步骤的结果。\n"
+    "请合成一份完整、可以直接交付的结果：不要罗列步骤，要给出结论性的答案；"
+    "步骤之间有矛盾就指出来；缺什么就说明缺什么。只输出汇总本身，"
+    "不要解释，不要 markdown 代码块。")
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -429,6 +436,14 @@ def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
         # directly) and the thread it belongs to (the conversation).
         "trigger_id": "",
         "thread_id": "",
+        # The plan this task belongs to ("" = a standalone task). The parent
+        # holds the final result; the children are the steps. A task that
+        # waits for others says which ones in depends_on.
+        "parent_id": "",
+        "plan_id": "",
+        "depends_on": [],
+        "kind": "",            # "" = a normal task, "plan" = the container
+        "children": [],
         # Where the work runs: "" = the local agent, "fleet" = the devices'
         # own agents (each device answers with its own provider and context).
         "target": "",
@@ -907,7 +922,7 @@ class Engine:
     """The scheduler: what to work on, and when."""
 
     def __init__(self, store, agent, events, args, trigger_store=None, thread_writer=None,
-                 thread_file=None, decorate_event=None):
+                 thread_file=None, decorate_event=None, plan_store=None):
         self.store = store
         self.agent = agent
         self.events = events
@@ -924,6 +939,11 @@ class Engine:
         # Adds the thread (its title) to an event before it goes out: the
         # router says things about conversations, not only about task ids.
         self.decorate_event = decorate_event or (lambda event: event)
+        # The plans (the complex jobs that were split into steps).
+        self.plan_store = plan_store
+        # The plans whose summary is being made right now: one plan is
+        # summarized once, not once per round.
+        self.summarizing = set()
         self.running = {}     # task id -> {"thread":..., "workspace_id":...}
         self._quota = (None, None, 0.0)   # (percent, window, read_at)
 
@@ -1055,6 +1075,11 @@ class Engine:
         queued.sort(key=lambda t: (-int(t.get("priority") or 0),
                                    t.get("created_at") or "", t.get("id") or ""))
 
+        # The tasks whose dependency will never be done are stopped before
+        # anything is started: a task that waits for a step that failed would
+        # wait for ever.
+        self.sweep_dependencies()
+
         started = 0
         now = time.time()
         # The tasks that are running are counted ONCE for this round. Asking
@@ -1078,6 +1103,19 @@ class Engine:
                 # The project is working on something else: the task keeps its
                 # place and waits its turn.
                 busy += 1
+                continue
+            if task.get("kind") == "plan":
+                # A plan is a container: the queue does not run it, its
+                # children are the work.
+                continue
+            state, reason = self.dependency_state(task)
+            if state == "waiting":
+                # It waits for a step that is not done yet: it keeps its
+                # place in the queue.
+                busy += 1
+                continue
+            if state == "dead":
+                # The sweep stops it; starting it would be wrong.
                 continue
             wanted = task.get("provider")
             if wanted and wanted != provider:
@@ -1130,6 +1168,159 @@ class Engine:
     def _publish(self, event):
         """Publish an event, with the thread it belongs to attached."""
         self.events.publish(self.decorate_event(event))
+
+    # ---- the plans ---------------------------------------------------------
+    def check_plans(self):
+        """Drive the plans: count the steps, and summarize when they are done.
+
+        The summary is made here, in the queue, and not in the router: the
+        queue is what knows when the last step is done, and a plan must not
+        hang because the router happens to be down. The router still speaks
+        the result - the task_done event is what it turns into words.
+        """
+        if self.plan_store is None:
+            return
+        for plan in self.plan_store.list_plans():
+            try:
+                self.check_one_plan(plan)
+            except Exception as exc:  # noqa: BLE001 - one bad plan must not stop the rest
+                log("cannot check the plan %s: %s: %s"
+                    % (plan.get("id"), type(exc).__name__, exc))
+
+    def check_one_plan(self, plan):
+        parent_id = plan.get("parent_id") or ""
+        workspace_id = plan.get("workspace_id") or ""
+        if not parent_id:
+            return
+        parent = self.store.load(workspace_id, parent_id)
+        if parent is None or parent.get("status") in TERMINAL:
+            return
+        children = []
+        for step in plan.get("steps") or []:
+            child = self.store.load(workspace_id, step.get("task_id") or "")
+            if child is None:
+                return          # a step that is not there yet: wait
+            children.append((step, child))
+        if not children:
+            return
+        done = [c for _, c in children if c.get("status") == DONE]
+        failed = [c for _, c in children if c.get("status") in (FAILED, CANCELLED)]
+        busy = [c for _, c in children if c.get("status") not in TERMINAL]
+        total = len(children)
+        if busy:
+            # Still working: the parent shows how far the plan is.
+            progress = int(100 * len(done) / total)
+            note = "计划：%d/%d 步完成" % (len(done), total)
+            if parent.get("progress") != progress or parent.get("note") != note:
+                written = self.store.update(workspace_id, parent_id, lambda t: t.update({
+                    "progress": progress, "note": note}))
+                if written is not None:
+                    self._publish({"type": "task_updated", "task": written})
+            return
+        if failed:
+            titles = "、".join((c.get("title") or c.get("id") or "") for c in failed)
+            reason = "有 %d 步没成功：%s" % (len(failed), titles)
+            written = self._finalize(workspace_id, parent_id, FAILED, {
+                "error": reason,
+                "progress": 100,
+                "finished_at": now_iso(),
+                "note": reason[:80],
+            })
+            if written is not None:
+                self._publish({"type": "task_failed", "task": written})
+                self.note_thread(written, "error", reason)
+            plan["status"] = "failed"
+            self.plan_store.save(plan)
+            return
+        # Every step is done: the plan is summarized - once.
+        if parent_id in self.summarizing:
+            return
+        self.summarizing.add(parent_id)
+        thread = threading.Thread(target=self._summarize_plan, args=(plan,), daemon=True)
+        thread.start()
+
+    def aggregate_prompt(self, plan):
+        """What the model is asked to turn the steps into one result."""
+        workspace_id = plan.get("workspace_id") or ""
+        parts = []
+        for step in plan.get("steps") or []:
+            child = self.store.load(workspace_id, step.get("task_id") or "") or {}
+            title = step.get("title") or step.get("key") or ""
+            text = str(child.get("result") or child.get("error") or "").strip()
+            parts.append("【%s】\n%s" % (title, text or "（这一步没有留下结果）"))
+        goal = plan.get("goal") or plan.get("title") or ""
+        ask = plan.get("aggregate_prompt") or "把这些结果汇总成一份完整、可以直接交付的结果。"
+        return ("【任务目标】\n%s\n\n【要做的汇总】\n%s\n\n【各步骤的结果】\n%s"
+                % (goal, ask, "\n\n".join(parts)))
+
+    def _summarize_plan(self, plan):
+        """One model call turns the steps into the plan's result."""
+        parent_id = plan.get("parent_id") or ""
+        workspace_id = plan.get("workspace_id") or ""
+        try:
+            parent = self.store.load(workspace_id, parent_id)
+            if parent is None or parent.get("status") in TERMINAL:
+                return
+            prompt = self.aggregate_prompt(plan)
+            budget = int(getattr(self.args, "aggregate_max_tokens", 4000) or 4000)
+            answer = {}
+            text = ""
+            for _ in range(3):
+                try:
+                    answer = self.agent.llm_chat(
+                        prompt=prompt, system=AGGREGATE_SYSTEM,
+                        temperature=0.1, max_tokens=budget,
+                        timeout=getattr(self.args, "aggregate_timeout", 180))
+                except AgentError as exc:
+                    log("the model did not summarize the plan %s: %s" % (plan.get("id"), exc))
+                    answer = {}
+                # Only the answer is the answer: the reasoning is the model
+                # thinking out loud, and it must never become the result.
+                text = str((answer or {}).get("content") or "").strip()
+                if text:
+                    break
+                if (answer or {}).get("finish_reason") == "length":
+                    # The answer was cut off: the model thinks first, and the
+                    # thinking ate the budget. Give it more.
+                    budget = min(budget * 2, 16000)
+                    log("the summary of the plan %s was cut off - retrying with %d tokens"
+                        % (plan.get("id"), budget))
+                    continue
+                break
+            if not text:
+                # No answer: try again in the next round. After a few tries
+                # the plan is failed - a plan that cannot be summarized is
+                # not a plan that hangs for ever.
+                attempts = int(plan.get("attempts") or 0) + 1
+                plan["attempts"] = attempts
+                self.plan_store.save(plan)
+                if attempts >= 3:
+                    written = self._finalize(workspace_id, parent_id, FAILED, {
+                        "error": "汇总没成功（试了 %d 次）" % attempts,
+                        "progress": 100,
+                        "finished_at": now_iso(),
+                    })
+                    if written is not None:
+                        self._publish({"type": "task_failed", "task": written})
+                    plan["status"] = "failed"
+                    self.plan_store.save(plan)
+                return
+            steps = plan.get("steps") or []
+            written = self._finalize(workspace_id, parent_id, DONE, {
+                "result": text,
+                "progress": 100,
+                "finished_at": now_iso(),
+                "note": "计划完成：%d 步" % len(steps),
+            })
+            if written is not None:
+                self._publish({"type": "task_done", "task": written})
+                self.note_thread(written, "result", text[:1000])
+            plan["status"] = "done"
+            plan["attempts"] = 0
+            self.plan_store.save(plan)
+            log("plan %s is done: %d step(s)" % (plan.get("id"), len(steps)))
+        finally:
+            self.summarizing.discard(parent_id)
 
     # ---- the final word about a task --------------------------------------
     def _finalize(self, workspace_id, task_id, status, fields=None):
@@ -1191,6 +1382,57 @@ class Engine:
         self.store.audit("fail", task_id, {"reason": reason, "actor": actor})
         return written
 
+    # ---- the steps that wait for each other --------------------------------
+    def dependency_state(self, task):
+        """What the dependencies of a task say.
+
+        ("ready", "")          - it may start now
+        ("waiting", reason)    - it waits for steps that are not done yet
+        ("dead", reason)       - a step it waits for failed: it will never run
+
+        The reasons are for the record: they say why a task is still in the
+        queue, or why it was stopped.
+        """
+        deps = task.get("depends_on") or []
+        if not deps:
+            return "ready", ""
+        waiting = []
+        dead = []
+        for dep_id in deps:
+            dep = self.store.load(task.get("workspace_id"), dep_id)
+            if dep is None:
+                dead.append("%s（记录不见了）" % dep_id)
+                continue
+            status = dep.get("status")
+            if status == DONE:
+                continue
+            if status in TERMINAL:
+                dead.append("%s（%s）" % (dep.get("title") or dep_id, status))
+            else:
+                waiting.append(dep.get("title") or dep_id)
+        if dead:
+            return "dead", "等的那一步没能完成：%s" % "、".join(dead)
+        if waiting:
+            return "waiting", "等 %d 个前一步：%s" % (len(waiting), "、".join(waiting))
+        return "ready", ""
+
+    def sweep_dependencies(self):
+        """Stop the tasks whose dependency will never be done."""
+        for task in self.store.list(status=QUEUED):
+            if not (task.get("depends_on") or []):
+                continue
+            state, reason = self.dependency_state(task)
+            if state != "dead":
+                continue
+            written = self._finalize(task.get("workspace_id"), task.get("id"), CANCELLED, {
+                "error": reason,
+                "finished_at": now_iso(),
+                "note": "停下了：%s" % reason[:80],
+            })
+            if written is not None:
+                self._publish({"type": "task_cancelled", "task": written})
+                log("  task %s cancelled: %s" % (task.get("id"), reason))
+
     # ---- running one task -------------------------------------------------
     def start_task(self, task, provider=None):
         """Run a task now: the turn goes through the agent, the record follows."""
@@ -1198,6 +1440,11 @@ class Engine:
         workspace_id = task.get("workspace_id")
         if task_id in self.running:
             log("  task %s is already running here", task_id)
+            return False
+        if task.get("kind") == "plan":
+            # A plan is a container: its steps are the work. Running the
+            # container would ask the model to do the whole thing at once.
+            log("  task %s is a plan, not work: it is not run", task_id)
             return False
 
         provider = provider or task.get("provider") or self.args.provider
@@ -1237,6 +1484,12 @@ class Engine:
             out += " (%s)" % task["title"]
         if task.get("prompt"):
             out += ": " + task["prompt"]
+        plan_id = task.get("plan_id") or ""
+        if plan_id and self.plan_store is not None:
+            plan = self.plan_store.load(plan_id)
+            if plan:
+                out += "\n\n【这是个大计划里的一步】%s\n总目标：%s" % (
+                    plan.get("title") or "", plan.get("goal") or "")
         thread_id = task.get("thread_id") or ""
         if thread_id and self.triggers is not None:
             before = self.triggers.context_of(thread_id)
@@ -1454,6 +1707,7 @@ class Engine:
         while True:
             try:
                 self.round()
+                self.check_plans()
             except AgentError as exc:
                 log("round failed: %s" % exc)
             except Exception as exc:  # noqa: BLE001
@@ -1619,6 +1873,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._list_triggers()
         if path == "/api/threads":
             return self._list_threads()
+        if path == "/api/plans":
+            return self._list_plans()
+        if path.startswith("/api/plans/"):
+            return self._get_plan(path[len("/api/plans/"):])
         if path.startswith("/api/triggers/"):
             return self._get_trigger(path[len("/api/triggers/"):])
         if path.startswith("/api/threads/"):
@@ -1658,6 +1916,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._submit_trigger()
         if path == "/api/threads":
             return self._create_thread()
+        if path == "/api/plans":
+            return self._create_plan()
+        if path.startswith("/api/plans/") and path.endswith("/cancel"):
+            return self._cancel_plan(path[len("/api/plans/"):-len("/cancel")])
         if path.startswith("/api/threads/") and path.endswith("/spill"):
             return self._thread_spill(path[len("/api/threads/"):-len("/spill")])
         if path.startswith("/api/tasks/"):
@@ -2058,6 +2320,10 @@ class Handler(BaseHTTPRequestHandler):
     def _start(self, workspace_id, task):
         if task.get("status") == RUNNING:
             return self._error(409, "task_running", "task %s is already running" % task.get("id"))
+        if task.get("kind") == "plan":
+            return self._error(409, "bad_request",
+                               "task %s is a plan: its steps are the work, "
+                               "the plan itself is not run" % task.get("id"))
         provider = task.get("provider") or self.app.args.provider
         # The same gate the scheduler uses: the work starts while there is quota.
         left, _ = self.app.engine.quota_left(provider)
@@ -2203,6 +2469,45 @@ class Handler(BaseHTTPRequestHandler):
         if not self._check_project({"workspace_id": trigger.get("workspace_id") or ""}):
             return self._forbid("trigger %s" % trigger_id)
         self._json(200, trigger)
+
+    def _list_plans(self):
+        items = self.app.plan_store.list_plans()
+        self._json(200, {"plans": items, "count": len(items)})
+
+    def _get_plan(self, plan_id):
+        plan = self.app.plan_store.load(plan_id)
+        if plan is None:
+            return self._error(404, "not_found", "no plan %r" % plan_id)
+        if not self._check_project({"workspace_id": plan.get("workspace_id") or ""}):
+            return self._forbid("plan %s" % plan_id)
+        self._json(200, self.app.plan_view(plan))
+
+    def _create_plan(self):
+        body = self._body()
+        if body is None:
+            return self._error(400, "bad_request", "the request body is not JSON")
+        # A plan file (what the planner wrote) may be handed in as it is.
+        inner = body.get("plan")
+        if isinstance(inner, dict):
+            merged = dict(inner)
+            for key, value in body.items():
+                if key != "plan" and value not in (None, ""):
+                    merged.setdefault(key, value)
+            body = merged
+        header_key = str(self.headers.get("Idempotency-Key") or "").strip()
+        if header_key:
+            body["idempotency_key"] = header_key
+        try:
+            plan, duplicate = self.app.create_plan(body)
+        except plans.PlanError as exc:
+            return self._error(400, "bad_request", str(exc))
+        self._json(200, dict(self.app.plan_view(plan), duplicate=duplicate))
+
+    def _cancel_plan(self, plan_id):
+        plan = self.app.cancel_plan(plan_id)
+        if plan is None:
+            return self._error(404, "not_found", "no plan %r" % plan_id)
+        self._json(200, self.app.plan_view(plan))
 
     def _list_threads(self):
         caller = self._project_of_caller()
@@ -2435,9 +2740,11 @@ class App:
         # mail, a chat). The records live in their own directories next to
         # the task records.
         self.trigger_store = triggers.TriggerStore(data_dir)
+        # The plans (the complex jobs that were split into steps).
+        self.plan_store = plans.PlanStore(data_dir)
         self.engine = Engine(self.store, self.agent, self.events, args, self.trigger_store,
                              self.write_thread_file, self.thread_file_path,
-                             self.decorate_event)
+                             self.decorate_event, self.plan_store)
         self.trigger_rules = triggers.Rules(getattr(args, "trigger_config", ""))
         self.trigger_service = triggers.TriggerService(
             self.trigger_store, self.trigger_rules,
@@ -2506,6 +2813,146 @@ class App:
                          {"prompt": task.get("prompt", "")[:200],
                           "trigger_id": task["trigger_id"]})
         return task
+
+    def create_plan(self, body):
+        """One complex job, split into steps: the plan and its tasks.
+
+        The plan becomes one parent task (the container: it holds the final
+        result) and one child per step. The children may depend on each
+        other; the queue starts a child only when what it waits for is done.
+
+        The body:
+            title            what the whole thing is about
+            goal             the goal the steps serve
+            steps            the steps: [{key, title, prompt, depends_on}]
+            workspace_id     where the steps run (the queue's own by default)
+            thread_key       the conversation the steps belong to
+            aggregate_prompt how the result should be put together
+
+        Returns (plan, duplicate).
+        """
+        steps = plans.normalize_steps(body.get("steps"))
+        workspace_id = str(body.get("workspace_id") or "").strip()
+        if not workspace_id:
+            workspace_id = self.default_workspace()
+        if not workspace_id:
+            raise plans.PlanError("'workspace_id' is required (the agent has no workspace)")
+        title = str(body.get("title") or "").strip() or (steps[0].get("title") or "")
+        goal = str(body.get("goal") or "").strip() or title
+        key = str(body.get("idempotency_key") or "").strip()
+        if key:
+            existing = self.plan_store.find_by_key(key)
+            if existing is not None:
+                return existing, True
+        plan_id = self.plan_store.new_plan_id()
+        # The steps are one conversation: the router remembers what the other
+        # steps did, and the model can read the plan's whole record.
+        thread_key = str(body.get("thread_key") or "").strip() or ("plan:" + plan_id)
+        thread_id = self.trigger_store.thread_id(workspace_id, thread_key)
+        self.trigger_store.attach(thread_id, workspace_id, thread_key, title=title)
+
+        parent = new_task({"prompt": goal, "title": title[:80]}, workspace_id)
+        parent["kind"] = "plan"
+        parent["plan_id"] = plan_id
+        parent["thread_id"] = thread_id
+        parent["note"] = "计划：%d 步" % len(steps)
+        self.store.create(parent)
+        self.trigger_store.attach(thread_id, workspace_id, thread_key,
+                                  task_id=parent["id"], title=title)
+        self.publish("task_created", parent)
+
+        children = []
+        for step in steps:
+            child = new_task({"prompt": step["prompt"],
+                              "title": step["title"][:80],
+                              "provider": step.get("provider") or ""},
+                             step.get("workspace_id") or workspace_id)
+            child["kind"] = "step"
+            child["plan_id"] = plan_id
+            child["parent_id"] = parent["id"]
+            child["thread_id"] = thread_id
+            self.store.create(child)
+            children.append((step, child))
+            self.trigger_store.attach(thread_id, workspace_id, thread_key,
+                                      task_id=child["id"])
+            self.publish("task_created", child)
+            self.store.audit("submit", child["id"],
+                             {"prompt": child.get("prompt", "")[:200],
+                              "plan_id": plan_id})
+
+        # The dependencies are the tasks of the steps that are waited for.
+        by_key = dict((step["key"], child["id"]) for step, child in children)
+        for step, child in children:
+            deps = [by_key.get(name, "") for name in (step.get("depends_on") or [])]
+            deps = [one for one in deps if one]
+            if deps:
+                self.store.update(child["workspace_id"], child["id"],
+                                  lambda t: t.update({"depends_on": deps}))
+                child["depends_on"] = deps
+        self.store.update(parent["workspace_id"], parent["id"],
+                          lambda t: t.update({"children": [c["id"] for _, c in children]}))
+
+        plan = {
+            "id": plan_id,
+            "title": title,
+            "goal": goal,
+            "aggregate_prompt": str(body.get("aggregate_prompt") or "").strip(),
+            "workspace_id": workspace_id,
+            "thread_id": thread_id,
+            "parent_id": parent["id"],
+            "steps": [{"key": step["key"], "title": step["title"],
+                       "task_id": child["id"],
+                       "depends_on": list(step.get("depends_on") or [])}
+                      for step, child in children],
+            "status": "running",
+            "attempts": 0,
+            "idempotency_key": key,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        self.plan_store.save(plan)
+        self.store.audit("plan", parent["id"], {"plan_id": plan_id,
+                                                "steps": len(steps)})
+        return plan, False
+
+    def plan_view(self, plan):
+        """The plan, with the tasks it became."""
+        if not plan:
+            return {}
+        workspace_id = plan.get("workspace_id") or ""
+        parent = self.store.load(workspace_id, plan.get("parent_id") or "")
+        # The queue order is read once for the whole answer: asking for it
+        # per step would scan the whole ledger per step.
+        order = self.queue_order()
+        steps = []
+        for step in plan.get("steps") or []:
+            child = self.store.load(workspace_id, step.get("task_id") or "")
+            steps.append({"key": step.get("key"), "title": step.get("title"),
+                          "depends_on": step.get("depends_on") or [],
+                          "task": self.decorate(child, order=order) if child else None})
+        return {"plan": plan,
+                "parent": self.decorate(parent, order=order) if parent else None,
+                "steps": steps}
+
+    def cancel_plan(self, plan_id):
+        """Stop a plan: the parent and every step that is still open."""
+        plan = self.plan_store.load(plan_id)
+        if plan is None:
+            return None
+        workspace_id = plan.get("workspace_id") or ""
+        stopped = []
+        for step in plan.get("steps") or []:
+            child = self.store.load(workspace_id, step.get("task_id") or "")
+            if child is None or child.get("status") in TERMINAL:
+                continue
+            if self.cancel_task(workspace_id, child["id"]):
+                stopped.append(child["id"])
+        parent = self.store.load(workspace_id, plan.get("parent_id") or "")
+        if parent is not None and parent.get("status") not in TERMINAL:
+            self.cancel_task(workspace_id, parent["id"])
+        plan["status"] = "cancelled"
+        self.plan_store.save(plan)
+        return plan
 
     def thread_file_path(self, workspace_id, thread_id):
         """Where the full record of a thread lives, relative to the workspace.
@@ -2611,6 +3058,8 @@ class App:
         else:
             task["starts_at_local"] = ""
             task["starts_in_s"] = 0
+        if task.get("kind") == "plan":
+            task["child_count"] = len(task.get("children") or [])
         if full:
             task["events"] = self.store.events(task.get("id") or "")
             task["history"] = task.get("steps") or []
@@ -2864,6 +3313,11 @@ def main(argv=None):
     parser.add_argument("--trigger-config", default=triggers.DEFAULT_RULES_PATH,
                         help="the rules of the trigger entry: which outside events are "
                              "work and which are not (see docs/router-watchdog.md)")
+    parser.add_argument("--aggregate-timeout", type=float, default=180.0,
+                        help="seconds for the model call that summarizes a plan")
+    parser.add_argument("--aggregate-max-tokens", type=int, default=4000,
+                        help="how many tokens the summary may take (the model's "
+                             "thinking comes out of the same budget)")
     parser.add_argument("--trigger-timeout", type=float, default=60.0,
                         help="seconds for the model call that judges a trigger")
     parser.add_argument("--chat-timeout", type=float, default=3600.0,

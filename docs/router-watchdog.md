@@ -17,6 +17,7 @@
 | **触发器入口** | 外部事件（webhook / 邮件 / 聊天）统一进门：去重 → 规则 → 模型判断 → **受理才变任务** | `sched/triggers.py` + 队列 | 队列的一部分 |
 | **Router** | 把分开的工作区会话串成一条**线索**：记住每一步、收拢旧进展、统一对外说话 | `sched/router.py` | `a2_router.service` |
 | **看门狗** | 在 agent 和队列**外面**盯着：卡住的任务、agent 健康、额度、机群设备；还能问模型「跑偏了没有」 | `sched/watchdog.py` | `a2_watchdog.service` |
+| **计划** | 一个复杂活儿拆成几步：步骤之间可以互相等，做完合成一份交付物 | `sched/plans.py` + `sched/planner.py` | 队列的一部分 |
 
 ```
 人 ──► 渠道（微信 / Telegram / 邮件 / Webhook / 定时）
@@ -231,6 +232,49 @@ cat ~/.tea_agent/router/speech.jsonl     # router 都说了什么
 
 ---
 
+## 计划：复杂活儿拆成几步
+
+Super-agent 的原型里，复杂活儿是**拆开**的：Worker 各干各的，谁也不用等谁；我们这边多一层
+——步骤之间可以**互相等**，而且做完要有一个人把它们**合成**一份交付物。
+
+这层落在队列里（不是 agent 里）：队列本来就管「什么时候做什么」，它知道每一步的状态。
+
+```bash
+# 交一个计划：几步、每步等谁
+curl -X POST http://127.0.0.1:8283/api/plans -H 'Content-Type: application/json' -d '{
+  "title": "写一份上手指南",
+  "goal": "让新用户 5 分钟会用 tea_a2",
+  "steps": [
+    {"key": "read",  "title": "读 README", "prompt": "读 README.md，列出关键事实"},
+    {"key": "write", "title": "写指南",   "prompt": "写成一份上手指南", "depends_on": ["read"]}
+  ]}'
+```
+
+交完就有了：一个**父任务**（`kind: "plan"`，装最终结果）+ 每一步一个子任务。
+
+| 谁 | 做什么 |
+| --- | --- |
+| 队列 | 只启动「依赖都做完了」的步骤；哪一步失败，依赖它的步骤被停掉（不等了） |
+| 队列 | 全做完了 → **一次模型调用**把各步结果合成一份，写进父任务的 `result` |
+| 队列 | 几步是**同一条线索**：router 记得住谁做了什么，下一步的 prompt 里带着上一步的结果 |
+| router | 像平常一样说话：「排了一个计划（4 步）：…」「做完了 t_x：…」（`speech` 事件） |
+| 看门狗 | 步骤都做完了、父任务却一直没写结果 → `plan_stuck` 告警（`audit.jsonl` + 事件流） |
+
+**规划是单独的一步**（`sched/planner.py`）：一次模型调用把活儿拆成计划，写成 JSON 文件，
+**人可以改过再交**——模型拆的步不一定对。
+
+```bash
+python3 sched/planner.py --goal "把 30 个文件分类并写一份报告" --out /tmp/plan.json
+$EDITOR /tmp/plan.json
+python3 sched/planner.py --submit /tmp/plan.json
+```
+
+### 为什么汇总在队列里，不在 router 里
+
+router 已经有「线索」这个容器和唯一那次模型调用，看起来汇总该归它。但**队列知道最后一步是
+什么时候做完的**，router 只是隔 30 秒来看一眼。汇总放在队列里，计划才不会因为 router 恰好
+不在就悬着。router 照旧负责**说话**：最终结果是一个 `task_done` 事件，router 把它变成一句话。
+
 ## 看门狗
 
 **在 agent 和队列外面盯着它们。** agent 很会干活，但它不会注意到自己停了：一次卡住的工具
@@ -357,7 +401,7 @@ Super-agent 的五个部件，我们已经有了五个（Trigger / Worker / Rout
 | Router 接管回话后渠道行为变了 | 分两步：先影子运行（`--no-publish`），对比一段时间再切 |
 | 队列被看门狗的 fail 打断 | fail 只改记录不动正在跑的线程；要真正停掉走 `POST /api/tasks/{id}/cancel` |
 
-### 路线（M0~M5 全部完成）
+### 路线（M0~M6 全部完成）
 
 | 阶段 | 是什么 | 状态 |
 | --- | --- | --- |
@@ -367,6 +411,7 @@ Super-agent 的五个部件，我们已经有了五个（Trigger / Worker / Rout
 | M3 | Router（跨会话的上下文 + 对外说话） | ✅ v1/v2/v3 `sched/router.py` |
 | M4 | 模型版看门狗（判断跑偏了没有） | ✅ `--drift` |
 | M5 | 把活儿派给设备上的 a2 | ✅ `target: fleet` |
+| M6 | 复杂活儿自主拆成几步，做完汇总 | ✅ `POST /api/plans` + `sched/planner.py` |
 
 ## 文档地图
 

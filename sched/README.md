@@ -24,6 +24,8 @@ agent 完全不知道 Python 侧的存在。所以：
 | `watchdog.py` | **任务看门狗**：在 agent 和队列外面盯着卡住的任务、agent 的健康、额度 | 想知道「是不是卡住了」「它还活着吗」 | [任务看门狗](#任务看门狗watchdog) |
 | `triggers.py` | **触发器入口**：外部事件（webhook / 邮件 / 聊天）的统一入口——去重 + 规则 + 模型判断 | 想让外部系统直接派活儿 | [触发器入口](#触发器入口triggers) |
 | `router.py` | **Router**：把分开的工作区会话串成一条线索——记住每一步、收拢旧进展、给每个事件说一句话 | 想让「接着刚才那件事继续」真的接得上 | [Router](#router) |
+| `planner.py` | **规划器**：一次模型调用把一个复杂活儿拆成几步（写成 JSON 给人改过再交） | 想让复杂活儿自己拆开做 | [计划](#计划plans) |
+| `plans.py` | **计划**：计划的记录与校验（步骤、依赖、不许互相等成环）——队列的一部分 | （一般不用单独跑） | [计划](#计划plans) |
 | （队列的一个能力） | **任务跑在设备上**：排队时带 `target: fleet`，设备自己的 a2 回答，队列把设备的回答收成结果 | 想让活儿在那批机器上干 | [机群](fleet.md) |
 | `tea_api.py` | 调 agent / 队列的客户端库 | 想写自己的脚本 | [客户端库](#客户端库tea_apy) |
 | `channel.py` | 聊天前端的共用半边 | 想加第三种聊天前端 | [聊天前端](#聊天前端) |
@@ -42,7 +44,9 @@ agent 完全不知道 Python 侧的存在。所以：
 ## 两种角色
 
 **随包发布**（发版时复制进 release 的 `tasks/`，给终端用户）：
-`task_server.py`、`task_order.py`、`task-order.template`、`task_ui.html`、`tea_api.py`、`wechat_bot.py`。
+`task_server.py`、`task_order.py`、`task-order.template`、`task_ui.html`、`tea_api.py`、`wechat_bot.py`、
+`triggers.py`、`plans.py`、`planner.py`——**`task_server.py` import 的模块必须一起进包**
+（`triggers.py`、`plans.py`），少了哪个，终端用户那边就是一次 ImportError。
 
 **开发者/自用**（不随包发布，但都在这个仓库里）：
 `fleet.py`、`fleet_server.py`、`channel.py`、`telegram_bot.py`、`asr_server.py`、
@@ -164,6 +168,26 @@ q = Queue("http://127.0.0.1:8283")     # 队列：任务记录、事件
 `Tea` 对应 C++ 的 `/api/chat`（SSE）、`/api/providers/{n}/usage`、`/api/workspaces`；
 `Queue` 对应队列的 `/api/tasks`。注意**任务路由已经搬到 Python 侧**了 —— 想操作任务请用 `Queue`，
 不是 `Tea`。
+
+## 计划（plans）
+
+一个复杂活儿可以拆成几步：每步一个任务，步骤之间可以互相等，做完合成一份交付物。
+
+```bash
+# 1. 规划：一次模型调用出计划（写成 JSON 文件，可以改）
+python3 sched/planner.py --goal "把 30 个文件分类并写一份报告" --out /tmp/plan.json
+$EDITOR /tmp/plan.json
+
+# 2. 交进队列：父任务 + 每步一个子任务
+python3 sched/planner.py --submit /tmp/plan.json
+
+# 3. 看它走到哪儿了
+curl http://127.0.0.1:8283/api/plans
+curl http://127.0.0.1:8283/api/plans/<plan_id>
+```
+
+计划是**建议**，不是命令：模型拆的步不一定对，所以中间留了人（改完再交）。详见
+[docs/tasks.md](../docs/tasks.md) 与 [docs/router-watchdog.md](../docs/router-watchdog.md)。
 
 ## 聊天前端
 
@@ -402,4 +426,6 @@ agent / 队列：`TEA_AGENT_URL`、`TEA_AGENT_WORKSPACE`、`TEA_TASK_URL`、`TEA
 ### 打包
 
 发版时把这些文件复制进 release 的 `tasks/`：`task_server.py`、`task_order.py`、
-`task-order.template`、`task_ui.html`、`tea_api.py`、`wechat_bot.py`（详见 `tea_a2_agent.md` 的发版流程）。
+`task-order.template`、`task_ui.html`、`tea_api.py`、`wechat_bot.py`、`channel.py`、
+`triggers.py`、`plans.py`、`planner.py`（**`task_server.py` import 的模块必须一起进包**；
+详见 `tea_a2_agent.md` 的发版流程）。

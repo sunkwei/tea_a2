@@ -456,6 +456,49 @@ class Watchdog(object):
                 del self.state["tasks"][task_id]
         return out
 
+    def check_plans(self):
+        """A plan whose steps are done but whose result was never written.
+
+        The queue summarizes a plan when its last step is done. If that
+        fails - the model does not answer, the queue cannot reach it - the
+        plan hangs with all its work finished. Nobody else would say so:
+        the steps are done, so the usual "stuck task" rule sees nothing.
+
+        This is the watchdog's job: it is the one that looks from outside.
+        """
+        if not self.args.stall_after:
+            return []
+        status, body = http_json(self.tasks_url + "/api/tasks", timeout=self.args.timeout)
+        if status == 0:
+            return []
+        data = unwrap(body)
+        tasks = (data.get("tasks") or []) if isinstance(data, dict) else []
+        by_id = dict((one.get("id"), one) for one in tasks)
+        out = []
+        now = time.time()
+        for task in tasks:
+            if task.get("kind") != "plan":
+                continue
+            children = [by_id.get(one) for one in (task.get("children") or [])]
+            if not children or any(one is None for one in children):
+                continue
+            if any(one.get("status") not in ("done", "failed", "cancelled")
+                   for one in children):
+                continue
+            stamp = parse_iso(task.get("updated_at") or task.get("created_at") or "")
+            age = (now - stamp) if stamp is not None else 0
+            if age < self.args.stall_after * 60:
+                continue
+            marker = "plan:" + str(task.get("id"))
+            if self.state["seen"].get(marker):
+                continue
+            self.state["seen"][marker] = True
+            reason = ("the steps of the plan are done, but the result was never "
+                      "written (%.1f min)" % (age / 60.0))
+            self.escalate("plan_stuck", reason, None, level="warn")
+            out.append(task)
+        return out
+
     def check_running_drift(self):
         """The tasks that run for a long time: are they still going the right way?
 
@@ -551,6 +594,7 @@ class Watchdog(object):
         self.check_agent()
         self.check_quota()
         self.check_stalled()
+        self.check_plans()
         self.check_running_drift()
         self.check_devices()
         self._write_state()
