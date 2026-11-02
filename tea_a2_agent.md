@@ -1187,8 +1187,8 @@ refresh token + Google Cloud 的 OAuth 客户端），入口在 `ImapSource.conn
 回头想「这版到底发了什么」都不好翻。
 
 ```bash
-.tea_agent_run/scripts/release.sh 0.18.0                      # 打包 + 上传 + 清理旧版本，一步到位
-git add -A && git commit -m "release: 0.18.0"                 # **不**提交 release/*.zip
+.tea_agent_run/scripts/release.sh 0.18.1                      # 打包 + 上传 + 清理旧版本，一步到位
+git add -A && git commit -m "release: 0.18.1"                 # **不**提交 release/*.zip
 ```
 
 `release.sh` 是这台机器上的流程（`.tea_agent_run/scripts/`，不进 git）：打包 → 传到
@@ -1285,3 +1285,46 @@ Super-agent 的原型里，Worker 各干各的；我们这边多一层：**步�
 - **步骤之间不能传数据**：只能靠同一条线索的上下文（prompt 里带上前一步的结果）。要显式传
   产物（比如第 1 步写了个文件，第 2 步要知道路径），得有个「步骤的产出」字段。
 - **并行**：同一工作区的步骤还是串行（见上）。要并行得让步骤分到不同工作区。
+
+## `task_model:`：排队任务用哪个 provider+模型（0.18.1）
+
+provider.yaml 顶层加一行，指定**所有排队任务**用哪个 provider 和模型：
+
+```yaml
+task_model: minimax+MiniMax-M3.1-Flash
+```
+
+### 为什么是「一个 provider+模型」而不是「每个任务各自」
+
+排队任务和聊天页不是一回事：聊天页用**这个文件的默认**（第一个 provider 的第一个模型），
+队列是后台干活、花你托付给它的那张卡。以前队列只有一个硬编码的 `--provider`（minimax），
+改它要改 systemd 单元；现在改一行配置就行。
+
+但队列**一次只跑一个 provider**：额度闸门是「一个 provider 的额度」，跑别的 provider 就是
+假账（查的是 A 的额度、跑的是 B）。所以这是一条「队列级别的决定」，不是每个任务的决定；
+单个任务仍然可以写自己的 `model`（那个优先）。
+
+### 为什么 agent 解析、队列问 agent
+
+provider.yaml 是 **agent 的**文件（它热加载、设置页能改）。如果队列自己再解析一遍 yaml，
+同一个文件就有两个主人、两份解析代码——迟早对不上。所以队列**问 agent**
+（`GET /api/health` 的 `task_model` 字段），不自己装 yaml 解析器（设备上没有 pyyaml）。
+
+例外：agent 挂了、或者还是不认识这个 key 的老版本时，队列自己**扫那一行**——顶层一个标量，
+`split(":")` 就够，不用 yaml。这条兼底让新配置在 agent 没重启时也照样生效。
+
+### 别的取舍
+
+- **优先级**：命令行 `--provider` > `task_model:` > 内置默认（minimax）。命令行是起服务的人
+  明确说的，配置文件是机器上的默认。
+- **额度闸门跟着走**：闸门查的就是这个 provider 的额度。**provider 没有额度端点 → 队列不开工**
+  （除非 `--allow-without-quota`）——这条对「task_model 指到一个不报额度的 provider」同样成立。
+- **改完不用重启**：队列 60 秒缓存一次这个值（一分钟之内自己看到）。
+- **写错不致命**：少了 `+`、`providers:` 里没有这个 provider → agent 警告一句，这一行当没写。
+
+### 顺手修的：任务的 `model` 字段以前是死的
+
+API 和任务单都收 `model:`，也存进任务记录，但队列的 `Agent.chat()` **只传 provider**，
+从不传 model → 模型永远是那个 provider 的首选模型。现在真传了（agent 的 `/api/chat` 本来就
+支持 `model`；不认识的模型名按 agent 的老规矩回退到首选）。
+
