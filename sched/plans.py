@@ -169,9 +169,14 @@ class PlanStore(object):
         return loaded
 
     def list_plans(self, limit=100):
+        """The plans, newest first.
+
+        The ids are random, so the order cannot come from the file names:
+        it comes from when the plan was made.
+        """
         out = []
         try:
-            names = sorted(os.listdir(self.plans_dir), reverse=True)
+            names = os.listdir(self.plans_dir)
         except OSError:
             return []
         for name in names:
@@ -180,9 +185,8 @@ class PlanStore(object):
             plan = self.load(name[:-5])
             if plan:
                 out.append(plan)
-            if len(out) >= limit:
-                break
-        return out
+        out.sort(key=lambda p: (p.get("created_at") or "", p.get("id") or ""), reverse=True)
+        return out[:limit] if limit else out
 
     def find_by_key(self, key):
         """The plan a repeated submission with the same key must return."""
