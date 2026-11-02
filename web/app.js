@@ -187,6 +187,38 @@
     return (n / 1048576).toFixed(1) + ' MB';
   }
   function fmtMs(ms) { return ms == null ? '' : (ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s'); }
+  /// 超时上限的写法：秒级的东西写秒，分钟级的写分钟（180000 ms -> 3 m）。
+  function fmtLimit(ms) {
+    if (!ms) return '';
+    if (ms < 60000) return Math.round(ms / 1000) + ' s';
+    return Math.round(ms / 60000) + ' m';
+  }
+  /// 墙上时钟（本地时区）：几点几分几秒。工具行的「启动于」用它。
+  function fmtClockSec(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    var p = function (x) { return (x < 10 ? '0' : '') + x; };
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  /// 一次工具调用的时间：什么时候开始、用了多久、上限是多少。
+  /// started_at 是服务端给的 ISO 串（UTC），换算成时间戳后浏览器就能自己
+  /// 走秒针 —— 服务端只在开始和结束时说话，中间那段是空的。
+  function toolTiming(tc, result) {
+    var startedAt = (result && result.started_at) || (tc && tc.started_at) || '';
+    var timeoutMs = num((result && result.timeout_ms != null) ? result.timeout_ms
+                                                           : (tc && tc.timeout_ms));
+    var elapsedMs = (result && result.elapsed_ms != null) ? num(result.elapsed_ms) : null;
+    var startedMs = startedAt ? Date.parse(startedAt) : 0;
+    if (!startedMs || isNaN(startedMs)) startedMs = 0;
+    return { startedAt: startedAt, startedMs: startedMs, timeoutMs: timeoutMs, elapsedMs: elapsedMs };
+  }
+  /// 正在跑的工具：已用多久 = 现在 - 开始。（服务端给的 elapsed 只在结束时才有。）
+  function liveElapsed(timing) {
+    if (!timing.startedMs) return 0;
+    var ms = Date.now() - timing.startedMs;
+    return ms > 0 ? ms : 0;
+  }
   function fmtTime(iso) {
     if (!iso) return '';
     var d = new Date(iso);
@@ -434,6 +466,7 @@
     // half-way, and the row says so.
     var status = running ? 'running'
       : (result ? (result.cancelled ? 'cancelled' : (result.ok === false ? 'fail' : 'ok')) : 'idle');
+    var timing = toolTiming(tc, result);
     var row = el('div', 'tool-row');
     row.dataset.key = key;
     if ((key in state.expanded) ? state.expanded[key] : (status === 'running')) row.classList.add('open');
@@ -446,11 +479,33 @@
     line.appendChild(el('span', 'tool-title', meta.title));
     line.appendChild(el('span', 'dot'));
     line.appendChild(el('span', 'tool-summary', toolSummary(tc.arguments)));
+    // 时间：跑着的工具自己走秒针（服务端只在开始和结束时说话），
+    // 跑完的就是服务端量的那个数。
     if (status === 'cancelled') line.appendChild(el('span', 'tool-time', '已中断'));
+    else if (running && timing.startedMs) {
+      var t = el('span', 'tool-time');
+      t.appendChild(el('span', 'tool-state', '运行中'));
+      t.appendChild(el('span', 'tool-sep', ' · '));
+      var used = el('span', 'tool-elapsed', fmtMs(liveElapsed(timing)));
+      used.setAttribute('data-started-at', String(timing.startedMs));
+      t.appendChild(used);
+      if (timing.timeoutMs) {
+        t.appendChild(el('span', 'tool-sep', ' · '));
+        t.appendChild(el('span', 'tool-limit', '上限 ' + fmtLimit(timing.timeoutMs)));
+      }
+      line.appendChild(t);
+      startToolTimer();
+    }
     else if (result && result.elapsed_ms != null) line.appendChild(el('span', 'tool-time', fmtMs(result.elapsed_ms)));
     else if (status === 'running') line.appendChild(el('span', 'tool-time', '运行中'));
     line.appendChild(el('span', 'chev', '›'));
     row.appendChild(line);
+    // 悬浮时给出完整的三件事：什么时候开始、用了多久、上限是多少。
+    if (timing.startedAt || timing.timeoutMs) {
+      row.title = '启动于 ' + (fmtClockSec(timing.startedAt) || '—') +
+        ' · 已用 ' + fmtMs(running && timing.startedMs ? liveElapsed(timing) : (timing.elapsedMs || 0)) +
+        (timing.timeoutMs ? ' · 超时 ' + fmtLimit(timing.timeoutMs) : '');
+    }
 
     var panel = el('div', 'tool-panel'), kv1 = el('div', 'kv'), kv2 = el('div', 'kv');
     var input = '';
@@ -463,6 +518,29 @@
     kv2.appendChild(el('div', 'k', '输出'));
     kv2.appendChild(el('div', 'v', outText));
     panel.appendChild(kv1); panel.appendChild(kv2);
+    // 耗时：什么时候开始、用了多久、上限是多少。工具跑得久的时候，
+    // 这三件事是唯一能回答「它还活着吗」的证据。
+    if (timing.startedAt || timing.timeoutMs) {
+      var kv3 = el('div', 'kv');
+      kv3.appendChild(el('div', 'k', '耗时'));
+      var tv = el('div', 'v');
+      tv.appendChild(el('span', null, '启动 ' + (fmtClockSec(timing.startedAt) || '—')));
+      if (timing.startedMs) {
+        tv.appendChild(el('span', null, ' · 已用 '));
+        var used2 = el('span', 'tool-elapsed',
+                       fmtMs(running ? liveElapsed(timing) : (timing.elapsedMs || 0)));
+        if (running) {
+          used2.setAttribute('data-started-at', String(timing.startedMs));
+          startToolTimer();
+        }
+        tv.appendChild(used2);
+      } else if (timing.elapsedMs != null) {
+        tv.appendChild(el('span', null, ' · 已用 ' + fmtMs(timing.elapsedMs)));
+      }
+      tv.appendChild(el('span', null, timing.timeoutMs ? ' · 超时 ' + fmtLimit(timing.timeoutMs) : ' · 无超时'));
+      kv3.appendChild(tv);
+      panel.appendChild(kv3);
+    }
     row.appendChild(panel);
     return row;
   }
@@ -481,6 +559,32 @@
     row.appendChild(line);
     row.appendChild(el('div', 'reason-panel', text));
     return row;
+  }
+
+  /* ---------- 4a) 正在跑的工具：秒针自己走 ----------
+     服务端只在工具开始和结束时报两次，中间那几十秒是空的。界面上的
+     「已用」必须自己走，否则用户盯着一个不动的数字，只能猜它是不是卡住了。 */
+  var toolTimer = 0;
+  function startToolTimer() {
+    if (toolTimer) return;
+    toolTimer = setInterval(tickToolElapsed, 500);
+  }
+  function stopToolTimer() {
+    if (toolTimer) { clearInterval(toolTimer); toolTimer = 0; }
+  }
+  function tickToolElapsed() {
+    var nodes = document.querySelectorAll('.tool-elapsed[data-started-at]');
+    if (!nodes.length) { stopToolTimer(); return; }
+    var now = Date.now();
+    for (var i = 0; i < nodes.length; i++) {
+      var el2 = nodes[i];
+      var started = Number(el2.getAttribute('data-started-at')) || 0;
+      if (!started) continue;
+      var ms = now - started;
+      if (ms < 0) ms = 0;
+      var text = fmtMs(ms);
+      if (el2.textContent !== text) el2.textContent = text;
+    }
   }
 
   /* ---------- 4b) 轨迹：每一轮的结构化审计记录 ----------
@@ -1222,7 +1326,8 @@
     state.messages.forEach(function (m) {
       if (m.role === 'tool' && m.tool_call_id) {
         outputs[m.tool_call_id] = { output: m.content, ok: m.ok !== false,
-                                    cancelled: !!m.cancelled, elapsed_ms: m.elapsed_ms };
+                                    cancelled: !!m.cancelled, elapsed_ms: m.elapsed_ms,
+                                    started_at: m.started_at, timeout_ms: m.timeout_ms };
       }
     });
     // The final answer of the latest turn is the natural place for "here are the
@@ -1289,7 +1394,7 @@
       var tc = b.tc || {};
       var out = live.outputs && live.outputs[tc.id];
       parts.push('t:' + tc.id + ':' + (tc.status || '') + ':' +
-        (out ? (out.ok === false ? 'fail' : 'ok') : '-'));
+        (out ? (out.ok === false ? 'fail' : 'ok') : '-') + ':' + (tc.started_at || ''));
     }
     parts.push(state.ended ? 'e' : 's');
     return parts.join('|');
@@ -1666,7 +1771,8 @@
       var o = live.outputs[id] || {};
       state.messages.push({
         role: 'tool', tool_call_id: id, content: o.output || '',
-        ok: o.ok !== false, elapsed_ms: o.elapsed_ms, truncated: !!o.truncated
+        ok: o.ok !== false, elapsed_ms: o.elapsed_ms, truncated: !!o.truncated,
+        started_at: o.started_at, timeout_ms: o.timeout_ms
       });
     });
     state.live = { role: 'assistant', reasoning: '', blocks: [], outputs: {} };
@@ -1854,16 +1960,29 @@
     if (ev.type === 'tool_call' || ev.type === 'tool_start') {
       if (ev.type === 'tool_start') { state.turnSteps++; renderMetrics(); }
       var block = liveBlockForTool(ev.id);
-      if (block) block.tc.status = 'running';
-      else state.live.blocks.push({ type: 'tool', tc: { id: ev.id, name: ev.name, arguments: ev.arguments, status: 'running' } });
+      if (!block) {
+        block = { type: 'tool', tc: { id: ev.id, name: ev.name, arguments: ev.arguments, status: 'running' } };
+        state.live.blocks.push(block);
+      } else {
+        block.tc.status = 'running';
+      }
+      // tool_start 带着「什么时候开始」和「上限是多少」：跑着的工具行要
+      // 自己显示秒针，还要告诉用户它最多能跑多久。
+      if (ev.started_at) block.tc.started_at = ev.started_at;
+      if (ev.timeout_ms != null) block.tc.timeout_ms = ev.timeout_ms;
       scheduleLiveRender(); return;
     }
     if (ev.type === 'tool_result') {
       state.live.outputs[ev.id] = { output: ev.output, ok: ev.ok !== false,
                                     cancelled: !!ev.cancelled, elapsed_ms: ev.elapsed_ms,
-                                    truncated: !!ev.truncated };
+                                    truncated: !!ev.truncated,
+                                    started_at: ev.started_at, timeout_ms: ev.timeout_ms };
       var b2 = liveBlockForTool(ev.id);
-      if (b2) b2.tc.status = ev.ok === false ? 'fail' : 'ok';
+      if (b2) {
+        b2.tc.status = ev.ok === false ? 'fail' : 'ok';
+        if (ev.started_at) b2.tc.started_at = ev.started_at;
+        if (ev.timeout_ms != null) b2.tc.timeout_ms = ev.timeout_ms;
+      }
       scheduleLiveRender(); return;
     }
     if (ev.type === 'tool_args_delta') { noteLiveTokens(ev.text); return; }   // 工具调用参数也是输出 token

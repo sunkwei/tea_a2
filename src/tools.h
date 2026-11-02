@@ -98,6 +98,15 @@ class ToolRegistry {
                               bool include_mcp = true) const;
   bool has(const std::string& name) const;
 
+  /// The time budget of one call of this tool, in milliseconds.
+  /// 0 means the tool has no deadline of its own (a local file read, say).
+  ///
+  /// The agent announces the budget before the call starts, so the UI can say
+  /// how long a slow tool may still take instead of only "running". It is the
+  /// same number the tool itself enforces - not a guess.
+  int timeout_ms(const std::string& name, const nlohmann::json& arguments,
+                 const ToolContext& ctx) const;
+
   /// The MCP servers whose tools join the agent's tool set. Null => no MCP
   /// tools (no mcp.yaml is configured).
   void set_mcp(McpRegistry* mcp) { mcp_ = mcp; }

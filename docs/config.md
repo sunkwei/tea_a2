@@ -36,6 +36,10 @@ search:                        # 可选：独立的搜索 provider（见下「�
   provider: DeepSeek           # providers: 里的一个名字：web 工具发给它、用它的 key
   # always: true               # 强制所有 web 调用都走它（默认是「回退」）
 
+# 排队任务（任务队列）用哪个 provider + 模型。
+# 格式：<provider>+<模型名>。改了之后队列一分钟内自己看到（不用重启）。
+task_model: DeepSeek+deepseek-chat
+
 # 设置不在这个文件里：provider.yaml 只说「跟谁说话」。设置住在
 # <tea_home>/tea_agent.yaml（机器级）或工作区的 .tea_agent_run/settings.yaml
 # （按工作区，优先级更高）——见下「设置住在哪儿」。

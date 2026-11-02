@@ -102,6 +102,9 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
   options.shell = arg_str(args, "shell", ctx.workspace->settings().shell);
   options.timeout_ms = static_cast<int>(arg_int(args, "timeout_ms", ctx.workspace->settings().command_timeout_ms));
   if (options.timeout_ms < 1000) options.timeout_ms = 1000;
+  // The same number the UI is told about, so "the command was given 180 s"
+  // and "the command had 180 s" are the same sentence.
+  result.meta["timeout_ms"] = options.timeout_ms;
   options.max_output_bytes = static_cast<std::size_t>(ctx.workspace->settings().max_tool_output);
   options.utf8_console = ctx.workspace->settings().utf8_console;
   // The command can be interrupted: the user asking to stop the turn must not
@@ -1255,6 +1258,8 @@ struct WebToolResponse {
   bool ok = false;
   int status = 0;
   long long elapsed_ms = 0;
+  /// The read timeout the request ran under - the deadline the UI shows.
+  int timeout_ms = 0;
   nlohmann::json body;
   std::string error;
 };
@@ -1282,6 +1287,7 @@ WebToolResponse web_tool_post(const std::string& url, const std::string& api_key
   req.connect_timeout_ms =
       st.web_tool_connect_timeout_ms > 0 ? st.web_tool_connect_timeout_ms : 10000;
   req.read_timeout_ms = st.web_tool_timeout_ms > 0 ? st.web_tool_timeout_ms : 60000;
+  out.timeout_ms = req.read_timeout_ms;
 
   // Abort mid-transfer when the user stops the turn. Returning false makes the
   // HTTP layer close the connection instead of draining the body.
@@ -1498,6 +1504,7 @@ ToolResult tool_search(const nlohmann::json& args, const ToolContext& ctx) {
   const WebToolResponse resp = web_tool_post(url, wp.api_key, payload, st, ctx.cancel);
   // Which provider actually served the call: the turn's own one, or the
   // independent search provider from the `search:` section.
+  result.meta["timeout_ms"] = resp.timeout_ms;
   result.meta["provider"] = wp.name;
   result.meta["url"] = url;
   result.meta["status"] = resp.status;
@@ -1620,6 +1627,7 @@ ToolResult tool_fetch(const nlohmann::json& args, const ToolContext& ctx) {
            via_search ? (" via " + wp.name) : "");
   const Settings st = ctx.config ? ctx.config->settings : Settings();
   const WebToolResponse resp = web_tool_post(endpoint, wp.api_key, payload, st, ctx.cancel);
+  result.meta["timeout_ms"] = resp.timeout_ms;
   result.meta["provider"] = wp.name;
   result.meta["url"] = url;
   result.meta["endpoint"] = endpoint;
@@ -1778,6 +1786,7 @@ ToolResult tool_fleet(const nlohmann::json& args, const ToolContext& ctx) {
   // the seconds an LLM call gets.
   req.connect_timeout_ms = 10000;
   req.read_timeout_ms = 900000;
+  result.meta["timeout_ms"] = req.read_timeout_ms;
 
   LOG_INFO("toolkit_fleet: ", method, " ", path);
   const HttpResponse resp = http_perform(req);
@@ -2182,6 +2191,8 @@ ToolResult tool_peer(const nlohmann::json& args, const ToolContext& ctx) {
   const std::size_t out_limit = static_cast<std::size_t>(st.max_tool_output);
   const int timeout_s = static_cast<int>(arg_int(args, "timeout_s", 900));
   const int connect_timeout_ms = 10000;
+  // The peer's own budget, so the UI shows the deadline that applies.
+  result.meta["timeout_ms"] = timeout_s * 1000;
 
   if (action == "health" || action == "status" || action == "tools" ||
       action == "workspaces") {
@@ -2395,6 +2406,7 @@ ToolResult tool_mcp(const std::string& name, const nlohmann::json& args, const T
   }
   result.ok = !call.is_error;
   result.output = call.text;
+  if (ctx.mcp) result.meta["timeout_ms"] = ctx.mcp->timeout_ms_for(name);
   if (call.is_error) {
     result.output = "the MCP tool reported an error: " + result.output;
   }
@@ -3013,6 +3025,38 @@ bool ToolRegistry::has(const std::string& name) const {
     if (defs_[i].name == name) return true;
   }
   return false;
+}
+
+int ToolRegistry::timeout_ms(const std::string& name, const nlohmann::json& arguments,
+                            const ToolContext& ctx) const {
+  const Settings& st = ctx.config ? ctx.config->settings : Settings();
+  if (name == "toolkit_exec") {
+    // The command's own deadline: what the caller asked for, else the
+    // configured default, with the same floor the exec tool applies.
+    long long ms = arg_int(arguments, "timeout_ms",
+                           ctx.workspace ? ctx.workspace->settings().command_timeout_ms
+                                          : st.command_timeout_ms);
+    if (ms < 1000) ms = 1000;
+    return static_cast<int>(ms);
+  }
+  if (name == "toolkit_search" || name == "toolkit_fetch") {
+    return st.web_tool_timeout_ms > 0 ? st.web_tool_timeout_ms : 60000;
+  }
+  if (name == "toolkit_fleet") {
+    return 900000;  // a fleet job on many devices is not a web request
+  }
+  if (name == "toolkit_peer") {
+    // The peer's own budget: the model says how long it may take.
+    long long secs = arg_int(arguments, "timeout_s", 900);
+    if (secs < 1) secs = 1;
+    return static_cast<int>(secs * 1000);
+  }
+  if (mcp_ && starts_with(name, "mcp__")) {
+    return mcp_->timeout_ms_for(name);
+  }
+  // The file, memory and todo tools answer in milliseconds: they have no
+  // deadline of their own, and pretending otherwise would be a lie.
+  return 0;
 }
 
 ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& arguments,

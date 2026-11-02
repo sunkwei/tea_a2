@@ -94,6 +94,18 @@ std::string short_hash(const std::string& in) {
   return std::string(buf);
 }
 
+/// The prefix every tool of this server carries: "mcp__<server>__".
+/// The server part is sanitized (and shortened when it is long), so the
+/// published name and the configured name are not always the same string -
+/// this is the one place that knows how.
+std::string mcp_server_prefix(const std::string& server) {
+  std::string server_part = sanitize_name_part(server);
+  if (server_part.size() > 32) {
+    server_part = server_part.substr(0, 23) + "_" + short_hash(server).substr(0, 8);
+  }
+  return "mcp__" + server_part + "__";
+}
+
 /// Case-insensitive comparison of the first `n` characters (portable: the
 /// Windows build has no strncasecmp).
 bool starts_with_ci(const std::string& s, const char* prefix, std::size_t n) {
@@ -1058,6 +1070,19 @@ bool McpRegistry::call(const std::string& full_name, const nlohmann::json& argum
   return false;
 }
 
+int McpRegistry::timeout_ms_for(const std::string& full_name) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (std::size_t i = 0; i < entries_.size(); ++i) {
+    const Entry& entry = entries_[i];
+    // The published name carries the server name, so the owner of a tool is
+    // found without asking the server (which may not even be up yet).
+    if (starts_with(full_name, mcp_server_prefix(entry.cfg.name))) {
+      return entry.cfg.timeout_ms;
+    }
+  }
+  return 0;
+}
+
 nlohmann::json McpRegistry::status_json() {
   nlohmann::json j = nlohmann::json::object();
   std::lock_guard<std::mutex> lock(mu_);
@@ -1133,11 +1158,7 @@ void McpRegistry::warm_up() {
 // ---------------------------------------------------------------------------
 
 std::string mcp_tool_full_name(const std::string& server, const std::string& tool) {
-  std::string server_part = sanitize_name_part(server);
-  if (server_part.size() > 32) {
-    server_part = server_part.substr(0, 23) + "_" + short_hash(server).substr(0, 8);
-  }
-  const std::string prefix = "mcp__" + server_part + "__";
+  const std::string prefix = mcp_server_prefix(server);
   std::string name = sanitize_name_part(tool);
   // OpenAI-compatible function names are at most 64 characters long.
   if (prefix.size() + name.size() > kMaxToolNameBytes) {

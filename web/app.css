@@ -321,6 +321,9 @@ button{font-family:inherit}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .tool-time{flex:0 0 auto;margin-left:8px;font-size:12px;color:var(--dsw-alias-label-caption)}
+/* 工具的时间信息：跑着的工具自己走秒针，上限是它自己的截止时间。 */
+.tool-time .tool-elapsed{font-variant-numeric:tabular-nums}
+.tool-time .tool-limit{color:var(--dsw-alias-label-caption);opacity:.85}
 .chev{flex:0 0 auto;margin-left:6px;font-size:11px;color:var(--dsw-alias-label-caption);transition:transform .15s ease}
 .tool-row.open>.tool-line .chev{transform:rotate(90deg)}
 .tool-panel{

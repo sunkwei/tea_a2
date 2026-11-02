@@ -314,6 +314,8 @@ nlohmann::json Message::to_store() const {
   if (role == "tool") {
     j["ok"] = ok;
     j["elapsed_ms"] = elapsed_ms;
+    if (!started_at.empty()) j["started_at"] = started_at;
+    if (timeout_ms > 0) j["timeout_ms"] = timeout_ms;
     if (truncated) j["truncated"] = true;
     if (cancelled) j["cancelled"] = true;
   }
@@ -364,6 +366,9 @@ Message Message::from_store(const nlohmann::json& j) {
   if (ok_it != j.end() && ok_it->is_boolean()) m.ok = ok_it->get<bool>();
   auto el_it = j.find("elapsed_ms");
   if (el_it != j.end() && el_it->is_number()) m.elapsed_ms = el_it->get<long long>();
+  m.started_at = get_str("started_at");
+  auto to_it = j.find("timeout_ms");
+  if (to_it != j.end() && to_it->is_number()) m.timeout_ms = to_it->get<int>();
   auto tr_it = j.find("truncated");
   if (tr_it != j.end() && tr_it->is_boolean()) m.truncated = tr_it->get<bool>();
   auto ca_it = j.find("cancelled");

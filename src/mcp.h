@@ -172,6 +172,10 @@ class McpRegistry {
   bool call(const std::string& full_name, const nlohmann::json& arguments,
             McpCallResult* out, std::string* err);
 
+  /// The deadline of the server that owns this tool, in milliseconds
+  /// (the value from mcp.yaml). 0 when the tool belongs to no known server.
+  int timeout_ms_for(const std::string& full_name) const;
+
   /// The state of every server: for the UI and for /api/mcp/servers.
   nlohmann::json status_json();
 

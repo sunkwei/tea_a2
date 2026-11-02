@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.18.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
+| `GET` | `/api/health` | 探活、版本（`0.18.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/peer/health` | **对端通道**：`/api/health` 的令牌版镜像（见下「机器对机器的通道」） |
@@ -378,8 +378,8 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 | `content_delta` | 正文增量 |
 | `tool_args_delta` | 工具调用参数的流式增量（只用于进度/速度统计，不当正文渲染） |
 | `tool_call` | 模型请求的工具（`id` / `name` / `arguments`） |
-| `tool_start` | 即将执行 |
-| `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated` |
+| `tool_start` | 即将执行，带 `started_at`（什么时候开始，ISO8601 UTC）和 `timeout_ms`（这一次的上限，毫秒；0 = 这个工具自己没有上限） |
+| `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated`，外加跟 `tool_start` 一样的 `started_at` / `timeout_ms` |
 | `iteration_end` | 单轮结束，带 `usage` 与 `metrics` |
 | `compaction` | 上下文被压缩：`covered_messages`（折掉的条数）/ `summary_bytes` / `live_tokens` / `trigger_tokens`，`dropped: true` 表示摘要没生成成、那一段旧消息被直接丢弃。回合内部也会发（长回合每轮都查压力） |
 | `queue_adopted` | 采纳了一条排队消息（`id` / `content` / `pending`） |
@@ -394,6 +394,28 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 
 上层 agent 只需要：发一条 `POST /api/chat`，读 SSE，看 `tool_result` 有没成功，`done` 结束。
 需要打断就调 `/api/chat/stop`——它会在下一个模型/工具边界停住，已产生的会话照样落盘。
+
+### 工具跑多久：三个数（什么时候开始 / 用了多久 / 上限多少）
+
+一个跑三分钟的构建，在界面上和一个卡死的 agent 一模一样：只有一行转圈。用户没法判断
+「还在干活」还是「已经死了」，也没法判断「再等一分钟值不值」。
+
+所以每次工具调用都报三个数：
+
+- **`started_at`**（`tool_start` 与 `tool_result` 都带）——这次调用**什么时候开始**，
+  ISO8601 UTC（毫秒精度）。
+- **`elapsed_ms`**（`tool_result`）——这次调用**用了多久**（服务端量的）。
+- **`timeout_ms`**（`tool_start` 与 `tool_result` 都带）——这次调用的**上限**，
+  就是工具自己真正在用的那个截止时间（毫秒）。**0 = 这个工具没有自己的上限**
+  （读文件、记笔记这类毫秒级的工具），不是「没有上限」，是「不用等」。
+
+`timeout_ms` 不是猜的，是各工具报上来的那份真值：`toolkit_exec` 用命令自己拿到的
+`timeout_ms`（没写就用配置的 `command_timeout_ms`），web 工具用它们的读超时，
+`toolkit_peer` 用模型给的 `timeout_s`，`toolkit_fleet` 用 15 分钟，
+MCP 工具用那个 MCP 服务器在 `mcp.yaml` 里的 `timeout_ms`。
+
+跑着的调用，服务端**不会**再说话（它在等工具返回）。界面上那个「已用 Xs」是浏览器
+自己按 `started_at` 走的秒针，所以它会一直跳——工具还在跑，用户就知道它还活着。
 
 ### 断线重连：关掉页面不会取消这一轮
 

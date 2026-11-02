@@ -200,7 +200,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.18.1","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.18.2","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -236,8 +236,8 @@ curl -N -X POST $B/api/chat \
 | `start` | 本轮开始（session / provider / model / `messages_before`） |
 | `reasoning_delta` | 思考流 |
 | `content_delta` | 正文增量 |
-| `tool_call` / `tool_start` | 模型请求的工具 / 即将执行 |
-| `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated` |
+| `tool_call` / `tool_start` | 模型请求的工具 / 即将执行（`tool_start` 还带 `started_at` = 什么时候开始、`timeout_ms` = 这一次的超时上限，0 = 没有上限） |
+| `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated`（外加同样的 `started_at` / `timeout_ms`） |
 | `iteration_end` | 单轮结束，带 `usage` 与 `metrics` |
 | `queue_adopted` | 采纳了一条排队消息 |
 | `queue_unconsumed` | 轮次结束时仍未采纳的排队消息（客户端应放回输入框） |

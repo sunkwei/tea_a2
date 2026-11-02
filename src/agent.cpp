@@ -1703,11 +1703,31 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     for (std::size_t i = 0; i < chat.tool_calls.size(); ++i) {
       const ToolCall& call = chat.tool_calls[i];
 
+      // The budget of this call, computed before it runs: the UI shows it
+      // next to the running tool, so "it has been running for 40 s, and the
+      // deadline is 180 s" is answerable while it is still running.
+      ToolContext tool_ctx;
+      tool_ctx.config = config_;
+      tool_ctx.provider = provider_info;
+      tool_ctx.model = model_info;
+      tool_ctx.workspace = &workspace;
+      tool_ctx.session = session;
+      tool_ctx.cancel = cancel;
+      tool_ctx.web_tool_calls = &web_tool_calls;
+      tool_ctx.mcp = tools_->mcp();
+      if (!options.task_id.empty()) tool_ctx.task_id = &options.task_id;
+      const int timeout_ms = tools_->timeout_ms(call.name, call.arguments, tool_ctx);
+
+      const int64_t tool_started = now_ms();
+      const std::string tool_started_at = now_iso8601_ms();
+
       nlohmann::json start_ev = nlohmann::json::object();
       start_ev["type"] = "tool_start";
       start_ev["id"] = call.id;
       start_ev["name"] = call.name;
       start_ev["arguments"] = call.arguments;
+      start_ev["started_at"] = tool_started_at;
+      start_ev["timeout_ms"] = timeout_ms;
       emit(start_ev);
 
       Message tool_message;
@@ -1715,8 +1735,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       tool_message.tool_call_id = call.id;
       tool_message.name = call.name;
       tool_message.created_at = now_iso8601();
+      tool_message.started_at = tool_started_at;
+      tool_message.timeout_ms = timeout_ms;
 
-      const int64_t tool_started = now_ms();
       ToolResult tool_result;
 
       // Re-parse the raw arguments so a malformed payload is reported back to
@@ -1745,16 +1766,6 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         tool_result.output =
             "cancelled by user: the turn was interrupted before this tool ran";
       } else if (arguments_valid) {
-        ToolContext tool_ctx;
-        tool_ctx.config = config_;
-        tool_ctx.provider = provider_info;
-        tool_ctx.model = model_info;
-        tool_ctx.workspace = &workspace;
-        tool_ctx.session = session;
-        tool_ctx.cancel = cancel;
-        tool_ctx.web_tool_calls = &web_tool_calls;
-        tool_ctx.mcp = tools_->mcp();
-        if (!options.task_id.empty()) tool_ctx.task_id = &options.task_id;
         tool_result = tools_->execute(call.name, parsed_arguments, tool_ctx);
       }
 
@@ -1886,6 +1897,8 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       result_event["ok"] = tool_result.ok;
       result_event["cancelled"] = tool_result.cancelled;
       result_event["elapsed_ms"] = tool_message.elapsed_ms;
+      result_event["started_at"] = tool_message.started_at;
+      result_event["timeout_ms"] = tool_message.timeout_ms;
       result_event["output"] = tool_result.output;
       result_event["truncated"] = tool_result.truncated;
       emit(result_event);

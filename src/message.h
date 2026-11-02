@@ -38,6 +38,13 @@ struct Message {
   bool ok = true;
   long long elapsed_ms = 0;
   bool truncated = false;
+  /// When the tool call started (ISO8601, UTC). Only for role == "tool".
+  /// Kept next to elapsed_ms so the transcript says both "when" and "how
+  /// long" - a call that took two minutes is worth locating.
+  std::string started_at;
+  /// The deadline this call ran under, in milliseconds (0 = the tool has no
+  /// deadline of its own). Only for role == "tool".
+  int timeout_ms = 0;
   /// The tool was interrupted (the turn was stopped while it ran). Kept in the
   /// transcript so the UI can still say "interrupted" after a reload - and so
   /// the next turn's model sees that the work did not happen.

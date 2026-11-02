@@ -1187,8 +1187,8 @@ refresh token + Google Cloud 的 OAuth 客户端），入口在 `ImapSource.conn
 回头想「这版到底发了什么」都不好翻。
 
 ```bash
-.tea_agent_run/scripts/release.sh 0.18.1                      # 打包 + 上传 + 清理旧版本，一步到位
-git add -A && git commit -m "release: 0.18.1"                 # **不**提交 release/*.zip
+.tea_agent_run/scripts/release.sh 0.18.2                      # 打包 + 上传 + 清理旧版本，一步到位
+git add -A && git commit -m "release: 0.18.2"                 # **不**提交 release/*.zip
 ```
 
 `release.sh` 是这台机器上的流程（`.tea_agent_run/scripts/`，不进 git）：打包 → 传到
@@ -1328,3 +1328,52 @@ API 和任务单都收 `model:`，也存进任务记录，但队列的 `Agent.ch
 从不传 model → 模型永远是那个 provider 的首选模型。现在真传了（agent 的 `/api/chat` 本来就
 支持 `model`；不认识的模型名按 agent 的老规矩回退到首选）。
 
+## 工具的时间：什么时候开始、用了多久、上限多少（0.18.2）
+
+一个跑三分钟的构建，在界面上和一个卡死的 agent 一模一样：只有一行转圈。用户没法判断
+「还在干活」还是「已经死了」，也没法判断「再等一分钟值不值」。**跑得久的工具必须报时间。**
+
+### 三个数
+
+- **`started_at`**（`tool_start` + `tool_result` 都带）：这次调用什么时候开始，ISO8601 UTC
+  （毫秒精度，`now_iso8601_ms()`）。
+- **`elapsed_ms`**（`tool_result`，早就有）：服务端量的耗时。
+- **`timeout_ms`**（`tool_start` + `tool_result` 都带）：这一次的**上限**。
+  **0 = 这个工具没有自己的上限**（读文件、记笔记这类毫秒级工具），不是「没有上限」。
+
+`Message`（role == "tool"）也存这两个，所以**刷新页面后数字还在**（`to_store()` /
+`from_store()` 各加一行）。
+
+### 上限是真值，不是猜的
+
+`ToolRegistry::timeout_ms(name, args, ctx)` 算这个数，各工具再把**自己正在用的那个**
+报上来（`result.meta["timeout_ms"]`）——两边指向同一个值，所以界面上写的和工具真的执行的
+不会打架：
+
+| 工具 | 上限从哪来 |
+| --- | --- |
+| `toolkit_exec` | 命令自己拿到的 `timeout_ms`（没写就用 `command_timeout_ms`，下限 1 s） |
+| `toolkit_search` / `toolkit_fetch` | 读超时（`web_tool_timeout_ms`，默认 60 s） |
+| `toolkit_fleet` | 15 分钟（一次机群作业不是一次网页请求） |
+| `toolkit_peer` | 模型给的 `timeout_s`（默认 900 s） |
+| `mcp__<server>__<tool>` | 那个 MCP 服务器在 `mcp.yaml` 里的 `timeout_ms` |
+| 文件 / 记忆 / 待办 | 没有上限 → 0 |
+
+**MCP 的坑**：发布出来的工具名是 `mcp__<净化后的服务器名>__<工具>`，服务器名太长会被
+截断加哈希——所以「从名字反查服务器」不能靠字符串匹配。`mcp_server_prefix()` 是唯一知道
+这件事的地方（`mcp_tool_full_name()` 和 `McpRegistry::timeout_ms_for()` 都用它）。
+
+### 秒针在浏览器这边走
+
+服务端只在**开始和结束**时报两次，中间那几十秒是空的——工具没返回，它就一直在等。
+所以界面上的「已用 Xs」是**浏览器自己按 `started_at` 走的秒针**
+（`web/app.js` 的 `tickToolElapsed()`，每 500 ms 刷一次带 `data-started-at` 的元素）。
+这样工具还在跑，用户就知道它还活着；结束的那一刻换回服务端量的 `elapsed_ms`。
+
+### 坑
+
+- **时间只挂在 `tool_start` 上**：模型可以一次请求好几个工具，`tool_call` 是**预告**
+  （全都发出来），`tool_start` 才是**真开始**——预告的那一刻工具还没跑，谈「用了多久」没有意义。
+- **live 结构签名要带上 `started_at`**：界面按结构签名决定要不要重画，签名不变就不重画——
+  工具开始的那一帧不重画，秒针就没有落脚点。
+- **`tool_call` 的预告行也会显示「运行中」**：预告 ≠ 真的开始。老样子，没改。
