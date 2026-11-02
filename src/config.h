@@ -412,6 +412,12 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   Settings settings;
   std::string active_provider;
   std::string active_model;
+  /// The provider and model the queued tasks should use
+  /// (`task_model: <provider>+<name>` in provider.yaml). Empty when the
+  /// operator did not say.
+  std::string task_model;
+  std::string task_provider;
+  std::string task_model_name;
   /// The independent search provider (the `search:` section of provider.yaml).
   SearchProviderConfig search;
   /// The speech-to-text service (the `asr:` section of provider.yaml).

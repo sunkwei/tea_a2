@@ -55,7 +55,8 @@ class MockAgent(BaseHTTPRequestHandler):
     """A fake agent: it answers the health check, the quota, the turns and
     the one model call the queue makes to summarize a plan."""
 
-    records = {"llm": 0, "chat": 0, "usage": 0, "order": []}
+    records = {"llm": 0, "chat": 0, "usage": 0, "order": [], "models": [],
+               "llm_models": []}
     ws_dir = ""
 
     def log_message(self, *args):
@@ -90,6 +91,7 @@ class MockAgent(BaseHTTPRequestHandler):
             except ValueError:
                 body = {}
             prompt = body.get("prompt") or ""
+            MockAgent.records["llm_models"].append(body.get("model") or "")
             if "各步骤的结果" not in prompt:
                 # The trigger judgement - not what this test is about.
                 return self._json({"ok": True, "provider": "mock", "model": "mock",
@@ -106,6 +108,7 @@ class MockAgent(BaseHTTPRequestHandler):
                 body = {}
             message = body.get("message") or ""
             MockAgent.records["order"].append(message)
+            MockAgent.records["models"].append(body.get("model") or "")
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
@@ -315,6 +318,16 @@ def main():
               at_read >= 0 and at_classify > at_read, order)
         check("the summary was made with one model call",
               MockAgent.records["llm"] == 1, MockAgent.records["llm"])
+
+        # ---- the model of a task is really used --------------------------
+        status, answer = call(queue_port, "POST", "/api/tasks",
+                              {"prompt": "用指定的模型跑", "model": "mock-model-x"})
+        asked = ((answer or {}).get("data") or {})
+        asked_id = asked.get("id")
+        wait_task(queue_port, asked_id, timeout=60)
+        check("the model of a task reaches the agent",
+              "mock-model-x" in MockAgent.records["models"],
+              MockAgent.records["models"][-3:])
 
         # ---- the plan record ---------------------------------------------
         status, answer = call(queue_port, "GET", "/api/plans/" + str(plan.get("id")))

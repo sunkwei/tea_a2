@@ -753,6 +753,40 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
     }
   }
 
+  // ---- the provider and model for the queued tasks ----------------------
+  //
+  // `task_model: <provider>+<name>` says which provider and model the task
+  // queue should use for the work it does. It sits with the other top-level
+  // keys because it is the same kind of decision: this machine, this account.
+  // The queue asks the agent what this file says (the agent owns it), so the
+  // two never disagree.
+  {
+    const std::string raw = trim(ystr(root, "task_model"));
+    task_model.clear();
+    task_provider.clear();
+    task_model_name.clear();
+    if (!raw.empty()) {
+      const size_t plus = raw.find('+');
+      if (plus == std::string::npos) {
+        warnings.push_back("task_model: '" + raw + "' has no '+': it must be <provider>+<model>");
+      } else {
+        task_provider = trim(raw.substr(0, plus));
+        task_model_name = trim(raw.substr(plus + 1));
+        if (task_provider.empty() || task_model_name.empty()) {
+          warnings.push_back("task_model: '" + raw + "' does not name both a provider and a model");
+          task_provider.clear();
+          task_model_name.clear();
+        } else {
+          task_model = task_provider + "+" + task_model_name;
+          if (providers.find(task_provider) == providers.end()) {
+            warnings.push_back("task_model: provider '" + task_provider +
+                               "' is not in the providers list of this file");
+          }
+        }
+      }
+    }
+  }
+
   // ---- the independent search provider ----------------------------------
   // The `search:` section names the provider that serves the web tools
   // (toolkit_search / toolkit_fetch), independently of the provider the

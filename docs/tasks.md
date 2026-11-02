@@ -256,6 +256,7 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
 | 写回线索的摘要 | `POST /api/threads/{id}/spill {"summary": "…", "count": N}`（router 用；只有本机操作员能写——摘要会进 prompt） |
 | 交一个**计划**（复杂活儿拆成几步） | `POST /api/plans {"title": "…", "goal": "…", "steps": [{"key": "s1", "title": "…", "prompt": "…", "depends_on": []}]}`——计划变成一个父任务（装最终结果）+ 每步一个任务；`depends_on` 里的步骤没做完，这一步就不启动。`GET /api/plans` / `GET /api/plans/{id}` 看计划，`POST /api/plans/{id}/cancel` 取消 |
 | 交一份任务单 | `python3 sched/task_server.py --submit-order <文件>`，或把 `*.order` 文件发给微信 bot |
+| 排队任务用哪个 **provider+模型** | provider.yaml 顶层一行 `task_model: <provider>+<模型名>`（例：`task_model: minimax+MiniMax-M3.1-Flash`）。队列问 agent 要这个值，改完一分钟内自己看到，不用重启。额度闸门查的就是这个 provider 的额度 |
 
 ### 计划：一个复杂活儿拆成几步
 
@@ -464,9 +465,10 @@ toolkit_task op=update needs_confirmation=true question="可以删掉旧构建�
 
 ### 额度闸门
 
-安排执行任务时，任务服务先问 agent：「minimax 这个 provider 还剩多少额度？」
-（`GET /api/providers/minimax/usage`，即「5 小时窗口 + 每周窗口」）。**只有余量够的时候
-才开工**：
+安排执行任务时，任务服务先问 agent：「**排队任务用的那个** provider 还剩多少额度？」
+（`GET /api/providers/<provider>/usage`，即「5 小时窗口 + 每周窗口」）。那个 provider 是
+provider.yaml 的 `task_model:` 说的（没写就是 minimax），也是**真正跑活儿的那个**。
+**只有余量够的时候才开工**：
 
 ```
 2026-10-22 07:38:47  agent up: http://127.0.0.1:8282 (provider minimax, model MiniMax-M3.1-Flash)
@@ -481,7 +483,9 @@ toolkit_task op=update needs_confirmation=true question="可以删掉旧构建�
 - **额度读不到就不开工**（provider 没声明额度端点、或者查询失败）。宁可不做，也不要在
   额度已经用光时继续烧；确实要无条件做，加 `--allow-without-quota`。
 - **工作一定跑在查额度的那个 provider 上**：启动任务时会把 provider 带过去，否则
-  「查的是 A 的额度、跑的却是 B」就成了假账。
+  「查的是 A 的额度、跑的却是 B」就成了假账。那个 provider 由 `task_model:` 决定；
+- **provider 没有额度端点就不开工**（除非 `--allow-without-quota`）：所以 `task_model:`
+  指到一个不报额度的 provider 时，得配上这个开关。
 - **别的 provider 的任务不碰**：任务自己指定了 provider 就由它自己排队。
 - **一次做一件**（`--max-per-round`）：额度是窗口制的，一口气全做完没有意义。
 - **在等人确认时停下**：那一轮跑完就停，记录里写清楚要人回答什么；回答之后在**同一个会话**

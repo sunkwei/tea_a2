@@ -7,6 +7,22 @@
 
 version: 1
 
+# Which provider and model the **queued** tasks run on.
+#
+# This is a different thing from the default model of this file (the first
+# provider's first model - that one is what the chat page uses). The task
+# queue (sched/task_server.py) works in the background, on the account you
+# trust it to spend, so it gets its own line.
+#
+# Format: <provider>+<model>, both spelled as they are in the providers:
+# list below. The queue asks the agent what this file says, so a change
+# takes effect within a minute - no restart of anything.
+#
+# Without this line the queue falls back to its own built-in default
+# (minimax). A task may still name its own model - that one wins.
+#
+# task_model: minimax+MiniMax-M3.1-Flash
+
 providers:
   DeepSeek:
     # Bare hosts are fine: tea_agent appends /v1/chat/completions when the URL

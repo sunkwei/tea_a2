@@ -125,6 +125,47 @@ def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def split_task_model(raw):
+    """'provider+model' -> ('provider', 'model').
+
+    The plus is the separator the operator writes in provider.yaml. The
+    provider is the part before the first plus; the model may contain one
+    itself (a name is longer than a provider name).
+    """
+    text = (raw or "").strip().strip("'\"")
+    if not text:
+        return "", ""
+    if "+" not in text:
+        return text, ""
+    provider, _, model = text.partition("+")
+    return provider.strip(), model.strip()
+
+
+def read_task_model_from_file(path):
+    """The `task_model:` line of provider.yaml, read without a YAML parser.
+
+    The agent owns provider.yaml and normally tells the queue what it says
+    (GET /api/health). This is the fallback for when the agent is down or is
+    an old build that does not know the key: it is one top-level scalar, so a
+    line scan is enough - the queue must not need a YAML parser (the devices
+    have no pyyaml).
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line or line[0] in " \t#-":
+                    continue          # indented, a comment or a list item
+                if ":" not in line:
+                    continue
+                key, _, value = line.partition(":")
+                if key.strip() != "task_model":
+                    continue
+                return split_task_model(value)
+    except OSError:
+        return "", ""
+    return "", ""
+
+
 def parse_iso(text):
     """The epoch seconds of a stamp this module wrote ('' -> None)."""
     if not text:
@@ -263,6 +304,29 @@ class Agent:
         except (urllib.error.URLError, OSError):
             return b""
 
+    def primary_model(self, provider):
+        """The model the tasks of this provider will use (its first model).
+
+        The agent answers with the models that are in the config; the first
+        one is the one a request without a model name gets.
+        """
+        try:
+            body = self._request("GET", "/api/providers/"
+                                 + urllib.parse.quote(provider) + "/models")
+        except AgentError:
+            return ""
+        if not isinstance(body, dict):
+            return ""
+        data = body.get("current") or []
+        for one in data:
+            if isinstance(one, dict) and one.get("id"):
+                return one["id"]
+        models = body.get("models") or []
+        for one in models:
+            if isinstance(one, dict) and one.get("id"):
+                return one["id"]
+        return ""
+
     def usage(self, provider):
         """How much of the provider's subscription is left.
 
@@ -348,7 +412,7 @@ class Agent:
         return self._request("POST", "/api/workspaces", {"path": path, "name": name})
 
     def chat(self, workspace_id, message, provider=None, session_id=None,
-             task_id=None, task_context=None, allow_paths=None):
+             task_id=None, task_context=None, allow_paths=None, model=None):
         """Run one turn and yield the agent's events as they happen.
 
         This is the whole contract between the queue and the channel: the
@@ -359,6 +423,10 @@ class Agent:
         body = {"workspace_id": workspace_id, "message": message}
         if provider:
             body["provider"] = provider
+        if model:
+            # The model of this task. The agent falls back to the provider's
+            # first model when the name is empty or unknown.
+            body["model"] = model
         if session_id:
             body["session_id"] = session_id
         if task_id:
@@ -941,6 +1009,11 @@ class Engine:
         self.decorate_event = decorate_event or (lambda event: event)
         # The plans (the complex jobs that were split into steps).
         self.plan_store = plan_store
+        # The provider and model the queued work runs on: (provider, model,
+        # read_at). It comes from provider.yaml (`task_model:`) and is read
+        # again from time to time, so a changed file takes effect without
+        # restarting the queue.
+        self._task_model = ("", "", 0.0)
         # The plans whose summary is being made right now: one plan is
         # summarized once, not once per round.
         self.summarizing = set()
@@ -981,6 +1054,58 @@ class Engine:
             return None, None
         self._quota = (percent, window, now)
         return percent, window
+
+    # ---- which provider and model the work runs on -------------------------
+    def task_model(self, refresh=False):
+        """(provider, model) - what `task_model:` in provider.yaml says.
+
+        The agent owns provider.yaml, so the queue asks the agent
+        (GET /api/health). When the agent cannot answer - it is down, or it
+        is an old build that does not know the key - the queue reads the one
+        line itself.
+        """
+        now = time.time()
+        if not refresh and self._task_model[2] and now - self._task_model[2] < 60.0:
+            return self._task_model[0], self._task_model[1]
+        provider, model = "", ""
+        try:
+            health = self.agent.health()
+            provider, model = split_task_model(health.get("task_model") or "")
+        except (AgentError, AttributeError):
+            provider, model = "", ""
+        if not provider:
+            provider, model = read_task_model_from_file(self.provider_yaml_path())
+        if (provider, model) != (self._task_model[0], self._task_model[1]):
+            log("task_model: %s" % (provider + "+" + model if provider else "(none)"))
+        self._task_model = (provider, model, now)
+        return provider, model
+
+    def provider_yaml_path(self):
+        """Where provider.yaml is (the agent's tea home)."""
+        tea_home = os.environ.get("TEA_HOME") or os.path.expanduser("~/.tea_agent")
+        try:
+            health = self.agent.health()
+            if health.get("tea_home"):
+                tea_home = health["tea_home"]
+        except (AgentError, AttributeError):
+            pass
+        return os.path.join(tea_home, "provider.yaml")
+
+    def effective_provider(self):
+        """The provider the queued work runs on.
+
+        The command line wins (the operator who starts the service said so),
+        then provider.yaml's `task_model:`, then the built-in default.
+        """
+        if self.args.provider:
+            return self.args.provider
+        provider, _ = self.task_model()
+        return provider or DEFAULT_PROVIDER
+
+    def effective_model(self):
+        """The model the queued work uses (empty = the provider's own first)."""
+        _, model = self.task_model()
+        return model
 
     # ---- how many tasks may run at the same time --------------------------
     def running_tasks(self):
@@ -1037,7 +1162,7 @@ class Engine:
         if state.get("paused"):
             log("the queue is paused: %s" % (state.get("reason") or "no reason given"))
             return 0
-        provider = self.args.provider
+        provider = self.effective_provider()
         queued = self.store.list(status=QUEUED)
         if not queued:
             # Nothing to do: do not call the provider either. The quota is
@@ -1269,6 +1394,8 @@ class Engine:
                 try:
                     answer = self.agent.llm_chat(
                         prompt=prompt, system=AGGREGATE_SYSTEM,
+                        provider=plan.get("provider") or self.effective_provider() or None,
+                        model=plan.get("model") or None,
                         temperature=0.1, max_tokens=budget,
                         timeout=getattr(self.args, "aggregate_timeout", 180))
                 except AgentError as exc:
@@ -1447,7 +1574,7 @@ class Engine:
             log("  task %s is a plan, not work: it is not run", task_id)
             return False
 
-        provider = provider or task.get("provider") or self.args.provider
+        provider = provider or task.get("provider") or self.effective_provider()
         context = self.context_for(task)
         # A task that was waiting for an answer carries it with it: the answer
         # is the next thing said in the task's session.
@@ -1554,9 +1681,13 @@ class Engine:
         report = {"progress": None, "note": "", "needs_confirmation": False, "question": ""}
         answer = ""
         allow_paths = task.get("allow_paths") or []
+        # The model this task asked for; without one the queue's default
+        # applies (`task_model:` in provider.yaml).
+        model = task.get("model") or self.effective_model()
         for event in self.agent.chat(workspace_id, message, provider=provider,
                                      session_id=session_id, task_id=task_id,
-                                     task_context=context, allow_paths=allow_paths):
+                                     task_context=context, allow_paths=allow_paths,
+                                     model=model or None):
             kind = event.get("type")
             if kind == "start":
                 session_id = event.get("session_id") or session_id
@@ -1961,13 +2092,20 @@ class Handler(BaseHTTPRequestHandler):
         except AgentError as exc:
             health = {"error": str(exc)}
             agent_ok = False
-        left, _ = self.app.engine.quota_left(self.app.args.provider)
+        provider = self.app.engine.effective_provider()
+        model = self.app.engine.effective_model()
+        left, _ = self.app.engine.quota_left(provider)
         self._json(200, {
             "ok": True,
             "agent": agent.base,
             "agent_ok": agent_ok,
             "agent_health": health,
-            "provider": self.app.args.provider,
+            # The provider the queued work runs on, and the model it will
+            # use. `agent_health` is the agent's OWN default (what the chat
+            # front end uses) - the queue does not use it.
+            "provider": provider,
+            "model": model or self.app.agent.primary_model(provider),
+            "task_model": (provider + "+" + model) if model else provider,
             "quota_percent": left,
             "data_dir": self.app.store.root,
             "counts": self.app.store.counts(),
@@ -2324,7 +2462,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(409, "bad_request",
                                "task %s is a plan: its steps are the work, "
                                "the plan itself is not run" % task.get("id"))
-        provider = task.get("provider") or self.app.args.provider
+        provider = task.get("provider") or self.app.engine.effective_provider()
         # The same gate the scheduler uses: the work starts while there is quota.
         left, _ = self.app.engine.quota_left(provider)
         if left is None and not self.app.args.allow_without_quota:
@@ -2768,7 +2906,8 @@ class App:
         try:
             answer = self.agent.llm_chat(
                 prompt=prompt, system=system,
-                provider=self.args.provider or None,
+                provider=self.engine.effective_provider() or None,
+                model=self.engine.effective_model() or None,
                 temperature=0.0, max_tokens=300,
                 timeout=getattr(self.args, "trigger_timeout", 60))
         except AgentError as exc:
@@ -2851,7 +2990,14 @@ class App:
         thread_id = self.trigger_store.thread_id(workspace_id, thread_key)
         self.trigger_store.attach(thread_id, workspace_id, thread_key, title=title)
 
-        parent = new_task({"prompt": goal, "title": title[:80]}, workspace_id)
+        # The whole plan runs on one provider (and one model): the steps
+        # inherit it, and the summary is made with it too.
+        plan_provider = (str(body.get("provider") or "").strip()
+                         or self.engine.effective_provider())
+        plan_model = str(body.get("model") or "").strip()
+        parent = new_task({"prompt": goal, "title": title[:80],
+                           "provider": plan_provider, "model": plan_model},
+                          workspace_id)
         parent["kind"] = "plan"
         parent["plan_id"] = plan_id
         parent["thread_id"] = thread_id
@@ -2865,7 +3011,8 @@ class App:
         for step in steps:
             child = new_task({"prompt": step["prompt"],
                               "title": step["title"][:80],
-                              "provider": step.get("provider") or ""},
+                              "provider": step.get("provider") or plan_provider,
+                              "model": step.get("model") or plan_model},
                              step.get("workspace_id") or workspace_id)
             child["kind"] = "step"
             child["plan_id"] = plan_id
@@ -2898,6 +3045,8 @@ class App:
             "goal": goal,
             "aggregate_prompt": str(body.get("aggregate_prompt") or "").strip(),
             "workspace_id": workspace_id,
+            "provider": plan_provider,
+            "model": plan_model,
             "thread_id": thread_id,
             "parent_id": parent["id"],
             "steps": [{"key": step["key"], "title": step["title"],
@@ -3286,8 +3435,10 @@ def main(argv=None):
                         help="the queue's own workspace directory (created and registered with the agent)")
     parser.add_argument("--workspace-name", default=os.environ.get("TEA_TASK_WORKSPACE_NAME", "任务"),
                         help="the name the queue's workspace gets in the agent")
-    parser.add_argument("--provider", default=DEFAULT_PROVIDER,
-                        help="the provider whose quota gates the work (default: %s)" % DEFAULT_PROVIDER)
+    parser.add_argument("--provider", default="",
+                        help="the provider whose quota gates the work and which runs "
+                             "the queued tasks (default: provider.yaml's task_model:, "
+                             "else %s)" % DEFAULT_PROVIDER)
     parser.add_argument("--window", default="window", choices=["window", "weekly"],
                         help="which quota window to watch (default: the short one)")
     parser.add_argument("--min-remaining", type=float, default=5.0,
@@ -3358,7 +3509,7 @@ def main(argv=None):
             "workspace_id": workspace_id,
             "prompt": args.submit,
             "title": args.title,
-            "provider": args.provider,
+            "provider": app.engine.effective_provider(),
             "model": "",
             "allow_paths": [os.path.abspath(os.path.expanduser(p)) for p in args.allow_path],
             "session_id": "",

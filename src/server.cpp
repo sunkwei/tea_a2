@@ -1536,6 +1536,13 @@ void ApiServer::Impl::install_routes() {
     j["uptime_s"] = static_cast<double>(now_ms() - started_ms) / 1000.0;
     j["provider"] = config->active_provider;
     j["model"] = config->active_model;
+    // Which provider and model the task queue should use for its work
+    // (`task_model:` in provider.yaml). The queue asks the agent for this.
+    if (!config->task_model.empty()) {
+      j["task_model"] = config->task_model;
+      j["task_provider"] = config->task_provider;
+      j["task_model_name"] = config->task_model_name;
+    }
     j["http_engine"] = http_engine();
     // Hosts where WinHTTP was given up on and the bundled TLS backend took over
     // (Windows only, empty otherwise). Makes the fallback visible from outside

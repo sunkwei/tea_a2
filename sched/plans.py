@@ -82,6 +82,7 @@ def normalize_steps(steps, max_steps=MAX_STEPS):
             "depends_on": [str(d).strip() for d in depends if str(d).strip()],
             "workspace_id": str(raw.get("workspace_id") or "").strip(),
             "provider": str(raw.get("provider") or "").strip(),
+            "model": str(raw.get("model") or "").strip(),
         })
     # The dependencies must exist...
     for step in out:

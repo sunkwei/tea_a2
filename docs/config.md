@@ -143,6 +143,26 @@ provider 卡片上的「**模型配置**」按钮打开一个对话框：这个 
 改完先校验再替换，配置随即热加载生效，不用重启。
 接口细节见 [HTTP 接口](api.md#改模型配置-put-apiprovidername-models)。
 
+### 排队任务用哪个 provider 和模型（`task_model:` 段）
+
+聊天页用的是**这个文件的默认**（第一个 provider 的第一个模型）；后台的**任务队列**是另一回事：
+它在替人干活，花的是你托付给它的那张卡。所以它有自己的一行：
+
+```yaml
+task_model: minimax+MiniMax-M3.1-Flash
+```
+
+- 格式：`<provider>+<模型名>`，两个名字都要和下面 `providers:` 里写的一样；
+- **谁说了算**：provider.yaml 是 agent 的，队列不自己解析 yaml——它问 agent
+  （`GET /api/health` 的 `task_model` 字段）。改完一分钟内队列自己看到，不用重启；
+  agent 挂了或者还是老版本时，队列自己扫那一行（一个顶层标量，不需要 yaml 解析器）；
+- **优先级**：队列的命令行 `--provider` > 这一行 > 内置默认（minimax）；
+- **额度闸门跟着走**：闸门查的就是这个 provider 的额度——真正掏钱的那一个；
+- **任务自己说了算**：单个任务仍可以写自己的 `model`（那个优先）；写了别的 `provider` 的
+  任务在自动调度里会被跳过（队列一次只跑一个 provider），日志里会说明；
+- 写错了不会让 agent 起不来：它会警告（`providers:` 里没有这个 provider、少了 `+`），
+  这一行就当没写。
+
 ### 网页搜索与抓取（provider 级可选能力）
 
 DeepSeek 对所有 API 用户开放了两个原生端点（`POST /v1/tools/search`、`POST /v1/tools/fetch`，
