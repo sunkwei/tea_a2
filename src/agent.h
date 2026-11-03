@@ -20,6 +20,16 @@ namespace tea {
 /// Receives streaming events; must be safe to call from the agent thread.
 using EventEmitter = std::function<void(const nlohmann::json&)>;
 
+/// Whether the assistant's reasoning_content is echoed back to the provider on
+/// a follow-up request (a tool result goes back, the model answers again).
+///
+/// DeepSeek's API reference documents reasoning_content only as an *output*
+/// field, and rejects it on the way in; thinking-mode gateways (opencode.ai and
+/// others) insist on receiving it back. Both behaviours are real, so the
+/// decision lives here - and it is shared, because the agent loop and
+/// /api/llm/chat both send a follow-up request.
+bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provider);
+
 struct TurnOptions {
   std::string provider;  // empty => config default
   std::string model;     // empty => config default

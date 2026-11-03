@@ -1,11 +1,17 @@
 // embed_assets.cpp -- build-time helper that converts web/ assets into a C++
 // translation unit, so the tea_agent binary is fully self-contained.
 //
-// usage: tea_embed_assets <output-dir> <web-dir> <relpath> [<relpath> ...]
+// usage: tea_embed_assets <output-dir> <root-dir> <name>=<relpath> [...]
 //
-// The virtual asset name is the relative path exactly as written on the command
-// line; the file is read from <web-dir>/<relpath>. The output directory must
-// already exist (CMake creates it).
+// Every asset is named explicitly: <name> is the virtual name the program
+// asks for at runtime, <relpath> is where the file is, relative to <root-dir>.
+// The output directory must already exist (CMake creates it).
+//
+// Why not "the relpath is the name": the assets no longer all live in one
+// directory. The web UI is in web/, and the API documentation is in docs/ -
+// and the documentation has to be in the binary too, because a device with no
+// network and no repository still has to be able to read what the API looks
+// like.
 //
 // Deliberately depends on nothing but the C standard library plus <string>, so
 // it builds with any host compiler including GCC 6.5.
@@ -110,25 +116,37 @@ static std::string to_literal(const std::string& data) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: tea_embed_assets <output-dir> <web-dir> <relpath> [relpath...]\n");
+    std::fprintf(stderr,
+                 "usage: tea_embed_assets <output-dir> <root-dir> <name>=<relpath> [...]\n"
+                 "  <name>     the virtual name the program asks for at runtime\n"
+                 "  <relpath>  where the file is, relative to <root-dir>\n");
     return 2;
   }
   const std::string out_dir = argv[1];
-  std::string web_dir = argv[2];
-  while (!web_dir.empty() && (web_dir[web_dir.size() - 1] == '/' || web_dir[web_dir.size() - 1] == '\\')) {
-    web_dir.erase(web_dir.size() - 1);
+  std::string root_dir = argv[2];
+  while (!root_dir.empty() &&
+         (root_dir[root_dir.size() - 1] == '/' || root_dir[root_dir.size() - 1] == '\\')) {
+    root_dir.erase(root_dir.size() - 1);
   }
 
   std::vector<Asset> assets;
   for (int i = 3; i < argc; ++i) {
-    std::string rel = argv[i];
+    const std::string spec = argv[i];
+    const std::string::size_type eq = spec.find('=');
+    if (eq == std::string::npos) {
+      std::fprintf(stderr, "embed_assets: '%s' is not <name>=<relpath>\n", spec.c_str());
+      return 2;
+    }
+    std::string rel = spec.substr(eq + 1);
     for (size_t k = 0; k < rel.size(); ++k) {
       if (rel[k] == '\\') rel[k] = '/';
     }
     Asset a;
-    a.path = rel;
+    a.path = spec.substr(0, eq);
+    // The mime follows the file, not the virtual name: the name may carry no
+    // extension at all.
     a.mime = mime_for(rel);
-    a.data = read_binary(web_dir + "/" + rel);
+    a.data = read_binary(root_dir + "/" + rel);
     assets.push_back(a);
   }
   std::sort(assets.begin(), assets.end(),

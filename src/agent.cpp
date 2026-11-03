@@ -252,6 +252,9 @@ int close_dangling_tool_calls(Session* session,
   return filled;
 }
 
+
+}  // namespace
+
 bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provider) {
   bool learned = false;
   if (config.lookup_reasoning_echo(provider.name, &learned)) return learned;
@@ -271,10 +274,6 @@ bool resolve_reasoning_echo(const AppConfig& config, const ProviderInfo& provide
   if (host == "deepseek.com" || ends_with(host, ".deepseek.com")) return false;
   return true;
 }
-
-
-
-}  // namespace
 
 long long Agent::estimate_tokens(const std::string& text) {
   // Per-script heuristic: ASCII runs about 3 characters per token, CJK about one

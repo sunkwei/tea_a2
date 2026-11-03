@@ -13,8 +13,10 @@ README 讲的是「这是什么、为什么这么设计」；[HTTP 接口](api.m
 | 起服务、改端口、换模型、看日志 | [1. 起服务](#1-起服务) |
 | 用 curl 让 agent 干活 | [2. agent 的 HTTP 命令](#2-agent-的-http-命令) |
 | 排队、查进度、取消、重做 | [3. 任务队列的命令](#3-任务队列的命令) |
-| 用麦克风说话（语音输入） | [2.12](#212-语音输入) |
-| 让这台机器去控制另一台 tea_a2（级联） | [2.13](#213-级联控制另一台-tea_a2) |
+| 查接口有哪些、这个字段什么意思 | [2.13](#213-接口文档在哪儿apidoc) |
+| 让模型自己联网搜索 | [2.12](#212-网页搜索deepseek-的-search--fetch) |
+| 用麦克风说话（语音输入） | [2.14](#214-语音输入) |
+| 让这台机器去控制另一台 tea_a2（级联） | [2.16](#216-级联控制另一台-tea_a2) |
 | 定时做一件活儿（`not_before`、微信 `/at`） | [3.2.1](#321-定时做一件活儿) · [4](#4-聊天端的命令) |
 | 在微信 / Telegram 里排队 | [4. 聊天端的命令](#4-聊天端的命令) |
 | 写脚本调 agent | [5. 给脚本用的客户端](#5-给脚本用的客户端) |
@@ -200,7 +202,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.18.3","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.18.4","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -530,7 +532,68 @@ curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
 `POST /api/chat` 的这一轮也吃同一套旋钮（只对这一轮生效）。
 细节见 [HTTP 接口](api.md#一次调用能带哪些旋钮)。
 
-### 2.12 语音输入
+### 2.12 网页搜索：DeepSeek 的 search / fetch
+
+DeepSeek 的搜索和抓取是 **provider 上的两个端点**（`/v1/tools/search`、
+`/v1/tools/fetch`），不是模型自己执行的工具——tea_a2 去调它们，把结果当工具结果喂回模型。
+开关在 provider 级别：
+
+```yaml
+providers:
+  DeepSeek:
+    supports_search: true      # 放开 toolkit_search
+    supports_fetch: true       # 放开 toolkit_fetch
+```
+
+`/api/chat`（agent loop）里这两个工具跟别的工具一样给模型用。
+`/api/llm/chat` 是原语层，**它不执行任何工具**——所以要在这条路上搜索，有两条路：
+
+**① 一次调用就完事**（服务端替模型跑搜索）：
+
+```bash
+curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
+  -d '{"prompt":"搜一下 tea_a2","web_tools":true}'
+# → {"content":"我搜到了，这是答案。",
+#    "web_tool_calls":[{"tool":"toolkit_search","arguments":{"query":"tea_a2"},
+#                       "output":"1 result(s) …","elapsed_ms":412}]}
+```
+
+服务端把 provider 能提供的网页工具告诉模型；模型要搜时服务端替它调那个端点，
+把结果喂回去，模型接着回答（最多 4 轮）。**只有网页工具会被执行**——模型要是调了别的
+工具，那个调用照旧回到你手里。
+
+**② 脚本自己转**（机制层的做法，轮数归你管）：
+
+```bash
+# 调一个网页工具，不要模型
+curl -s -X POST $B/api/tools/call -H 'Content-Type: application/json' \
+  -d '{"tool":"toolkit_search","arguments":{"query":"tea_a2"}}'
+# → {"ok":true,"tool":"toolkit_search","output":"1 result(s) for: tea_a2 …"}
+```
+
+然后把结果当 `role: "tool"` 的消息喂回 `/api/llm/chat`，模型接着回答。
+
+> 搜索是**按次计费**的（provider 每次调用都收钱），所以 `web_tools: true` 的轮数有上限。
+
+### 2.13 接口文档在哪儿：`/api/doc`
+
+设备上可能没有网、也没有仓库，但**要查接口的人手上只有这个设备**。所以接口文档
+（`docs/api.md`）在**编译期就进了二进制**，`/api/doc` 从二进制里读出来：
+
+```bash
+curl -s $B/api/doc | head -30        # 渲染好的网页（浏览器直接打开也行）
+curl -s $B/api/doc?format=md         # Markdown 原文
+curl -s $B/api/doc?format=json       # {ok, version, title, markdown, html}
+```
+
+默认给的是 HTML（自带样式，深浅色跟系统走）；`?format=md` 给 Markdown 原文；
+`?format=json` 一次给全，脚本不用挑格式。不认识的 `format` 是 400。
+
+二进制里的是**编译时的那一份**——改了 `docs/api.md` 要重新编译才会变。
+测试 `tests/smoke_api_docs.py` 盯着这件事：它比对字节，还把代码里注册的每一条路由
+跟文档对一遍（**代码里有、文档里没写**的路由算失败）。
+
+### 2.14 语音输入
 
 界面上的麦克风按钮（输入框旁边）把说的话变成文字**填进输入框**——不自动发送，
 转写有错还能改。
@@ -575,7 +638,7 @@ curl -s -X POST $B/api/asr/transcribe -H 'Content-Type: audio/wav' \
    `http://192.168.x.x:8282` 访问设备时浏览器不给权限，所以按钮不出现。
 3. 浏览器不支持 `MediaRecorder`（很老的浏览器）。
 
-### 2.6 MCP 服务器
+### 2.15 MCP 服务器
 
 **和 provider.yaml 同目录**的 `mcp.yaml` 里配的 MCP 服务器（Model Context Protocol）是
 **独立的程序**：agent 启动它们，用 stdio 上的 JSON-RPC 跟它们说话，它们提供的工具变成模型
@@ -610,7 +673,7 @@ curl -s -X POST $B/api/mcp/servers/uiautomation/call \
 `/api/mcp/servers` 里写着原因（`error`），别的服务器照常工作。细节见
 [配置](config.md#mcp-服务器mcp-yaml)。
 
-### 2.13 级联：控制另一台 tea_a2
+### 2.16 级联：控制另一台 tea_a2
 
 被控端加一个令牌（`--api-token`）就多出一组**机器对机器**的路由：
 `/api/peer/<路由>` 是 `/api/<路由>` 的令牌版镜像。没配令牌时这些路由**不存在**（404）。

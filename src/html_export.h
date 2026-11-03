@@ -76,4 +76,10 @@ std::string export_file_name(const std::string& session_title);
 /// else is escaped, never passed through.
 std::string markdown_to_html(const std::string& source);
 
+/// A standalone HTML page around a Markdown document - the API reference, for
+/// example. Self-contained: no external CSS, no fonts, no network, so it
+/// renders the same on a device that has nothing else installed. Light and
+/// dark mode come from the same colour variables the export uses.
+std::string render_markdown_page(const std::string& title, const std::string& markdown);
+
 }  // namespace tea

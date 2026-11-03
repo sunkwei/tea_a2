@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"0.18.3\"")
+    "  const char* const kVersionString = \"0.18.4\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -290,10 +290,23 @@ set(TEA_WEB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/web)
 set(TEA_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${TEA_GEN_DIR})
 
-set(TEA_WEB_RELPATHS index.html tokens.css app.css app.js)
-set(TEA_WEB_FILES "")
-foreach(_rel ${TEA_WEB_RELPATHS})
-  list(APPEND TEA_WEB_FILES ${TEA_WEB_DIR}/${_rel})
+# The assets that go into the binary. Every one is named explicitly:
+# <virtual name>=<path relative to the repository root>. The web UI is in
+# web/, the API documentation is in docs/ - and the documentation has to be in
+# the binary too, because a device with no network and no repository still has
+# to be able to read what the API looks like (GET /api/doc).
+set(TEA_ASSET_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
+set(TEA_ASSET_SPECS
+    index.html=web/index.html
+    tokens.css=web/tokens.css
+    app.css=web/app.css
+    app.js=web/app.js
+    api.md=docs/api.md)
+set(TEA_ASSET_FILES "")
+foreach(_spec ${TEA_ASSET_SPECS})
+  string(REPLACE "=" ";" _pair ${_spec})
+  list(GET _pair 1 _rel)
+  list(APPEND TEA_ASSET_FILES ${TEA_ASSET_ROOT}/${_rel})
 endforeach()
 
 if(TEA_AGENT_USE_HOST_ASSET_TOOL)
@@ -375,8 +388,8 @@ add_custom_command(
 set(TEA_WEB_ASSETS_CPP ${TEA_GEN_DIR}/web_assets.cpp)
 add_custom_command(
   OUTPUT ${TEA_WEB_ASSETS_CPP} ${TEA_GEN_DIR}/web_assets.h
-  COMMAND ${TEA_EMBED_EXE} ${TEA_GEN_DIR} ${TEA_WEB_DIR} ${TEA_WEB_RELPATHS}
-  DEPENDS ${TEA_EMBED_DEP} ${TEA_WEB_FILES}
+  COMMAND ${TEA_EMBED_EXE} ${TEA_GEN_DIR} ${TEA_ASSET_ROOT} ${TEA_ASSET_SPECS}
+  DEPENDS ${TEA_EMBED_DEP} ${TEA_ASSET_FILES}
   COMMENT "Embedding web assets into web_assets.cpp"
   VERBATIM
 )

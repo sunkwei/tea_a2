@@ -9,7 +9,9 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.18.3`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
+| `GET` | `/api/health` | 探活、版本（`0.18.4`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
+| `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
+| `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/peer/health` | **对端通道**：`/api/health` 的令牌版镜像（见下「机器对机器的通道」） |
@@ -416,6 +418,28 @@ MCP 工具用那个 MCP 服务器在 `mcp.yaml` 里的 `timeout_ms`。
 
 跑着的调用，服务端**不会**再说话（它在等工具返回）。界面上那个「已用 Xs」是浏览器
 自己按 `started_at` 走的秒针，所以它会一直跳——工具还在跑，用户就知道它还活着。
+
+### 这份文档在哪儿：`GET /api/doc`
+
+设备上可能没有网、没有仓库、连 `docs/` 目录都没有——但**要查接口的人手上只有这个设备**。
+所以 `docs/api.md` 在**编译期就进了二进制**（跟网页资源一起），`GET /api/doc` 从二进制里读出来：
+
+```bash
+curl -s http://127.0.0.1:8282/api/doc | head -40          # 渲染好的网页
+curl -s http://127.0.0.1:8282/api/doc?format=md           # Markdown 原文
+curl -s http://127.0.0.1:8282/api/doc?format=json         # {ok, version, title, markdown, html}
+```
+
+- 默认返回 **HTML**（自带的样式，深浅色跟着系统走），浏览器直接打开就能读；
+- `?format=md` 返回 Markdown 原文（`Accept: text/markdown` 也一样，不用带查询串）；
+- `?format=json` 一次给全：版本号、Markdown、渲染好的 HTML——脚本不用自己挑格式；
+- 别的 `format` 是 400（不认识的格式不静默当成 html）。
+
+**二进制里的是哪一份**：编译时的那一份。所以改了 `docs/api.md` 却没重新编译，
+`/api/doc` 给的还是旧的——测试 `tests/smoke_api_docs.py` 会发现（它比对字节）。
+
+**这份文档不能落后于代码**：`tests/smoke_api_docs.py` 还会把 `src/server.cpp` 里注册的
+每一条路由跟这份文档对一遍——**代码里有、文档里没写的路由**算失败。
 
 ### 断线重连：关掉页面不会取消这一轮
 
@@ -877,6 +901,74 @@ curl --data-binary @hello.wav -H 'Content-Type: audio/wav' \
 | `POST /api/llm/chat` | **一次模型调用**：没有 agent loop，不执行任何工具。`{prompt\|messages, system, provider, model, tools, stream, ...旋钮}`。不流式时返回 `{content, reasoning, tool_calls[], usage, elapsed_ms, knobs}`；流式时是 SSE（`content_delta` / `reasoning_delta`，最后一条 `done` 带全部结果）。`tools` 原样透传——协议归调用方，服务端只负责把请求送出去。旋钮见下面的「一次调用能带哪些旋钮」。 |
 | `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id` + `task_context`（这一轮在做某个排队任务，模型会据此汇报进度）、**旋钮**（跟 `/api/llm/chat` 同一套，只对这一轮生效）。 |
 | `GET /api/providers/{name}/usage` | 这个 provider 的额度（5 小时窗口 + 每周窗口）；provider 没声明额度端点时是 400。 |
+
+### 网页搜索：DeepSeek 的 search / fetch 怎么用
+
+DeepSeek 的搜索和抓取**不是模型自己执行的工具**，而是 provider 上的两个端点
+（`/v1/tools/search` 与 `/v1/tools/fetch`）。tea_a2 自己调这两个端点，把结果当工具结果
+喂回模型。开着的是 provider 级的开关：
+
+```yaml
+providers:
+  DeepSeek:
+    supports_search: true      # 放开 toolkit_search
+    supports_fetch: true       # 放开 toolkit_fetch
+```
+
+在 `/api/chat`（agent loop）里，这两个工具跟别的工具一样给模型用。
+**`/api/llm/chat` 是原语层，它不执行任何工具**——所以要在这条路上用搜索，有两条路：
+
+**① 脚本自己转（机制层的做法）**
+
+```bash
+# 模型说要搜什么
+curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
+  -d '{"prompt":"搜一下 tea_a2","tools":[{"type":"function","function":{
+        "name":"toolkit_search","description":"搜索网页",
+        "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}}]}'
+# → {"tool_calls":[{"name":"toolkit_search","arguments":{"query":"tea_a2"}}], …}
+
+# 脚本自己去跑这个工具
+curl -s -X POST $B/api/tools/call -H 'Content-Type: application/json' \
+  -d '{"tool":"toolkit_search","arguments":{"query":"tea_a2"}}'
+# → {"ok":true,"tool":"toolkit_search","output":"1 result(s) for: tea_a2 …"}
+
+# 把结果喂回去，模型接着回答
+curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"搜一下 tea_a2"},
+                    {"role":"assistant","content":"","tool_calls":[
+                       {"id":"call_1","type":"function","function":{"name":"toolkit_search",
+                        "arguments":"{\"query\":\"tea_a2\"}"}}]},
+                    {"role":"tool","tool_call_id":"call_1","name":"toolkit_search",
+                     "content":"1 result(s) for: tea_a2 …"}]}'
+```
+
+**② 一次调用就完事（`web_tools: true`）**
+
+```bash
+curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
+  -d '{"prompt":"搜一下 tea_a2","web_tools":true}'
+```
+
+服务端把 provider 能提供的网页工具（`toolkit_search` / `toolkit_fetch`）告诉模型；
+模型要搜索时，**服务端替它调那个端点**，把结果喂回去，模型接着回答。最多 4 轮。
+
+回答里带一段 `web_tool_calls`，说的是服务端替模型做了什么：
+
+```json
+{"content": "我搜到了，这是答案。",
+ "web_tool_calls": [{"tool": "toolkit_search", "ok": true, "elapsed_ms": 412,
+                     "arguments": {"query": "tea_a2"}, "output": "1 result(s) …"}]}
+```
+
+**只有网页工具会被执行**：模型要是调了别的工具，那个调用照旧回到调用方手里
+（这条路由答应的是「一次模型调用」，不是「一个 agent」）。没开 `web_tools` 时，
+服务端一个工具都不执行——这是这条路由的约定。
+
+流式（`"stream": true`）也一样：最后的 `done` 帧里带着 `web_tool_calls`。
+
+> 搜索是**按次计费**的（provider 每次调用都收钱）。`web_tools: true` 的调用因此有一个
+> 轮数上限（4 轮），`/api/tools/call` 一次只算一次。
 
 ### 一次调用能带哪些旋钮
 

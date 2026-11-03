@@ -3020,6 +3020,23 @@ nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider,
   return arr;
 }
 
+bool ToolRegistry::is_web_tool(const std::string& name) {
+  return name == "toolkit_search" || name == "toolkit_fetch";
+}
+
+nlohmann::json ToolRegistry::web_tool_schemas(const ProviderInfo* provider,
+                                              const AppConfig* config) const {
+  nlohmann::json arr = nlohmann::json::array();
+  for (std::size_t i = 0; i < defs_.size(); ++i) {
+    const ToolDef& def = defs_[i];
+    if (!is_web_tool(def.name)) continue;
+    const bool want_search = def.name == "toolkit_search";
+    if (!web_tool_available(provider, config, want_search)) continue;
+    arr.push_back(def.to_openai());
+  }
+  return arr;
+}
+
 bool ToolRegistry::has(const std::string& name) const {
   for (std::size_t i = 0; i < defs_.size(); ++i) {
     if (defs_[i].name == name) return true;

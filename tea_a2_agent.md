@@ -1187,8 +1187,8 @@ refresh token + Google Cloud 的 OAuth 客户端），入口在 `ImapSource.conn
 回头想「这版到底发了什么」都不好翻。
 
 ```bash
-.tea_agent_run/scripts/release.sh 0.18.3                      # 打包 + 上传 + 清理旧版本，一步到位
-git add -A && git commit -m "release: 0.18.3"                 # **不**提交 release/*.zip
+.tea_agent_run/scripts/release.sh 0.18.4                      # 打包 + 上传 + 清理旧版本，一步到位
+git add -A && git commit -m "release: 0.18.4"                 # **不**提交 release/*.zip
 ```
 
 `release.sh` 是这台机器上的流程（`.tea_agent_run/scripts/`，不进 git）：打包 → 传到
@@ -1431,3 +1431,115 @@ knobs_to_json(request);                          // 响应里报「真正发出�
 
 - `/api/llm/chat` 以前**不回退**到模型配置里的采样参数（你传就用你的，不传就发 provider
   的默认）。现在跟 agent loop 一样回退，规则统一了。
+
+## 接口文档进二进制：GET /api/doc（0.18.4）
+
+设备上可能没有网、没有仓库、连 `docs/` 目录都没有——但**要查接口的人手上只有这个设备**。
+所以 `docs/api.md` 在**编译期就进了二进制**（跟网页资源一起），`GET /api/doc` 从二进制里读出来。
+
+### 三个格式
+
+| 请求 | 回答 |
+| --- | --- |
+| `GET /api/doc` | 渲染好的 HTML（自带样式，深浅色跟系统走） |
+| `GET /api/doc?format=md` | Markdown 原文（`Accept: text/markdown` 也一样） |
+| `GET /api/doc?format=json` | `{ok, version, title, markdown, html}`——脚本不用挑格式 |
+
+不认识的 `format` 是 400，不静默当成 html。
+
+### 嵌入机制改了：`tools/embed_assets.cpp`
+
+以前资源只有一个根目录（`web/`），命令行是 `<out> <web-dir> <relpath>...`，
+**相对路径既是源文件也是虚拟名**。现在资源不止住一个地方（网页在 `web/`，
+文档在 `docs/`），所以改成显式的一一对应：
+
+```
+tea_embed_assets <out-dir> <root-dir> <name>=<relpath> ...
+```
+
+`name` 是运行时要的虚拟名，`relpath` 是源文件（相对 root-dir）。CMake 里：
+
+```cmake
+set(TEA_ASSET_SPECS index.html=web/index.html ... api.md=docs/api.md)
+```
+
+**两份资源一份机制**——以后再要往二进制里塞东西（一个图标、一份 schema），
+加一行就行，不用改工具。
+
+### 顺带修的 markdown 渲染 bug
+
+`**粗体 `code` 粗体**` 渲染出来是 `**粗体 `code` 粗体**`（星号没变成粗体）。
+原因：`inline_md()` 原来按 `<code>` 把文本切成段，**每段单独跑一遍加粗**——
+跨着代码块的加粗，第二个 `**` 落在另一段里，永远配不上对。
+
+改成：**先把代码块提出来**（内容存进数组，原地留一个占位符），整段文本跑完加粗/斜体/
+删除线**之后**再把代码块放回去。代码块里的 `*` 仍然是字面量（它不在文本里），
+而包着代码块的标记现在跨得过去了。
+
+**这个 bug 不只影响文档页**：会话导出（`/api/sessions/{id}/export`）用的是同一个渲染器，
+模型回答里一句「**重点 `code` 重点**」以前也是坏的。
+
+### 文档不能落后于代码
+
+`tests/smoke_api_docs.py` 做两件事：
+
+1. **比对字节**：`/api/doc?format=md` 的内容必须跟仓库里的 `docs/api.md` 一模一样——
+   改了文档没重新编译，这里会失败（错误信息会说「重新编译」）。
+2. **路由覆盖**：`src/server.cpp` 里注册的每一条路由都必须在 `docs/api.md` 里出现过——
+   **代码里有、文档里没写的路由**算失败。
+
+第 2 条的坑：两边拼路由的方式不一样（代码 `([^/]+)`、文档 `{sid}`；文档还常带
+查询串），所以要先把两边归一成同一个形状再比。归一化写错过一次：
+`\[\^/\]+` 里的 `+` 在字符类里是「一个或多个 `]`」，不是「`]` 后面跟个 `+`」——
+所以那个替换**根本没生效**，测试却「通过」了（它只是把更多路由算成没写）。
+现在的写法是 `\(\[\^/\]\+\)`。
+
+## 原语层也能联网搜索：/api/tools/call 与 web_tools（0.18.4）
+
+DeepSeek 的搜索和抓取是 **provider 上的两个端点**（`/v1/tools/search`、
+`/v1/tools/fetch`），不是模型自己执行的工具——tea_a2 去调它们，把结果当工具结果喂回模型。
+这在 `/api/chat`（agent loop）里一直能用，但 **`/api/llm/chat` 是原语层，它不执行任何
+工具**：想在那条路上搜索的脚本，今天只能自己拼 DeepSeek 的端点。
+
+现在两条路都有了：
+
+- **`POST /api/tools/call`** —— 调一个网页工具，不要模型。
+  `{"tool":"toolkit_search","arguments":{…}}` → `{ok, tool, provider, output, elapsed_ms}`。
+  只有 `toolkit_search` / `toolkit_fetch` 两个：别的工具要工作区、要会话，属于一轮对话。
+- **`/api/llm/chat` 带 `web_tools: true`** —— 一次调用就完事。服务端把 provider 能提供的
+  网页工具告诉模型；模型要搜时服务端替它调那个端点，把结果喂回去，模型接着回答（最多 4 轮）。
+  回答里带 `web_tool_calls`（服务端替模型做了什么）。
+
+**只有网页工具会被执行**：模型要是调了别的工具，那个调用照旧回到调用方手里——这条路由
+答应的是「一次模型调用」，不是「一个 agent」。没开 `web_tools` 时，服务端一个工具都不执行。
+
+### 坑：流式分支里 provider 会被反复调用（真 bug，已修）
+
+`/api/llm/chat` 的流式分支用 `set_chunked_content_provider`，**但没有调 `sink.done()`**。
+httplib 的 chunked provider 是个循环：
+
+```cpp
+while (data_available && !is_shutting_down()) {
+  ... else if (!content_provider(offset, 0, data_sink)) return false;
+}
+```
+
+`data_available` 只有 `sink.done()` 才会变成 false。所以 httplib 会**一遍又一遍地调用这个
+provider**——而 provider 里是「调一次模型」：**同一个问题被问了一遍又一遍，每一遍都计费**，
+直到客户端断开。
+
+`/api/chat` 那条 SSE 路由没这个问题：它的 provider 是 `turn->pump()`，pump 结束时
+调了 `sink.done()`（那里的注释已经写清楚了为什么：返回 false 会让传输被中断，浏览器报
+"Error in input stream"）。
+
+修法就一行：`sink.write(frame...)` 之后 `sink.done();`。
+
+**为什么这么久没人发现**：这条路由的流式分支很少有人用；用的人多半是 `curl` 一次，
+看到答案就断了——循环在断开的瞬间停掉，模型也被多问了几次（钱照扣）。
+
+### `resolve_reasoning_echo` 搬到了 agent.h
+
+`/api/llm/chat` 的 web_tools 分支要把助手的 `reasoning_content` 一起发回去（thinking 模式的
+网关要求这样，DeepSeek 拒绝这样）。这个判断以前是 `agent.cpp` 里的一个匿名函数，
+现在两条路都要用 → 挪到 `agent.h`（实现还在 agent.cpp，因为它要用 `parse_url`，
+而 `ParsedUrl` 在 `http.h` 里，config.cpp 不该拖上整个 HTTP 客户端）。

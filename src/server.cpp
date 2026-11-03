@@ -1062,6 +1062,20 @@ struct ApiServer::Impl {
   // ---- helpers -----------------------------------------------------------
   void install_routes();
 
+  /// Run the web tools the model asked for, put the results back into the
+  /// request and let the caller ask the model again.
+  ///
+  /// Returns true when a round was run. Only the web tools are executed here:
+  /// a call to anything else belongs to the caller, who asked for a model call
+  /// and not for an agent.
+  ///
+  /// It is a method (and not a lambda in the route) because the streaming
+  /// route runs it *after* the route handler returned - everything it touches
+  /// has to outlive that, so it is passed in explicitly.
+  bool run_web_tools(ChatRequest* req, ChatResult* result, const ProviderInfo* provider,
+                     const ModelInfo* model_info, bool echo_reasoning, int* web_calls,
+                     nlohmann::json* trail, bool enabled);
+
   /// The turn currently owning `session_id`, if any. Never prunes and never
   /// joins: callers must not hold `mu` while a ChatTurn dies (its destructor
   /// joins the worker, which may still be inside a long tool call).
@@ -1408,6 +1422,67 @@ struct ApiServer::Impl {
   }
 };
 
+bool ApiServer::Impl::run_web_tools(ChatRequest* req, ChatResult* result,
+                                   const ProviderInfo* provider, const ModelInfo* model_info,
+                                   bool echo_reasoning, int* web_calls, nlohmann::json* trail,
+                                   bool enabled) {
+  // The caller did not ask for the web tools: nothing is executed. This check
+  // lives here, not at the call site, because the streaming route calls it
+  // from a lambda that runs after the route handler returned.
+  if (!enabled) return false;
+  if (!req || !result || !result->ok || result->tool_calls.empty()) return false;
+  // A call to anything but a web tool belongs to the caller.
+  for (std::size_t i = 0; i < result->tool_calls.size(); ++i) {
+    if (!ToolRegistry::is_web_tool(result->tool_calls[i].name)) return false;
+  }
+  // The assistant's message (with the tool calls) goes back to the model.
+  Message assistant;
+  assistant.role = "assistant";
+  assistant.content = result->content;
+  assistant.reasoning = result->reasoning;
+  assistant.tool_calls = result->tool_calls;
+  req->messages.push_back(assistant.to_wire(echo_reasoning));
+
+  ToolContext ctx;
+  ctx.config = config;
+  ctx.provider = provider;
+  ctx.model = model_info;
+  ctx.web_tool_calls = web_calls;
+  for (std::size_t i = 0; i < result->tool_calls.size(); ++i) {
+    const ToolCall& call = result->tool_calls[i];
+    nlohmann::json args = call.arguments;
+    if (!call.raw_arguments.empty()) {
+      try {
+        args = nlohmann::json::parse(call.raw_arguments);
+      } catch (const std::exception& e) {
+        // A malformed argument object is reported to the model, not to the
+        // caller: the model is the one who has to fix it.
+        args = nlohmann::json::object();
+        args["__invalid_arguments__"] = e.what();
+      }
+    }
+    const int64_t started = now_ms();
+    const ToolResult tr = tools->execute(call.name, args, ctx);
+    Message tool_message;
+    tool_message.role = "tool";
+    tool_message.tool_call_id = call.id;
+    tool_message.name = call.name;
+    tool_message.content = tr.output;
+    req->messages.push_back(tool_message.to_wire(false));
+
+    if (trail) {
+      nlohmann::json entry = nlohmann::json::object();
+      entry["tool"] = call.name;
+      entry["ok"] = tr.ok;
+      entry["elapsed_ms"] = now_ms() - started;
+      entry["arguments"] = args;
+      entry["output"] = tr.output;
+      trail->push_back(entry);
+    }
+  }
+  return true;
+}
+
 void ApiServer::Impl::install_routes() {
   httplib::Server& svr = server;
 
@@ -1441,6 +1516,126 @@ void ApiServer::Impl::install_routes() {
     LOG_INFO("server: http pool base=", kHttpThreadsBase, " max=", max_threads);
     return new httplib::ThreadPool(kHttpThreadsBase, max_threads, kHttpQueuedRequests);
   };
+
+  // ---- one web tool, without a model -------------------------------------
+  //
+  // The web tools (toolkit_search / toolkit_fetch) talk to the provider's own
+  // search endpoint - DeepSeek's /v1/tools/search and its relatives. A script
+  // that wants that result does not have to run a whole agent turn for it: it
+  // asks for the tool here, gets the answer, and decides what to do with it.
+  //
+  // Only the web tools: the rest of the toolkit needs a workspace, a session
+  // and sometimes a model - they belong to a turn, not to a single call.
+  svr.Post("/api/tools/call", [this](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    if (!parse_json_body(req, &body, res)) return;
+    const std::string tool_name = trim(json_string(body, "tool"));
+    if (tool_name.empty()) {
+      send_error(res, 400, "bad_request", "'tool' is required");
+      return;
+    }
+    if (!ToolRegistry::is_web_tool(tool_name)) {
+      send_error(res, 400, "bad_request",
+                 "'" + tool_name + "' is not a web tool - this endpoint calls "
+                 "toolkit_search and toolkit_fetch");
+      return;
+    }
+    nlohmann::json arguments = nlohmann::json::object();
+    auto args_it = body.find("arguments");
+    if (args_it != body.end() && args_it->is_object()) arguments = *args_it;
+
+    // Which provider serves it: the named one, else the active one. The
+    // independent search provider from the `search:` section is used as a
+    // fallback by the tool itself, exactly as in a turn.
+    const std::string provider_name =
+        trim(json_string(body, "provider", config->active_provider));
+    const ProviderInfo* provider = config->provider(provider_name);
+    if (!provider) {
+      send_error(res, 400, "unknown_provider", "no provider named '" + provider_name + "'");
+      return;
+    }
+    if (!provider->has_key()) {
+      send_error(res, 409, "no_api_key",
+                 "provider '" + provider->name + "' has no api_key configured");
+      return;
+    }
+
+    ToolContext ctx;
+    ctx.config = config;
+    ctx.provider = provider;
+    // The web tools are billed per request, so they carry a budget. One call
+    // here is one call: the budget is 1 (the tool itself refuses a second).
+    int web_calls = 0;
+    ctx.web_tool_calls = &web_calls;
+
+    const int64_t started = now_ms();
+    const ToolResult result = tools->execute(tool_name, arguments, ctx);
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = result.ok;
+    j["tool"] = tool_name;
+    j["provider"] = provider->name;
+    j["output"] = result.output;
+    j["elapsed_ms"] = now_ms() - started;
+    if (result.truncated) j["truncated"] = true;
+    if (result.meta.is_object() && !result.meta.empty()) j["meta"] = result.meta;
+    send_json(res, j);
+  });
+
+  // ---- the API documentation ---------------------------------------------
+  //
+  // A device with no network and no repository still has to be able to read
+  // what the API looks like - so docs/api.md goes into the binary at build
+  // time and is served from there. The same copy the developer wrote is the
+  // copy the reader sees; there is no second file to fall behind.
+  //
+  //   GET /api/doc             the reference, rendered as a web page
+  //   GET /api/doc?format=md   the same text as Markdown
+  //   GET /api/doc?format=json {version, title, markdown, html}
+  //
+  // `Accept: text/markdown` asks for the Markdown without the query string.
+  svr.Get("/api/doc", [this](const httplib::Request& req, httplib::Response& res) {
+    const WebAsset* asset = find_embedded_asset("api.md");
+    if (!asset) {
+      send_error(res, 500, "no_assets", "the embedded API documentation is missing");
+      return;
+    }
+    // The asset data is NUL-terminated; never trust a size that runs past the
+    // terminator (same rule as the web assets).
+    std::size_t n = asset->size;
+    const std::size_t term = std::strlen(asset->data);
+    if (n > term) n = term;
+    const std::string markdown(asset->data, n);
+
+    std::string format = "html";
+    const std::string q = trim(req.get_param_value("format"));
+    if (!q.empty()) format = to_lower(q);
+    if (format == "markdown") format = "md";
+    const std::string accept = req.get_header_value("Accept");
+    if (accept.find("text/markdown") != std::string::npos) format = "md";
+
+    if (format == "md") {
+      res.set_content(markdown, "text/markdown; charset=utf-8");
+      res.set_header("Cache-Control", "no-store");
+      return;
+    }
+    if (format == "json") {
+      nlohmann::json j = nlohmann::json::object();
+      j["ok"] = true;
+      j["version"] = version_string();
+      j["title"] = "tea_a2 HTTP API";
+      j["markdown"] = markdown;
+      j["html"] = render_markdown_page("tea_a2 HTTP API", markdown);
+      send_json(res, j);
+      return;
+    }
+    if (format != "html") {
+      send_error(res, 400, "bad_request", "'format' must be html, md or json");
+      return;
+    }
+    res.set_content(render_markdown_page("tea_a2 HTTP API", markdown),
+                    "text/html; charset=utf-8");
+    res.set_header("Cache-Control", "no-store");
+  });
 
   // ---- static ------------------------------------------------------------
   svr.Get("/", [this](const httplib::Request&, httplib::Response& res) {
@@ -1866,15 +2061,53 @@ void ApiServer::Impl::install_routes() {
     // the server only carries it. Nothing is executed here.
     auto tools_it = body.find("tools");
     if (tools_it != body.end() && tools_it->is_array()) request.tools = *tools_it;
+
+    // ---- the web tools ----------------------------------------------------
+    //
+    // With "web_tools": true the model may search the web: the provider's own
+    // search endpoint (DeepSeek's /v1/tools/search and its relatives) is called
+    // by the server, the result goes back to the model, and it answers.
+    //
+    // Only the web tools are executed here. Every other tool call comes back to
+    // the caller as usual - a caller that asked for a model call did not ask
+    // for an agent.
+    const bool want_web_tools = body.value("web_tools", false);
+    if (want_web_tools) {
+      const nlohmann::json schemas = tools->web_tool_schemas(provider, config);
+      if (schemas.empty()) {
+        send_error(res, 400, "no_web_tools",
+                   "no provider can serve the web tools - set supports_search / supports_fetch "
+                   "in provider.yaml, or configure the 'search:' section");
+        return;
+      }
+      for (std::size_t i = 0; i < schemas.size(); ++i) request.tools.push_back(schemas[i]);
+    }
+
     for (std::size_t i = 0; i < messages.size(); ++i) {
       request.messages.push_back(messages[i].to_wire(false));
     }
     request.connect_timeout_ms = config->settings.http_connect_timeout_ms;
     request.read_timeout_ms = config->settings.http_read_timeout_ms;
 
+    // The web tools the model asked for: the server runs them and asks again.
+    // The trail is what the caller gets to see afterwards.
+    nlohmann::json web_trail = nlohmann::json::array();
+    int web_calls = 0;
+    const bool echo_reasoning = resolve_reasoning_echo(*config, *provider);
+    // How many times the model may ask for a web tool. The agent has no round
+    // limit at all; here every round is a bill, so it gets one.
+    const int kMaxWebRounds = 4;
+
     // ---- the call --------------------------------------------------------
     if (!request.stream) {
       ChatResult result = llm_chat(request, DeltaCallback(), nullptr);
+      int rounds = 0;
+      while (rounds < kMaxWebRounds &&
+             run_web_tools(&request, &result, provider, model_info, echo_reasoning, &web_calls,
+                           &web_trail, want_web_tools)) {
+        ++rounds;
+        result = llm_chat(request, DeltaCallback(), nullptr);
+      }
       if (!result.ok) {
         std::string message = result.error.empty() ? "the model call failed" : result.error;
         if (!result.detail.empty()) message += ": " + result.detail;
@@ -1893,6 +2126,7 @@ void ApiServer::Impl::install_routes() {
       // What the provider was actually told: a caller that asked for "no
       // thinking" can see that the field went out (and that it did not).
       j["knobs"] = knobs_to_json(request);
+      if (!web_trail.empty()) j["web_tool_calls"] = web_trail;
       nlohmann::json calls = nlohmann::json::array();
       for (std::size_t i = 0; i < result.tool_calls.size(); ++i) {
         const ToolCall& call = result.tool_calls[i];
@@ -1913,7 +2147,8 @@ void ApiServer::Impl::install_routes() {
     res.set_header("X-Accel-Buffering", "no");
     res.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
-        [this, request](std::size_t, httplib::DataSink& sink) {
+        [this, request, provider, model_info, echo_reasoning, kMaxWebRounds, want_web_tools](
+            std::size_t, httplib::DataSink& sink) mutable {
           ChatResult result;
           DeltaCallback on_delta = [&sink, &result](DeltaKind kind, const std::string& text) {
             nlohmann::json e = nlohmann::json::object();
@@ -1922,7 +2157,18 @@ void ApiServer::Impl::install_routes() {
             const std::string frame = "data: " + dump_json(e) + "\n\n";
             if (!sink.write(frame.data(), frame.size())) return;
           };
+          // The route handler has returned by the time this runs, so the
+          // trail and the budget live here, not out there.
+          nlohmann::json web_trail = nlohmann::json::array();
+          int web_calls = 0;
           result = llm_chat(request, on_delta, nullptr);
+          int rounds = 0;
+          while (rounds < kMaxWebRounds &&
+                 run_web_tools(&request, &result, provider, model_info, echo_reasoning,
+                               &web_calls, &web_trail, want_web_tools)) {
+            ++rounds;
+            result = llm_chat(request, on_delta, nullptr);
+          }
           nlohmann::json done = nlohmann::json::object();
           done["type"] = "done";
           done["ok"] = result.ok;
@@ -1934,6 +2180,7 @@ void ApiServer::Impl::install_routes() {
           done["elapsed_ms"] = result.elapsed_ms;
           done["usage"] = result.usage.to_json();
           done["knobs"] = knobs_to_json(request);
+          if (!web_trail.empty()) done["web_tool_calls"] = web_trail;
           nlohmann::json calls = nlohmann::json::array();
           for (std::size_t i = 0; i < result.tool_calls.size(); ++i) {
             const ToolCall& call = result.tool_calls[i];
@@ -1950,6 +2197,13 @@ void ApiServer::Impl::install_routes() {
           }
           const std::string frame = "data: " + dump_json(done) + "\n\n";
           sink.write(frame.data(), frame.size());
+          // A chunked body is only terminated by done(). Without it httplib
+          // calls the provider again - and again - so the model would be asked
+          // the same question over and over (and billed for it) until the
+          // client hung up. Returning false instead would abort the transfer
+          // without the terminating "0\r\n\r\n" chunk, which browsers report
+          // as "Error in input stream".
+          sink.done();
           return true;
         });
   });

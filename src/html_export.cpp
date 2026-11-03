@@ -125,71 +125,73 @@ std::string rewrite_links(const std::string& s) {
 /// starts emphasis at a word boundary, which keeps `2*3*4` and paths such as
 /// `src/*.cpp` from turning into italics.
 std::string inline_md(const std::string& t) {
-  // Split on inline code first: `a *b*` inside backticks must stay literal.
-  std::string out;
-  std::size_t i = 0;
-  while (i < t.size()) {
-    const std::size_t tick = t.find('`', i);
-    if (tick == std::string::npos) {
-      out += rewrite_links(t.substr(i));
-      break;
+  // The inline code spans are lifted out first and put back at the end.
+  //
+  // Why not just render them where they are: markup AROUND a code span
+  // (`**bold `code` bold**`) is one pair of markers, and a pass that worked on
+  // the text BETWEEN the code spans would never find the second one - the
+  // `**` would come out as two stray asterisks. The content of a code span
+  // stays literal all the same: it is not in the text while the markup passes
+  // run.
+  const char kMarkStart = '\x01';
+  const char kMarkEnd = '\x02';
+  std::vector<std::string> code_spans;
+  std::string text;
+  {
+    std::size_t i = 0;
+    while (i < t.size()) {
+      const std::size_t tick = t.find('`', i);
+      if (tick == std::string::npos) {
+        text += t.substr(i);
+        break;
+      }
+      const std::size_t end = t.find('`', tick + 1);
+      if (end == std::string::npos) {
+        text += t.substr(i);
+        break;
+      }
+      text += t.substr(i, tick - i);
+      text += kMarkStart;
+      text += std::to_string(code_spans.size());
+      text += kMarkEnd;
+      code_spans.push_back(t.substr(tick + 1, end - tick - 1));
+      i = end + 1;
     }
-    const std::size_t end = t.find('`', tick + 1);
-    if (end == std::string::npos) {
-      out += rewrite_links(t.substr(i));
-      break;
-    }
-    out += rewrite_links(t.substr(i, tick - i));
-    out += "<code class=\"md-inline\">" + t.substr(tick + 1, end - tick - 1) + "</code>";
-    i = end + 1;
   }
 
-  // **bold** and ~~strike~~ are unambiguous; handle them outside code spans.
+  text = rewrite_links(text);
+
+  // **bold** and ~~strike~~ are unambiguous.
   std::string with_bold;
-  i = 0;
-  while (i < out.size()) {
-    const std::size_t code = out.find("<code", i);
-    const std::size_t stop = code == std::string::npos ? out.size() : code;
-    std::string chunk = out.substr(i, stop - i);
-    std::string rebuilt;
-    std::size_t p = 0;
-    while (p < chunk.size()) {
-      if (chunk.compare(p, 2, "**") == 0) {
-        const std::size_t close = chunk.find("**", p + 2);
-        if (close != std::string::npos) {
-          rebuilt += "<strong>" + chunk.substr(p + 2, close - p - 2) + "</strong>";
-          p = close + 2;
-          continue;
-        }
+  std::size_t p = 0;
+  while (p < text.size()) {
+    if (text.compare(p, 2, "**") == 0) {
+      const std::size_t close = text.find("**", p + 2);
+      if (close != std::string::npos) {
+        with_bold += "<strong>" + text.substr(p + 2, close - p - 2) + "</strong>";
+        p = close + 2;
+        continue;
       }
-      if (chunk.compare(p, 2, "~~") == 0) {
-        const std::size_t close = chunk.find("~~", p + 2);
-        if (close != std::string::npos) {
-          rebuilt += "<del>" + chunk.substr(p + 2, close - p - 2) + "</del>";
-          p = close + 2;
-          continue;
-        }
+    }
+    if (text.compare(p, 2, "~~") == 0) {
+      const std::size_t close = text.find("~~", p + 2);
+      if (close != std::string::npos) {
+        with_bold += "<del>" + text.substr(p + 2, close - p - 2) + "</del>";
+        p = close + 2;
+        continue;
       }
-      rebuilt += chunk[p];
-      ++p;
     }
-    with_bold += rebuilt;
-    if (code == std::string::npos) break;
-    const std::size_t code_end = out.find("</code>", code);
-    if (code_end == std::string::npos) {
-      with_bold += out.substr(code);
-      break;
-    }
-    with_bold += out.substr(code, code_end + 7 - code);
-    i = code_end + 7;
+    with_bold += text[p];
+    ++p;
   }
 
-  // *italic* / _italic_ at word boundaries.
+  // *italic* / _italic_ at word boundaries. A code span counts as one: the
+  // text after it may start an emphasis, as it did before.
   std::string with_em;
   for (std::size_t k = 0; k < with_bold.size(); ++k) {
     const char c = with_bold[k];
     const bool boundary = k == 0 || with_bold[k - 1] == ' ' || with_bold[k - 1] == '(' ||
-                          with_bold[k - 1] == '\n';
+                          with_bold[k - 1] == '\n' || with_bold[k - 1] == kMarkEnd;
     if ((c == '*' || c == '_') && boundary && k + 1 < with_bold.size() &&
         with_bold[k + 1] != c && with_bold[k + 1] != ' ') {
       const std::size_t close = with_bold.find(std::string(1, c), k + 1);
@@ -201,7 +203,30 @@ std::string inline_md(const std::string& t) {
     }
     with_em += c;
   }
-  return with_em;
+
+  // The code spans go back where they were.
+  std::string out;
+  std::size_t i = 0;
+  while (i < with_em.size()) {
+    const std::size_t start = with_em.find(kMarkStart, i);
+    if (start == std::string::npos) {
+      out += with_em.substr(i);
+      break;
+    }
+    out += with_em.substr(i, start - i);
+    const std::size_t end = with_em.find(kMarkEnd, start + 1);
+    if (end == std::string::npos) {
+      out += with_em.substr(start);
+      break;
+    }
+    const std::string index = with_em.substr(start + 1, end - start - 1);
+    const std::size_t n = static_cast<std::size_t>(std::atoi(index.c_str()));
+    if (n < code_spans.size()) {
+      out += "<code class=\"md-inline\">" + code_spans[n] + "</code>";
+    }
+    i = end + 1;
+  }
+  return out;
 }
 
 bool starts_with_any(const std::string& s, const char* const* prefixes, std::size_t n) {
@@ -518,6 +543,62 @@ std::string image_block(const Workspace& ws, const ImageAttachment& att,
          "\"><figcaption>" + caption + " · " + human_size(bytes.size()) +
          "</figcaption></figure>";
 }
+
+/// The stylesheet of a Markdown page. The colours are variables on :root and
+/// the dark mode only overrides :root - a media query that re-declared
+/// individual rules would lose to any rule written after it (same specificity,
+/// later wins), which is how a page ends up dark with white cards.
+const char* const kDocStyle = R"CSS(
+:root{
+  color-scheme:light dark;
+  --bg:#f6f7f9; --fg:#1f2328; --muted:#6b7480;
+  --card:#fff; --card-border:#e3e6ea; --hairline:#e3e6ea;
+  --code-bg:#f6f8fa; --code-banner:#f6f8fa; --inline-bg:#f1f3f5;
+  --table-head:#f6f8fa; --link:#1a63d8; --quote:#57606a;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#16181c; --fg:#e6e8eb; --muted:#9aa4b2;
+    --card:#1d2025; --card-border:#2b2f36; --hairline:#2b2f36;
+    --code-bg:#14161a; --code-banner:#191c21; --inline-bg:#2a2f37;
+    --table-head:#191c21; --link:#7ab7ff; --quote:#a7b0bd;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","PingFang SC",
+  "Microsoft YaHei",sans-serif}
+main{max-width:1080px;margin:0 auto;padding:36px 24px 96px}
+h1{font-size:26px;line-height:1.35;margin:0 0 20px}
+h2{font-size:20px;margin:38px 0 12px;padding-bottom:7px;border-bottom:1px solid var(--hairline)}
+h3{font-size:17px;margin:28px 0 8px}
+h4{font-size:15px;margin:22px 0 6px;color:var(--muted)}
+p{margin:10px 0}
+ul,ol{margin:10px 0;padding-left:24px}
+li{margin:3px 0}
+a{color:var(--link);text-decoration:none}
+a:hover{text-decoration:underline}
+hr{border:0;border-top:1px solid var(--hairline);margin:26px 0}
+blockquote{margin:12px 0;padding:2px 0 2px 14px;border-left:3px solid var(--card-border);
+  color:var(--quote)}
+/* The tables fit the page and wrap: a reference that has to be scrolled
+   sideways to read a column is a reference nobody reads. Long unbroken
+   strings (a JSON body, a URL) break instead of pushing the page wide. */
+table{border-collapse:collapse;margin:14px 0;width:100%;font-size:14px}
+th,td{border:1px solid var(--card-border);padding:7px 10px;text-align:left;
+  vertical-align:top;overflow-wrap:anywhere}
+th{background:var(--table-head);font-weight:600}
+code{background:var(--inline-bg);padding:1px 5px;border-radius:4px;font-size:.92em;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{background:var(--code-bg);border:1px solid var(--card-border);border-radius:8px;
+  padding:12px 14px;overflow-x:auto}
+pre code{background:none;padding:0}
+.code-block{margin:14px 0}
+.code-banner{background:var(--code-banner);border:1px solid var(--card-border);
+  border-bottom:0;border-radius:8px 8px 0 0;padding:4px 12px;font-size:12px;color:var(--muted)}
+.code-banner + pre{border-radius:0 0 8px 8px;margin-top:0}
+strong{font-weight:650}
+)CSS";
 
 const char* const kStyle = R"CSS(
 /* Everything is driven by these variables, so dark mode only has to override
@@ -950,6 +1031,19 @@ bool import_session_payload(const Workspace& workspace, const nlohmann::json& pa
   if (!workspace.save_session(session, err)) return false;
   *out = session;
   return true;
+}
+
+std::string render_markdown_page(const std::string& title, const std::string& markdown) {
+  std::ostringstream out;
+  out << "<!doctype html>\n<html lang=\"zh\">\n<head>\n"
+      << "<meta charset=\"utf-8\">\n"
+      << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+      << "<title>" << esc(title) << "</title>\n"
+      << "<style>" << kDocStyle << "</style>\n"
+      << "</head>\n<body>\n<main>\n"
+      << markdown_to_html(markdown)
+      << "\n</main>\n</body>\n</html>\n";
+  return out.str();
 }
 
 std::string export_file_name(const std::string& session_title) {

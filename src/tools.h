@@ -79,6 +79,18 @@ class ToolRegistry {
   ToolRegistry();
 
   const std::vector<ToolDef>& defs() const { return defs_; }
+
+  /// The web tools this provider can serve (toolkit_search / toolkit_fetch),
+  /// as OpenAI tool schemas. Empty when neither the provider nor the
+  /// independent search provider can search - then a model would only learn
+  /// about the tool by calling it and failing.
+  nlohmann::json web_tool_schemas(const ProviderInfo* provider,
+                                  const AppConfig* config) const;
+
+  /// The web tools, by name: "toolkit_search" and "toolkit_fetch". These are
+  /// the two tools that need no workspace and no model - they talk to the
+  /// provider's own search endpoint - so a script can call them directly.
+  static bool is_web_tool(const std::string& name);
   /// Tools advertised to the model. Provider-scoped extras (toolkit_search /
   /// toolkit_fetch) only appear when `provider` declares support for them;
   /// a null pointer yields the portable core set.
