@@ -1187,8 +1187,8 @@ refresh token + Google Cloud 的 OAuth 客户端），入口在 `ImapSource.conn
 回头想「这版到底发了什么」都不好翻。
 
 ```bash
-.tea_agent_run/scripts/release.sh 0.18.2                      # 打包 + 上传 + 清理旧版本，一步到位
-git add -A && git commit -m "release: 0.18.2"                 # **不**提交 release/*.zip
+.tea_agent_run/scripts/release.sh 0.18.3                      # 打包 + 上传 + 清理旧版本，一步到位
+git add -A && git commit -m "release: 0.18.3"                 # **不**提交 release/*.zip
 ```
 
 `release.sh` 是这台机器上的流程（`.tea_agent_run/scripts/`，不进 git）：打包 → 传到
@@ -1377,3 +1377,57 @@ API 和任务单都收 `model:`，也存进任务记录，但队列的 `Agent.ch
 - **live 结构签名要带上 `started_at`**：界面按结构签名决定要不要重画，签名不变就不重画——
   工具开始的那一帧不重画，秒针就没有落脚点。
 - **`tool_call` 的预告行也会显示「运行中」**：预告 ≠ 真的开始。老样子，没改。
+
+## 一次调用的旋钮：/api/llm/chat 也能带「别思考、便宜、稳一点」（0.18.3）
+
+`/api/llm/chat` 原来只接了 `temperature` / `top_p` / `max_tokens`，**`reasoning_effort`
+被静默忽略**——传了跟没传一样。一个机制接口给不出策略组合，就只能当「问一句话」用，
+不能当「按我的策略调一次模型」用（比如一个 Firefox 翻译插件：便宜、不要思考、翻译要稳）。
+
+### 现在能带的旋钮
+
+`reasoning_effort`（思考强度）、`temperature`、`top_p`、`top_k`、
+`frequency_penalty`、`presence_penalty`、`seed`、`max_tokens`。
+`/api/chat` 的**这一轮**也吃同一套（`TurnOptions::knob_overrides`）。
+
+### 三条规则
+
+1. **优先级：请求体 > 机器设置 > 模型自己的配置。** 没人设的旋钮**不会出现在请求里**
+   ——网关不认识某个字段会回 400。没设 ≠ 设成 0。
+2. **`null` 是「清掉」**：`"temperature": null` 让这个字段离开请求，哪怕模型配置里设了它。
+3. **写错了会 400，不会被悄悄忽略**。这是这次改动里最要紧的一条：原来传
+   `"temperature": "很冷"` 不报错也不生效，调用方只能靠猜。
+
+### 落点：`llm.cpp` 里的两个函数
+
+```cpp
+apply_default_knobs(&request, st, model_info);   // 机器设置 → 模型配置
+apply_knob_overrides(&request, body, &knob_err); // 请求体（赢）
+knobs_to_json(request);                          // 响应里报「真正发出去的是什么」
+```
+
+**为什么放在 llm.cpp 而不是 agent.cpp**：以前这段逻辑写在 `Agent::run` 里，
+`/api/llm/chat` 各写一份 —— 两份必然漂移。现在两条路共用一个函数，
+`agent.cpp` 里那段内联代码删掉换成 `apply_default_knobs()`，行为一模一样。
+
+### `reasoning_effort` 的两个特例
+
+- **显式值照发**：`supports_reasoning` 只挡着**默认**那一条路。调用方显式写了
+  `reasoning_effort`，就发 —— 调用方知道自己的网关。「禁用思考」正是这么用的
+  （模型没声明 `supports_reasoning` 也照样发 `off`）。
+- **`auto` = 不发这个字段**（不是「自动强度」）。网关不认这个字段时会回 400。
+  值原样上线，所以 `none` 这种它自己的写法也照发；不在已知列表里的值会**在日志里
+  提一句**（拼错了不会立刻看出来，但至少留了痕迹）。
+
+### 响应带 `knobs`
+
+调用方能确认「我说的禁思考，真的禁了」：
+`knobs.reasoning_effort` 是实际值，`knobs.reasoning_effort_sent` 说明字段**有没有上线**。
+
+**但它证明不了网关照做了** —— 网关不认 `off` 就会**忽略**这个字段，模型照样思考。
+要绝对不思考，只能选一个本来就不思考的模型。这句话写进了 api.md，不能只写在代码里。
+
+### 顺带修的
+
+- `/api/llm/chat` 以前**不回退**到模型配置里的采样参数（你传就用你的，不传就发 provider
+  的默认）。现在跟 agent loop 一样回退，规则统一了。

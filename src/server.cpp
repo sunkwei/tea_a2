@@ -1850,19 +1850,17 @@ void ApiServer::Impl::install_routes() {
     // The caller asked for the numbers: without usage there is no way to bill or
     // to budget what just happened.
     request.include_usage = body.value("include_usage", true);
-    if (body.contains("temperature") && body["temperature"].is_number()) {
-      request.has_temperature = true;
-      request.temperature = body["temperature"].get<double>();
-    }
-    if (body.contains("top_p") && body["top_p"].is_number()) {
-      request.has_top_p = true;
-      request.top_p = body["top_p"].get<double>();
-    }
-    if (body.contains("max_tokens") && body["max_tokens"].is_number()) {
-      request.max_tokens = body["max_tokens"].get<long long>();
-    }
-    if (request.max_tokens <= 0 && model_info && model_info->max_output_tokens > 0) {
-      request.max_tokens = model_info->max_output_tokens;
+    // The knobs of this call: what the caller asked for, then the machine
+    // settings, then the model's own configuration - the same order the agent
+    // loop uses, so both routes make the same decision about what goes on the
+    // wire. A knob nobody set stays out of the request.
+    apply_default_knobs(&request, config->settings, model_info);
+    std::string knob_err;
+    if (!apply_knob_overrides(&request, body, &knob_err)) {
+      // A mistyped knob is reported, not ignored: "I set temperature and it
+      // did nothing" is the worst possible answer.
+      send_error(res, 400, "bad_request", knob_err);
+      return;
     }
     // Tool schemas are passed through untouched: the caller owns the protocol,
     // the server only carries it. Nothing is executed here.
@@ -1892,6 +1890,9 @@ void ApiServer::Impl::install_routes() {
       j["finish_reason"] = result.finish_reason;
       j["elapsed_ms"] = result.elapsed_ms;
       j["usage"] = result.usage.to_json();
+      // What the provider was actually told: a caller that asked for "no
+      // thinking" can see that the field went out (and that it did not).
+      j["knobs"] = knobs_to_json(request);
       nlohmann::json calls = nlohmann::json::array();
       for (std::size_t i = 0; i < result.tool_calls.size(); ++i) {
         const ToolCall& call = result.tool_calls[i];
@@ -1932,6 +1933,7 @@ void ApiServer::Impl::install_routes() {
           done["finish_reason"] = result.finish_reason;
           done["elapsed_ms"] = result.elapsed_ms;
           done["usage"] = result.usage.to_json();
+          done["knobs"] = knobs_to_json(request);
           nlohmann::json calls = nlohmann::json::array();
           for (std::size_t i = 0; i < result.tool_calls.size(); ++i) {
             const ToolCall& call = result.tool_calls[i];
@@ -4134,6 +4136,18 @@ void ApiServer::Impl::install_routes() {
     // server (sched/task_server.py), so the caller says what the work is; this
     // side only tells the model "this turn works on that task".
     const std::string task_context = trim(json_string(body, "task_context"));
+    // The model knobs for this turn (`reasoning_effort`, `temperature`, ...).
+    // The same overrides /api/llm/chat takes: a caller that drives its own
+    // policy can say "this turn thinks less" without touching the config.
+    nlohmann::json knob_overrides = nlohmann::json::object();
+    {
+      static const char* const kKnobKeys[] = {
+          "reasoning_effort", "temperature", "top_p", "top_k",
+          "frequency_penalty", "presence_penalty", "seed", "max_tokens"};
+      for (std::size_t i = 0; i < sizeof(kKnobKeys) / sizeof(kKnobKeys[0]); ++i) {
+        if (body.contains(kKnobKeys[i])) knob_overrides[kKnobKeys[i]] = body[kKnobKeys[i]];
+      }
+    }
     // Extra directories the file tools may touch in this turn. A caller that
     // drives its own policy (the task queue) says per task what it may work
     // in; the grant lasts this turn only.
@@ -4250,7 +4264,8 @@ void ApiServer::Impl::install_routes() {
     AppConfig* cfg = config;
     ToolRegistry* reg = tools;
     turn->worker = std::thread([turn, cfg, reg, message, images, provider, model, system_prompt,
-                             allowed_tools, task_id, task_context, allow_paths]() {
+                             allowed_tools, task_id, task_context, allow_paths,
+                             knob_overrides]() {
       Agent agent(cfg, reg);
       TurnOptions options;
       options.provider = provider;
@@ -4262,6 +4277,7 @@ void ApiServer::Impl::install_routes() {
       options.task_id = task_id;
       options.task_context = task_context;
       options.allow_paths = allow_paths;
+      options.knob_overrides = knob_overrides;
       EventEmitter emit = [turn](const nlohmann::json& event) { turn->emit_event(event); };
       try {
         agent.run_turn(turn->workspace, &turn->session, message, images, options, emit,

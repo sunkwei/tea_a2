@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.18.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
+| `GET` | `/api/health` | 探活、版本（`0.18.3`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/peer/health` | **对端通道**：`/api/health` 的令牌版镜像（见下「机器对机器的通道」） |
@@ -874,9 +874,51 @@ curl --data-binary @hello.wav -H 'Content-Type: audio/wav' \
 
 | 接口 | 干什么 |
 | --- | --- |
-| `POST /api/llm/chat` | **一次模型调用**：没有 agent loop，不执行任何工具。`{prompt\|messages, system, provider, model, tools, temperature, max_tokens, stream}`。不流式时返回 `{content, reasoning, tool_calls[], usage, elapsed_ms}`；流式时是 SSE（`content_delta` / `reasoning_delta`，最后一条 `done` 带全部结果）。`tools` 原样透传——协议归调用方，服务端只负责把请求送出去。 |
-| `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id` + `task_context`（这一轮在做某个排队任务，模型会据此汇报进度）。 |
+| `POST /api/llm/chat` | **一次模型调用**：没有 agent loop，不执行任何工具。`{prompt\|messages, system, provider, model, tools, stream, ...旋钮}`。不流式时返回 `{content, reasoning, tool_calls[], usage, elapsed_ms, knobs}`；流式时是 SSE（`content_delta` / `reasoning_delta`，最后一条 `done` 带全部结果）。`tools` 原样透传——协议归调用方，服务端只负责把请求送出去。旋钮见下面的「一次调用能带哪些旋钮」。 |
+| `POST /api/chat` | agent loop 本身也是原语：多带 `system_prompt`（换掉人设，设备事实/工作区指令/agent.md 仍在）、`tools`（只给模型这几个工具，给 `[]` 就是纯聊天）、`task_id` + `task_context`（这一轮在做某个排队任务，模型会据此汇报进度）、**旋钮**（跟 `/api/llm/chat` 同一套，只对这一轮生效）。 |
 | `GET /api/providers/{name}/usage` | 这个 provider 的额度（5 小时窗口 + 每周窗口）；provider 没声明额度端点时是 400。 |
+
+### 一次调用能带哪些旋钮
+
+机制接口要给出足够的策略组合：调用方要能一次说清「用哪个模型、别思考、随机性多低」，
+不用去改这台机器的配置。
+
+`POST /api/llm/chat`（以及 `POST /api/chat` 的这一轮）接受：
+
+| 旋钮 | 取值 | 说明 |
+| --- | --- | --- |
+| `reasoning_effort` | `auto` / `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | **思考强度**。`auto`（和不传）是「**不发这个字段**」，provider 用它自己的默认；`off` 是「不思考」。值原样上线，网关认什么就是什么（`none` 这种它自己的写法也照发） |
+| `temperature` | 0–2 | 采样温度 |
+| `top_p` | 0–1 | 核采样 |
+| `top_k` | 0–1000000 | 只取前 k 个（vLLM / Ollama 一类网关）；0 = 不设 |
+| `frequency_penalty` / `presence_penalty` | -2–2 | 频率 / 存在惩罚 |
+| `seed` | 0–2147483647 | 随机种子（0 也是真种子，只有 `null` 才是不设） |
+| `max_tokens` | 整数 | 单次输出上限 |
+
+**优先级**：请求体 > 机器设置（`tea_agent.yaml` 的 `settings:`）> 模型自己的配置
+（`provider.yaml` 的 `models:` 块）。**没人设的旋钮不会出现在请求里**——网关不认识某个
+字段会回 400。
+
+**`null` 是「清掉」**：请求体里写 `"temperature": null`，这个字段就离开请求了，
+哪怕模型配置里设了它。
+
+**写错了会报错，不会被悄悄忽略**：`{"temperature": "很冷"}` 是 400（并说清楚是哪个
+旋钮、应该是什么），不是一个「设了但没生效」。
+
+**响应里带 `knobs`**：这一次真正发出去的是什么。`knobs.reasoning_effort` 是实际的值，
+`knobs.reasoning_effort_sent` 说明这个字段**有没有真的上线**（`auto` 就是没有）。
+其余旋钮同理，没设的就是 `null`。调用方可以据此确认「我说的禁思考，真的禁了」。
+
+一个例子（Firefox 翻译插件）：要便宜、不要思考、翻译要稳定：
+
+```json
+{"prompt": "把这段译成中文：…", "model": "deepseek-chat",
+ "reasoning_effort": "off", "temperature": 0.2, "max_tokens": 512}
+```
+
+> 「不思考」能不能真做到，取决于那个网关认不认 `off`：认，就关掉了；不认，它会**忽略**
+> 这个字段（模型照样思考）。响应里的 `knobs.reasoning_effort_sent` 只能证明**字段上线了**，
+> 证明不了网关照做了。要绝对不思考，只能选一个本来就不思考的模型。
 
 `sched/tea_api.py` 是这两层接口的客户端（纯标准库，设备上跑得起来）：`Tea` 说 agent 的
 原语层，`Queue` 说任务队列（任务相关的接口住在 Python 侧的队列上，不在 agent 上）：

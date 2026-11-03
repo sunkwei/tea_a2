@@ -200,7 +200,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.18.2","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.18.3","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -510,6 +510,25 @@ curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
 
 带 `messages` 就是自己拼历史；带 `tools` 就是把工具定义交给模型——**它只会返回
 工具调用，不会替你执行**，要执行得你自己来（那正是 `/api/chat` 做的事）。
+
+**这一次调用怎么打**也能一起说清：`provider` / `model` 选谁、`reasoning_effort`
+（思考强度，`off` = 不思考）、`temperature` / `top_p` / `top_k` /
+`frequency_penalty` / `presence_penalty` / `seed` / `max_tokens`（采样旋钮）。
+
+```bash
+# Firefox 翻译插件那种：便宜、不要思考、翻译要稳
+curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
+  -d '{"prompt":"把这段译成中文：hello","model":"deepseek-chat",
+       "reasoning_effort":"off","temperature":0.2,"max_tokens":512}'
+```
+
+优先级：**请求体 > 机器设置 > 模型自己的配置**；没人设的旋钮不会出现在请求里
+（网关不认识会回 400）。写错了（比如 `"temperature":"很冷"`）是 400，不会被悄悄忽略。
+响应里带一个 `knobs`，说的是这一次**真正发出去**的旋钮
+（`knobs.reasoning_effort_sent` 说明「别思考」那个字段有没有真的上线）。
+
+`POST /api/chat` 的这一轮也吃同一套旋钮（只对这一轮生效）。
+细节见 [HTTP 接口](api.md#一次调用能带哪些旋钮)。
 
 ### 2.12 语音输入
 
@@ -996,6 +1015,9 @@ tea.providers()                    # provider 清单
 tea.usage("minimax")               # 额度（provider 没声明额度端点时抛 400）
 tea.workspaces()                   # 工作区列表
 tea.llm_chat(prompt="说：ok", max_tokens=10)   # 一次模型调用（不跑 agent loop）
+# 旋钮也能一起给：便宜、不要思考、翻译要稳
+tea.llm_chat(prompt="译成中文：hello", model="deepseek-chat",
+             reasoning_effort="off", temperature=0.2, max_tokens=512)
 
 # ---- 队列这一层 ----
 task = queue.create_task("把 README 的例子跑一遍", title="例子")

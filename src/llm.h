@@ -92,6 +92,32 @@ struct ChatRequest {
   RetryCallback on_retry;
 };
 
+/// The knobs of one model call.
+///
+/// They are resolved in one place, so that /api/llm/chat and the agent loop
+/// make the same decision about what goes on the wire:
+///
+///   1. what the caller asked for (the request body) - it wins;
+///   2. the machine settings (`settings:` in tea_agent.yaml);
+///   3. the model's own configuration (the `models:` block in provider.yaml).
+///
+/// A knob nobody set stays OUT of the request: some gateways answer 400 for a
+/// field they do not know. "Not set" and "set to zero" are different things.
+void apply_default_knobs(ChatRequest* req, const Settings& st, const ModelInfo* model);
+
+/// Apply the per-call overrides a request body carries. They win over the
+/// defaults; a `null` clears a knob (the field leaves the request).
+///
+/// `reasoning_effort` is special: an explicit value is sent even when the
+/// model does not declare `supports_reasoning` - the caller knows their
+/// gateway, and "off" is exactly what a caller who wants no thinking asks for.
+/// Returns false and fills `err` when a value has the wrong shape.
+bool apply_knob_overrides(ChatRequest* req, const nlohmann::json& body, std::string* err);
+
+/// The knobs that were actually used. The response says them, so a caller can
+/// see what the provider was told instead of guessing.
+nlohmann::json knobs_to_json(const ChatRequest& req);
+
 enum class DeltaKind { Content, Reasoning, ToolArgs };
 using DeltaCallback = std::function<void(DeltaKind kind, const std::string& text)>;
 

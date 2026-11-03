@@ -48,6 +48,12 @@ struct TurnOptions {
   /// iteration (FIFO) before building that iteration's request; whatever is left
   /// when the loop stops is reported back as `queue_unconsumed`. May be null.
   PromptInbox* inbox = nullptr;
+  /// Per-turn overrides of the model knobs (`reasoning_effort`, `temperature`,
+  /// `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `seed`,
+  /// `max_tokens`), in the same shape the request body uses. They win over the
+  /// machine settings and over the model's own configuration. A null or empty
+  /// object means "no overrides".
+  nlohmann::json knob_overrides = nlohmann::json::object();
 };
 
 /// How much of the stored history actually made it into the model context.

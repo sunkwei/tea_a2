@@ -112,12 +112,29 @@ class Tea:
         return self._request("GET", "/api/workspaces").get("workspaces") or []
 
     def llm_chat(self, prompt=None, messages=None, system=None, provider=None, model=None,
-                 tools=None, temperature=None, max_tokens=None, stream=False):
+                 tools=None, temperature=None, top_p=None, top_k=None,
+                 frequency_penalty=None, presence_penalty=None, seed=None,
+                 reasoning_effort=None, max_tokens=None, stream=False):
         """One model call. No agent loop, no tool is executed.
 
         With `tools` you hand over OpenAI-style tool schemas; the answer carries
         the tool calls the model asked for and the caller decides what to do with
         them. That is the difference to /api/chat, which runs the loop itself.
+
+        The knobs say how the call is made: which model, how hard it should
+        think, how random it should be. A translation plugin, say, wants a cheap
+        model that does not think at all:
+        `llm_chat(prompt=..., model="cheap", reasoning_effort="off",
+        temperature=0.2)`.
+
+        `reasoning_effort` is "auto" (do not send the field at all - the
+        provider decides), "off" (no thinking), or one of "minimal" / "low" /
+        "medium" / "high" / "xhigh" / "max". A knob left at None is not sent
+        either: the device's own configuration decides, and a gateway that does
+        not know a field answers 400 when it sees it.
+
+        The answer carries a "knobs" object: what the provider was actually
+        told, so a caller can check that its request had an effect.
         """
         body = {}
         if prompt is not None:
@@ -134,6 +151,18 @@ class Tea:
             body["tools"] = tools
         if temperature is not None:
             body["temperature"] = temperature
+        if top_p is not None:
+            body["top_p"] = top_p
+        if top_k is not None:
+            body["top_k"] = top_k
+        if frequency_penalty is not None:
+            body["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            body["presence_penalty"] = presence_penalty
+        if seed is not None:
+            body["seed"] = seed
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         body["stream"] = bool(stream)

@@ -11,6 +11,18 @@
 namespace tea {
 namespace {
 
+/// The known reasoning levels. "auto" means "do not send the field at all" -
+/// the provider then uses its own default, which is the only safe choice for
+/// a gateway that does not know `reasoning_effort` (it answers 400).
+///
+/// The names are the ones OpenAI uses; gateways that spell them differently
+/// (xhigh, max) are accepted as well - the value goes on the wire unchanged,
+/// so what the provider understands is what it gets.
+const char* const kEfforts[] = {"auto", "off", "minimal", "low", "medium",
+                                "high", "xhigh", "max"};
+const int kEffortCount = static_cast<int>(sizeof(kEfforts) / sizeof(kEfforts[0]));
+
+
 std::string strip_trailing_slashes(std::string s) {
   while (!s.empty() && s.back() == '/') s.pop_back();
   return s;
@@ -477,6 +489,223 @@ std::string chat_completions_url(const std::string& api_url) {
 }
 
 std::string models_url(const std::string& api_url) { return endpoint(api_url, "/models"); }
+
+void apply_default_knobs(ChatRequest* req, const Settings& st, const ModelInfo* model) {
+  if (!req) return;
+  // max_tokens: the machine setting wins, the model's own output limit is
+  // the fallback. Zero means "the provider decides".
+  if (req->max_tokens <= 0) {
+    if (st.max_tokens > 0) {
+      req->max_tokens = st.max_tokens;
+    } else if (model && model->max_output_tokens > 0) {
+      req->max_tokens = model->max_output_tokens;
+    }
+  }
+  // The sampling knobs: the global setting wins, the model value is the
+  // fallback. A knob that was never set stays out of the request - some
+  // gateways answer 400 for a field they do not know.
+  if (st.temperature >= 0) {
+    req->has_temperature = true;
+    req->temperature = st.temperature;
+  } else if (model && model->has_temperature) {
+    req->has_temperature = true;
+    req->temperature = model->temperature;
+  }
+  if (st.top_p >= 0) {
+    req->has_top_p = true;
+    req->top_p = st.top_p;
+  } else if (model && model->has_top_p) {
+    req->has_top_p = true;
+    req->top_p = model->top_p;
+  }
+  if (st.top_k > 0) {
+    req->has_top_k = true;
+    req->top_k = st.top_k;
+  } else if (model && model->has_top_k) {
+    req->has_top_k = true;
+    req->top_k = model->top_k;
+  }
+  if (st.frequency_penalty >= 0) {
+    req->has_frequency_penalty = true;
+    req->frequency_penalty = st.frequency_penalty;
+  } else if (model && model->has_frequency_penalty) {
+    req->has_frequency_penalty = true;
+    req->frequency_penalty = model->frequency_penalty;
+  }
+  if (st.presence_penalty >= 0) {
+    req->has_presence_penalty = true;
+    req->presence_penalty = st.presence_penalty;
+  } else if (model && model->has_presence_penalty) {
+    req->has_presence_penalty = true;
+    req->presence_penalty = model->presence_penalty;
+  }
+  if (st.seed != 0) {
+    req->has_seed = true;
+    req->seed = st.seed;
+  } else if (model && model->has_seed) {
+    req->has_seed = true;
+    req->seed = model->seed;
+  }
+  // How hard the model should think. The model's own value wins; "auto" (and
+  // the empty string) fall back to the machine setting, and "auto" there as
+  // well means "say nothing" - a gateway that does not know `reasoning_effort`
+  // answers 400 when it sees the field.
+  std::string effort = model ? model->reasoning_effort : std::string();
+  if (effort.empty() || effort == "auto") effort = st.reasoning_effort;
+  req->reasoning_effort = effort;
+  req->send_reasoning_effort = false;
+  if (effort != "auto" && !effort.empty()) {
+    // A model that does not declare reasoning support is not asked to think:
+    // the field would be rejected by the gateway. The settings page ties the
+    // effort field to the same checkbox, so this can only happen in a
+    // hand-edited file.
+    if (!model || model->supports_reasoning) {
+      req->send_reasoning_effort = true;
+    }
+  }
+}
+
+bool apply_knob_overrides(ChatRequest* req, const nlohmann::json& body,
+                          std::string* err) {
+  if (!req || !body.is_object()) return true;
+  auto fail = [&](const std::string& msg) {
+    if (err) *err = msg;
+    return false;
+  };
+  // A number knob: a number sets it, null clears it (the field leaves the
+  // request), anything else is a mistake worth reporting - a typo that is
+  // silently ignored is how "I set temperature and it did nothing" happens.
+  auto num_knob = [&](const char* key, bool* has, double* value, double lo,
+                       double hi, const char* range) -> bool {
+    if (!body.contains(key)) return true;
+    const nlohmann::json& v = body[key];
+    if (v.is_null()) {
+      *has = false;
+      return true;
+    }
+    if (!v.is_number()) {
+      return fail(std::string("'") + key + "' must be a number");
+    }
+    const double d = v.get<double>();
+    if (d < lo || d > hi) {
+      return fail(std::string("'") + key + "' must be between " + range);
+    }
+    *has = true;
+    *value = d;
+    return true;
+  };
+  if (!num_knob("temperature", &req->has_temperature, &req->temperature, 0.0, 2.0,
+                "0 and 2")) return false;
+  if (!num_knob("top_p", &req->has_top_p, &req->top_p, 0.0, 1.0, "0 and 1")) return false;
+  if (!num_knob("frequency_penalty", &req->has_frequency_penalty,
+                &req->frequency_penalty, -2.0, 2.0, "-2 and 2")) return false;
+  if (!num_knob("presence_penalty", &req->has_presence_penalty,
+                &req->presence_penalty, -2.0, 2.0, "-2 and 2")) return false;
+
+  // top_k: 0 would mean "no token at all", so it is the same as "not set".
+  if (body.contains("top_k")) {
+    const nlohmann::json& v = body["top_k"];
+    if (v.is_null()) {
+      req->has_top_k = false;
+      req->top_k = 0;
+    } else if (!v.is_number_integer()) {
+      return fail("'top_k' must be a whole number");
+    } else {
+      const int64_t k = v.get<int64_t>();
+      if (k < 0 || k > 1000000) return fail("'top_k' must be between 0 and 1000000");
+      req->has_top_k = k > 0;
+      req->top_k = static_cast<int>(k);
+    }
+  }
+  // seed: 0 is a real seed (a deterministic call), so only null means "unset".
+  if (body.contains("seed")) {
+    const nlohmann::json& v = body["seed"];
+    if (v.is_null()) {
+      req->has_seed = false;
+      req->seed = 0;
+    } else if (!v.is_number_integer()) {
+      return fail("'seed' must be a whole number");
+    } else {
+      const int64_t sd = v.get<int64_t>();
+      if (sd < 0 || sd > 2147483647LL) {
+        return fail("'seed' must be between 0 and 2147483647");
+      }
+      req->has_seed = true;
+      req->seed = sd;
+    }
+  }
+  if (body.contains("max_tokens")) {
+    const nlohmann::json& v = body["max_tokens"];
+    if (v.is_null()) {
+      req->max_tokens = 0;
+    } else if (!v.is_number_integer()) {
+      return fail("'max_tokens' must be a whole number");
+    } else {
+      const int64_t mt = v.get<int64_t>();
+      if (mt < 0 || mt > 100000000LL) {
+        return fail("'max_tokens' must be between 0 and 100000000");
+      }
+      req->max_tokens = mt;
+    }
+  }
+  // The thinking level. "auto" (and null) mean "do not send the field"; any
+  // other value is sent as it is - the caller knows their gateway, and "off"
+  // is exactly what a caller who wants no thinking asks for.
+  if (body.contains("reasoning_effort")) {
+    const nlohmann::json& v = body["reasoning_effort"];
+    if (v.is_null()) {
+      req->reasoning_effort = "auto";
+      req->send_reasoning_effort = false;
+    } else if (!v.is_string()) {
+      return fail("'reasoning_effort' must be a string");
+    } else {
+      const std::string effort = trim(v.get<std::string>());
+      if (effort.empty() || effort == "auto") {
+        req->reasoning_effort = "auto";
+        req->send_reasoning_effort = false;
+      } else {
+        req->reasoning_effort = effort;
+        req->send_reasoning_effort = true;
+        // The value goes on the wire unchanged, so a gateway-specific spelling
+        // works. A typo does not: it would be ignored and the model would keep
+        // thinking. Say so in the log - the response tells the caller what was
+        // sent, the log tells the operator it looks wrong.
+        bool known = false;
+        for (int i = 0; i < kEffortCount; ++i) {
+          if (effort == kEfforts[i]) { known = true; break; }
+        }
+        if (!known) {
+          LOG_WARN("llm: unusual reasoning_effort '", effort,
+                   "' (known: auto/off/minimal/low/medium/high/xhigh/max) - "
+                   "it goes on the wire unchanged");
+        }
+      }
+    }
+  }
+  return true;
+}
+
+nlohmann::json knobs_to_json(const ChatRequest& req) {
+  nlohmann::json j = nlohmann::json::object();
+  // "auto" means the field was not sent; the flag says so explicitly, because
+  // "the gateway decided" and "we asked for off" are different things.
+  j["reasoning_effort"] = req.send_reasoning_effort ? req.reasoning_effort : "auto";
+  j["reasoning_effort_sent"] = req.send_reasoning_effort;
+  j["temperature"] = req.has_temperature ? nlohmann::json(req.temperature)
+                                          : nlohmann::json(nullptr);
+  j["top_p"] = req.has_top_p ? nlohmann::json(req.top_p) : nlohmann::json(nullptr);
+  j["top_k"] = req.has_top_k ? nlohmann::json(req.top_k) : nlohmann::json(nullptr);
+  j["frequency_penalty"] = req.has_frequency_penalty
+                               ? nlohmann::json(req.frequency_penalty)
+                               : nlohmann::json(nullptr);
+  j["presence_penalty"] = req.has_presence_penalty
+                               ? nlohmann::json(req.presence_penalty)
+                               : nlohmann::json(nullptr);
+  j["seed"] = req.has_seed ? nlohmann::json(req.seed) : nlohmann::json(nullptr);
+  j["max_tokens"] = req.max_tokens > 0 ? nlohmann::json(req.max_tokens)
+                                        : nlohmann::json(nullptr);
+  return j;
+}
 
 nlohmann::json ChatUsage::to_json() const {
   nlohmann::json j = nlohmann::json::object();
