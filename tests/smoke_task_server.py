@@ -52,6 +52,7 @@ class Provider(BaseHTTPRequestHandler):
 
     quota_remaining = 100.0
     calls = []
+    bodies = []
 
     def log_message(self, *args):
         pass
@@ -92,6 +93,8 @@ class Provider(BaseHTTPRequestHandler):
             body = json.loads(raw or b"{}")
         except ValueError:
             body = {}
+        # What really went on the wire - the knobs of a task are checked here.
+        Provider.bodies.append(body)
         messages = body.get("messages") or []
         last = messages[-1] if messages else {}
         if isinstance(last.get("content"), str) and "SLOWME" in last["content"]:
@@ -113,6 +116,14 @@ class Provider(BaseHTTPRequestHandler):
         if last.get("role") == "tool":
             # The report was made; answer and let the turn finish.
             self._sse_text("understood, continuing")
+        elif self._wants_file(messages):
+            # A task that produces a file: the agent writes it in the
+            # workspace and reports it as an artifact of the turn.
+            self._sse_tool_call("toolkit_file", {
+                "op": "write",
+                "path": "report.txt",
+                "content": "hello from the task",
+            })
         elif self._wants_confirmation(messages):
             self._sse_tool_call("toolkit_task", {
                 "op": "update",
@@ -133,6 +144,16 @@ class Provider(BaseHTTPRequestHandler):
 
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
+
+    @staticmethod
+    def _wants_file(messages):
+        """A task that asks for a file to be written."""
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            return isinstance(content, str) and "MAKEFILE" in content
+        return False
 
     @staticmethod
     def _wants_confirmation(messages):
@@ -774,6 +795,85 @@ providers:
                                % (later.get("id"), ws_id))
         check("a scheduled task can still be started by hand",
               status == 200, (status, started))
+
+        # ---- a task that says when it starts, with which provider, which
+        # ---- model and which model knobs -------------------------------
+        status, knobs = call(task_port, "POST", "/api/tasks",
+                             {"workspace_id": ws_id, "prompt": "with knobs",
+                              "provider": "minimax", "model": "MiniMax-M3.1-Flash",
+                              "model_params": {"temperature": 0.3, "max_tokens": "8000",
+                                               "reasoning_effort": "off"}})
+        params = (knobs or {}).get("model_params") or {}
+        check("a task can carry the model knobs",
+              status == 200 and params.get("temperature") == 0.3
+              and params.get("max_tokens") == 8000
+              and params.get("reasoning_effort") == "off", (status, knobs))
+        status, typo = call(task_port, "POST", "/api/tasks",
+                             {"workspace_id": ws_id, "prompt": "x",
+                              "model_params": {"temp": 0.3}})
+        check("a knob nobody knows is refused", status == 400, (status, typo))
+        status, wild = call(task_port, "POST", "/api/tasks",
+                            {"workspace_id": ws_id, "prompt": "x",
+                             "model_params": {"temperature": 9}})
+        check("a knob out of range is refused", status == 400, (status, wild))
+        # The knobs travel with the turn: the provider really receives them.
+        ran = wait_task_status(task_port, ws_id, knobs.get("id"), ("done", "failed"), 90)
+        check("the task with the knobs ran", (ran or {}).get("status") == "done", ran)
+        sent = [b for b in Provider.bodies if b.get("temperature") == 0.3]
+        check("the knobs went to the provider",
+              bool(sent) and sent[-1].get("max_tokens") == 8000
+              and sent[-1].get("reasoning_effort") == "off",
+              sent[-1] if sent else None)
+
+        # ---- a local time (what a browser's clock hands over) --------------
+        stamp = time.strftime("%Y-%m-%dT%H:%M", time.localtime(time.time() + 7200))
+        status, local = call(task_port, "POST", "/api/tasks",
+                             {"workspace_id": ws_id, "prompt": "local time",
+                              "not_before": stamp})
+        check("a local time is understood",
+              status == 200 and local.get("not_before")
+              and local.get("not_before_text") == stamp
+              and local.get("starts_at_local"), (status, local))
+
+        # ---- the pickers the web page draws from --------------------------
+        status, spaces = call(task_port, "GET", "/api/workspaces")
+        check("the queue lists the workspaces",
+              status == 200 and any(w.get("id") == ws_id
+                                    for w in (spaces.get("workspaces") or [])),
+              (status, spaces))
+        status, providers = call(task_port, "GET", "/api/providers")
+        check("the queue lists the providers and their models",
+              status == 200 and any(p.get("name") == "minimax"
+                                    and "MiniMax-M3.1-Flash" in (p.get("models") or [])
+                                    for p in (providers.get("providers") or [])),
+              (status, providers))
+        # A task may name its workspace by path - that is what a person types.
+        status, by_path = call(task_port, "POST", "/api/tasks",
+                               {"workspace": ws_dir, "prompt": "by path"})
+        check("a task can name its workspace by path",
+              status == 200 and by_path.get("workspace_id") == ws_id, (status, by_path))
+        status, nowhere = call(task_port, "POST", "/api/tasks",
+                               {"workspace": os.path.join(tmp, "nope"), "prompt": "x"})
+        check("a workspace nobody has is refused", status == 400, (status, nowhere))
+
+        # ---- a task that produces a file: the result has a download link ---
+        status, made = call(task_port, "POST", "/api/tasks",
+                            {"workspace_id": ws_id, "prompt": "MAKEFILE a report"})
+        check("a task that produces a file is queued", status == 200, (status, made))
+        done = wait_task_status(task_port, ws_id, made.get("id"), ("done", "failed"), 90)
+        check("the task with the file finished", (done or {}).get("status") == "done", done)
+        arts = (done or {}).get("artifacts") or []
+        check("the produced file is in the record",
+              any(a.get("path") == "report.txt" for a in arts), arts)
+        check("the file has a download link",
+              bool(arts) and bool(arts[0].get("download_url")), arts)
+        link = (arts[0].get("download_url") if arts else "") or ""
+        status, content = call(task_port, "GET", link)
+        check("the download link serves the file",
+              status == 200 and "hello from the task" in str(content), (status, content))
+        status, denied = call(task_port, "GET",
+                              "/api/tasks/%s/download?path=secret.txt" % made.get("id"))
+        check("a file the task did not produce is not served", status == 404, (status, denied))
 
         # ---- the unified envelope ---------------------------------------------
         status, envelope = call(task_port, "GET", "/api/tasks", raw=True)

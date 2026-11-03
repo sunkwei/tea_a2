@@ -70,8 +70,11 @@ curl http://127.0.0.1:8283/api/tasks
 | --- | --- | --- |
 | `GET` | `/api/health` | 服务自己、以及它连着的 agent 的状态、队列计数 |
 | `GET` | `/api/tasks?workspace_id=&status=` | 任务列表 + 每种状态的计数 |
-| `POST` | `/api/tasks` | 排队：`{workspace_id?, prompt, title?, provider?, model?, allow_paths?, meta?}` |
-| `GET` | `/api/tasks/{id}?workspace_id=` | 单个任务：状态、进度、中间状态、结果 |
+| `POST` | `/api/tasks` | 排队：`{workspace_id?, prompt, title?, provider?, model?, model_params?, allow_paths?, meta?}` |
+| `GET` | `/api/tasks/{id}?workspace_id=` | 单个任务：状态、进度、中间状态、结果（生成物带下载链接） |
+| `GET` | `/api/tasks/{id}/download?path=&workspace_id=` | 下载这个任务产出的一个文件（队列自己伺服，agent 在别的机器上也行） |
+| `GET` | `/api/workspaces` | 任务可以放在哪些工作区里（agent 的 + 队列自己的）——网页的下拉框就是它画的 |
+| `GET` | `/api/providers` | agent 认识的 provider 和它们的模型——网页的下拉框也是它画的 |
 | `DELETE` | `/api/tasks/{id}?workspace_id=` | 删掉一个任务（正在跑的先停掉） |
 | `POST` | `/api/tasks/{id}/start?workspace_id=` | 现在就做这件事（同样过额度闸门） |
 | `POST` | `/api/tasks/{id}/cancel?workspace_id=` | 停掉正在跑的那个（`POST /api/chat/stop`） |
@@ -99,6 +102,20 @@ python3 sched/task_server.py --submit "把 README 的例子跑一遍" --title "�
 可以带的字段：`prompt`（必填）、`title`、`workspace_id`（默认第一个）、`provider`（默认
 `minimax`，即用谁的额度当闸门）、`model`、`meta`（自己用的自由字段）。写错 `workspace_id`
 会被当场挡下（400，并列出 agent 真正认识的工作区），不会排到一半才失败。
+
+还可以带：
+
+| 字段 | 是什么 |
+| --- | --- |
+| `workspace` | 工作区的**路径**（也可以写 id）——人写路径，队列换成 agent 认识的那个 id |
+| `not_before`（或 `start_at`） | 什么时候开始做：`"+5"`、`"23:30"`、`"+30m"`、`"+2d"`、`"2026-10-24T09:00:00Z"`，或者**本机时间** `"2026-10-24T09:30"`（网页的日期框给的就是这个） |
+| `model_params` | 这一轮用哪些模型参数：`{"temperature": 0.3, "max_tokens": 8000, "reasoning_effort": "off"}` |
+
+**模型参数**是 agent 自己 `/api/chat` 也认的那几个旋钮（`temperature`、`top_p`、`top_k`、
+`frequency_penalty`、`presence_penalty`、`seed`、`max_tokens`、`reasoning_effort`）。
+它们只对**这一轮**生效（下一个任务还是模型自己的默认值）；写错名字或者超范围会被
+当场挡下（400，并说清是哪个旋钮），不会等到开工才发现。也可以直接写在请求的顶层
+（`{"prompt":"…","temperature":0.3}`），和 agent 的接口一个写法。
 
 排完它就**等着**：调度器每轮看一眼队列，minimax 额度够（默认至少剩 5%）就开工，不够就一直等。
 想立刻做：`POST /api/tasks/{id}/start`（网页上就是卡片里的「开始」按钮）。
@@ -309,6 +326,9 @@ allow_paths:
   - /tmp
 provider: minimax
 model: MiniMax-M3.1-Flash
+model_params:
+  temperature: 0.3
+  max_tokens: 8000
 priority: 0
 not_before: +5
 tags:
@@ -374,13 +394,31 @@ agent，这台机器上还有别的 agent（比如 8383 上那个）时加 `--ag
 
 ### 网页：<http://127.0.0.1:8283/>
 
-任务服务自带一个页面（`sched/task_ui.html`，一个静态文件，纯标准库伺服），分三段：
+任务服务自带一个页面（`sched/task_ui.html`，一个静态文件，纯标准库伺服），上面一张
+**排任务的表单**，下面三段：
 
-- **排队中**：什么时候排的、任务内容、provider、可以「开始」或「删除」；
+**表单**能一次把一个任务能有的设置都写清楚：
+
+| 格子 | 是什么 |
+| --- | --- |
+| 主题 | 一句话说清要做什么（`title`） |
+| 详细内容 | 真正要做的事（`prompt`） |
+| 工作区 | 下拉里是 agent 认识的工作区（`GET /api/workspaces`），也可以直接写路径 |
+| 什么时候开始 | 尽快 / 30 分钟后 / 2 小时后 / 明天 09:00 / 自己挑一个日期时间（`not_before`） |
+| provider | 下拉里是 agent 认识的 provider（`GET /api/providers`） |
+| 模型 | 跟着 provider 变的模型下拉（留空 = 那个 provider 的默认模型） |
+| 模型参数 | 展开才看见：`temperature`、`top_p`、`max_tokens`、`思考强度`、`seed`（留空 = 什么都不额外发） |
+| 额外可访问的目录 | 这个任务额外能碰的目录（逗号分隔） |
+
+填完点「排队」，下面三段：
+
+- **排队中**：什么时候排的、任务内容、provider、模型、模型参数、什么时候开始
+  （`⏰`）、可以「开始」或「删除」；
 - **进行中**：进度条与百分比、agent 报上来的最新中间状态（展开看历史）、可以「取消」；
   「等你确认」的任务在这里，答一句就继续；
-- **已完成**：**最终回答**、**生成物**（agent 产出的文件，点开直接下载）、中间状态、
-  **任务目录**（记录文件在哪、工作区在哪）和「在 agent 里打开这个会话」的链接。
+- **已完成**：**最终回答**、**生成物**（agent 产出的文件，点开直接下载——链接是队列自己的
+  `/api/tasks/{id}/download`，agent 在别的机器上也点得开）、中间状态、
+  **任务目录**（记录文件在哪、工作区在哪）、「下载全部结果（zip）」和「在 agent 里打开这个会话」的链接。
 
 页面靠 `/api/events`（SSE）实时刷新，5 秒轮询一次兜底；顶栏还显示 agent 的连通状态和
 **minimax 额度还剩多少**。

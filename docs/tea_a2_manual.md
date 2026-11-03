@@ -764,12 +764,27 @@ curl -X POST http://127.0.0.1:8283/api/tasks \
      -d '{"prompt":"把 README 里的例子都跑一遍","title":"例子"}'
 # → {"code":0,"message":"ok","request_id":"req_...","data":{"id":"t_...","status":"queued",...}}
 
-# 3) 网页：打开 http://127.0.0.1:8283/ ，写一句要做的事，点「排队」
+# 3) 网页：打开 http://127.0.0.1:8283/ ，填一张表（主题、内容、工作区、
+#    什么时候开始、provider、模型、模型参数），点「排队」
+#    做完了，任务卡上就是最终回答和**生成物的下载链接**
 ```
 
 能带的字段：`prompt`（必填）、`title`、`workspace_id`（默认第一个工作区）、
 `provider`、`model`、`allow_paths`、`meta`、`priority`、`idempotency_key`、
-`not_before`（**定时**）。
+`not_before`（**定时**）、`workspace`（写工作区的路径）、`model_params`（**模型参数**）。
+
+**模型参数**（这一轮用哪个模型、哪些旋钮）：
+
+```bash
+curl -X POST http://127.0.0.1:8283/api/tasks -H 'Content-Type: application/json' \
+     -d '{"prompt":"把 README 的例子跑一遍","provider":"minimax",
+          "model":"MiniMax-M3.1-Flash",
+          "model_params":{"temperature":0.3,"max_tokens":8000,"reasoning_effort":"off"}}'
+```
+
+认得的旋钮：`temperature`、`top_p`、`top_k`、`frequency_penalty`、`presence_penalty`、
+`seed`、`max_tokens`、`reasoning_effort`——和 agent 的 `/api/chat` 是同一套。
+它们只对**这一轮**生效；写错名字或者超范围当场 `400 bad_request`（`data.error` 里说是哪个）。
 
 ### 3.2.1 定时做一件活儿
 
@@ -790,7 +805,8 @@ curl -X POST http://127.0.0.1:8283/api/tasks -H 'Content-Type: application/json'
 ```
 
 写法一共这几种：`+5`（五小时后）、`+30m`（半小时后）、`+2d`（两天后）、
-`23:30`（今天这个钟点，过了就尽快做）、`2026-10-24T09:00:00Z`（绝对时间）。
+`23:30`（今天这个钟点，过了就尽快做）、`2026-10-24T09:00:00Z`（绝对时间）、
+`2026-10-24T09:30`（**本机时间**，网页的日期框给的就是这个）。
 看不懂就返回 `400 bad_request`，`data.error` 里说明它没听懂。
 
 **到点之前这个任务不会被启动，但它也不挡着后面的任务**——「晚点做」不是
@@ -863,6 +879,15 @@ curl -sJ "http://127.0.0.1:8283/api/tasks/t_xxx/export?format=zip" -o task.zip
 
 zip 里有 `manifest.json` / `final_answer.md` / `conversation.jsonl` / `events.jsonl` /
 `artifacts/`。
+
+**单个文件也能下载**（网页上生成物的链接就是它）：
+
+```bash
+curl -sJ "http://127.0.0.1:8283/api/tasks/t_xxx/download?path=report.txt" -o report.txt
+```
+
+只服务这个任务**真的产出过**的文件（别的文件 → 404）——文件在 agent 的工作区里，
+由队列代为伺服（agent 在别的机器上也点得开）。
 
 ### 3.6 按项目授权
 

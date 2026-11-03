@@ -233,7 +233,8 @@ class Queue:
         return key
 
     def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
-               meta=None, key="", not_before="", model="", priority=0, extra=None):
+               meta=None, key="", not_before="", model="", priority=0, extra=None,
+               model_params=None):
         body = {"prompt": prompt}
         if workspace_id:
             body["workspace_id"] = workspace_id
@@ -251,6 +252,8 @@ class Queue:
             body["not_before"] = not_before
         if model:
             body["model"] = model
+        if model_params:
+            body["model_params"] = dict(model_params)
         if priority:
             body["priority"] = priority
         for key_name, value in (extra or {}).items():

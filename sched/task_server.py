@@ -222,10 +222,121 @@ def parse_not_before(text, now=None):
             return iso_from_epoch(int(now // 60) * 60), raw
         return iso_from_epoch(today), raw
 
+    # A local time without a zone: "2026-11-04T09:30" (what a browser's
+    # datetime picker hands over) or "2026-11-04 09:30". It is local time,
+    # so it is converted to the UTC every other stamp uses.
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?)?$", raw)
+    if match:
+        try:
+            stamp = time.mktime((int(match.group(1)), int(match.group(2)),
+                                 int(match.group(3)), int(match.group(4) or 0),
+                                 int(match.group(5) or 0), int(match.group(6) or 0),
+                                 0, 0, -1))
+        except (OverflowError, ValueError):
+            return None, ""
+        return iso_from_epoch(stamp), raw
+
     stamp = parse_iso(raw)
     if stamp is not None:
         return raw, raw
     return None, ""
+
+
+# The model knobs a task may carry - the same ones the agent's chat API takes
+# (see apply_knob_overrides in src/llm.cpp). A knob nobody set stays out of
+# the request; a knob nobody knows is an error, never a silent no-op.
+MODEL_KNOBS = ("temperature", "top_p", "top_k", "frequency_penalty",
+               "presence_penalty", "seed", "max_tokens", "reasoning_effort")
+
+# The number knobs and the range each of them lives in.
+KNOB_RANGES = {
+    "temperature": (0.0, 2.0),
+    "top_p": (0.0, 1.0),
+    "frequency_penalty": (-2.0, 2.0),
+    "presence_penalty": (-2.0, 2.0),
+}
+# The whole-number knobs and their upper bound.
+KNOB_LIMITS = {"top_k": 1000000, "seed": 2147483647, "max_tokens": 100000000}
+
+
+def _knob_number(value):
+    """A number from a JSON value or from a text field ("" -> None)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def parse_model_params(body):
+    """The model knobs of a task: (params, error message).
+
+    The knobs may come as `model_params` (a dict), as `params` (the same dict
+    under another name) or as the top-level fields of the request - the
+    agent's own chat API takes them that way, so a caller that knows one API
+    knows both. Values may be numbers or strings (a web form sends strings).
+
+    A knob nobody knows is an error with its name: "I set temperature and
+    nothing happened" is the worst possible answer.
+    """
+    body = body if isinstance(body, dict) else {}
+    wanted = {}
+    for name in ("model_params", "params"):
+        value = body.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            return {}, "'%s' must be an object (knob: value pairs)" % name
+        for key, raw in value.items():
+            if key not in MODEL_KNOBS:
+                return {}, ("不认识的模型参数 %r（认识的：%s）"
+                            % (key, "、".join(MODEL_KNOBS)))
+            wanted[key] = raw
+    # The top level: only the knobs are read - the rest of the body is the
+    # task itself (prompt, title, workspace, ...).
+    for key in MODEL_KNOBS:
+        if key in body:
+            wanted[key] = body[key]
+
+    params = {}
+    for key, raw in wanted.items():
+        if raw is None:
+            continue                       # "not set"
+        if key == "reasoning_effort":
+            text = str(raw).strip()
+            if not text:
+                continue
+            params[key] = text
+            continue
+        number = _knob_number(raw)
+        if number is None:
+            return {}, "'%s' must be a number" % key
+        if key in KNOB_RANGES:
+            low, high = KNOB_RANGES[key]
+            if number < low or number > high:
+                return {}, "'%s' must be between %g and %g" % (key, low, high)
+            params[key] = number
+        elif key in KNOB_LIMITS:
+            if isinstance(number, float) and number != int(number):
+                return {}, "'%s' must be a whole number" % key
+            number = int(number)
+            limit = KNOB_LIMITS[key]
+            if number < 0 or number > limit:
+                return {}, "'%s' must be between 0 and %d" % (key, limit)
+            params[key] = number
+        else:
+            params[key] = number
+    return params, ""
 
 
 class AgentError(Exception):
@@ -327,6 +438,13 @@ class Agent:
                 return one["id"]
         return ""
 
+    def providers(self):
+        """The providers the agent knows, with their models.
+
+        The queue's web page draws its provider and model pickers from this.
+        """
+        return self._request("GET", "/api/providers")
+
     def usage(self, provider):
         """How much of the provider's subscription is left.
 
@@ -412,7 +530,8 @@ class Agent:
         return self._request("POST", "/api/workspaces", {"path": path, "name": name})
 
     def chat(self, workspace_id, message, provider=None, session_id=None,
-             task_id=None, task_context=None, allow_paths=None, model=None):
+             task_id=None, task_context=None, allow_paths=None, model=None,
+             params=None):
         """Run one turn and yield the agent's events as they happen.
 
         This is the whole contract between the queue and the channel: the
@@ -427,6 +546,12 @@ class Agent:
             # The model of this task. The agent falls back to the provider's
             # first model when the name is empty or unknown.
             body["model"] = model
+        if params:
+            # The model knobs of this task (temperature, max_tokens, ...):
+            # they go on the wire for this turn and for this turn only.
+            for key, value in params.items():
+                if key in MODEL_KNOBS and value is not None:
+                    body[key] = value
         if session_id:
             body["session_id"] = session_id
         if task_id:
@@ -474,7 +599,7 @@ class Agent:
 
 
 def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
-             not_before_text="", key="", meta=None):
+             not_before_text="", key="", meta=None, model_params=None):
     """A task record, from the fields a task order (or the API) carries."""
     return {
         "id": "t_" + os.urandom(6).hex(),
@@ -483,6 +608,9 @@ def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
         "title": str(body.get("title") or "").strip(),
         "provider": str(body.get("provider") or "").strip(),
         "model": str(body.get("model") or "").strip(),
+        # The model knobs of this task (temperature, max_tokens, ...). Empty
+        # means "the defaults of the model" - nothing is sent to the wire.
+        "model_params": dict(model_params or {}),
         "allow_paths": list(allow_paths or []),
         "session_id": "",
         "status": QUEUED,
@@ -1684,10 +1812,12 @@ class Engine:
         # The model this task asked for; without one the queue's default
         # applies (`task_model:` in provider.yaml).
         model = task.get("model") or self.effective_model()
+        # The knobs the task asked for (temperature, max_tokens, ...).
+        params = task.get("model_params") or {}
         for event in self.agent.chat(workspace_id, message, provider=provider,
                                      session_id=session_id, task_id=task_id,
                                      task_context=context, allow_paths=allow_paths,
-                                     model=model or None):
+                                     model=model or None, params=params):
             kind = event.get("type")
             if kind == "start":
                 session_id = event.get("session_id") or session_id
@@ -2017,6 +2147,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_thread(rest)
         if path == "/api/task-order-template":
             return self._task_order_template()
+        if path == "/api/workspaces":
+            return self._workspaces()
+        if path == "/api/providers":
+            return self._providers()
         if path.startswith("/api/tasks/"):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
@@ -2025,6 +2159,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._task_events(task_id)
                 if action == "export":
                     return self._export(task_id)
+                if action == "download":
+                    return self._download(task_id)
                 return self._error(404, "not_found", "no such action: %s" % action)
             return self._get(rest)
         return self._error(404, "not_found", "no such endpoint: %s" % path)
@@ -2174,6 +2310,61 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _workspaces(self):
+        """The workspaces a task may run in.
+
+        The queue's own workspace is in the list too (it is the default), and
+        the agent's - the page draws its picker from this.
+        """
+        out = []
+        try:
+            for ws in self.app.agent.workspaces() or []:
+                out.append({
+                    "id": ws.get("id") or "",
+                    "name": ws.get("name") or "",
+                    "path": ws.get("path") or "",
+                    "writable": bool(ws.get("writable", True)),
+                    "write_error": ws.get("write_error") or "",
+                })
+        except AgentError as exc:
+            self._json(200, {"workspaces": [], "agent_ok": False, "error": str(exc)})
+            return
+        own = self.app.task_workspace_id()
+        if own and not any(one.get("id") == own for one in out):
+            out.insert(0, {"id": own, "name": "队列自己的工作区",
+                           "path": self.app.workspace_path(own),
+                           "writable": True, "write_error": ""})
+        self._json(200, {"workspaces": out, "agent_ok": True,
+                         "default_workspace_id": self.app.default_workspace()})
+
+    def _providers(self):
+        """The providers the agent knows, with their models.
+
+        The page draws its provider and model pickers from this, so a task
+        can say which provider and which model it wants.
+        """
+        try:
+            body = self.app.agent.providers()
+        except AgentError as exc:
+            self._json(200, {"providers": [], "agent_ok": False, "error": str(exc)})
+            return
+        if not isinstance(body, dict):
+            body = {}
+        providers = []
+        for one in body.get("providers") or []:
+            if not isinstance(one, dict):
+                continue
+            providers.append({
+                "name": one.get("name") or "",
+                "default_model": one.get("default_model") or "",
+                "models": [str(m) for m in (one.get("models") or [])],
+                "has_key": bool(one.get("has_key")),
+                "supports_usage": bool(one.get("supports_usage")),
+            })
+        self._json(200, {"providers": providers, "agent_ok": True,
+                         "active": body.get("active") or {},
+                         "reasoning_efforts": body.get("reasoning_efforts") or []})
+
     def _projects(self):
         """The projects (workspaces) the queue knows about.
 
@@ -2311,6 +2502,44 @@ class Handler(BaseHTTPRequestHandler):
         self.app.store.audit("export", task_id, {"format": "json"})
         self._json(200, document)
 
+    def _download(self, task_id):
+        """One file the task produced.
+
+        The queue serves it: the browser may not be able to reach the agent
+        (it lives on another machine), and the project key that guards the
+        tasks guards this file too. Only a file the task really produced is
+        served - the task's workspace is not a public directory.
+        """
+        workspace_id = self._one("workspace_id")
+        task = self.app.store.load(workspace_id, task_id)
+        if task is None:
+            return self._error(404, "not_found", "no task %r" % task_id)
+        if not self._check_project(task):
+            return self._forbid("task %s" % task_id)
+        path = self._one("path")
+        if not path:
+            return self._error(400, "bad_request", "'path' is required")
+        produced = [str(a.get("path") or "") for a in (task.get("artifacts") or [])
+                    if isinstance(a, dict)]
+        if path not in produced:
+            return self._error(404, "not_found",
+                               "%r is not a file this task produced" % path[:80])
+        data = self.app.agent.download(task.get("workspace_id") or "", path)
+        if not data:
+            return self._error(404, "not_found",
+                               "the file is gone (or empty): %r" % path[:80])
+        name = path.replace("\\", "/").rsplit("/", 1)[-1] or "file"
+        name = name.replace('"', "")
+        self.app.store.audit("download", task_id, {"path": path, "bytes": len(data)})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition",
+                         "attachment; filename=\"%s\"; filename*=UTF-8''%s"
+                         % (name, urllib.parse.quote(name)))
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _audit(self):
         task_id = self._one("task_id")
         limit = self._int("limit", 200)
@@ -2342,6 +2571,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "bad_request", "the request body is not JSON")
         workspace_id = str(body.get("workspace_id") or "").strip()
         prompt = str(body.get("prompt") or "").strip()
+        # The workspace may also be named by its path - that is what a person
+        # types. The queue turns it into the id the agent knows.
+        named = str(body.get("workspace") or body.get("workspace_path") or "").strip()
+        if named and not workspace_id:
+            try:
+                workspace_id = resolve_workspace_id(self.app.agent, named)
+            except task_order.OrderError as exc:
+                return self._error(400, "bad_request", str(exc))
+            except AgentError:
+                workspace_id = named      # the agent is down: keep what was written
         if not workspace_id:
             # The same default the scheduler uses: the first workspace.
             workspace_id = self.app.default_workspace()
@@ -2395,6 +2634,9 @@ class Handler(BaseHTTPRequestHandler):
         # what the user wrote ("+5", "23:30"); the stamp is absolute.
         not_before, not_before_text = "", ""
         wanted = body.get("not_before")
+        if wanted in (None, ""):
+            # "start_at" is the word the web page uses.
+            wanted = body.get("start_at")
         if wanted not in (None, ""):
             not_before, not_before_text = parse_not_before(str(wanted))
             if not not_before:
@@ -2402,9 +2644,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "'not_before' is not a time I understand: %r "
                                    "(try '+5' for five hours from now, or '23:30')"
                                    % str(wanted)[:40])
+        # The model knobs of this task (temperature, max_tokens, ...). A knob
+        # nobody knows is refused here - not after a long wait in the queue.
+        model_params, params_error = parse_model_params(body)
+        if params_error:
+            return self._error(400, "bad_request", params_error)
         task = new_task(body, workspace_id, allow_paths=allow_paths, priority=priority,
                         not_before=not_before, not_before_text=not_before_text, key=key,
-                        meta=body.get("meta") if isinstance(body.get("meta"), dict) else {})
+                        meta=body.get("meta") if isinstance(body.get("meta"), dict) else {},
+                        model_params=model_params)
         # Where the work runs: "" = the local agent, "fleet" = the devices'.
         task["target"] = str(body.get("target") or "").strip()
         if isinstance(body.get("fleet"), dict):
@@ -3209,6 +3457,30 @@ class App:
             task["starts_in_s"] = 0
         if task.get("kind") == "plan":
             task["child_count"] = len(task.get("children") or [])
+        # The files the task produced: each one gets a link the reader can
+        # click. The queue serves the file itself, so the link also works when
+        # the agent lives on another machine (a browser cannot reach it there).
+        artifacts = []
+        for art in (task.get("artifacts") or []):
+            if not isinstance(art, dict):
+                continue
+            item = dict(art)
+            path = str(item.get("path") or "")
+            if path:
+                item["name"] = path.replace("\\", "/").rsplit("/", 1)[-1]
+                item["download_url"] = ("/api/tasks/%s/download?path=%s"
+                                        % (urllib.parse.quote(task.get("id") or ""),
+                                           urllib.parse.quote(path)))
+                item["agent_download_url"] = (
+                    "%s/api/workspaces/%s/download?path=%s"
+                    % (self.agent.base,
+                       urllib.parse.quote(task.get("workspace_id") or ""),
+                       urllib.parse.quote(path)))
+            artifacts.append(item)
+        task["artifacts"] = artifacts
+        # The whole result as one document (or as one zip).
+        task["export_url"] = ("/api/tasks/%s/export?format=zip"
+                              % urllib.parse.quote(task.get("id") or ""))
         if full:
             task["events"] = self.store.events(task.get("id") or "")
             task["history"] = task.get("steps") or []
@@ -3407,11 +3679,16 @@ def submit_order(app, args):
         workspace_id = app.default_workspace()
     allow_paths = [os.path.abspath(os.path.expanduser(p))
                    for p in (body.get("allow_paths") or []) if str(p).strip()]
+    model_params, params_error = parse_model_params(body)
+    if params_error:
+        print("the task order has a problem:\n%s" % params_error, file=sys.stderr)
+        return 2
     task = new_task(body, workspace_id, allow_paths=allow_paths,
                     priority=int(body.get("priority") or 0),
                     not_before=not_before, not_before_text=not_before_text,
                     key=str(body.get("idempotency_key") or ""),
-                    meta=body.get("meta") if isinstance(body.get("meta"), dict) else {})
+                    meta=body.get("meta") if isinstance(body.get("meta"), dict) else {},
+                    model_params=model_params)
     app.store.create(task)
     log("queued task %s (%s)" % (task["id"], task["title"] or task["prompt"][:40]))
     if task["not_before"]:

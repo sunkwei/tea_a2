@@ -46,6 +46,13 @@ allow_paths:
 provider: minimax
 model: MiniMax-M3.1-Flash
 
+# 这一轮用哪些模型参数（留空 = 模型的默认值，什么都不额外发）
+# 认识的旋钮：temperature、top_p、top_k、frequency_penalty、presence_penalty、
+#             seed、max_tokens、reasoning_effort
+model_params:
+  temperature: 0.3
+  max_tokens: 8000
+
 # ---------------------------------------------------------------------------
 # 【什么时候做】
 # 留空 = 尽快（额度有余量就开工）

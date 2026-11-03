@@ -93,7 +93,7 @@ Run-Step 'end-to-end (tests/e2e.ps1)' {
 
 if (-not $SkipPython) {
     $smokes = @('smoke_config_quickstart.py', 'smoke_concurrency.py', 'smoke_task_runner.py',
-                 'smoke_artifacts.py',
+                 'smoke_artifacts.py', 'smoke_task_server.py',
                  'smoke_agent_doc.py', 'smoke_prompt_queue.py', 'smoke_system_prompt.py',
                  'smoke_todo.py', 'smoke_tool_images.py', 'smoke_usage_cache.py',
                  'smoke_provider_usage.py', 'smoke_console_level.py', 'smoke_vision.py',
@@ -119,6 +119,7 @@ if (-not $SkipUi) {
                  'ui_provider_reset.mjs', 'ui_workspace_access.mjs', 'ui_metrics_layout.mjs',
                  'ui_tab_blink.mjs',
                  'ui_sidebar.mjs', 'ui_status.mjs', 'ui_todo.mjs', 'ui_queue.mjs',
+                 'ui_task_form.mjs',
                  'ui_turn_index.mjs', 'ui_stream_guard.mjs', 'ui_stream_resume.mjs',
                  'ui_second_client.mjs', 'ui_two_clients.mjs', 'ui_workspace_add.mjs',
                  'ui_workspace_delete.mjs',

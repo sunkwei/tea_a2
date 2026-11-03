@@ -289,7 +289,7 @@ class Queue:
 
     def create_task(self, prompt, workspace_id=None, title=None, provider=None,
                     allow_paths=None, meta=None, priority=None, idempotency_key=None,
-                    not_before=None):
+                    not_before=None, model=None, model_params=None):
         """Put a task in the queue. It waits until the provider has quota.
 
         `not_before` is the "do it later" knob: "+5" (five hours from now),
@@ -314,6 +314,10 @@ class Queue:
             body["idempotency_key"] = idempotency_key
         if not_before:
             body["not_before"] = not_before
+        if model:
+            body["model"] = model
+        if model_params:
+            body["model_params"] = dict(model_params)
         # The same key means the same task: a retried submission must not queue
         # the work twice.
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None

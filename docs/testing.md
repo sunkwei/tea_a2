@@ -63,7 +63,8 @@ python3 tests/smoke_shell.py                              # 网页终端：开�
 node tests/ui_shell.mjs                                  # 网页终端：入口、按键翻译、终端画面（需 google-chrome）
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
-python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果/串行/幂等/事件/导出
+python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果/串行/幂等/事件/导出 + 模型参数/本地定时/生成物下载
+node tests/ui_task_form.mjs                                # 队列网页：排任务的表单（主题/工作区/定时/provider/模型/参数）+ 生成物下载（需 google-chrome）
 python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）
 python3 tests/smoke_watchdog.py                             # 看门狗：卡住的任务（默认只告警）/ --auto 才判死 / 队列暂停与恢复 / agent 不通
 python3 tests/smoke_triggers.py                            # 触发器入口：规则先于模型 / 去重 / 线索 / 老路仍然能排任务
@@ -443,6 +444,12 @@ profile 打开服务器地址时**仍然落在 proj_a**（不再被"谁在跑就
 `tests/ui_queue.mjs` 在流式回答期间用真实的 Enter 按键入队：排队条按顺序出现、输入框清空、
 没有产生第二个会话；点 × 取消第一条；随后被采纳的一条从排队条消失并变成对话里的 user 气泡，
 本轮在同一 SSE 内继续（恰好两次模型请求），结束后排队条隐藏、输入框恢复「发送」。
+
+`tests/ui_task_form.mjs` 覆盖队列网页的排任务表单：表单里真的有每一个设置（主题、内容、
+工作区、起始时间、provider、模型、模型参数）；下拉框是从队列的 `/api/workspaces` 和
+`/api/providers` 画出来的；填完点「排队」，API 那边看到的确实是这些值（定时是本机时间、
+模型参数原样存着）；排队的卡片上能看到 provider、模型和「⏰ 什么时候开始」；做完的任务
+卡片上有生成物，点那个链接真的下载得到那个文件。
 
 `tests/ui_sidebar.mjs` 覆盖侧栏收起：点隐藏按钮后侧栏宽度归零、顶栏出现展开按钮、正文栏
 变宽（780 → 1040）；刷新后仍是收起状态；再点展开（或 `Ctrl+B`）后侧栏与列宽复原，选择被

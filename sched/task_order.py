@@ -31,7 +31,7 @@ STRING_KEYS = ("title", "prompt", "workspace", "provider", "model",
                "not_before", "idempotency_key", "business_id")
 LIST_KEYS = ("allow_paths", "tags")
 INT_KEYS = ("priority",)
-DICT_KEYS = ("meta",)
+DICT_KEYS = ("meta", "model_params")
 
 KNOWN_KEYS = set(STRING_KEYS) | set(LIST_KEYS) | set(INT_KEYS) | set(DICT_KEYS)
 

@@ -78,16 +78,31 @@
   button.danger:hover { color: var(--err); border-color: var(--err); }
   .empty { color: var(--faint); font-size: 13px; padding: 4px 2px 12px; }
   .new { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
-  .new textarea, .new input {
+  .new textarea, .new input, .new select {
     width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 9px; font: inherit; resize: vertical;
   }
-  .newrow { display: flex; gap: 8px; margin-top: 8px; }
+  .newrow { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
   .newrow input { flex: 1 1 auto; }
   button.primary { color: var(--accent); border-color: var(--accent); }
   .path { color: var(--faint); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; word-break: break-all; }
   a.ext { color: var(--accent); text-decoration: none; font-size: 12px; }
   a.ext:hover { text-decoration: underline; }
+
+  /* the form of a new task */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 9px 12px; }
+  .f { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .f > span { font-size: 11px; color: var(--faint); letter-spacing: .04em; }
+  .f.wide { grid-column: 1 / -1; }
+  .knobs { margin-top: 9px; border-top: 1px dashed var(--line); padding-top: 7px; }
+  .knobs summary { color: var(--dim); }
+  .knobs .grid { margin-top: 8px; }
+  .knobs input, .knobs select { font-size: 12px; padding: 5px 8px; }
+  .msg { margin-top: 8px; font-size: 12px; }
+  .msg.ok { color: var(--ok); } .msg.bad { color: var(--err); }
+  .when { display: flex; gap: 8px; align-items: center; }
+  .when select { flex: 2 1 auto; font-size: 13px; }
+  .when input { flex: 1 1 auto; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -102,18 +117,86 @@
 </header>
 <main>
   <div class="new">
-    <textarea id="new-prompt" rows="2" spellcheck="false"
-              placeholder="写一句要做的事，排队等着（额度有余量时自动开工）"></textarea>
+    <div class="grid">
+      <label class="f">
+        <span>主题</span>
+        <input id="new-title" type="text" spellcheck="false" placeholder="一句话说清要做什么（可留空）">
+      </label>
+      <label class="f">
+        <span>工作区</span>
+        <input id="new-workspace" type="text" list="dl-workspace" spellcheck="false"
+               placeholder="留空 = 队列自己的工作区">
+        <datalist id="dl-workspace"></datalist>
+      </label>
+      <label class="f">
+        <span>什么时候开始</span>
+        <span class="when">
+          <select id="new-when">
+            <option value="">尽快（额度有余量就开工）</option>
+            <option value="+30m">30 分钟后</option>
+            <option value="+2h">2 小时后</option>
+            <option value="tomorrow">明天 09:00</option>
+            <option value="custom">指定时间…</option>
+          </select>
+          <input id="new-when-at" type="datetime-local" hidden>
+        </span>
+      </label>
+      <label class="f">
+        <span>用哪个 provider</span>
+        <input id="new-provider" type="text" list="dl-provider" spellcheck="false"
+               placeholder="留空 = 队列的默认 provider">
+        <datalist id="dl-provider"></datalist>
+      </label>
+      <label class="f">
+        <span>用哪个模型</span>
+        <input id="new-model" type="text" list="dl-model" spellcheck="false"
+               placeholder="留空 = 该 provider 的默认模型">
+        <datalist id="dl-model"></datalist>
+      </label>
+      <label class="f wide">
+        <span>详细内容（要做的事）</span>
+        <textarea id="new-prompt" rows="3" spellcheck="false"
+                  placeholder="写清楚要做什么、做成什么样。Ctrl/Cmd+Enter 也可以排队。"></textarea>
+      </label>
+      <label class="f wide">
+        <span>这个任务额外可以碰的目录（逗号分隔，可留空）</span>
+        <input id="new-allow" type="text" spellcheck="false" placeholder="例如 /data/raw">
+      </label>
+    </div>
+    <details class="knobs">
+      <summary>模型参数（留空 = 模型的默认值，什么都不额外发）</summary>
+      <div class="grid">
+        <label class="f"><span>temperature（0-2）</span>
+          <input id="knob-temperature" type="number" step="0.1" min="0" max="2" placeholder="留空"></label>
+        <label class="f"><span>top_p（0-1）</span>
+          <input id="knob-top_p" type="number" step="0.05" min="0" max="1" placeholder="留空"></label>
+        <label class="f"><span>max_tokens</span>
+          <input id="knob-max_tokens" type="number" step="256" min="0" placeholder="留空"></label>
+        <label class="f"><span>思考强度</span>
+          <select id="knob-reasoning_effort">
+            <option value="">留空（按模型默认）</option>
+            <option value="auto">auto（不额外说）</option>
+            <option value="off">off（别思考）</option>
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select></label>
+        <label class="f"><span>seed</span>
+          <input id="knob-seed" type="number" step="1" min="0" placeholder="留空"></label>
+      </div>
+    </details>
     <div class="newrow">
-      <input id="new-title" type="text" spellcheck="false" placeholder="标题（可留空）">
-      <input id="new-allow" type="text" spellcheck="false"
-             placeholder="允许访问的目录（逗号分隔，可留空）">
       <button class="primary" id="new-go">排队</button>
+      <button id="new-clear">清空</button>
       <a class="dl" id="dl-order" href="/api/task-order-template"
          download="task-order.template">下载任务单模板</a>
+      <span class="msg" id="new-msg"></span>
     </div>
     <p class="hint">任务单是一个文本文件：填好交给队列（<code>--submit-order</code>），
-      一次能带全所有设置（工作区、额外目录、provider、优先级、定时、标签…）。</p>
+      一次能带全所有设置（工作区、额外目录、provider、模型、模型参数、优先级、定时、标签…）。</p>
   </div>
   <h2>排队中 <span class="n" id="n-queued">0</span></h2>
   <div id="s-queued"></div>
@@ -124,7 +207,7 @@
 </main>
 <script>
 'use strict';
-var state = { tasks: [], health: null, agent: '', at: Date.now() };
+var state = { tasks: [], health: null, agent: '', at: Date.now(), providers: [] };
 
 function el(tag, cls, text) {
   var n = document.createElement(tag);
@@ -149,6 +232,7 @@ function bytes(n) {
   if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1048576).toFixed(1) + ' MB';
 }
+function val(id) { return (document.getElementById(id).value || '').trim(); }
 
 function card(t) {
   var c = el('div', 'card');
@@ -157,11 +241,19 @@ function card(t) {
   r1.appendChild(el('span', 'tid', t.id));
   r1.appendChild(el('span', 'pill ' + (t.status || ''), t.status || ''));
   if (t.provider) r1.appendChild(el('span', 'pill', t.provider));
+  if (t.model) r1.appendChild(el('span', 'pill', t.model));
   if (t.starts_at_local) r1.appendChild(el('span', 'pill when', '⏰ ' + t.starts_at_local));
   c.appendChild(r1);
 
   var p = el('div', 'prompt clamp', t.prompt || '');
   c.appendChild(p);
+
+  if (t.model_params && Object.keys(t.model_params).length) {
+    var knobs = Object.keys(t.model_params).map(function (k) {
+      return k + '=' + t.model_params[k];
+    }).join(' · ');
+    c.appendChild(el('div', 'hint', '模型参数：' + knobs));
+  }
 
   var pct = Math.max(0, Math.min(100, t.progress || 0));
   var bar = el('div', 'bar' + (t.status === 'done' ? ' done' : t.status === 'failed' ? ' failed' : ''));
@@ -197,9 +289,10 @@ function card(t) {
     var box = el('div', 'arts');
     t.artifacts.forEach(function (a) {
       var line = el('div', 'art');
-      var href = (t.agent_url || '') + '/api/workspaces/' + encodeURIComponent(t.workspace_id || '') +
-        '/download?path=' + encodeURIComponent(a.path || '');
-      var a2 = el('a', '', a.path || '');
+      var href = a.download_url || ((t.agent_url || '') + '/api/workspaces/' +
+        encodeURIComponent(t.workspace_id || '') + '/download?path=' +
+        encodeURIComponent(a.path || ''));
+      var a2 = el('a', '', a.name || a.path || '');
       a2.href = href; a2.target = '_blank';
       line.appendChild(a2);
       if (a.bytes != null) line.appendChild(el('span', 'sz', bytes(a.bytes) + (a.kind ? ' · ' + a.kind : '')));
@@ -226,6 +319,11 @@ function card(t) {
   var box2 = el('div');
   box2.appendChild(el('div', 'path', '记录：' + (t.record_path || '')));
   if (t.workspace_path) box2.appendChild(el('div', 'path', '工作区：' + t.workspace_path));
+  if (t.export_url) {
+    var zip = el('a', 'ext', '下载全部结果（zip）↗');
+    zip.href = t.export_url; zip.target = '_blank';
+    box2.appendChild(zip);
+  }
   if (t.session_id && t.agent_url) {
     var l = el('a', 'ext', '在 agent 里打开这个会话 ↗');
     l.href = t.agent_url + '/?s=' + encodeURIComponent(t.session_id);
@@ -308,22 +406,133 @@ function render() {
   document.getElementById('m-age').textContent = Math.round((Date.now() - state.at) / 1000) + ' 秒前';
 }
 
+/// The pickers: the workspaces a task may run in, the providers and their
+/// models. The queue knows them - it asks the agent.
+function fillList(id, items) {
+  var host = document.getElementById(id);
+  host.textContent = '';
+  items.forEach(function (one) {
+    var opt = el('option');
+    opt.value = one.value;
+    opt.label = one.label || '';
+    host.appendChild(opt);
+  });
+}
+
+function fillModels() {
+  var wanted = val('new-provider');
+  var models = [];
+  state.providers.forEach(function (p) {
+    if (wanted && p.name !== wanted) return;
+    (p.models || []).forEach(function (m) { models.push({ value: m, label: p.name }); });
+  });
+  fillList('dl-model', models);
+}
+
+function loadPickers() {
+  fetch('/api/workspaces').then(function (r) { return r.json(); }).then(function (d) {
+    var body = unwrap(d);
+    var items = (body.workspaces || []).map(function (w) {
+      var text = w.path || w.id || '';
+      return { value: text, label: (w.name && w.name !== text ? w.name : '') };
+    });
+    fillList('dl-workspace', items);
+  }).catch(function () {});
+  fetch('/api/providers').then(function (r) { return r.json(); }).then(function (d) {
+    var body = unwrap(d);
+    state.providers = body.providers || [];
+    fillList('dl-provider', state.providers.map(function (p) {
+      return { value: p.name, label: p.models ? p.models.join(', ') : '' };
+    }));
+    fillModels();
+  }).catch(function () {});
+}
+
+/// "什么时候开始": the quick choices and the free time.
+function whenValue() {
+  var choice = val('new-when');
+  if (choice === 'custom') return val('new-when-at');
+  if (choice === 'tomorrow') {
+    var d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(9, 0, 0, 0);
+    return localStamp(d);
+  }
+  return choice;
+}
+
+/// A local time as the queue reads it: "2026-11-04T09:30" (its own time).
+function localStamp(d) {
+  function two(n) { return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) +
+    'T' + two(d.getHours()) + ':' + two(d.getMinutes());
+}
+
+function collect() {
+  var body = { prompt: val('new-prompt') };
+  var title = val('new-title');
+  if (title) body.title = title;
+  var workspace = val('new-workspace');
+  if (workspace) body.workspace = workspace;
+  var provider = val('new-provider');
+  if (provider) body.provider = provider;
+  var model = val('new-model');
+  if (model) body.model = model;
+  var when0 = whenValue();
+  if (when0) body.not_before = when0;
+  var allow = val('new-allow');
+  if (allow) body.allow_paths = allow.split(',').map(function (s) { return s.trim(); })
+                                  .filter(function (s) { return !!s; });
+  // The model knobs: only the ones that were filled in.
+  var knobs = {};
+  ['temperature', 'top_p', 'max_tokens', 'seed'].forEach(function (key) {
+    var v = val('knob-' + key);
+    if (v !== '') knobs[key] = Number(v);
+  });
+  var effort = val('knob-reasoning_effort');
+  if (effort) knobs.reasoning_effort = effort;
+  if (Object.keys(knobs).length) body.model_params = knobs;
+  return body;
+}
+
+function say(text, ok) {
+  var box = document.getElementById('new-msg');
+  box.textContent = text;
+  box.className = 'msg ' + (ok ? 'ok' : 'bad');
+}
+
 function createTask() {
-  var prompt = document.getElementById('new-prompt').value.trim();
-  if (!prompt) { document.getElementById('new-prompt').focus(); return; }
-  var title = document.getElementById('new-title').value.trim();
-  var allow = document.getElementById('new-allow').value.trim();
+  var body = collect();
+  if (!body.prompt) {
+    document.getElementById('new-prompt').focus();
+    say('先写一句要做的事。', false);
+    return;
+  }
   fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ prompt: prompt, title: title,
-                                               allow_paths: allow ? allow.split(',') : [] }) })
+                        body: JSON.stringify(body) })
     .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: unwrap(d) }; }); })
     .then(function (res) {
-      if (!res.ok) { window.alert('排队失败：' + ((res.d.error || {}).message || '未知错误')); return; }
-      document.getElementById('new-prompt').value = '';
-      document.getElementById('new-title').value = '';
-      document.getElementById('new-allow').value = '';
+      if (!res.ok) {
+        var err = (res.d && res.d.error) || {};
+        say('排队失败：' + (err.message || '未知错误'), false);
+        return;
+      }
+      var task = res.d || {};
+      var when0 = task.starts_at_local ? ('（' + task.starts_at_local + ' 开始）') : '';
+      say('已排队：' + (task.id || '') + when0, true);
+      ['new-prompt', 'new-title', 'new-workspace', 'new-model', 'new-allow'].forEach(function (id) {
+        document.getElementById(id).value = '';
+      });
+      document.getElementById('new-when').value = '';
+      document.getElementById('new-when-at').value = '';
+      document.getElementById('new-when-at').hidden = true;
+      ['temperature', 'top_p', 'max_tokens', 'seed'].forEach(function (key) {
+        document.getElementById('knob-' + key).value = '';
+      });
+      document.getElementById('knob-reasoning_effort').value = '';
       refresh();
-    });
+    })
+    .catch(function () { say('排队失败：连不上队列服务。', false); });
 }
 
 function refresh() {
@@ -354,12 +563,35 @@ function health() {
 }
 
 document.getElementById('new-go').onclick = createTask;
+document.getElementById('new-clear').onclick = function () {
+  ['new-prompt', 'new-title', 'new-workspace', 'new-model', 'new-allow'].forEach(function (id) {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('new-when').value = '';
+  document.getElementById('new-when-at').value = '';
+  document.getElementById('new-when-at').hidden = true;
+  ['temperature', 'top_p', 'max_tokens', 'seed'].forEach(function (key) {
+    document.getElementById('knob-' + key).value = '';
+  });
+  document.getElementById('knob-reasoning_effort').value = '';
+  say('', true);
+};
 document.getElementById('new-prompt').addEventListener('keydown', function (e) {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); createTask(); }
 });
-refresh(); health();
+document.getElementById('new-when').addEventListener('change', function () {
+  var box = document.getElementById('new-when-at');
+  box.hidden = val('new-when') !== 'custom';
+  if (!box.hidden && !box.value) {
+    var d = new Date(Date.now() + 3600 * 1000);
+    box.value = localStamp(d);
+  }
+});
+document.getElementById('new-provider').addEventListener('input', fillModels);
+refresh(); health(); loadPickers();
 setInterval(refresh, 5000);
 setInterval(health, 10000);
+setInterval(loadPickers, 60000);
 // 事件流：有任务变化就重画（比轮询快）
 try {
   var es = new EventSource('/api/events');
