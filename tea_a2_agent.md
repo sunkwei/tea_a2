@@ -1187,8 +1187,8 @@ refresh token + Google Cloud 的 OAuth 客户端），入口在 `ImapSource.conn
 回头想「这版到底发了什么」都不好翻。
 
 ```bash
-.tea_agent_run/scripts/release.sh 0.18.4                      # 打包 + 上传 + 清理旧版本，一步到位
-git add -A && git commit -m "release: 0.18.4"                 # **不**提交 release/*.zip
+.tea_agent_run/scripts/release.sh 0.18.5                      # 打包 + 上传 + 清理旧版本，一步到位
+git add -A && git commit -m "release: 0.18.5"                 # **不**提交 release/*.zip
 ```
 
 `release.sh` 是这台机器上的流程（`.tea_agent_run/scripts/`，不进 git）：打包 → 传到
@@ -1543,3 +1543,33 @@ provider**——而 provider 里是「调一次模型」：**同一个问题被�
 网关要求这样，DeepSeek 拒绝这样）。这个判断以前是 `agent.cpp` 里的一个匿名函数，
 现在两条路都要用 → 挪到 `agent.h`（实现还在 agent.cpp，因为它要用 `parse_url`，
 而 `ParsedUrl` 在 `http.h` 里，config.cpp 不该拖上整个 HTTP 客户端）。
+
+## 发版包带上完整的 sched/ 与 scripts/（0.18.5）
+
+包里的 `tasks/` 一直是**一份手写清单**（`task_server.py`、`triggers.py`、`plans.py`……），
+Python 侧每加一个 `import`，打包脚本就得跟着改一次——忘了改，终端用户拿到包就是一次
+ImportError。`0.17.4` 就这么翻过一次车（包里少了 `triggers.py`）。
+
+现在**没有清单了**：
+
+```
+docs/tea_a2_manual.md
+sched/          整个目录
+scripts/        整个目录
+tea_a2-linux-x86_64-<版本> / -aarch64- / tea_a2-win-x86_64-<版本>.exe
+tea_agent.buildinfo
+```
+
+**目录名跟仓库里一样**，这一点比「文件全了」还重要：
+
+- systemd 单元（`scripts/a2_task.service`）里写的是 `<路径>/sched/task_server.py`。
+  以前包里只有 `tasks/`，单元指向的 `sched/` 根本不存在——**包其实是不自洽的**。
+- `scripts/install-units.sh` 用 `$(dirname "$0")/..` 当仓库根，解包后跑它，
+  单元里的路径就被换成解包目录 → `<解包目录>/sched/task_server.py` ✓ 现在真的存在。
+  所以**解包出来的包现在能自己装服务**（`systemctl --user enable --now a2_task`）。
+
+**打包脚本自己会再查一遍**：打完包后把仓库里 `sched/`、`scripts/` 的文件列表跟包里的
+条目比，少一个就中止发版。清单能出错，目录不能。
+
+`__pycache__` 与 `*.pyc` 仍然不进包（脚本打完会清）。
+包大了约 300 KB（压缩后）——sched/ 去掉 pycache 是 788 KB，scripts/ 是 172 KB。

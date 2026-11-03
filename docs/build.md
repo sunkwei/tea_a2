@@ -245,7 +245,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.18.4
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.18.5
 ```
 
 ### 常见错误的对照表
@@ -279,32 +279,45 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 0.18.4
 
 ```bash
 # 打包 + 上传 + 清理旧版本，一步到位（这台机器上的流程）
-.tea_agent_run/scripts/release.sh 0.18.4
+.tea_agent_run/scripts/release.sh 0.18.5
 
 # 等价于这三步：
 # 1. 打包（暂存目录里打，只 strip 暂存副本，release/ 里最后只剩那个 zip）
-.tea_agent_run/scripts/pack_release.sh 0.18.4
-# 2. 传到网盘 /tea_a2/releases/0.18.4/，并把网盘上旧版本清到只剩 5 个
-python3 sched/pan_publish.py release/tea_a2-0.18.4.zip --version 0.18.4 \
-    --remote-dir /tea_a2/releases/0.18.4 --keep 5
+.tea_agent_run/scripts/pack_release.sh 0.18.5
+# 2. 传到网盘 /tea_a2/releases/0.18.5/，并把网盘上旧版本清到只剩 5 个
+python3 sched/pan_publish.py release/tea_a2-0.18.5.zip --version 0.18.5 \
+    --remote-dir /tea_a2/releases/0.18.5 --keep 5
 # 3. 提交源码（**不**提交 release/ 里的 zip —— .gitignore 已经挡了）
-git add -A && git commit -m "release: 0.18.4"
+git add -A && git commit -m "release: 0.18.5"
 ```
 
-### 包里 `tasks/` 该有哪些文件
+### 包里有什么
 
-打包脚本（`.tea_agent_run/scripts/pack_release.sh`，**它不进 git**，每台机器各有一份）要把
-这些文件复制进 zip 的 `tasks/`：
+打包脚本（`.tea_agent_run/scripts/pack_release.sh`，**它不进 git**，每台机器各有一份）
+把下面这些放进 zip：
 
 ```
-task_server.py  task_order.py  task-order.template  task_ui.html
-tea_api.py  wechat_bot.py  channel.py
-triggers.py  plans.py  planner.py
+docs/tea_a2_manual.md          使用手册
+sched/                         整个目录（Python 侧的全部模块 + 模板 + README）
+scripts/                       整个目录（systemd 单元模板、安装脚本、构建脚本）
+tea_a2-linux-x86_64-<版本>     主程序
+tea_a2-linux-aarch64-<版本>    主程序（静态链接，aarch64）
+tea_a2-win-x86_64-<版本>.exe   主程序（Windows）
+tea_agent.buildinfo            这个二进制是从哪个 commit 编出来的
 ```
 
-**`task_server.py` import 的模块必须一起进包**（`triggers.py`、`plans.py`）：少了哪个，
-终端用户拿到包就是一次 ImportError——`0.17.4` 的包就少了 `triggers.py`（发版时补上）。
-Python 侧每加一个 `import`，打包清单就要跟着改。
+**`sched/` 与 `scripts/` 是整个目录进去的，目录名跟仓库里一样。**
+
+以前包里的 `tasks/` 是一份**手写清单**（`task_server.py`、`triggers.py`、`plans.py`……），
+少一个模块就是终端用户那边一次 ImportError——`0.17.4` 的包就少了 `triggers.py`。
+**清单没有了**：Python 侧每加一个 `import` 都不用改打包脚本，少一个模块这件事从根上
+不可能再发生。目录名也跟着仓库一致，于是 systemd 单元（`scripts/a2_task.service` 里写的
+是 `<路径>/sched/task_server.py`）对着解包后的目录直接能用。
+
+打包脚本会在打完包之后**自己再查一遍**：仓库里 `sched/`、`scripts/` 有的文件，包里必须
+都有，少一个就中止发版。
+
+`__pycache__` 和 `*.pyc` 不会进包（那是垃圾）。
 
 **网盘上最多留 5 个发布包**：传完按版本号（`0.17.10 > 0.17.3`，按数字比不是按字符串）排，
 最新的 5 个留下，其余的目录连包带清单删掉。想看现在有哪些：

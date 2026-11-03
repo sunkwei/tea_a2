@@ -43,10 +43,12 @@ agent 完全不知道 Python 侧的存在。所以：
 
 ## 两种角色
 
-**随包发布**（发版时复制进 release 的 `tasks/`，给终端用户）：
-`task_server.py`、`task_order.py`、`task-order.template`、`task_ui.html`、`tea_api.py`、`wechat_bot.py`、
-`triggers.py`、`plans.py`、`planner.py`——**`task_server.py` import 的模块必须一起进包**
-（`triggers.py`、`plans.py`），少了哪个，终端用户那边就是一次 ImportError。
+**随包发布**（发版时**整个 `sched/` 目录**进 release 的 zip，给终端用户）：目录名跟仓库
+里一样，`task_server.py` 就在 `sched/` 下面，旁边的 `task-order.template`、`task_ui.html`
+也跟它在一起（脚本是按「自己旁边」找这些文件的）。
+
+**没有打包清单**：以前是一份手写清单，少一个模块就是终端用户那边一次 ImportError
+（`0.17.4` 的包就少了 `triggers.py`）。现在整个目录进包，少一个模块这件事不会再发生。
 
 **开发者/自用**（不随包发布，但都在这个仓库里）：
 `fleet.py`、`fleet_server.py`、`channel.py`、`telegram_bot.py`、`asr_server.py`、
@@ -317,7 +319,7 @@ python3 sched/pan_sync.py watch --interval 300
 **发布产物也走这里**（2026-10-30 起包不再提交到 git）：
 
 ```bash
-python3 sched/pan_publish.py release/tea_a2-0.18.4.zip     # → /tea_a2/releases/0.18.4/
+python3 sched/pan_publish.py release/tea_a2-0.18.5.zip     # → /tea_a2/releases/0.18.5/
 ```
 
 按 4MB 一片上传（分片数 = ceil(大小/4MB)，最后一片是余数，小文件走单片），传完**回读校验**
@@ -425,7 +427,7 @@ agent / 队列：`TEA_AGENT_URL`、`TEA_AGENT_WORKSPACE`、`TEA_TASK_URL`、`TEA
 
 ### 打包
 
-发版时把这些文件复制进 release 的 `tasks/`：`task_server.py`、`task_order.py`、
-`task-order.template`、`task_ui.html`、`tea_api.py`、`wechat_bot.py`、`channel.py`、
-`triggers.py`、`plans.py`、`planner.py`（**`task_server.py` import 的模块必须一起进包**；
-详见 `tea_a2_agent.md` 的发版流程）。
+发版时**整个 `sched/` 目录**（还有整个 `scripts/`）复制进 release 的 zip，目录名跟仓库
+里一样（`sched/task_server.py`、`sched/task-order.template`……）。没有清单了——以前那份
+手写清单少一个模块就是终端用户那边一次 ImportError；打包脚本打完包会自己再查一遍，
+仓库里有的文件包里必须都有（详见 `tea_a2_agent.md` 的发版流程）。
