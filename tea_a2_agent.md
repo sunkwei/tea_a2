@@ -120,6 +120,39 @@ node tests/ui_shell.mjs             # 单个浏览器测试（需 CHROME_BIN）
   <https://mimo.mi.com/llms.txt>（每页正文在 `/static/docs/....md`）。
 - 测试：`tests/smoke_config_quickstart.py`、`tests/ui_setup_quickstart.mjs`。
 
+### 配好 provider 之后：没有工作区就把 `$HOME` 顶上
+
+快捷通道和上传（`POST /api/config/quickstart` / `POST /api/config`）成功后，如果这台机器
+**一个工作区都没有**，服务端就把 **`$HOME` 注册成一个工作区**（`ensure_default_workspace()`，
+`src/server.cpp`）：对话、文件、记忆都要有个落脚的地方，默认就用家目录，省得第一次用还要
+先去建一个目录。
+
+- **只在索引为空时做**：已经注册过的工作区一个都不动，也不会在旁边再加一个家目录。
+  （「重置 provider」走的就是同一个上传路由，所以重置后行为一样：有就不动，没有就补一个。）
+- 落进 `workspaces.json`，所以重启后还在；`.tea_agent_run/` 当场建出来（跟 CLI 一样），
+  第一次对话就有地方写。
+- 响应里多一个 `workspace` 字段（新工作区的 JSON）；没建就不带这个字段——前端不用猜。
+- 家目录用不了（不是目录、建 `.tea_agent_run` 失败）**不算失败**：配置照样生效，
+  前端照旧让人自己加工作区。
+- `$HOME` 是 `home_dir()` 读出来的（POSIX 读 `HOME`，Windows 读 `USERPROFILE`）。
+- 测试：`tests/smoke_default_workspace.py`（上传、快捷通道、重启后还在、已有工作区不动）。
+
+### 路径可以写成 `$HOME`
+
+注册工作区（`POST /api/workspaces`、`--workspace`）时，路径里的 `~` / `$HOME` / `${HOME}`
+（Windows 上还有 `%USERPROFILE%`）会展开成**服务端那台机器**的用户目录。
+
+- 展开在 `expand_user()`（`src/platform_fs.cpp`）里做，`expand_home_vars()` 是新加的那一段：
+  手工扫一遍字符串，`${HOME}` 优先，然后 `$HOME`——**后面必须不是变量名的一部分**
+  （`$HOMEDIR/x` 是另一个变量，相对路径，仍然拒绝）。
+- 值一律取 `home_dir()`：POSIX 上它就是 `$HOME`；Windows 上取 `USERPROFILE`
+  （Git-Bash 的 `HOME=/c/Users/me` 不是 agent 能打开的路径）。
+- 因为 `expand_user()` 本来就被 `WorkspaceRegistry::add()` 调用，所以**命令行、HTTP 接口、
+  界面表单是同一套规则**，索引里存的也是展开后的绝对路径。
+- 界面那一侧（`web/app.js` 的 `looksAbsolutePath()`）本来只认盘符/UNC/`/` 开头，
+  `$HOME/...` 会被当相对路径挡下来——所以客户端也得改，两边要一起。
+- 测试：`tests/smoke_workspace_home_var.py`(20) + `tests/ui_workspace_home_var.mjs`(7)。
+
 ---
 
 ## 额度查询（provider 级）

@@ -102,6 +102,8 @@ std::string tea_home_dir();                 // $HOME/.tea_agent
 std::string executable_path();              // absolute path of this binary
 std::string executable_dir();               // directory containing this binary
 std::string expand_user(const std::string& p);
+/// Replace $HOME / ${HOME} / %USERPROFILE% with the home directory.
+std::string expand_home_vars(const std::string& p);
 std::string path_join(const std::string& a, const std::string& b);
 std::string path_filename(const std::string& p);
 std::string path_parent(const std::string& p);

@@ -22,7 +22,7 @@
 | `GET` | `/api/peer/tools` | **对端通道**：对端有哪些工具（能力探测） |
 | `GET` | `/api/peer/workspaces` | **对端通道**：对端的工作区 |
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`）。每条带 `writable`（这个工作区进程**能不能写**）与 `write_error`（不能写的原因，带着操作系统自己的话）；`run_dir` 是运行数据的位置——项目目录写不进去时它落在 tea home 里 |
-| `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}`（可加 `"create":true` 让服务端先把目录建出来）。回答里带 `warning` 就说明工作区写不进去、或者索引 `workspaces.json` 没写成功（重启后这条登记就没了） |
+| `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}`（可加 `"create":true` 让服务端先把目录建出来）。路径里的 `~` / `$HOME` / `${HOME}`（Windows 上还有 `%USERPROFILE%`）会先展开成**服务端那台机器**的用户目录，索引里存的是展开后的绝对路径；相对路径仍然拒绝。回答里带 `warning` 就说明工作区写不进去、或者索引 `workspaces.json` 没写成功（重启后这条登记就没了） |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
 | `GET` | `/api/workspaces/{id}/search?q=` | **在工作区里搜东西**：文件名 + 文件内容。查询串按原样逐字节比较（**不做正则/模糊匹配**）。`scope=name\|content\|both`（默认 both）、`exact=1`（完全匹配：路径整串相等 / 整行相等）、`case=1`（区分大小写）、`path=`（只搜这个子目录）、`limit=`（最多几条，默认 100） |
 | `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件。`GET` 的回答里除了 `path` / `size` / `truncated` / `content`，还有 `binary`：文件里头 8 KB 有 NUL 字节就是 true（预览页据此说「预览不了」而不是显示一屏乱码） |
@@ -42,9 +42,9 @@
 | `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
 | `POST` | `/api/chat` | agent loop 本身；带 `task_id` + `task_context` 时，这一轮就是「在做某个排队任务」，模型会用 `toolkit_task` 汇报进度 |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
-| `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件。设置页的「重置 provider」走的就是它 |
+| `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件。设置页的「重置 provider」走的就是它。配置成功后，**这台机器还没有任何工作区**时，服务端会把 **`$HOME` 注册成一个工作区**（对话、文件、记忆都要有个落脚的地方，默认就用家目录），响应里多一个 `workspace` 字段；已经注册过工作区的机器**不受影响**：原来那个不会被改动，也不会再多出一个。 |
 | `POST` | `/api/config/reload` | **重新读一遍磁盘上的** `provider.yaml` 并热加载（文件是手写或从别处拷过来的时候用；光刷新网页没用，配置在服务端的内存里）。先校验再替换：文件不存在 → 404 `config_missing`，文件坏了 → 400 `invalid_config`（**当前配置不动**）；有轮次在跑时 409 |
-| `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax\|mimo","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`，小米 MiMo 默认模型 `mimo-v2.6-flash`）；key 不会出现在任何响应里。**生成的配置不查额度**（`supports_usage` 关着）：批量部署时每台设备都去问额度会把账号弄进风控；上传的 `provider.yaml` 不受此限。MiMo 的网关由 key 形状决定：`sk-…` → `api.xiaomimimo.com`，`tp-…`/`ttp-…` → `token-plan-cn.xiaomimimo.com` |
+| `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax\|mimo","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`，小米 MiMo 默认模型 `mimo-v2.6-flash`）；key 不会出现在任何响应里。**生成的配置不查额度**（`supports_usage` 关着）：批量部署时每台设备都去问额度会把账号弄进风控；上传的 `provider.yaml` 不受此限。MiMo 的网关由 key 形状决定：`sk-…` → `api.xiaomimimo.com`，`tp-…`/`ttp-…` → `token-plan-cn.xiaomimimo.com`。配置成功后，**这台机器还没有任何工作区**时，服务端会把 **`$HOME` 注册成一个工作区**（对话、文件、记忆都要有个落脚的地方，默认就用家目录），响应里多一个 `workspace` 字段；已经注册过工作区的机器**不受影响**：原来那个不会被改动，也不会再多出一个。 |
 | `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
 | `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |

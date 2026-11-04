@@ -1302,6 +1302,53 @@ struct ApiServer::Impl {
     return true;
   }
 
+  /// Make sure there is somewhere to work.
+  ///
+  /// A fresh install has no workspace: the person configures a provider (one
+  /// API key through the quick setup, or an uploaded provider.yaml) and the
+  /// UI then has nowhere to put the conversation - it asks for a workspace
+  /// before the first chat. The home directory is the obvious default: it
+  /// always exists, it is where the person already is, and it can be replaced
+  /// by a real project later.
+  ///
+  /// Only ever used when the index is **empty**. An existing workspace is
+  /// never touched, and the new one goes into the index, so the choice
+  /// survives a restart.
+  ///
+  /// Returns the new entry as JSON; an empty object when nothing was done
+  /// (there already is a workspace) or when it failed. A failure is not
+  /// fatal: the provider is configured either way, and the UI still asks for
+  /// a workspace - it just says why the default was not used.
+  nlohmann::json ensure_default_workspace() {
+    nlohmann::json out = nlohmann::json::object();
+    // `home_dir()` falls back to "." when the environment says nothing about
+    // where home is; the cwd is then the best guess there is (`add()` resolves
+    // it to an absolute path).
+    const std::string home = home_dir();
+    if (home.empty() || !path_is_dir(home)) return out;
+    std::string err;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      if (!registry->entries().empty()) return out;  // never touch a real one
+      WorkspaceEntry* entry = registry->add(home, std::string(), &err);
+      if (!entry) {
+        LOG_WARN("workspace: the home directory (", home, ") cannot be used: ", err);
+        return out;
+      }
+      registry->refresh_flags();
+      // Materialise .tea_agent_run/ right away, like the CLI does.
+      Workspace ws;
+      std::string open_err;
+      if (!ws.open(*entry, config->settings, &open_err)) {
+        LOG_WARN("workspace: ", open_err);
+      }
+      out = entry->to_json();
+    }
+    LOG_INFO("workspace: there was none, so the home directory became one: ",
+             out["path"].is_string() ? out["path"].get<std::string>() : home);
+    return out;
+  }
+
   /// What a wipe would delete, in the order it deletes them: the tea home
   /// (provider.yaml, tea_agent.yaml, workspaces.json, the global log) and each
   /// registered workspace's `.tea_agent_run` (sessions, trajectories, memory,
@@ -1958,6 +2005,10 @@ void ApiServer::Impl::install_routes() {
     j["path"] = config->path;
     j["providers"] = config->provider_order;
     j["active"] = { {"provider", config->active_provider}, {"model", config->active_model} };
+    // A fresh install has no workspace yet, and the conversation needs one:
+    // the home directory becomes the default (an existing one is untouched).
+    const nlohmann::json ws = ensure_default_workspace();
+    if (!ws.empty()) j["workspace"] = ws;
     send_json(res, j);
   });
 
@@ -2341,6 +2392,10 @@ void ApiServer::Impl::install_routes() {
     j["model"] = config->active_model;
     j["models"] = config->active_provider_info() ? config->active_provider_info()->models
                                                 : std::vector<std::string>();
+    // The same default workspace as the upload path: a key is enough to get
+    // from "nothing works" to "a workspace to talk in".
+    const nlohmann::json ws = ensure_default_workspace();
+    if (!ws.empty()) j["workspace"] = ws;
     send_json(res, j);
   });
 
@@ -2962,17 +3017,23 @@ void ApiServer::Impl::install_routes() {
     // resolve against the server's cwd (and `create` would happily mkdir there),
     // which is not something the person typing it can see, so refuse it up front
     // with a message that shows the expected shape.
-    if (!path_is_absolute(expand_user(trim(path)))) {
+    //
+    // `~` and `$HOME` are expanded first (expand_user), so they count as
+    // complete paths: they name the **server's** home directory, which is the
+    // one the agent can actually work in.
+    const std::string expanded_path = expand_user(trim(path));
+    if (!path_is_absolute(expanded_path)) {
       send_error(res, 400, "bad_request",
                  "workspace path must be a full path, e.g. /home/me/project or "
-                 "C:\\Users\\me\\project (got '" + trim(path) + "')");
+                 "C:\\Users\\me\\project (got '" + trim(path) + "'; ~ and $HOME are "
+                 "expanded to the server's home directory)");
       return;
     }
     // `create: true` lets the UI offer "the directory does not exist, create
     // it?" instead of dead-ending on a typo-free new project path.
     nlohmann::json::const_iterator create_it = body.find("create");
     if (create_it != body.end() && create_it->is_boolean() && create_it->get<bool>()) {
-      const std::string expanded = path_absolute(expand_user(trim(path)));
+      const std::string expanded = path_absolute(expanded_path);
       if (!path_exists(expanded)) {
         if (!make_dirs(expanded)) {
           send_error(res, 400, "workspace_error", "cannot create directory " + expanded);

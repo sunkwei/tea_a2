@@ -4109,21 +4109,33 @@
   function openAddWorkspace(isEmpty) { openAddWorkspaceForm(isEmpty); }
 
   function deriveWorkspaceName(path) {
-    return String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'workspace';
+    var p = String(path || '').replace(/[\\/]+$/, '');
+    // 光是家目录本身（~ / $HOME / ${HOME}）时没有目录名可取：空着让服务端按它
+    // 自己那台机器的家目录名来命名（不然工作区就叫「$HOME」了）。
+    if (/^~$/.test(p) || /^\$\{HOME\}$/.test(p) || /^\$HOME$/.test(p) ||
+        /^%USERPROFILE%$/i.test(p)) return '';
+    return p.split(/[\\/]/).pop() || 'workspace';
   }
 
-  /// 完整路径的判定：Windows 盘符（C:\…）、UNC 共享（\\server\…）和以 / 开头的 POSIX
-  /// 路径都算；其余都是相对路径，服务端会按自己的 cwd 解析，用户在浏览器里看不到那个
+  /// 完整路径的判定：Windows 盘符（C:\…）、UNC 共享（\\server\…）、以 / 开头的 POSIX
+  /// 路径，以及服务端会展开的 ~ / $HOME / ${HOME} / %USERPROFILE% 写法，都算；其余都是
+  /// 相对路径，服务端会按自己的 cwd 解析，用户在浏览器里看不到那个
   /// cwd，所以这里先拦下来（服务端 /api/workspaces 也会再校验一次）。
   function looksAbsolutePath(p) {
-    return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p) || p.charAt(0) === '/';
+    if (/^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p) || p.charAt(0) === '/') return true;
+    // ~ 和 $HOME 由**服务端**展开成它自己那台机器的用户目录（不是浏览器这台的）。
+    return /^~/.test(p) ||
+           /^\$\{HOME\}/.test(p) ||
+           /^\$HOME([\\/]|$)/.test(p) ||
+           /^%USERPROFILE%([\\/]|$)/i.test(p);
   }
 
   function openAddWorkspaceForm(isEmpty) {
     var body = el('div');
-    body.appendChild(el('div', 'desc', isEmpty
+    body.appendChild(el('div', 'desc', (isEmpty
       ? '输入项目目录的完整路径（绝对路径），例如 C:\\Users\\me\\project 或 /home/me/project。'
-      : '输入项目目录的完整路径（绝对路径），例如 C:\\Users\\me\\project 或 /home/me/project；目录不存在时会问你是否创建。'));
+      : '输入项目目录的完整路径（绝对路径），例如 C:\\Users\\me\\project 或 /home/me/project；目录不存在时会问你是否创建。')
+      + '用 ~ 或 $HOME 开头也行（会展开成服务端那台机器的用户目录）。'));
     var pathInput = el('input', 'ta'), nameInput = el('input', 'ta');
     pathInput.type = 'text'; pathInput.placeholder = 'C:\\Users\\me\\project';
     pathInput.autocomplete = 'off'; pathInput.spellcheck = false;
@@ -4156,7 +4168,8 @@
           var p = pathInput.value.trim();
           if (!p) { showError('请输入完整的项目目录路径'); return; }
           if (!looksAbsolutePath(p)) {
-            showError('请写完整的目录路径（绝对路径），例如 C:\\Users\\me\\project 或 /home/me/project');
+            showError('请写完整的目录路径（绝对路径），例如 C:\\Users\\me\\project 或 /home/me/project'
+              + '（~ 或 $HOME 开头也可以）');
             return;
           }
           var nm = nameInput.value.trim() || deriveWorkspaceName(p);

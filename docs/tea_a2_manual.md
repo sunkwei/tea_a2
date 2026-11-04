@@ -73,7 +73,7 @@ HTTP 引擎、可用工具、工作区列表。地址那行就是要打开的。
 
 | 参数 | 作用 |
 | --- | --- |
-| `--workspace <path>` | 注册一个工作区，可重复给多次 |
+| `--workspace <path>` | 注册一个工作区，可重复给多次。路径里的 `~` / `$HOME` / `${HOME}`（Windows 上还有 `%USERPROFILE%`）会展开成**服务端那台机器**的用户目录 |
 | `--workspace-root <dir>` | 把 `<dir>` 下所有一级子目录都注册成工作区 |
 | `--allow-outside-workspace` | 取消文件工具的目录围栏（**慎用**，见安全须知） |
 

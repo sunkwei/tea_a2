@@ -1,0 +1,195 @@
+{
+  "01-home-unconfigured": {
+    "caption": "还没配 key 时的首屏：红色横幅提示「未配置 provider.yaml」，对话等页签灰掉，但终端和设置照常可用",
+    "state": {
+      "note": "第一遍脚本拍到（唯一一次未配置状态）"
+    }
+  },
+  "02-settings-no-provider": {
+    "caption": "设置页（还没配 provider）：「模型提供方」一栏里只有一张「配置 provider.yaml…」按钮",
+    "state": {
+      "note": "第一遍脚本拍到"
+    },
+    "verified": [
+      "页面：设置（面包屑 无工作区 / 设置）",
+      "画面中央卡片：System prompt（当前工作区）",
+      "下方「模型提供方」一栏：还没有 provider.yaml + 「配置 provider.yaml…」按钮"
+    ]
+  },
+  "03-quickstart-open": {
+    "caption": "「快捷开始：只填 API key」：选「小米 MiMo（mimo-v2.6-flash）」",
+    "state": {
+      "note": "第一遍脚本拍到"
+    }
+  },
+  "04-quickstart-key-filled": {
+    "caption": "粘贴小米 MiMo 的 Token Plan key（tp- 开头 → token-plan-cn.xiaomimimo.com）",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/设置",
+      "banner": "无法连接到本地服务。",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash",
+      "nav": "设置"
+    },
+    "verified": [
+      "设置页",
+      "模型已是 mimo-v2.6-flash"
+    ]
+  },
+  "05-provider-reset-warning": {
+    "caption": "设置 →「重置 provider…」：还是同一个配置对话框，但标题变成「重置 provider 配置」，上面挂着黄色警告「⚠ 会覆盖现有配置，且无法撤销」——换 key 就走这里",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/设置",
+      "banner": "无法连接到本地服务。",
+      "dialog": "重置 provider 配置",
+      "activeNav": "设置",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash"
+    },
+    "verified": [
+      "对话框标题：重置 provider 配置",
+      "按钮：用 key 创建配置 / 取消 / 重新检测 / 上传并应用",
+      "输入框：provider 下拉 + API key + 上传区 + 粘贴区"
+    ]
+  },
+  "06-quickstart-applied": {
+    "caption": "只填一个 API key：服务端生成 provider.yaml 并热加载，「配置已生效」",
+    "verified": [
+      "提示文字：已用 mimo 创建配置（mimo-v2.6-flash），正在刷新…"
+    ]
+  },
+  "07-workspace-add": {
+    "caption": "添加工作区：填绝对路径 /app/zkfs/video_analyse（设备默认工作区）",
+    "state": {
+      "note": "第一遍脚本拍到"
+    }
+  },
+  "08-workspace-create": {
+    "caption": "目录不存在时弹出的确认框：标题「目录不存在」，里面写着「将创建 /app/zkfs/video_analyse」，按钮「取消 / 创建并添加」",
+    "state": {
+      "note": "第一遍脚本拍到"
+    },
+    "verified": [
+      "对话框标题：目录不存在",
+      "提示：将创建 /app/zkfs/video_analyse",
+      "按钮：取消 / 创建并添加"
+    ]
+  },
+  "09-workspace-ready": {
+    "caption": "工作区就绪：左侧工作区列表出现 video_analyse，顶部面包屑是完整路径",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/设置",
+      "banner": "无法连接到本地服务。",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash",
+      "nav": "设置"
+    },
+    "verified": [
+      "工作区 = video_analyse",
+      "面包屑含 /app/zkfs/video_analyse",
+      "服务已连接"
+    ]
+  },
+  "10-files": {
+    "caption": "文件页：浏览工作区目录，也能直接下载/上传",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/文件",
+      "banner": "无法连接到本地服务。",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash",
+      "nav": "文件"
+    },
+    "verified": [
+      "文件页",
+      "目录有内容"
+    ]
+  },
+  "11-terminal": {
+    "caption": "终端页：这就是设备自己的 shell（/bin/sh），不过模型",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/终端",
+      "banner": "无法连接到本地服务。",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash",
+      "nav": "终端"
+    },
+    "verified": [
+      "终端页",
+      "shell 是 /bin/sh"
+    ]
+  },
+  "12-terminal-command": {
+    "caption": "终端里跑命令：设备是 BusyBox ash，/app 只有 248MB（已用 90%），大文件请放 /userdata",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/终端",
+      "banner": "无法连接到本地服务。",
+      "dialog": "",
+      "activeNav": "终端",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash"
+    }
+  },
+  "13-terminal-curl-health": {
+    "caption": "设备上就有 curl：一条命令看清服务状态（provider / model / tea_home）",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/终端",
+      "banner": "无法连接到本地服务。",
+      "dialog": "",
+      "activeNav": "终端",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash"
+    }
+  },
+  "14-chat-answer": {
+    "caption": "对话页：这就是配好 key 之后的样子（底部是耗时/轮次/步数/速度指标）",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/这台设备上运行着一个视频分析程序（目录 /app",
+      "banner": "无法连接到本地服务。",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash",
+      "nav": "对话"
+    },
+    "verified": [
+      "对话页",
+      "模型回答有内容"
+    ]
+  },
+  "15-logs": {
+    "caption": "日志页：设备端运行日志尾部",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/日志",
+      "banner": "无法连接到本地服务。",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash",
+      "nav": "日志"
+    },
+    "verified": [
+      "日志页",
+      "日志有内容"
+    ]
+  },
+  "16-memory": {
+    "caption": "记忆页：agent.md（工作区经验）与长期记忆，跨会话保留",
+    "state": {
+      "breadcrumb": "/app/zkfs/video_analyse/记忆",
+      "banner": "无法连接到本地服务。",
+      "ws": "video_analyse",
+      "status": "已连接 v0.18.1",
+      "model": "mimo-v2.6-flash",
+      "nav": "记忆"
+    },
+    "verified": [
+      "记忆页",
+      "agent.md 有内容"
+    ]
+  }
+}

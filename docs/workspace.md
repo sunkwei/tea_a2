@@ -241,6 +241,41 @@ python tools/merge_work_area.py /old/project/.tea_agent_run ./.tea_agent_run
 
 回归：`python tests/smoke_merge_work_area.py`（51 项）。
 
+### 没有工作区的时候：家目录顶上
+
+刚装好、还没配 provider 的机器上一个工作区都没有；配好 provider（快捷通道或上传
+`provider.yaml`）之后，如果**索引还是空的**，服务端就把 **`$HOME`（家目录）注册成一个
+工作区**：对话、文件、记忆都要有个落脚的地方，默认就用家目录，省得第一次用还要先去建
+一个目录。落进 `workspaces.json`（所以重启后还在），`.tea_agent_run/` 当场建出来。
+
+**已经有工作区的机器不受影响**：原来那个不会被改动，也不会在旁边再加一个家目录。
+响应里多一个 `workspace` 字段（新工作区的 JSON）；没建就不带这个字段。
+
+### 路径可以写成 `$HOME`
+
+注册工作区时，路径里的 `~` / `$HOME` / `${HOME}`（Windows 上还有 `%USERPROFILE%`）会先被
+展开成**服务端那台机器**的用户目录——人敲的是自己眼前那个路径，agent 干活的是它自己那台
+机器。展开在 `expand_user()`（`src/platform_fs.cpp`）里做，所以命令行、HTTP 接口和界面
+表单是同一套规则：
+
+```bash
+# 这两条是同一个工作区（$HOME 在服务端展开）
+curl -X POST http://127.0.0.1:8282/api/workspaces \
+     -H 'Content-Type: application/json' -d '{"path":"$HOME/projects/demo"}'
+build/bin/tea_agent --workspace '$HOME/projects/demo'
+```
+
+- `$HOME` 后面必须**不是变量名的一部分**：`$HOMEDIR/x` 是另一个变量（相对路径，仍然拒绝）。
+- 索引（`workspaces.json`）里存的是**展开后**的绝对路径：界面、文件工具和边界检查看到的
+  都是真路径，不会再有 `$HOME` 这种要靠猜的东西。
+- 展开出来的目录不存在时，界面会问「要不要建」，`create: true` 也可以让服务端直接建。
+
+```bash
+# 手动加一个真正的项目目录（命令行也一样）
+curl -X POST http://127.0.0.1:8282/api/workspaces \
+     -H 'Content-Type: application/json' -d '{"path":"/home/me/project"}'
+```
+
 ### 删除工作区：只是把它从列表里摘掉
 
 左上角工作区下拉里，每一行右边有一个「✕」。点它会先弹一个确认框（写明是哪个路径、

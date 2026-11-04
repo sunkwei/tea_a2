@@ -54,6 +54,9 @@ python3 tests/smoke_console_level.py                      # 控制台只回声 W
 python3 tests/smoke_bind_urls.py                          # --host 0.0.0.0 打印活跃地址，且该地址真能打开 UI
 node tests/ui_boot_probe.mjs                              # 不启浏览器也能跑：app.js 启动路径不抛异常
 python3 tests/smoke_config_quickstart.py                  # 首次运行只填 key 生成 provider.yaml
+python3 tests/smoke_default_workspace.py               # 配好 provider 后没有工作区就把 $HOME 顶上
+python3 tests/smoke_workspace_home_var.py            # 工作区路径可以写 $HOME / ${HOME} / ~
+node tests/ui_workspace_home_var.mjs                 # 添加工作区的表单接受 $HOME 路径（需 google-chrome）
 node tests/ui_setup_flow.mjs                              # 首次运行上传配置（需 google-chrome）
 node tests/ui_setup_quickstart.mjs                        # 首次运行快捷通道：粘贴 key 回车即开始（需 google-chrome）
 node tests/ui_paste_image.mjs                             # 粘贴图片的浏览器端行为（需 google-chrome）
@@ -482,6 +485,23 @@ JSON。任何同步异常或未处理的 Promise rejection 都算失败，状态
 默认模型是 `mimo-v2.6-flash`（另有 `mimo-v2.6-pro`）、生成的配置里带
 `reasoning_content: keep`（v2.6 默认思考，小米的文档要求思考模式下把上一轮的
 `reasoning_content` 带回去）。
+
+`tests/smoke_default_workspace.py` 覆盖「配好 provider 之后有个地方可待」：全新安装一个工作区
+都没有；上传 `provider.yaml`（`POST /api/config`）之后多了一个工作区，路径就是 `$HOME`，
+`.tea_agent_run/` 也真的建出来了，响应里带着新工作区的 JSON；快捷通道（`POST
+/api/config/quickstart`）走同一条路；再换一次配置**不会**多出第二个工作区；重启之后它还在
+（落进了 `workspaces.json`）；**已经注册过工作区的机器不受影响**——那个工作区不会被改动，
+家目录也不会被加在旁边。
+
+`tests/smoke_workspace_home_var.py` 覆盖「路径可以写成 `$HOME`」：注册工作区时 `$HOME/proj`、
+`${HOME}/proj`、`~/proj` 都指向同一个目录，索引里存的是**展开后**的路径（没有 `$HOME` 漏进去），
+`create: true` 在展开后的目录下建目录；不存在的目录仍然被拒绝（消息里是展开后的路径）；
+相对路径仍然拒绝，**`$HOMEDIR/x` 也拒绝**（那是另一个变量）；命令行 `--workspace '$HOME/x'`
+（加了引号，shell 不展开）同样展开。
+
+`tests/ui_workspace_home_var.mjs` 在浏览器里走同一条路：添加工作区的表单接受 `$HOME/proj`、
+`${HOME}/proj`、`~/proj`（服务端展开成它自己那台机器的用户目录），而 `$HOMEDIR/proj` 仍然
+在表单里被挡下来（相对路径）。
 
 `tests/ui_setup_quickstart.mjs` 在浏览器里走这条快捷通道：首次运行对话框里有 provider 下拉
 （DeepSeek / MiniMax / 小米 MiMo）、`password` 类型的 key 输入框和「用 key 创建配置」按钮，

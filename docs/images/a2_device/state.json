@@ -1,0 +1,32 @@
+{
+  "base": "http://172.16.1.46:19318",
+  "health": {
+    "config_loaded": true,
+    "git_hash": "",
+    "http_engine": "auto",
+    "model": "mimo-v2.6-flash",
+    "ok": true,
+    "provider": "mimo",
+    "tea_home": "/userdata/zkfs/video_analyse/.tea_agent",
+    "tea_home_writable": true,
+    "uptime_s": 9019.46,
+    "version": "0.18.1"
+  },
+  "workspaces": {
+    "index_path": "/userdata/zkfs/video_analyse/.tea_agent/workspaces.json",
+    "tea_home": "/userdata/zkfs/video_analyse/.tea_agent",
+    "workspaces": [
+      {
+        "created_at": "2026-11-04T07:00:15Z",
+        "exists": true,
+        "id": "ws_2cd242f3cf2d",
+        "last_used_at": "2026-11-04T07:00:15Z",
+        "name": "video_analyse",
+        "path": "/app/zkfs/video_analyse",
+        "run_dir": "/app/zkfs/video_analyse/.tea_agent_run",
+        "sessions": 1,
+        "writable": true
+      }
+    ]
+  }
+}

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -187,10 +188,67 @@ std::string last_os_error() {
 // ---------------------------------------------------------------------------
 // path manipulation
 // ---------------------------------------------------------------------------
+/// Replace the home directory variables in a path. See expand_user().
+std::string expand_home_vars(const std::string& p) {
+  if (p.empty()) return p;
+  const std::string home = home_dir();
+  if (home.empty()) return p;
+  std::string out;
+  out.reserve(p.size());
+  for (std::size_t i = 0; i < p.size();) {
+    // ${HOME} - the braced form, unambiguous.
+    if (p.compare(i, 7, "${HOME}") == 0) {
+      out += home;
+      i += 7;
+      continue;
+    }
+    // $HOME - but only when the name ends here: $HOMEDIR is another variable,
+    // not the home directory with a suffix stuck on.
+    if (p.compare(i, 5, "$HOME") == 0) {
+      const std::size_t next = i + 5;
+      const bool name_ends =
+          next >= p.size() ||
+          !(std::isalnum(static_cast<unsigned char>(p[next])) || p[next] == '_');
+      if (name_ends) {
+        out += home;
+        i = next;
+        continue;
+      }
+    }
+#ifdef _WIN32
+    // The Windows spelling of the same idea.
+    if (p.compare(i, 12, "%USERPROFILE%") == 0) {
+      out += home;
+      i += 12;
+      continue;
+    }
+    if (p.compare(i, 6, "%HOME%") == 0) {
+      out += home;
+      i += 6;
+      continue;
+    }
+#endif
+    out += p[i];
+    ++i;
+  }
+  return out;
+}
+
+/// Expand the home directory in a path.
+///
+/// Three spellings, and people type all of them:
+///   * `~` and `~/x`     - the classic one;
+///   * `$HOME`/`${HOME}` - what a shell expands; a path copied out of a
+///                         `.bashrc`, a README or a ticket arrives like this;
+///   * `%USERPROFILE%`   - the Windows spelling of the same thing.
+///
+/// The value is always `home_dir()`: on POSIX that *is* `$HOME`, and on
+/// Windows it is `USERPROFILE` - a path the agent can really open (a Git-Bash
+/// `HOME=/c/Users/me` is not one).
 std::string expand_user(const std::string& p) {
   if (p == "~") return home_dir();
   if (starts_with(p, "~/") || starts_with(p, "~\\")) return path_join(home_dir(), p.substr(2));
-  return p;
+  return expand_home_vars(p);
 }
 
 std::string path_join(const std::string& a, const std::string& b) {
