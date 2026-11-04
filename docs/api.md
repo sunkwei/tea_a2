@@ -1173,6 +1173,33 @@ for event in queue.events():              # 订阅，而不是轮询
 `Queue` 会把队列的信封（`{code, message, request_id, data}`）拆开：`data` 里的东西直接
 给你，`code` 非零就抛 `ApiError`。带一把项目钥匙就只看得见那个项目。
 
+### 任务队列：另一个服务（`sched/task_server.py`，默认 127.0.0.1:8283）
+
+任务相关的接口**不住在 agent 上**，住在队列（Python 侧，纯标准库）上：队列自己记任务
+记录、发事件、查额度，再通过 `POST /api/chat` 驱动 agent 的轮次。
+
+| 方法 | 路径 | 干什么 |
+| --- | --- | --- |
+| `GET` | `/api/tasks?workspace_id=&status=` | 队列（每种状态的计数） |
+| `POST` | `/api/tasks` | 排一个任务：`{prompt, title?, workspace_id?（或 workspace?，写路径也行）, provider?, model?, model_params?, not_before?（或 start_at）, allow_paths?, meta?}` |
+| `GET` | `/api/tasks/{id}` | 一个任务：状态、进度、结果、**生成物（每个带下载链接）** |
+| `GET` | `/api/tasks/{id}/download?path=` | 下载这个任务产出的一个文件（队列代为伺服，agent 在别的机器上也点得开；只服务这个任务**真产出过**的文件） |
+| `GET` | `/api/tasks/{id}/export?format=zip` | 整包结果（`manifest.json` / `final_answer.md` / `conversation.jsonl` / `events.jsonl` / `artifacts/`） |
+| `POST` | `/api/tasks/{id}/start` / `/cancel` / `/confirm` / `/retry` | 现在就做 / 停掉 / 回答「问你呢」/ 重做一个失败的 |
+| `GET` | `/api/workspaces` | 任务可以放在哪些工作区里（agent 的 + 队列自己的） |
+| `GET` | `/api/providers` | agent 认识的 provider 和它们的模型（队列网页的下拉框是它们画的） |
+| `GET` | `/api/events` | 事件流（SSE）：`task_created` / `task_done` / `task_failed` / `task_waiting_confirmation` / … |
+| `GET` | `/api/health` | 队列自己、它连着的 agent、额度还剩多少、指标 |
+
+`model_params` 是**这一轮**的模型旋钮（`temperature` / `top_p` / `top_k` /
+`frequency_penalty` / `presence_penalty` / `seed` / `max_tokens` / `reasoning_effort`）——
+和上面那张旋钮表是同一套，只对这一轮生效；写错名字或者超范围当场 400（不会等到开工
+才发现）。`not_before` 认 `"+5"`、`"23:30"`、`"+30m"`、`"+2d"`、绝对的
+`"2026-10-24T09:00:00Z"`，也认**本机时间** `"2026-10-24T09:30"`。
+
+队列的完整说明在 `docs/tasks.md`；队列自己的网页在 <http://127.0.0.1:8283/>——一张表把
+上面的设置填一遍，做完的任务卡上就是最终回答和**生成物的下载链接**。
+
 ### 项目钥匙：门不是万能钥匙
 
 队列给每个项目发一把钥匙（`POST /api/projects {"workspace_id": "ws_…"}`，本机操作者才能发，
