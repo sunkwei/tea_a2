@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace tea {
 
 /// Whether assistant `reasoning_content` is echoed back on the follow-up
@@ -171,10 +173,66 @@ struct PeerConfig {
   std::string description;
 };
 
+/// The budget of one turn: the ceilings a turn may not cross.
+///
+/// 0 means "no limit" for that dimension. The machine settings carry the
+/// defaults (see Settings); a caller that drives its own policy - the task
+/// queue - may **tighten** them for one turn, never loosen them: the machine
+/// says what one turn may cost at most, the caller says how much of that this
+/// particular turn gets.
+struct TurnBudget {
+  /// Model iterations (one model call = one iteration).
+  int max_iterations = 0;
+  /// Wall clock of the whole turn, in ms.
+  int max_wall_ms = 0;
+  /// Tool calls of the turn.
+  int max_tool_calls = 0;
+  /// Tokens of the turn (prompt + completion, summed over the iterations).
+  long long max_total_tokens = 0;
+
+  bool any() const {
+    return max_iterations > 0 || max_wall_ms > 0 || max_tool_calls > 0 ||
+           max_total_tokens > 0;
+  }
+  /// The tighter of the two: a request may lower a ceiling, never raise it.
+  /// A 0 in one of them means "this dimension is not limited there", so the
+  /// other one wins.
+  TurnBudget tightened_by(const TurnBudget& request) const;
+};
+
+/// What a turn used of its budget - and which ceiling stopped it.
+struct TurnBudgetUse {
+  int iterations = 0;
+  int tool_calls = 0;
+  long long wall_ms = 0;
+  long long total_tokens = 0;
+  /// Which ceiling was hit: "iterations", "wall_ms", "tool_calls",
+  /// "total_tokens" - or "" when nothing was hit.
+  std::string limit;
+};
+
+/// The ceilings of a turn, as the API reports them.
+nlohmann::json turn_budget_json(const TurnBudget& budget);
+/// What a turn used of its budget, as the API reports it.
+nlohmann::json turn_budget_use_json(const TurnBudgetUse& used);
+
 struct Settings {
-  // There is no iteration budget: a turn runs until the model answers with
-  // text instead of a tool call (or until the user stops it, or until the
-  // repetition guard stops it).
+  // ---- the budget of one turn -------------------------------------------
+  // A turn is a loop: the model asks for a tool, the tool answers, the model
+  // looks at the answer and asks for the next one. It ends when the model
+  // answers with text - or when it runs out of budget. The ceilings live
+  // here, so "this machine does not spend more than X on one turn" is a fact
+  // of the machine and not a promise in a prompt.
+  //
+  // 0 means "no limit" for that dimension. The iteration ceiling is 300 by
+  // default: a turn that is still going after 300 model calls is not working,
+  // it is going in circles (the repetition guard catches the *same* output;
+  // this catches everything else).
+  int max_iterations = 300;
+  int max_wall_ms = 0;
+  int max_tool_calls = 0;
+  long long max_total_tokens = 0;
+
   int64_t max_tool_output = 131072;
   int64_t max_assistant_content = 131072;
   int keep_turns = 10;

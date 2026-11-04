@@ -58,13 +58,34 @@ task_model: DeepSeek+deepseek-chat
 | `<workspace>/.tea_agent_run/settings.yaml` | 按工作区 | 盖住机器级的同名设置 |
 | 命令行 | 这一次启动 | 只覆盖少数几项（如 `--http-engine`） |
 
-规则还是**后者盖前者**。`provider.yaml` 里那个 `settings:` 块**不再被读**——它本来是
+规则还是**后者盖前者**。`provider.yaml` 里那个 `settings:` 块**基本不再被读**——它本来是
 Python 实现留下的（那时候 provider.yaml 既是 provider 列表又是设置）。文件里还留着它，
 程序不会报错，但里面的东西不生效：启动日志里会写一句，提醒你把设置搬到
 `tea_agent.yaml`。
 
-设置里**没有**「一轮最多几轮工具调用」这种旋钮：一轮跑到模型自己收尾为止，唯一会停下
-它的是模型连续三次给出相同的结果（见[多轮工具调用](tools.md#多轮工具调用与上下文)）。
+**一个例外：一轮的预算。** `max_iterations` / `max_wall_ms` / `max_tool_calls` /
+`max_total_tokens` 这四个键在 `provider.yaml` 的 `settings:` 块里**也读**——预算紧挨着
+要付钱的 provider 放在一起最省事，其余设置仍然只在 `tea_agent.yaml` / 工作区
+`settings.yaml` 里生效。
+
+## 一轮的预算
+
+一轮是循环：模型要工具 → 工具回答 → 模型再要工具。预算就是**这一轮最多能花多少**：
+
+```yaml
+settings:
+  max_iterations: 300        # 几轮模型调用（默认 300；0 = 不限）
+  max_wall_ms: 0             # 这一轮的墙钟（毫秒；0 = 不限）
+  max_tool_calls: 0          # 几次工具调用（0 = 不限）
+  max_total_tokens: 0        # 这一轮的 token（0 = 不限）
+```
+
+- **默认 300 轮。** 一轮跑到 300 次模型调用还没收尾，就不是干活，是打转
+  （那道「连续三次相同结果」的闸只抓一模一样的输出，这道抓其余的）。
+- **到点是正常结束**，不是失败：这一轮带 `stop_reason: "budget"` 收尾，
+  做过的部分算数。详见 [HTTP 接口](api.md#一轮的预算limits到点是正常结束不是失败)。
+- **调用方只能收紧，不能放宽**：`POST /api/chat` 的 `limits` 只能比机器的上限更小。
+- `GET /api/health` 的 `limits` 报的是当前生效的那一套（任务队列照着它分预算）。
 
 ```yaml
 providers:

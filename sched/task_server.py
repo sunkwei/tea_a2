@@ -339,6 +339,83 @@ def parse_model_params(body):
     return params, ""
 
 
+# The budget of one turn: the ceilings the agent enforces. 0 => no limit for
+# that dimension. The agent's own settings are the hard ceiling (a request may
+# only tighten them); the queue hands each task its own budget inside it.
+LIMIT_KEYS = ("max_iterations", "max_wall_ms", "max_tool_calls", "max_total_tokens")
+
+
+def parse_limits(body):
+    """The budget of a task: (limits, error message).
+
+    The same shape the agent's /api/chat takes (`limits`). A key nobody knows
+    is an error, never a silent no-op: a task that believes it has a budget
+    and does not is the worst kind of surprise.
+    """
+    body = body if isinstance(body, dict) else {}
+    raw = body.get("limits")
+    if raw in (None, ""):
+        return {}, ""
+    if not isinstance(raw, dict):
+        return {}, "'limits' must be an object (max_iterations, max_wall_ms, " \
+                   "max_tool_calls, max_total_tokens)"
+    limits = {}
+    for key, value in raw.items():
+        if key not in LIMIT_KEYS:
+            return {}, ("不认识的预算项 %r（认识的：%s）" % (key, "、".join(LIMIT_KEYS)))
+        if isinstance(value, bool):
+            return {}, "预算项 %r 必须是一个整数" % key
+        if isinstance(value, str):
+            # A task order file (and a web form) write numbers as text.
+            try:
+                number = int(value.strip())
+            except ValueError:
+                return {}, "预算项 %r 必须是一个整数" % key
+        elif isinstance(value, (int, float)):
+            number = int(value)
+        else:
+            return {}, "预算项 %r 必须是一个整数" % key
+        if number < 0:
+            return {}, "预算项 %r 不能是负数" % key
+        limits[key] = number
+    return limits, ""
+
+
+def parse_policy(body):
+    """The permissions of a task: (policy, error message).
+
+    `policy.tools` is the list of tools the model may use while this task runs
+    (empty => the usual set); the directories the task may touch are its own
+    `allow_paths` (the agent's boundary is the workspace, a task may ask for
+    more). The queue decides, the agent enforces.
+    """
+    body = body if isinstance(body, dict) else {}
+    raw = body.get("policy")
+    if raw in (None, ""):
+        return {}, ""
+    if not isinstance(raw, dict):
+        return {}, "'policy' must be an object"
+    for key in raw:
+        if key != "tools":
+            return {}, ("不认识的权限项 %r（认识的：tools）" % key)
+    policy = {}
+    tools = raw.get("tools")
+    if tools not in (None, ""):
+        if isinstance(tools, str):
+            tools = [t.strip() for t in tools.replace(";", ",").split(",")]
+        if not isinstance(tools, list):
+            return {}, "'policy.tools' must be a list of tool names"
+        names = []
+        for one in tools:
+            if not isinstance(one, str):
+                return {}, "'policy.tools' must be a list of tool names"
+            one = one.strip()
+            if one and one not in names:
+                names.append(one)
+        policy["tools"] = names
+    return policy, ""
+
+
 class AgentError(Exception):
     """The agent answered, but not with what we asked for."""
 
@@ -452,6 +529,20 @@ class Agent:
         """
         return self._request("GET", "/api/providers/" + urllib.parse.quote(provider) + "/usage")
 
+    def limits(self):
+        """The budget the agent imposes on one turn.
+
+        The agent is the mechanism layer: it decides what a turn may cost at
+        most, and the queue hands its tasks a budget that fits inside it. The
+        answer is empty when the agent is down or too old to say.
+        """
+        try:
+            body = self._request("GET", "/api/health", timeout=10)
+        except AgentError:
+            return {}
+        limits = body.get("limits")
+        return dict(limits) if isinstance(limits, dict) else {}
+
     def stop(self, session_id):
         return self._request("POST", "/api/chat/stop", {"session_id": session_id})
 
@@ -531,7 +622,7 @@ class Agent:
 
     def chat(self, workspace_id, message, provider=None, session_id=None,
              task_id=None, task_context=None, allow_paths=None, model=None,
-             params=None):
+             params=None, limits=None, policy=None):
         """Run one turn and yield the agent's events as they happen.
 
         This is the whole contract between the queue and the channel: the
@@ -560,6 +651,16 @@ class Agent:
             body["task_context"] = task_context
         if allow_paths:
             body["allow_paths"] = list(allow_paths)
+        # The budget of this turn: the agent enforces it and reports back what
+        # it used and which ceiling it hit.
+        if limits:
+            body["limits"] = dict(limits)
+        # The permissions of this turn: the tools the model may use. The agent
+        # enforces the list (an empty list would mean "no tools at all", so an
+        # empty policy means "the usual set" and is not sent).
+        tools = (policy or {}).get("tools") or []
+        if tools:
+            body["tools"] = list(tools)
         req = urllib.request.Request(
             self.base + "/api/chat", data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST")
@@ -599,7 +700,8 @@ class Agent:
 
 
 def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
-             not_before_text="", key="", meta=None, model_params=None):
+             not_before_text="", key="", meta=None, model_params=None,
+             limits=None, policy=None):
     """A task record, from the fields a task order (or the API) carries."""
     return {
         "id": "t_" + os.urandom(6).hex(),
@@ -612,6 +714,11 @@ def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
         # means "the defaults of the model" - nothing is sent to the wire.
         "model_params": dict(model_params or {}),
         "allow_paths": list(allow_paths or []),
+        # The budget of this task (the ceilings the agent enforces) and the
+        # permissions it runs with (which tools it may use). Both are handed to
+        # the agent with the turn.
+        "limits": dict(limits or {}),
+        "policy": dict(policy or {}),
         "session_id": "",
         "status": QUEUED,
         "progress": 0,
@@ -644,6 +751,13 @@ def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
         # own agents (each device answers with its own provider and context).
         "target": "",
         "fleet": {},
+        # How the turn ended and what it cost: "stop_reason" is "" (the model
+        # finished), "budget" (a ceiling was reached), "cancelled" or "error".
+        "stop_reason": "",
+        "budget_used": {},
+        "usage": {},
+        "iterations": 0,
+        "trajectory_id": "",
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "started_at": "",
@@ -1142,6 +1256,9 @@ class Engine:
         # again from time to time, so a changed file takes effect without
         # restarting the queue.
         self._task_model = ("", "", 0.0)
+        # The budget the agent imposes on one turn: (limits, read_at). It comes
+        # from the agent (the mechanism layer) - the queue does not invent it.
+        self._machine_limits = ({}, 0.0)
         # The plans whose summary is being made right now: one plan is
         # summarized once, not once per round.
         self.summarizing = set()
@@ -1207,6 +1324,36 @@ class Engine:
             log("task_model: %s" % (provider + "+" + model if provider else "(none)"))
         self._task_model = (provider, model, now)
         return provider, model
+
+    def machine_limits(self, refresh=False):
+        """The budget the agent imposes on one turn (the mechanism layer's word).
+
+        The agent decides what a turn may cost at most; the queue only hands
+        out budgets that fit inside it. The answer is cached for a minute -
+        it changes when the settings change, not every second.
+        """
+        now = time.time()
+        if not refresh and self._machine_limits[1] and now - self._machine_limits[1] < 60.0:
+            return dict(self._machine_limits[0])
+        limits = {}
+        try:
+            limits = self.agent.limits()
+        except (AgentError, AttributeError):
+            limits = {}
+        self._machine_limits = (dict(limits), now)
+        return dict(limits)
+
+    def effective_limits(self, task):
+        """The budget this task runs with.
+
+        The task's own budget if it has one, otherwise the agent's. The agent
+        keeps the final word either way: a request may only tighten a ceiling,
+        never raise it.
+        """
+        own = task.get("limits") or {}
+        if isinstance(own, dict) and own:
+            return dict(own)
+        return self.machine_limits()
 
     def provider_yaml_path(self):
         """Where provider.yaml is (the agent's tea home)."""
@@ -1704,6 +1851,10 @@ class Engine:
 
         provider = provider or task.get("provider") or self.effective_provider()
         context = self.context_for(task)
+        # The budget of this task: its own, or the agent's. The record says
+        # which one it ran under, so a task that ran out of room can be
+        # answered with "how much did it get?".
+        limits = self.effective_limits(task)
         # A task that was waiting for an answer carries it with it: the answer
         # is the next thing said in the task's session.
         pending = task.get("pending_message") or ""
@@ -1717,6 +1868,7 @@ class Engine:
             "question": "",
             "note": "started",
             "pending_message": "",
+            "limits": limits,
         }))
 
         thread = threading.Thread(target=self._run,
@@ -1814,10 +1966,13 @@ class Engine:
         model = task.get("model") or self.effective_model()
         # The knobs the task asked for (temperature, max_tokens, ...).
         params = task.get("model_params") or {}
+        limits = task.get("limits") or {}
+        policy = task.get("policy") or {}
         for event in self.agent.chat(workspace_id, message, provider=provider,
                                      session_id=session_id, task_id=task_id,
                                      task_context=context, allow_paths=allow_paths,
-                                     model=model or None, params=params):
+                                     model=model or None, params=params,
+                                     limits=limits, policy=policy):
             kind = event.get("type")
             if kind == "start":
                 session_id = event.get("session_id") or session_id
@@ -1837,12 +1992,28 @@ class Engine:
             elif kind == "done":
                 answer = event.get("content") or answer
                 status = WAITING if report["needs_confirmation"] else DONE
+                # How the turn ended and what it cost. A turn that ran out of
+                # budget is **not** a failure - it says so, and the numbers are
+                # on the record.
+                stop_reason = str(event.get("stop_reason") or "")
+                budget_used = event.get("budget_used")
+                budget_used = dict(budget_used) if isinstance(budget_used, dict) else {}
+                usage = event.get("usage")
+                usage = dict(usage) if isinstance(usage, dict) else {}
 
                 def done_fields(t):
                     t["progress"] = 100 if status == DONE else t.get("progress", 0)
                     t["result"] = answer
                     t["finished_at"] = now_iso()
                     t["error"] = ""
+                    t["stop_reason"] = stop_reason
+                    t["budget_used"] = budget_used
+                    t["usage"] = usage
+                    t["iterations"] = int(event.get("iterations") or 0)
+                    t["trajectory_id"] = str(event.get("trajectory_id") or "")
+                    if stop_reason == "budget":
+                        # 到点了，不是做完了：说清楚是哪一条预算。
+                        t["note"] = "预算用完了（%s）" % (budget_used.get("limit") or "budget")
 
                 written = self._finalize(workspace_id, task_id, status, done_fields)
                 if written is not None:
@@ -1857,6 +2028,7 @@ class Engine:
             elif kind == "error":
                 written = self._finalize(workspace_id, task_id, FAILED, {
                     "error": event.get("message") or "the turn failed",
+                    "stop_reason": "error",
                     "finished_at": now_iso()})
                 if written is not None:
                     self._publish({"type": "task_failed", "task": written})
@@ -1864,6 +2036,7 @@ class Engine:
                 return
             elif kind == "stopped":
                 written = self._finalize(workspace_id, task_id, CANCELLED, {
+                    "stop_reason": "cancelled",
                     "finished_at": now_iso()})
                 if written is not None:
                     self._publish({"type": "task_cancelled", "task": written})
@@ -2649,10 +2822,19 @@ class Handler(BaseHTTPRequestHandler):
         model_params, params_error = parse_model_params(body)
         if params_error:
             return self._error(400, "bad_request", params_error)
+        # The budget of this task (the ceilings the agent enforces) and the
+        # permissions it runs with (which tools it may use). Both are checked
+        # here, not after a long wait in the queue.
+        limits, limits_error = parse_limits(body)
+        if limits_error:
+            return self._error(400, "bad_request", limits_error)
+        policy, policy_error = parse_policy(body)
+        if policy_error:
+            return self._error(400, "bad_request", policy_error)
         task = new_task(body, workspace_id, allow_paths=allow_paths, priority=priority,
                         not_before=not_before, not_before_text=not_before_text, key=key,
                         meta=body.get("meta") if isinstance(body.get("meta"), dict) else {},
-                        model_params=model_params)
+                        model_params=model_params, limits=limits, policy=policy)
         # Where the work runs: "" = the local agent, "fleet" = the devices'.
         task["target"] = str(body.get("target") or "").strip()
         if isinstance(body.get("fleet"), dict):
@@ -3765,6 +3947,15 @@ def main(argv=None):
     parser.add_argument("--allow-path", action="append", default=[],
                         help="a directory the task may touch (repeatable; the file "
                              "tools are otherwise fenced to the workspace)")
+    parser.add_argument("--allow-tool", action="append", default=[],
+                        help="a tool the task may use (repeatable; empty = the usual set)")
+    parser.add_argument("--limit-iterations", type=int, default=0,
+                        help="how many model iterations this turn may run "
+                             "(0 = the machine's own ceiling)")
+    parser.add_argument("--limit-tool-calls", type=int, default=0,
+                        help="how many tool calls this turn may make (0 = no limit)")
+    parser.add_argument("--limit-wall-ms", type=int, default=0,
+                        help="the wall clock of this turn, in ms (0 = no limit)")
     parser.add_argument("--no-serve", action="store_true",
                         help="do not serve; only run the scheduler (for a cron-style setup)")
     args = parser.parse_args(argv)
@@ -3789,6 +3980,13 @@ def main(argv=None):
             "provider": app.engine.effective_provider(),
             "model": "",
             "allow_paths": [os.path.abspath(os.path.expanduser(p)) for p in args.allow_path],
+            # The budget of this task and the tools it may use. The agent
+            # enforces both; the queue only asks.
+            "limits": dict((k, v) for k, v in (
+                ("max_iterations", args.limit_iterations),
+                ("max_tool_calls", args.limit_tool_calls),
+                ("max_wall_ms", args.limit_wall_ms)) if v),
+            "policy": ({"tools": list(args.allow_tool)} if args.allow_tool else {}),
             "session_id": "",
             "status": QUEUED,
             "progress": 0,
@@ -3799,6 +3997,11 @@ def main(argv=None):
             "error": "",
             "result": "",
             "meta": {},
+            "stop_reason": "",
+            "budget_used": {},
+            "usage": {},
+            "iterations": 0,
+            "trajectory_id": "",
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "started_at": "",

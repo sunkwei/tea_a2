@@ -5228,6 +5228,14 @@
     }
     if (cfg.settings) {
       row('工具输出上限', cfg.settings.max_tool_output + ' 字节');
+      // The budget of one turn: the ceilings a turn may not cross. A turn
+      // that runs out of room ends normally (stop_reason: "budget").
+      var budget = cfg.settings.budget || {};
+      if (budget.max_iterations) {
+        row('一轮的预算', budget.max_iterations + ' 轮模型调用' +
+            (budget.max_tool_calls ? ' / ' + budget.max_tool_calls + ' 次工具' : '') +
+            (budget.max_wall_ms ? ' / ' + Math.round(budget.max_wall_ms / 1000) + ' 秒' : ''));
+      }
     }
     // 没配置时：顶上那张「配置 provider.yaml」的卡是入口，下面那行「重置
     // provider」收起来（没有配置可覆盖）；配好了就反过来。

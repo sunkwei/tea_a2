@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.18.5`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因） |
+| `GET` | `/api/health` | 探活、版本（`0.18.5`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
@@ -57,7 +57,7 @@
 | `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
 | `GET` | `/api/providers/{name}/models` | 问这个 provider 现在提供哪些模型：服务端用 provider 自己的 key 去问 `GET {api_url}/v1/models`（key 不下发）。返回每个模型的默认配置、来源、新增了哪些、哪些已经不再提供。上游失败返回 502 与原因 |
 | `POST` | `/api/providers/{name}/models` | 把确认后的模型列表写进 `provider.yaml`：`{"models":[{"id":…,"max_context_tokens":…,"max_output_tokens":…,"supports_tools":…,"supports_reasoning":…,"supports_vision":…}]}`。**只改这个 provider 的 `models:` 块**（别的 provider、注释、settings 块原样保留），先校验再替换 |
-| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}` |
+| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}`。可带 `limits`（这一轮的预算，见下）、`tools`（这一轮允许用的工具）、`allow_paths`（这一轮额外可碰的目录）、`task_id` / `task_context`（这一轮在做哪个排队任务） |
 | `POST` | `/api/chat/stop` | 中断当前轮次（对所有人）。**必须带 `{"session_id":"…"}`**，否则 `cancelled` 一直是 false |
 | `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
 | `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
@@ -386,7 +386,8 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 | `compaction` | 上下文被压缩：`covered_messages`（折掉的条数）/ `summary_bytes` / `live_tokens` / `trigger_tokens`，`dropped: true` 表示摘要没生成成、那一段旧消息被直接丢弃。回合内部也会发（长回合每轮都查压力） |
 | `queue_adopted` | 采纳了一条排队消息（`id` / `content` / `pending`） |
 | `queue_unconsumed` | 轮次结束时仍未采纳的排队消息（`items[]`），客户端应放回输入框 |
-| `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` / `trajectory_id` |
+| `budget` | 这一轮的预算到点了（`limit` 是撞到的那条：iterations / wall_ms / tool_calls / total_tokens；带 `budget` 与 `budget_used`）。**不是失败**：这一轮是正常结束的 |
+| `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` / `trajectory_id`。`stop_reason` 说明它为什么停（`""` = 模型自己收尾，`budget` = 预算到点，`repeated_output` = 模型在原地打转）；`budget` / `budget_used` 是这一轮的预算和用量 |
 | `stopped` | 被 `/api/chat/stop` 中断 |
 | `error` | `message` / `detail`，外加 `request`（被拒请求的规模：`messages` / `tool_calls` / `bytes`，修过结构时还有 `repaired`） |
 | `ping` | 空闲心跳（15s），用于判断链路存活 |
@@ -396,6 +397,40 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 
 上层 agent 只需要：发一条 `POST /api/chat`，读 SSE，看 `tool_result` 有没成功，`done` 结束。
 需要打断就调 `/api/chat/stop`——它会在下一个模型/工具边界停住，已产生的会话照样落盘。
+
+### 一轮的预算：`limits`（到点是正常结束，不是失败）
+
+一轮是循环：模型要工具 → 工具回答 → 模型再要工具。预算就是**这一轮最多能花多少**：
+
+```bash
+curl -N -X POST http://127.0.0.1:8282/api/chat -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_x","message":"把 README 的例子跑一遍",
+       "limits":{"max_iterations":8,"max_wall_ms":300000,
+                 "max_tool_calls":40,"max_total_tokens":200000}}'
+```
+
+| 键 | 意思 | 0 = |
+| --- | --- | --- |
+| `max_iterations` | 几轮模型调用 | 不限 |
+| `max_wall_ms` | 这一轮的墙钟（毫秒） | 不限 |
+| `max_tool_calls` | 几次工具调用 | 不限 |
+| `max_total_tokens` | 这一轮的 token（提示 + 生成，逐轮累加） | 不限 |
+
+规矩三条：
+
+1. **请求只能收紧，不能放宽。** 机器自己的上限（设置里的 `max_iterations` 等）是天花板，
+   请求给的值只能比它更小。这样「这台机器一轮最多花多少」是机器说了算，调用方
+   （比如任务队列）只能在这个范围里再切一刀。
+2. **到点是正常结束。** `done` 事件带 `stop_reason: "budget"` 与 `budget_used`，
+   另有一条 `budget` 事件说明撞到的是哪一条。**不是 error**——调用方要能分清
+   「活干完了」和「没地方了」。
+3. **写错会报错。** 不认识的键 → `400 bad_request`（错误里点名是哪个键），
+   值不是整数 → `400`。
+
+机器自己的上限写在设置里（`max_iterations` / `max_wall_ms` / `max_tool_calls` /
+`max_total_tokens`，`max_iterations` 默认 **300**），`GET /api/health` 的 `limits`
+报的就是当前生效的那一套。工具调用撞到上限时，那一次调用不会执行——但它仍然有
+一个回答（provider 不接受没有结果的工具调用）。
 
 ### 工具跑多久：三个数（什么时候开始 / 用了多久 / 上限多少）
 
@@ -680,7 +715,9 @@ firefox，可停止此页面」。内置 UI 现在按三条规则做：
 - 位置：`<workspace>/.tea_agent_run/trajectories/<session_id>.jsonl`，**一轮一行**。
 - 一行 = 一个 turn 对象：`turn_id` / `session_id` / `workspace_id` / `provider` / `model` /
   `started_at` / `finished_at` / `ok` / `iterations` / `usage{prompt,completion,total,cached}`
-  / `steps[]` / `files_changed[]`。
+  / `steps[]` / `files_changed[]`。另外：`task_id`（这一轮在做哪个排队任务，空 = 普通对话）、
+  `stop_reason`（这一轮为什么停：`budget` / `repeated_output` / `cancelled`）、
+  `budget`（这一轮的预算上限）。
 - 步骤 `kind`：
   - `model`：`reasoning_chars` / `content_chars` / 请求的 `tool_calls` 名字 /
     `tokens{prompt,completion,cached}` / `ttft_ms`（provider 没回 usage 时标 `usage_estimated`）；

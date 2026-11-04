@@ -54,6 +54,10 @@ struct TurnOptions {
   /// supports). A caller that drives its own policy can hand the agent exactly the
   /// tools it wants - or none at all.
   std::vector<std::string> tools;
+  /// The budget of this turn. It may only **tighten** the machine's ceilings
+  /// (see Settings), never loosen them: the task queue says how much of the
+  /// machine's budget this task gets, and the machine keeps the final word.
+  TurnBudget budget;
   /// Prompts typed while this turn was already running. The loop adopts one per
   /// iteration (FIFO) before building that iteration's request; whatever is left
   /// when the loop stops is reported back as `queue_unconsumed`. May be null.
@@ -104,6 +108,16 @@ struct TurnResult {
   long long ttft_ms = 0;             // time to first streamed token (first iteration)
   long long generation_ms = 0;       // summed streaming window of the turn
   bool usage_estimated = false;
+  /// Why the turn ended: "" (the model finished), "budget" (a ceiling was
+  /// reached), "cancelled" (the user stopped it), "repeated_output" (the model
+  /// went in circles), "error". A turn that ran out of budget is **not** a
+  /// failure: the caller has to be able to tell "the work is done" from "we
+  /// ran out of room".
+  std::string stop_reason;
+  /// The ceilings that applied to this turn.
+  TurnBudget budget;
+  /// What the turn used of them, and which one it hit.
+  TurnBudgetUse budget_used;
 };
 
 class Agent {

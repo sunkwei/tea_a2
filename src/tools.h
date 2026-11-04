@@ -72,6 +72,11 @@ struct ToolContext {
   /// The MCP servers (null => no mcp.yaml is configured). The
   /// `mcp__<server>__<tool>` tools are dispatched through it.
   McpRegistry* mcp = nullptr;
+  /// The turn's deadline (absolute epoch milliseconds; 0 => no deadline). The
+  /// turn's wall clock is a ceiling for the whole turn, the tools included: a
+  /// command that would run past it is cut short instead of keeping the turn
+  /// alive past its budget.
+  long long deadline_ms = 0;
 };
 
 class ToolRegistry {

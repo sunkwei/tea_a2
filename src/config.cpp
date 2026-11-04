@@ -301,9 +301,35 @@ void parse_peers(const YAML::Node& node, std::vector<PeerConfig>* out,
   }
 }
 
+/// Read only the budget keys of a `settings:` block. Used for the
+/// `settings:` block of provider.yaml, where the rest of the settings are not
+/// read any more but the ceiling of a turn still is.
+void apply_budget_settings(Settings* s, const YAML::Node& node) {
+  if (!s || !node || !node.IsMap()) return;
+  if (yhas(node, "max_iterations"))
+    s->max_iterations = static_cast<int>(yint(node, "max_iterations", s->max_iterations));
+  if (yhas(node, "max_wall_ms"))
+    s->max_wall_ms = static_cast<int>(yint(node, "max_wall_ms", s->max_wall_ms));
+  if (yhas(node, "max_tool_calls"))
+    s->max_tool_calls = static_cast<int>(yint(node, "max_tool_calls", s->max_tool_calls));
+  if (yhas(node, "max_total_tokens"))
+    s->max_total_tokens = yint(node, "max_total_tokens", s->max_total_tokens);
+  if (s->max_iterations < 0) s->max_iterations = 0;
+  if (s->max_wall_ms < 0) s->max_wall_ms = 0;
+  if (s->max_tool_calls < 0) s->max_tool_calls = 0;
+  if (s->max_total_tokens < 0) s->max_total_tokens = 0;
+}
+
 void apply_settings(Settings& s, const YAML::Node& node,
                    std::vector<std::string>* warnings) {
   if (!node || !node.IsMap()) return;
+  if (yhas(node, "max_iterations"))
+    s.max_iterations = static_cast<int>(yint(node, "max_iterations", s.max_iterations));
+  if (yhas(node, "max_wall_ms")) s.max_wall_ms = static_cast<int>(yint(node, "max_wall_ms", s.max_wall_ms));
+  if (yhas(node, "max_tool_calls"))
+    s.max_tool_calls = static_cast<int>(yint(node, "max_tool_calls", s.max_tool_calls));
+  if (yhas(node, "max_total_tokens"))
+    s.max_total_tokens = yint(node, "max_total_tokens", s.max_total_tokens);
   if (yhas(node, "max_tool_output")) s.max_tool_output = yint(node, "max_tool_output", s.max_tool_output);
   if (yhas(node, "max_assistant_content"))
     s.max_assistant_content = yint(node, "max_assistant_content", s.max_assistant_content);
@@ -382,6 +408,11 @@ void apply_settings(Settings& s, const YAML::Node& node,
   if (yhas(node, "trajectory_max_bytes"))
     s.trajectory_max_bytes = yint(node, "trajectory_max_bytes", s.trajectory_max_bytes);
   if (s.keep_turns < 0) s.keep_turns = 0;
+  // A negative budget is nonsense; 0 means "no limit" for that dimension.
+  if (s.max_iterations < 0) s.max_iterations = 0;
+  if (s.max_wall_ms < 0) s.max_wall_ms = 0;
+  if (s.max_tool_calls < 0) s.max_tool_calls = 0;
+  if (s.max_total_tokens < 0) s.max_total_tokens = 0;
   if (s.trajectory_step_max_bytes < 0) s.trajectory_step_max_bytes = 0;
   if (s.trajectory_step_max_bytes > 1024 * 1024) s.trajectory_step_max_bytes = 1024 * 1024;
   if (s.trajectory_max_turns < 1) s.trajectory_max_turns = 1;
@@ -405,6 +436,50 @@ void apply_settings(Settings& s, const YAML::Node& node,
 }
 
 }  // namespace
+
+nlohmann::json turn_budget_json(const TurnBudget& budget) {
+  nlohmann::json j = nlohmann::json::object();
+  j["max_iterations"] = budget.max_iterations;
+  j["max_wall_ms"] = budget.max_wall_ms;
+  j["max_tool_calls"] = budget.max_tool_calls;
+  j["max_total_tokens"] = budget.max_total_tokens;
+  return j;
+}
+
+nlohmann::json turn_budget_use_json(const TurnBudgetUse& used) {
+  nlohmann::json j = nlohmann::json::object();
+  j["iterations"] = used.iterations;
+  j["tool_calls"] = used.tool_calls;
+  j["wall_ms"] = used.wall_ms;
+  j["total_tokens"] = used.total_tokens;
+  j["limit"] = used.limit;
+  return j;
+}
+
+TurnBudget TurnBudget::tightened_by(const TurnBudget& request) const {
+  TurnBudget out;
+  // A request may lower a ceiling, never raise it: the machine says what one
+  // turn may cost at most, the caller says how much of that this turn gets.
+  out.max_iterations = request.max_iterations > 0
+                           ? (max_iterations > 0 ? std::min(request.max_iterations, max_iterations)
+                                                 : request.max_iterations)
+                           : max_iterations;
+  out.max_wall_ms = request.max_wall_ms > 0
+                        ? (max_wall_ms > 0 ? std::min(request.max_wall_ms, max_wall_ms)
+                                            : request.max_wall_ms)
+                        : max_wall_ms;
+  out.max_tool_calls = request.max_tool_calls > 0
+                           ? (max_tool_calls > 0
+                                  ? std::min(request.max_tool_calls, max_tool_calls)
+                                  : request.max_tool_calls)
+                           : max_tool_calls;
+  out.max_total_tokens = request.max_total_tokens > 0
+                             ? (max_total_tokens > 0
+                                    ? std::min(request.max_total_tokens, max_total_tokens)
+                                    : request.max_total_tokens)
+                             : max_total_tokens;
+  return out;
+}
 
 bool apply_settings_yaml(Settings* settings, const std::string& yaml_path, std::string* err) {
   if (!settings) return false;
@@ -905,8 +980,15 @@ bool AppConfig::load(const std::string& config_path, const std::string& tea_home
   // <run_dir>/settings.yaml (per workspace). A file that still carries one
   // must not look like it works.
   if (root["settings"]) {
+    // The budget of one turn is the one exception: the ceiling of a turn is
+    // worth having next to the provider that has to pay for it, so these keys
+    // are read here as well. Everything else in the block stays ignored - the
+    // warning says so.
+    apply_budget_settings(&settings, root["settings"]);
     warnings.push_back(
-        "the 'settings:' block of provider.yaml is not read any more; put it in " +
+        "the 'settings:' block of provider.yaml is not read any more (only the turn "
+        "budget keys are: max_iterations, max_wall_ms, max_tool_calls, "
+        "max_total_tokens); put the rest in " +
         path_join(tea_home, "tea_agent.yaml") +
         " (machine level) or in the workspace's .tea_agent_run/settings.yaml (per workspace)");
   }

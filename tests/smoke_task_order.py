@@ -94,6 +94,18 @@ def main():
     check("the idempotency key is read", body.get("idempotency_key") == "abc",
           body.get("idempotency_key"))
 
+    # ---- the budget and the permissions -------------------------------------
+    budgeted = task_order.parse_order(
+        "title: t\nprompt: y\n"
+        "limits:\n  max_iterations: 8\n  max_wall_ms: 300000\n"
+        "policy:\n  tools: toolkit_exec, toolkit_file\n")
+    check("a task order can carry a budget",
+          budgeted.get("limits") == {"max_iterations": "8", "max_wall_ms": "300000"},
+          budgeted.get("limits"))
+    check("a task order can carry the permissions",
+          budgeted.get("policy") == {"tools": "toolkit_exec, toolkit_file"},
+          budgeted.get("policy"))
+
     # ---- the template that ships with the queue ----------------------------
     check("the queue ships a template", os.path.exists(TEMPLATE), TEMPLATE)
     with open(TEMPLATE, encoding="utf-8") as f:
@@ -104,7 +116,7 @@ def main():
           all(key in template for key in
               ("title:", "prompt:", "workspace:", "allow_paths:", "provider:", "model:",
                "priority:", "not_before:", "tags:", "business_id:", "idempotency_key:",
-               "meta:")), True)
+               "meta:", "limits:", "policy:")), True)
 
     # ---- the errors --------------------------------------------------------
     for name, text, needle in (

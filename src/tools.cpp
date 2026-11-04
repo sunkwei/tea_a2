@@ -102,6 +102,15 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
   options.shell = arg_str(args, "shell", ctx.workspace->settings().shell);
   options.timeout_ms = static_cast<int>(arg_int(args, "timeout_ms", ctx.workspace->settings().command_timeout_ms));
   if (options.timeout_ms < 1000) options.timeout_ms = 1000;
+  // The turn's wall clock is a ceiling for the command too: a build that runs
+  // past the end of the budget must not keep the turn alive past it.
+  if (ctx.deadline_ms > 0) {
+    const long long left = ctx.deadline_ms - now_ms();
+    if (left < options.timeout_ms) {
+      options.timeout_ms = static_cast<int>(left > 1000 ? left : 1000);
+      result.meta["budget_deadline"] = true;
+    }
+  }
   // The same number the UI is told about, so "the command was given 180 s"
   // and "the command had 180 s" are the same sentence.
   result.meta["timeout_ms"] = options.timeout_ms;

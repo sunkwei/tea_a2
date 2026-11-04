@@ -164,6 +164,20 @@
       </label>
     </div>
     <details class="knobs">
+      <summary>预算与权限（留空 = 用机器的预算和全部工具）</summary>
+      <div class="grid">
+        <label class="f"><span>迭代上限（几轮模型调用）</span>
+          <input id="limit-max_iterations" type="number" step="1" min="0" placeholder="留空"></label>
+        <label class="f"><span>工具调用上限</span>
+          <input id="limit-max_tool_calls" type="number" step="1" min="0" placeholder="留空"></label>
+        <label class="f"><span>时间上限（秒）</span>
+          <input id="limit-max_wall_s" type="number" step="10" min="0" placeholder="留空"></label>
+        <label class="f wide"><span>可以用的工具（逗号分隔，留空 = 全部）</span>
+          <input id="policy-tools" type="text" spellcheck="false"
+                 placeholder="例如 toolkit_exec,toolkit_file"></label>
+      </div>
+    </details>
+    <details class="knobs">
       <summary>模型参数（留空 = 模型的默认值，什么都不额外发）</summary>
       <div class="grid">
         <label class="f"><span>temperature（0-2）</span>
@@ -265,6 +279,29 @@ function card(t) {
     var ap = el('div', 'path');
     ap.textContent = '本任务可额外访问：' + t.allow_paths.join('、');
     c.appendChild(ap);
+  }
+
+  if (t.limits && Object.keys(t.limits).length) {
+    var lim = [];
+    if (t.limits.max_iterations) lim.push('迭代 ' + t.limits.max_iterations + ' 轮');
+    if (t.limits.max_tool_calls) lim.push('工具 ' + t.limits.max_tool_calls + ' 次');
+    if (t.limits.max_wall_ms) lim.push('时间 ' + Math.round(t.limits.max_wall_ms / 1000) + ' 秒');
+    if (t.limits.max_total_tokens) lim.push('token ' + t.limits.max_total_tokens);
+    var lb = el('div', 'path');
+    lb.textContent = '本任务的预算：' + (lim.length ? lim.join(' · ') : '用机器的');
+    c.appendChild(lb);
+  }
+
+  if (t.policy && t.policy.tools && t.policy.tools.length) {
+    var pol = el('div', 'path');
+    pol.textContent = '本任务可用的工具：' + t.policy.tools.join('、');
+    c.appendChild(pol);
+  }
+
+  if (t.stop_reason === 'budget') {
+    var bud = el('div', 'hint');
+    bud.textContent = '预算到点：' + ((t.budget_used || {}).limit || 'budget');
+    c.appendChild(bud);
   }
 
   var times = el('div', 'times');
@@ -483,6 +520,23 @@ function collect() {
   var allow = val('new-allow');
   if (allow) body.allow_paths = allow.split(',').map(function (s) { return s.trim(); })
                                   .filter(function (s) { return !!s; });
+  // The budget of the task: only the ones that were filled in. The agent
+  // enforces it and says which ceiling it hit.
+  var limits = {};
+  ['max_iterations', 'max_tool_calls'].forEach(function (key) {
+    var v = val('limit-' + key);
+    if (v !== '') limits[key] = Number(v);
+  });
+  var wall = val('limit-max_wall_s');
+  if (wall !== '') limits.max_wall_ms = Number(wall) * 1000;
+  if (Object.keys(limits).length) body.limits = limits;
+  // The permissions: which tools the model may use in this task.
+  var tools = val('policy-tools');
+  if (tools) {
+    var names = tools.split(',').map(function (s) { return s.trim(); })
+                     .filter(function (s) { return !!s; });
+    if (names.length) body.policy = { tools: names };
+  }
   // The model knobs: only the ones that were filled in.
   var knobs = {};
   ['temperature', 'top_p', 'max_tokens', 'seed'].forEach(function (key) {
@@ -520,7 +574,9 @@ function createTask() {
       var task = res.d || {};
       var when0 = task.starts_at_local ? ('（' + task.starts_at_local + ' 开始）') : '';
       say('已排队：' + (task.id || '') + when0, true);
-      ['new-prompt', 'new-title', 'new-workspace', 'new-model', 'new-allow'].forEach(function (id) {
+      ['new-prompt', 'new-title', 'new-workspace', 'new-model', 'new-allow',
+       'limit-max_iterations', 'limit-max_tool_calls', 'limit-max_wall_s',
+       'policy-tools'].forEach(function (id) {
         document.getElementById(id).value = '';
       });
       document.getElementById('new-when').value = '';

@@ -1059,6 +1059,20 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   }
 
   const Settings& st = workspace.settings();
+  // The budget of this turn: the machine's ceilings, tightened by what the
+  // caller asked for (the task queue sends its own limits per task). A request
+  // may only *lower* a ceiling - the machine keeps the final word.
+  TurnBudget machine_budget;
+  machine_budget.max_iterations = st.max_iterations;
+  machine_budget.max_wall_ms = st.max_wall_ms;
+  machine_budget.max_tool_calls = st.max_tool_calls;
+  machine_budget.max_total_tokens = st.max_total_tokens;
+  const TurnBudget budget = machine_budget.tightened_by(options.budget);
+  out.budget = budget;
+  // The wall clock of the turn: the tools get the same deadline, so a long
+  // command cannot keep a turn alive past the end of its budget.
+  const long long budget_deadline_ms =
+      budget.max_wall_ms > 0 ? started + budget.max_wall_ms : 0;
   bool echo_reasoning = resolve_reasoning_echo(*config_, *provider_info);
   LOG_DEBUG("agent: turn start provider=", provider, " model=", model,
             " reasoning_echo=", echo_reasoning ? 1 : 0, " history=", session->messages.size());
@@ -1168,6 +1182,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // killed process still leaves a usable partial trajectory.
   TrajectoryRecorder trajectory;
   trajectory.begin(workspace, session->info.id, workspace.id(), provider, model);
+  // The task this turn works on (the queue's task id) and the budget it ran
+  // under: the audit trail says which job this was and what it was allowed to
+  // spend.
+  trajectory.set_task_id(options.task_id);
+  trajectory.set_budget(budget);
   const EventEmitter emit_user = emit;
   // Compaction is the one step that does not pass through this function's own
   // bookkeeping (it runs inside maybe_compact, both before the loop and during
@@ -1257,10 +1276,20 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     return tools_json_no_web;
   };
 
-  // 一轮跑到模型自己收尾为止：**没有轮数上限，也没有「预算」这种配置**。
-  // 会停下这一轮的只有：模型给出最终回答、用户中断、provider 报错，
-  // 以及下面那道「连续三次相同输出」的闸（模型在原地打转）。
+  // 一轮跑到模型自己收尾为止，或者跑到预算用完为止。预算在下面三处生效：
+  // 迭代次数、工具调用次数、墙钟（和 token 上限）。到点是**正常结束**，
+  // 不是失败：调用方要能分清「活干完了」和「没地方了」。
   bool finished = false;
+  // What the turn used of its budget.
+  int budget_tool_calls = 0;
+  bool budget_stopped = false;
+  // The tokens this turn spent: the provider's own numbers when it reports
+  // them, the local estimate otherwise (the estimate counts the prompt of the
+  // largest request plus the generated text).
+  auto tokens_used = [&]() -> long long {
+    if (out.usage.present) return out.usage.total_tokens;
+    return out.context_tokens + out.output_tokens;
+  };
   // 同样的结果连着来：模型在原地打转。上限没了之后，这道闸是防止一轮永远
   // 跑下去、把钱烧光的最后一道。
   const int kMaxIdenticalOutputs = 3;
@@ -1306,6 +1335,30 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   };
 
   for (int iteration = 0; ; ++iteration) {
+    // The budget of the turn. Running out of room ends the turn **normally**:
+    // the caller has to be able to tell "the work is done" from "we have no
+    // room left", so this is a stop_reason and not an error.
+    if (budget.max_iterations > 0 && iteration >= budget.max_iterations) {
+      out.stop_reason = "budget";
+      out.budget_used.limit = "iterations";
+      LOG_WARN("agent: the turn reached its iteration budget (", budget.max_iterations,
+               ") - it stops here");
+      break;
+    }
+    if (budget.max_wall_ms > 0 && (now_ms() - started) > budget.max_wall_ms) {
+      out.stop_reason = "budget";
+      out.budget_used.limit = "wall_ms";
+      LOG_WARN("agent: the turn reached its wall-clock budget (", budget.max_wall_ms,
+               " ms) - it stops here");
+      break;
+    }
+    if (budget.max_total_tokens > 0 && tokens_used() > budget.max_total_tokens) {
+      out.stop_reason = "budget";
+      out.budget_used.limit = "total_tokens";
+      LOG_WARN("agent: the turn reached its token budget (", budget.max_total_tokens,
+               ") - it stops here");
+      break;
+    }
     if (cancel && cancel->load()) {
       out.cancelled = true;
       break;
@@ -1658,6 +1711,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       tool_ctx.web_tool_calls = &web_tool_calls;
       tool_ctx.mcp = tools_->mcp();
       if (!options.task_id.empty()) tool_ctx.task_id = &options.task_id;
+      // The turn's wall clock is the tool's deadline too: a build that runs
+      // past the end of the budget must not keep the turn alive.
+      tool_ctx.deadline_ms = budget_deadline_ms;
       const int timeout_ms = tools_->timeout_ms(call.name, call.arguments, tool_ctx);
 
       const int64_t tool_started = now_ms();
@@ -1697,7 +1753,43 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         }
       }
 
-      if (arguments_valid && cancel && cancel->load()) {
+      // The permissions of this turn: a tool the caller did not allow is
+      // refused **even when the model asks for it**. The allowlist is not only
+      // about what the model is shown (see the tool schema above) - it is the
+      // caller's decision, and the agent enforces it.
+      bool tool_allowed = true;
+      if (!options.tools.empty()) {
+        tool_allowed = false;
+        for (std::size_t k = 0; k < options.tools.size(); ++k) {
+          if (options.tools[k] == call.name) { tool_allowed = true; break; }
+        }
+      }
+      const bool tool_not_allowed = arguments_valid && !tool_allowed;
+      // The budget of the turn: a tool call that would cross the ceiling does
+      // not run. The call still gets an answer (a provider rejects a tool call
+      // without a result), and the turn ends right after - with the reason
+      // why, so the caller knows it was the budget and not a failure.
+      const bool tool_budget_exhausted = arguments_valid && budget.max_tool_calls > 0 &&
+                                         budget_tool_calls >= budget.max_tool_calls;
+      if (tool_budget_exhausted) {
+        tool_result.ok = false;
+        tool_result.output =
+            "budget: this turn has used up its tool-call budget (" +
+            std::to_string(budget.max_tool_calls) + " calls); the turn stops here.";
+        out.stop_reason = "budget";
+        out.budget_used.limit = "tool_calls";
+        budget_stopped = true;
+        LOG_WARN("agent: the turn reached its tool-call budget (", budget.max_tool_calls,
+                 ") - the call ", call.name, " does not run");
+      } else if (tool_not_allowed) {
+        // The caller did not allow this tool. The model is told so (it may
+        // pick another one); the tool does not run.
+        tool_result.ok = false;
+        tool_result.output = "this turn may not use the tool '" + call.name +
+                             "' (the caller of this turn allowed a different set of tools)";
+        LOG_WARN("agent: the turn asked for the tool ", call.name,
+                 ", which this turn is not allowed to use - it does not run");
+      } else if (arguments_valid && cancel && cancel->load()) {
         // The turn was stopped before this tool ran. The call still needs an
         // answer: a tool call without a result is a request no provider
         // accepts ("invalid params, 400 (2013)" on MiniMax), so an interrupt
@@ -1709,6 +1801,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
             "cancelled by user: the turn was interrupted before this tool ran";
       } else if (arguments_valid) {
         tool_result = tools_->execute(call.name, parsed_arguments, tool_ctx);
+        ++budget_tool_calls;
       }
 
       // Images the tool produced: encode once, then hand them to the follow-up
@@ -1859,6 +1952,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       // without running anything.
     }
 
+    // The tool budget ran out: the turn stops here. Every announced call got
+    // its answer, so the session stays usable for the next turn.
+    if (budget_stopped) break;
+
     // Images a tool loaded (toolkit_load_image) cannot ride on the tool result:
     // the wire format only carries images on user messages. Attach them as one
     // follow-up user message, after every tool result of this iteration, so the
@@ -1919,6 +2016,13 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     }
   }
 
+  // What the turn used of its budget - the numbers the caller sees next to
+  // the answer.
+  out.budget_used.iterations = out.iterations;
+  out.budget_used.tool_calls = budget_tool_calls;
+  out.budget_used.wall_ms = now_ms() - started;
+  out.budget_used.total_tokens = tokens_used();
+
   // 轨迹记录的是**事实**：这一轮是被上限截断的，还是被重复输出打断的。
   trajectory.set_repeated_output(out.repeated_output);
 
@@ -1945,6 +2049,44 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     emit(event);
   }
 
+
+  // 预算用完：这一轮到此为止。**不是失败**——做完的部分算数，做完的事写进
+  // 对话，下一轮知道它停在哪。这句话也要进回答，调用方才看得到「到点」而不是
+  // 一句没有下文的话。
+  if (out.stop_reason == "budget" && !out.cancelled) {
+    std::string notice;
+    if (out.budget_used.limit == "iterations") {
+      notice = "这一轮用完了迭代预算（" + std::to_string(out.budget_used.iterations) + "/" +
+               std::to_string(budget.max_iterations) + " 轮），工作还没收尾。";
+    } else if (out.budget_used.limit == "tool_calls") {
+      notice = "这一轮用完了工具调用预算（" + std::to_string(out.budget_used.tool_calls) + "/" +
+               std::to_string(budget.max_tool_calls) + " 次），工作还没收尾。";
+    } else if (out.budget_used.limit == "wall_ms") {
+      notice = "这一轮用完了时间预算（" + std::to_string(out.budget_used.wall_ms) + " 毫秒），工作还没收尾。";
+    } else if (out.budget_used.limit == "total_tokens") {
+      notice = "这一轮用完了 token 预算（" + std::to_string(out.budget_used.total_tokens) + "/" +
+               std::to_string(budget.max_total_tokens) + "），工作还没收尾。";
+    }
+    if (!notice.empty()) {
+      Message final_msg;
+      final_msg.role = "assistant";
+      final_msg.content = out.content.empty() ? notice : (out.content + "\n\n" + notice);
+      final_msg.created_at = now_iso8601();
+      session->messages.push_back(final_msg);
+      session->info.updated_at = final_msg.created_at;
+      out.content = final_msg.content;
+      nlohmann::json delta = nlohmann::json::object();
+      delta["type"] = "content_delta";
+      delta["text"] = notice;
+      emit(delta);
+      nlohmann::json event = nlohmann::json::object();
+      event["type"] = "budget";
+      event["limit"] = out.budget_used.limit;
+      event["budget"] = turn_budget_json(budget);
+      event["budget_used"] = turn_budget_use_json(out.budget_used);
+      emit(event);
+    }
+  }
 
   // The restore step of an interrupt: every tool call the model made must have
   // an answer, or the next request is one no provider accepts ("invalid params,
@@ -2049,6 +2191,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
   // Close the trajectory (stamps finished_at/ok/usage, appends the final line
   // and applies retention) before the done event announces its id.
+  trajectory.set_stop_reason(out.stop_reason);
   trajectory.finish(out.ok, out.error, out.detail, out.iterations, out.usage,
                     out.usage_estimated);
 
@@ -2095,6 +2238,12 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     }
     event["elapsed_ms"] = out.elapsed_ms;
     event["usage"] = usage_json(out.usage);
+    // Why the turn ended: "" (the model finished), "budget" (a ceiling was
+    // reached), "repeated_output" (the model went in circles). The caller
+    // needs this to tell "the work is done" from "we ran out of room".
+    if (!out.stop_reason.empty()) event["stop_reason"] = out.stop_reason;
+    event["budget"] = turn_budget_json(out.budget);
+    event["budget_used"] = turn_budget_use_json(out.budget_used);
     event["metrics"] = metrics_json(out.max_context_tokens, out.context_tokens, out.output_tokens,
                                     out.ttft_ms, out.generation_ms, out.usage_estimated,
                                     out.elapsed_ms);

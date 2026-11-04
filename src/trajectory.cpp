@@ -157,6 +157,10 @@ nlohmann::json trajectory_summary(const nlohmann::json& turn) {
   s["ok"] = turn.value("ok", false);
   s["cancelled"] = turn.value("cancelled", false);
   s["repeated_output"] = turn.value("repeated_output", false);
+  // Which task this turn was working on (empty => an ordinary chat), and how
+  // it ended ("budget" = a ceiling was reached).
+  s["task_id"] = turn.value("task_id", std::string());
+  s["stop_reason"] = turn.value("stop_reason", std::string());
   s["iterations"] = turn.value("iterations", 0);
   s["steps"] = (turn.contains("steps") && turn["steps"].is_array())
                    ? static_cast<int>(turn["steps"].size())
@@ -237,6 +241,9 @@ nlohmann::json TrajectoryRecorder::build() const {
   turn["ok"] = finished_ ? ok_ : false;
   turn["cancelled"] = cancelled_;
   if (repeated_output_) turn["repeated_output"] = true;
+  if (!stop_reason_.empty()) turn["stop_reason"] = stop_reason_;
+  if (!task_id_.empty()) turn["task_id"] = task_id_;
+  if (budget_.any()) turn["budget"] = turn_budget_json(budget_);
   turn["iterations"] = iterations_;
   turn["usage"] = usage_object(usage_, usage_estimated_);
   turn["steps"] = steps_;

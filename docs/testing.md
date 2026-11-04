@@ -64,6 +64,9 @@ node tests/ui_shell.mjs                                  # 网页终端：入口
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
 python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果/串行/幂等/事件/导出 + 模型参数/本地定时/生成物下载
+python3 tests/smoke_turn_budget.py                         # 一轮的预算：默认 300 轮 / 请求只能收紧 / 到点正常结束（stop_reason=budget）
+                                                          # + 工具调用预算 + 轨迹记 task_id 与预算
+python3 tests/smoke_task_budget.py                         # 队列这一侧：任务带预算与权限 / 下发给 agent / 收回 stop_reason 与用量 / 不准用的工具不执行
 node tests/ui_task_form.mjs                                # 队列网页：排任务的表单（主题/工作区/定时/provider/模型/参数）+ 生成物下载（需 google-chrome）
 python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）
 python3 tests/smoke_watchdog.py                             # 看门狗：卡住的任务（默认只告警）/ --auto 才判死 / 队列暂停与恢复 / agent 不通

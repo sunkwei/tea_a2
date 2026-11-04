@@ -304,3 +304,12 @@ providers:
 # implementation, where this file was both the provider list and the settings.
 # The startup log says so if it finds one. See tea_agent.example.yaml for the
 # settings and what each one does.
+#
+# One exception: the **budget of one turn** is read here as well, because it
+# belongs next to the provider that pays for it:
+#
+# settings:
+#   max_iterations: 300        # model iterations per turn (0 = no limit)
+#   max_wall_ms: 0             # wall clock of one turn, in ms
+#   max_tool_calls: 0          # tool calls of one turn
+#   max_total_tokens: 0        # tokens of one turn

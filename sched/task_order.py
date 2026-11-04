@@ -11,6 +11,11 @@ A task order is a plain text file with "key: value" lines:
     allow_paths:
       - /tmp
     not_before: +5
+    limits:
+      max_iterations: 8
+      max_wall_ms: 300000
+    policy:
+      tools: toolkit_exec, toolkit_file
 
 The format is deliberately small - a line, an indented continuation, a list,
 a nested block of key/value pairs. It is NOT yaml (the standard library has no
@@ -31,7 +36,7 @@ STRING_KEYS = ("title", "prompt", "workspace", "provider", "model",
                "not_before", "idempotency_key", "business_id")
 LIST_KEYS = ("allow_paths", "tags")
 INT_KEYS = ("priority",)
-DICT_KEYS = ("meta", "model_params")
+DICT_KEYS = ("meta", "model_params", "limits", "policy")
 
 KNOWN_KEYS = set(STRING_KEYS) | set(LIST_KEYS) | set(INT_KEYS) | set(DICT_KEYS)
 

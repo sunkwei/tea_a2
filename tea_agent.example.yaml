@@ -12,6 +12,13 @@
 # settings. A file that still carries one gets a warning in the startup log.
 
 settings:
+  # The budget of ONE turn: the ceilings a turn may not cross. 0 = no limit
+  # for that dimension. A turn that runs out of room ends normally
+  # (stop_reason: "budget") - it is not a failure.
+  max_iterations: 300          # model iterations (one model call = one iteration)
+  max_wall_ms: 0               # wall clock of the turn, in ms
+  max_tool_calls: 0            # tool calls of the turn
+  max_total_tokens: 0          # tokens of the turn (prompt + completion)
   max_tool_output: 131072      # bytes of tool output fed back to the model
   keep_turns: 10               # hard floor on how many turns stay in context
   command_timeout_ms: 180000   # default toolkit_exec timeout

@@ -484,7 +484,38 @@ python3 sched/task_server.py --submit "整理 /data/raw 的日志" --allow-path 
 | `needs_confirmation` + `question` | **需要用户确认**：agent 停下来等一个答案，任务不会假装做完 |
 | `session_id` | 跑这个任务的会话（确认之后接着在同一个会话里继续） |
 | `result` | 最后一轮的回答 |
+| `limits` | **这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）。没写就用机器的（`GET /api/health` 的 `limits`） |
+| `policy` | **这一轮的权限**：`tools` 是这次允许用的工具清单（空 = 全部） |
+| `stop_reason` | 这一轮为什么停：`""`（模型自己收尾）/ `budget`（预算到点）/ `cancelled` / `error` |
+| `budget_used` | 预算用了多少、撞到的是哪一条（`limit`） |
+| `usage` | 这一轮的 token 用量（provider 自己报的） |
+| `trajectory_id` | 这一轮在 agent 那边的轨迹 id（`GET /api/turns/<id>/trajectory`） |
 | `meta` | 给脚本自己用的自由字段 |
+
+### 预算与权限：这一轮能花多少、能用什么
+
+agent 是**机制层**：它决定一轮最多能花多少，并且**强制**执行；队列是**策略层**：
+它决定每个任务分到多少、能用哪些工具，然后把这两样交给 agent。
+
+排队时就能写：
+
+```bash
+curl -X POST http://127.0.0.1:8283/api/tasks -H 'Content-Type: application/json' \
+     -d '{"prompt":"整理 /data/raw 的日志",
+          "allow_paths":["/data/raw"],
+          "limits":{"max_iterations":8,"max_wall_ms":300000},
+          "policy":{"tools":["toolkit_exec","toolkit_file"]}}'
+```
+
+- **预算**：没写就用机器的（agent 的 `GET /api/health` → `limits`，`max_iterations`
+  默认 300）。请求**只能收紧，不能放宽**机器的上限——这是机制层的规矩，队列也改不动。
+- **权限**：`policy.tools` 是这次允许用的工具清单。清单外的工具**模型点名也不执行**
+  （工具会得到一句「这一轮不准用这个工具」的回答）。`allow_paths` 仍是额外能碰的目录。
+- **不认识的键当场报错**（400），不会等排队排到一半才发现。
+- **到点不是失败**：预算用完时这一轮**正常结束**（`stop_reason: "budget"`），
+  任务记成 `done`，`note` 里写清楚撞到的是哪一条。做过的部分算数。
+
+网页上排队时，「预算与权限」那一栏就是这两样（留空 = 用机器的预算和全部工具）。
 
 ### agent 怎么报进度：`toolkit_task`
 

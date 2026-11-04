@@ -277,6 +277,56 @@ bool json_bool(const nlohmann::json& j, const char* key, bool def = false) {
   return it->get<bool>();
 }
 
+/// The budget of one turn, as a request may ask for it:
+///
+///   "limits":{"max_iterations":8,"max_wall_ms":300000,
+///             "max_tool_calls":40,"max_total_tokens":200000}
+///
+/// A request may only *tighten* the machine's ceilings (the clamp happens in
+/// TurnBudget::tightened_by), so the values are only checked for shape here.
+/// A key nobody knows is an error, never a silent no-op - the same rule the
+/// model knobs follow.
+bool parse_turn_limits(const nlohmann::json& body, TurnBudget* out, std::string* err) {
+  out->max_iterations = 0;
+  out->max_wall_ms = 0;
+  out->max_tool_calls = 0;
+  out->max_total_tokens = 0;
+  auto it = body.find("limits");
+  if (it == body.end() || it->is_null()) return true;
+  if (!it->is_object()) {
+    *err = "'limits' must be an object (max_iterations, max_wall_ms, max_tool_calls, max_total_tokens)";
+    return false;
+  }
+  static const char* const kKeys[] = {"max_iterations", "max_wall_ms", "max_tool_calls",
+                                      "max_total_tokens"};
+  for (nlohmann::json::const_iterator k = it->begin(); k != it->end(); ++k) {
+    const std::string key = k.key();
+    bool known = false;
+    for (std::size_t i = 0; i < sizeof(kKeys) / sizeof(kKeys[0]); ++i) {
+      if (key == kKeys[i]) { known = true; break; }
+    }
+    if (!known) {
+      *err = "unknown budget key '" + key + "' (known: max_iterations, max_wall_ms, "
+             "max_tool_calls, max_total_tokens)";
+      return false;
+    }
+    if (!k.value().is_number_integer()) {
+      *err = "'" + key + "' must be a whole number";
+      return false;
+    }
+    const long long value = k.value().get<long long>();
+    if (value < 0) {
+      *err = "'" + key + "' must not be negative";
+      return false;
+    }
+    if (key == "max_iterations") out->max_iterations = static_cast<int>(value);
+    else if (key == "max_wall_ms") out->max_wall_ms = static_cast<int>(value);
+    else if (key == "max_tool_calls") out->max_tool_calls = static_cast<int>(value);
+    else out->max_total_tokens = value;
+  }
+  return true;
+}
+
 /// A NUL byte in the first chunk means "this is not text". The same rule the
 /// workspace search uses (src/workspace.cpp): a file with a stray control
 /// character is still worth showing, a file full of zero bytes is not.
@@ -1749,6 +1799,17 @@ void ApiServer::Impl::install_routes() {
     if (!config->loaded) j["config_error"] = config->error;
     // Where the mutable state lives; the settings page shows it next to
     // "销毁" so it is obvious what that button is about to delete.
+    // The budget of one turn: the ceilings this machine imposes. A caller
+    // (the task queue) reads them and hands its own tasks a budget that fits
+    // inside them.
+    {
+      TurnBudget machine_budget;
+      machine_budget.max_iterations = config->settings.max_iterations;
+      machine_budget.max_wall_ms = config->settings.max_wall_ms;
+      machine_budget.max_tool_calls = config->settings.max_tool_calls;
+      machine_budget.max_total_tokens = config->settings.max_total_tokens;
+      j["limits"] = turn_budget_json(machine_budget);
+    }
     j["tea_home"] = config->tea_home;
     // Can this process write into the tea home? The UI shows it, because the
     // workspace index and the global log are lost - silently - when it cannot.
@@ -2361,6 +2422,16 @@ void ApiServer::Impl::install_routes() {
     settings["max_tool_output"] = config->settings.max_tool_output;
     settings["command_timeout_ms"] = config->settings.command_timeout_ms;
     settings["allow_outside_workspace"] = config->settings.allow_outside_workspace;
+    // The budget of one turn (the settings page shows it, and the queue reads
+    // it to know what a task may spend).
+    {
+      TurnBudget machine_budget;
+      machine_budget.max_iterations = config->settings.max_iterations;
+      machine_budget.max_wall_ms = config->settings.max_wall_ms;
+      machine_budget.max_tool_calls = config->settings.max_tool_calls;
+      machine_budget.max_total_tokens = config->settings.max_total_tokens;
+      settings["budget"] = turn_budget_json(machine_budget);
+    }
     j["settings"] = settings;
     // The speech-to-text service (the `asr:` section of provider.yaml). The
     // UI needs to know before the user presses the mic button: without a
@@ -4385,6 +4456,16 @@ void ApiServer::Impl::install_routes() {
         if ((*tools_it)[i].is_string()) allowed_tools.push_back((*tools_it)[i].get<std::string>());
       }
     }
+    // The budget of this turn. The request may only tighten the machine's
+    // ceilings - see TurnBudget::tightened_by.
+    TurnBudget request_budget;
+    {
+      std::string limits_err;
+      if (!parse_turn_limits(body, &request_budget, &limits_err)) {
+        send_error(res, 400, "bad_request", limits_err);
+        return;
+      }
+    }
     const std::string task_id = trim(json_string(body, "task_id"));
     // What the task is: id, title, request. The task queue lives in the task
     // server (sched/task_server.py), so the caller says what the work is; this
@@ -4519,7 +4600,7 @@ void ApiServer::Impl::install_routes() {
     ToolRegistry* reg = tools;
     turn->worker = std::thread([turn, cfg, reg, message, images, provider, model, system_prompt,
                              allowed_tools, task_id, task_context, allow_paths,
-                             knob_overrides]() {
+                             knob_overrides, request_budget]() {
       Agent agent(cfg, reg);
       TurnOptions options;
       options.provider = provider;
@@ -4531,6 +4612,7 @@ void ApiServer::Impl::install_routes() {
       options.task_id = task_id;
       options.task_context = task_context;
       options.allow_paths = allow_paths;
+      options.budget = request_budget;
       options.knob_overrides = knob_overrides;
       EventEmitter emit = [turn](const nlohmann::json& event) { turn->emit_event(event); };
       try {

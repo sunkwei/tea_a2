@@ -115,6 +115,18 @@ class TrajectoryRecorder {
   /// stopped: it was going in circles, not working.
   void set_repeated_output(bool hit) { repeated_output_ = hit; }
 
+  /// The task this turn works on (the task queue's task id). Empty => an
+  /// ordinary chat. It ties the audit trail to the job: "which task did
+  /// this?" is answerable from the record alone.
+  void set_task_id(const std::string& task_id) { task_id_ = task_id; }
+
+  /// The ceilings this turn ran under. Empty => no budget was in force.
+  void set_budget(const TurnBudget& budget) { budget_ = budget; }
+
+  /// Why the turn ended ("" = the model finished, "budget" = a ceiling was
+  /// reached, "cancelled" = the user stopped it, "repeated_output" = ...).
+  void set_stop_reason(const std::string& reason) { stop_reason_ = reason; }
+
  private:
   nlohmann::json build() const;
   void flush();
@@ -138,6 +150,9 @@ class TrajectoryRecorder {
   bool cancelled_ = false;
   bool repeated_output_ = false;
   bool usage_estimated_ = false;
+  std::string task_id_;
+  std::string stop_reason_;
+  TurnBudget budget_;
   std::string error_;
   std::string detail_;
   ChatUsage usage_;
