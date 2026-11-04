@@ -13,6 +13,10 @@ notifications. That shared half lives here. The transport is a subclass
 that implements `send_text` and `send_file` and hands the incoming
 messages over.
 
+The two clients (the queue and the agent) live in `a2_ext_py` - they used to
+live here too, and there was a third copy in `task_server.py`. Now the HTTP
+is written once; what is left here is the chat front end's own business.
+
 Standard library only: these scripts run on the device next to the agent,
 where nobody installs anything.
 """
@@ -22,12 +26,16 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-import task_order
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import task_order  # noqa: E402
+from a2_ext_py import ApiError, Client, Queue as _Queue  # noqa: E402
 
 DEFAULT_AGENT = "http://127.0.0.1:8282"
 DEFAULT_TASKS = "http://127.0.0.1:8283"
@@ -64,13 +72,17 @@ def chunks(text, size):
     return out
 
 
-class ChannelError(Exception):
-    """Something on the way out answered badly: the queue, the agent, the chat."""
+class ChannelError(ApiError):
+    """Something on the way out answered badly: the queue, the agent, the chat.
+
+    The one error type of the extension layer (`a2_ext_py.ApiError`), with the
+    message-first shape this module has always used. The bots catch this
+    name, so it stays.
+    """
 
     def __init__(self, message, errcode=0, status=0):
-        super().__init__(message)
+        super().__init__(status, message)
         self.errcode = errcode
-        self.status = status
 
 
 def safe_file_name(name):
@@ -166,161 +178,40 @@ def fmt_task(task):
     return line
 
 
-class Queue:
+class Queue(_Queue):
     """The task server's API - the queue the chat drives.
 
     A chat front end works in ONE project (its own workspace), so it carries
     that project's key: the queue then hands it nothing but its own tasks,
     even if the machine has other projects in the queue.
+
+    The HTTP is the extension layer's (`a2_ext_py.Queue`); what is added
+    here is the error type the bots catch.
     """
 
     def __init__(self, base=DEFAULT_TASKS, timeout=30):
-        self.base = base.rstrip("/")
-        self.timeout = timeout
-        self.key = ""
+        super().__init__(base=base, timeout=timeout)
 
     def _request(self, method, path, body=None, timeout=None, headers=None):
-        url = self.base + path
-        data = None
-        head = {}
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            head["Content-Type"] = "application/json"
-        if self.key:
-            head["Authorization"] = "Bearer " + self.key
-        head.update(headers or {})
-        req = urllib.request.Request(url, data=data, headers=head, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", "replace")
-            message = raw
-            try:
-                message = (json.loads(raw).get("error") or {}).get("message") or raw
-            except ValueError:
-                pass
-            raise ChannelError("task server: HTTP %s: %s" % (exc.code, message[:200]),
-                               status=exc.code) from None
-        except urllib.error.URLError as exc:
-            raise ChannelError("cannot reach the task server %s: %s" % (url, exc.reason)) from None
-        try:
-            body = json.loads(raw) if raw else {}
-        except ValueError:
-            return {}
-        # The queue answers in one shape: {code, message, request_id, data}.
-        if isinstance(body, dict) and "code" in body and "data" in body:
-            if body.get("code"):
-                detail = ((body.get("data") or {}).get("error") or {}).get("message") \
-                    or body.get("message") or "failed"
-                raise ChannelError("task server: %s" % detail)
-            return body.get("data") or {}
-        return body
-
-    def health(self):
-        return self._request("GET", "/api/health", timeout=10)
+            return super()._request(method, path, body=body, timeout=timeout,
+                                    headers=headers)
+        except ApiError as exc:
+            raise ChannelError(exc.message, status=exc.status) from None
 
     def project_key(self, workspace_id):
-        """The key of our own project (the local operator may ask for one)."""
+        """The key of our own project - and a queue without one is not a problem.
+
+        The chat front ends work in one project, but they must also work
+        against a queue that does not hand out keys (an old one, a test one):
+        the key is a refinement, not a requirement. So a refusal is logged
+        and the bot carries on.
+        """
         try:
-            answer = self._request("POST", "/api/projects", {"workspace_id": workspace_id})
+            return super().project_key(workspace_id)
         except ChannelError as exc:
             log("no key for the workspace: %s" % exc)
             return ""
-        key = str(answer.get("key") or "")
-        if key:
-            self.key = key
-        return key
-
-    def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
-               meta=None, key="", not_before="", model="", priority=0, extra=None,
-               model_params=None):
-        body = {"prompt": prompt}
-        if workspace_id:
-            body["workspace_id"] = workspace_id
-        if title:
-            body["title"] = title
-        if provider:
-            body["provider"] = provider
-        if allow_paths:
-            body["allow_paths"] = list(allow_paths)
-        if meta:
-            body["meta"] = meta
-        if not_before:
-            # "not before": the queue may not start the task before this time
-            # ("+5" = five hours from now, "23:30" = today at 23:30).
-            body["not_before"] = not_before
-        if model:
-            body["model"] = model
-        if model_params:
-            body["model_params"] = dict(model_params)
-        if priority:
-            body["priority"] = priority
-        for key_name, value in (extra or {}).items():
-            if value not in (None, "", [], {}):
-                body[key_name] = value
-        # The same key means the same task: a command that is repeated (or a
-        # request that times out and is sent again) must not queue the work
-        # twice.
-        headers = {"Idempotency-Key": key} if key else None
-        return self._request("POST", "/api/tasks", body, headers=headers)
-
-    def trigger(self, source, text, workspace_id=None, dedup_key="", title="", meta=None,
-                thread_key="", not_before=""):
-        """One outside event through the trigger entry.
-
-        The trigger entry decides whether it is work at all (the rules
-        first, then the model) and only an accepted trigger becomes a task.
-        The answer carries the trigger, so the caller can say what happened.
-        """
-        body = {"source": source, "text": text}
-        if workspace_id:
-            body["workspace_id"] = workspace_id
-        if dedup_key:
-            body["dedup_key"] = dedup_key
-        if title:
-            body["title"] = title
-        if meta:
-            body["meta"] = meta
-        if thread_key:
-            body["thread_key"] = thread_key
-        if not_before:
-            body["not_before"] = not_before
-        return self._request("POST", "/api/triggers", body)
-
-    def list(self, workspace_id=None, status=None):
-        query = {}
-        if workspace_id:
-            query["workspace_id"] = workspace_id
-        if status:
-            query["status"] = status
-        path = "/api/tasks" + ("?" + urllib.parse.urlencode(query) if query else "")
-        return self._request("GET", path)
-
-    def get(self, task_id, workspace_id=None):
-        query = {"workspace_id": workspace_id} if workspace_id else {}
-        path = "/api/tasks/%s" % urllib.parse.quote(task_id)
-        if query:
-            path += "?" + urllib.parse.urlencode(query)
-        return self._request("GET", path)
-
-    def delete(self, task_id, workspace_id=None):
-        query = {"workspace_id": workspace_id} if workspace_id else {}
-        path = "/api/tasks/%s" % urllib.parse.quote(task_id)
-        if query:
-            path += "?" + urllib.parse.urlencode(query)
-        return self._request("DELETE", path)
-
-    def retry(self, task_id, workspace_id=None):
-        """Try a failed task again."""
-        return self.action(task_id, "retry", workspace_id=workspace_id)
-
-    def action(self, task_id, action, body=None, workspace_id=None):
-        query = {"workspace_id": workspace_id} if workspace_id else {}
-        path = "/api/tasks/%s/%s" % (urllib.parse.quote(task_id), action)
-        if query:
-            path += "?" + urllib.parse.urlencode(query)
-        return self._request("POST", path, body or {})
 
     def events(self, workspace_id=None, timeout=3600):
         """The queue's event stream (SSE), as the parsed frames.
@@ -329,55 +220,25 @@ class Queue:
         local operator and hands the bot every project's events - the bot
         works in one project and must not hear the others.
         """
-        query = {"workspace_id": workspace_id} if workspace_id else {}
-        url = self.base + "/api/events" + ("?" + urllib.parse.urlencode(query) if query else "")
-        head = {}
-        if self.key:
-            head["Authorization"] = "Bearer " + self.key
-        req = urllib.request.Request(url, headers=head, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            for raw_line in resp:
-                line = raw_line.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                try:
-                    yield json.loads(line[5:].strip())
-                except ValueError:
-                    continue
+        try:
+            for frame in super().events(workspace_id=workspace_id, timeout=timeout):
+                yield frame
+        except ApiError as exc:
+            raise ChannelError(exc.message, status=exc.status) from None
 
 
-class Agent:
+class Agent(Client):
     """The agent, just enough of it: the workspace list (and the registry)."""
 
     def __init__(self, base=DEFAULT_AGENT, timeout=15):
-        self.base = base.rstrip("/")
-        self.timeout = timeout
+        super().__init__(base=base, timeout=timeout)
 
-    def _request(self, method, path, body=None):
-        url = self.base + path
-        data = None
-        headers = {}
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    def _request(self, method, path, body=None, timeout=None, headers=None):
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            raise ChannelError("agent: HTTP %s" % exc.code, status=exc.code) from None
-        except urllib.error.URLError as exc:
-            raise ChannelError("cannot reach the agent %s: %s" % (url, exc.reason)) from None
-        try:
-            return json.loads(raw) if raw else {}
-        except ValueError:
-            return {}
-
-    def workspaces(self):
-        return self._request("GET", "/api/workspaces").get("workspaces") or []
-
-    def register_workspace(self, path, name=""):
-        return self._request("POST", "/api/workspaces", {"path": path, "name": name})
+            return super()._request(method, path, body=body, timeout=timeout,
+                                    headers=headers)
+        except ApiError as exc:
+            raise ChannelError(exc.message, status=exc.status) from None
 
 
 def resolve_workspace(agent, path, name=""):

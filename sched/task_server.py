@@ -48,9 +48,12 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 
-import plans
-import task_order
-import triggers
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import plans  # noqa: E402
+import task_order  # noqa: E402
+import triggers  # noqa: E402
+from a2_ext_py import ApiError, Client  # noqa: E402
 
 try:
     # Python 3.7+
@@ -416,287 +419,11 @@ def parse_policy(body):
     return policy, ""
 
 
-class AgentError(Exception):
-    """The agent answered, but not with what we asked for."""
-
-    def __init__(self, status, message):
-        super().__init__("%s: %s" % (status, message))
-        self.status = status
-        self.message = message
-
-
-class Agent:
-    """The workspace channel: the part of the agent's API the queue needs."""
-
-    def __init__(self, base=DEFAULT_AGENT, timeout=60, chat_timeout=3600):
-        self.base = base.rstrip("/")
-        self.timeout = timeout
-        # A turn may take hours; but not for ever: without a timeout a turn
-        # whose answer never comes holds its slot (and the project) for good.
-        self.chat_timeout = chat_timeout
-
-    def _request(self, method, path, body=None, timeout=None):
-        url = self.base + path
-        data = None
-        headers = {}
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", "replace")
-            message = raw
-            try:
-                err = json.loads(raw)
-                message = (err.get("error") or {}).get("message") or raw
-            except ValueError:
-                pass
-            raise AgentError(exc.code, message or str(exc.reason)) from None
-        except urllib.error.URLError as exc:
-            raise AgentError(0, "cannot reach %s: %s" % (url, exc.reason)) from None
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw)
-        except ValueError:
-            raise AgentError(0, "the answer is not JSON: " + raw[:200]) from None
-
-    def health(self):
-        return self._request("GET", "/api/health")
-
-    def workspaces(self):
-        return self._request("GET", "/api/workspaces").get("workspaces") or []
-
-    def session(self, session_id):
-        """The conversation behind a task (its messages, artifacts, todos)."""
-        if not session_id:
-            return {}
-        try:
-            return self._request("GET", "/api/sessions/%s" % urllib.parse.quote(session_id))
-        except AgentError:
-            return {}
-
-    def download(self, workspace_id, path):
-        """One file the task produced. Returns the bytes."""
-        if not workspace_id or not path:
-            return b""
-        url = ("%s/api/workspaces/%s/download?path=%s"
-               % (self.base, urllib.parse.quote(workspace_id),
-                  urllib.parse.quote(path)))
-        try:
-            with urllib.request.urlopen(url, timeout=60) as resp:
-                return resp.read()
-        except (urllib.error.URLError, OSError):
-            return b""
-
-    def primary_model(self, provider):
-        """The model the tasks of this provider will use (its first model).
-
-        The agent answers with the models that are in the config; the first
-        one is the one a request without a model name gets.
-        """
-        try:
-            body = self._request("GET", "/api/providers/"
-                                 + urllib.parse.quote(provider) + "/models")
-        except AgentError:
-            return ""
-        if not isinstance(body, dict):
-            return ""
-        data = body.get("current") or []
-        for one in data:
-            if isinstance(one, dict) and one.get("id"):
-                return one["id"]
-        models = body.get("models") or []
-        for one in models:
-            if isinstance(one, dict) and one.get("id"):
-                return one["id"]
-        return ""
-
-    def providers(self):
-        """The providers the agent knows, with their models.
-
-        The queue's web page draws its provider and model pickers from this.
-        """
-        return self._request("GET", "/api/providers")
-
-    def usage(self, provider):
-        """How much of the provider's subscription is left.
-
-        Raises AgentError(400) when the provider does not report a quota at all.
-        """
-        return self._request("GET", "/api/providers/" + urllib.parse.quote(provider) + "/usage")
-
-    def limits(self):
-        """The budget the agent imposes on one turn.
-
-        The agent is the mechanism layer: it decides what a turn may cost at
-        most, and the queue hands its tasks a budget that fits inside it. The
-        answer is empty when the agent is down or too old to say.
-        """
-        try:
-            body = self._request("GET", "/api/health", timeout=10)
-        except AgentError:
-            return {}
-        limits = body.get("limits")
-        return dict(limits) if isinstance(limits, dict) else {}
-
-    def stop(self, session_id):
-        return self._request("POST", "/api/chat/stop", {"session_id": session_id})
-
-    def fleet_ask(self, fleet_url, token, prompt, groups=None, names=None, labels=None,
-                  timeout_s=300, timeout=360):
-        """Let the devices' own agents answer the prompt.
-
-        This is the multi-level path: the server does not have to know how a
-        device is put right, the device does. The queue only collects the
-        answers.
-        """
-        base = (fleet_url or "").rstrip("/")
-        if not base:
-            raise AgentError(0, "no fleet service is configured")
-        body = {"prompt": prompt, "timeout_s": int(timeout_s or 300)}
-        if groups:
-            body["groups"] = list(groups)
-        if names:
-            body["names"] = list(names)
-        if labels:
-            body["labels"] = dict(labels)
-        req = urllib.request.Request(
-            base + "/api/fleet/ask", data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST")
-        if token:
-            req.add_header("Authorization", "Bearer " + token)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", "replace")
-            message = raw
-            try:
-                message = (json.loads(raw).get("message") or raw)
-            except ValueError:
-                pass
-            raise AgentError(exc.code, message[:300]) from None
-        except urllib.error.URLError as exc:
-            raise AgentError(0, "cannot reach the fleet service %s: %s" % (base, exc.reason)) from None
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            raise AgentError(0, "the fleet service did not answer with JSON") from None
-        if isinstance(data, dict) and "data" in data and "code" in data:
-            if data.get("code"):
-                raise AgentError(0, str(data.get("message") or "the fleet service refused")[:300])
-            data = data.get("data") or {}
-        return data
-
-    def llm_chat(self, prompt=None, system=None, provider=None, model=None,
-                 temperature=None, max_tokens=None, timeout=60):
-        """One model call - no agent loop, no tool is executed.
-
-        The queue uses it to judge a trigger: "is this worth doing?". It is
-        the same call the mail watcher makes, on the same endpoint, so there
-        is one way to ask the model a question in this repository.
-        """
-        body = {}
-        if prompt is not None:
-            body["prompt"] = prompt
-        if system is not None:
-            body["system"] = system
-        if provider is not None:
-            body["provider"] = provider
-        if model is not None:
-            body["model"] = model
-        if temperature is not None:
-            body["temperature"] = temperature
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
-        body["stream"] = False
-        return self._request("POST", "/api/llm/chat", body, timeout=timeout)
-
-    def register_workspace(self, path, name=""):
-        """Add a workspace to the agent's index (it is the agent's registry)."""
-        return self._request("POST", "/api/workspaces", {"path": path, "name": name})
-
-    def chat(self, workspace_id, message, provider=None, session_id=None,
-             task_id=None, task_context=None, allow_paths=None, model=None,
-             params=None, limits=None, policy=None):
-        """Run one turn and yield the agent's events as they happen.
-
-        This is the whole contract between the queue and the channel: the
-        agent announces the session, reports on the task (toolkit_task) and
-        finishes (done / error / stopped). The queue reads the progress out of
-        the stream - it never has to ask the agent where it is.
-        """
-        body = {"workspace_id": workspace_id, "message": message}
-        if provider:
-            body["provider"] = provider
-        if model:
-            # The model of this task. The agent falls back to the provider's
-            # first model when the name is empty or unknown.
-            body["model"] = model
-        if params:
-            # The model knobs of this task (temperature, max_tokens, ...):
-            # they go on the wire for this turn and for this turn only.
-            for key, value in params.items():
-                if key in MODEL_KNOBS and value is not None:
-                    body[key] = value
-        if session_id:
-            body["session_id"] = session_id
-        if task_id:
-            body["task_id"] = task_id
-        if task_context:
-            body["task_context"] = task_context
-        if allow_paths:
-            body["allow_paths"] = list(allow_paths)
-        # The budget of this turn: the agent enforces it and reports back what
-        # it used and which ceiling it hit.
-        if limits:
-            body["limits"] = dict(limits)
-        # The permissions of this turn: the tools the model may use. The agent
-        # enforces the list (an empty list would mean "no tools at all", so an
-        # empty policy means "the usual set" and is not sent).
-        tools = (policy or {}).get("tools") or []
-        if tools:
-            body["tools"] = list(tools)
-        req = urllib.request.Request(
-            self.base + "/api/chat", data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST")
-        try:
-            resp = urllib.request.urlopen(req, timeout=self.chat_timeout or None)
-        except (socket.timeout, TimeoutError):
-            raise AgentError(0, "the agent did not answer within %d seconds"
-                             % self.chat_timeout) from None
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", "replace")
-            message = raw
-            try:
-                message = (json.loads(raw).get("error") or {}).get("message") or raw
-            except ValueError:
-                pass
-            raise AgentError(exc.code, message) from None
-        except urllib.error.URLError as exc:
-            raise AgentError(0, "cannot reach %s: %s" % (self.base, exc.reason)) from None
-        with resp:
-            for frame in self._sse(resp):
-                yield frame
-
-    @staticmethod
-    def _sse(stream):
-        """Parse a text/event-stream into dictionaries."""
-        for raw_line in stream:
-            line = raw_line.decode("utf-8", "replace").strip()
-            if not line or not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if not payload or payload == "[DONE]":
-                continue
-            try:
-                yield json.loads(payload)
-            except ValueError:
-                continue
+# The agent's HTTP client and its error type live in the extension layer
+# (`a2_ext_py`): there used to be a third copy of the same client here, and
+# three copies of one interface drift.
+Agent = Client
+AgentError = ApiError
 
 
 def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
@@ -3302,7 +3029,8 @@ class App:
             data_dir = os.path.join(os.path.abspath(os.path.expanduser(args.workspace_path)),
                                     "tasks")
         self.store = Store(data_dir)
-        self.agent = Agent(args.agent, chat_timeout=getattr(args, "chat_timeout", 3600))
+        self.agent = Agent(args.agent, timeout=60,
+                           chat_timeout=getattr(args, "chat_timeout", 3600))
         self.events = Events(self.store)
         # The trigger entry: one door for every outside event (a webhook, a
         # mail, a chat). The records live in their own directories next to
