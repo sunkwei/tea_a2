@@ -432,6 +432,20 @@ curl -N -X POST http://127.0.0.1:8282/api/chat -H 'Content-Type: application/jso
 报的就是当前生效的那一套。工具调用撞到上限时，那一次调用不会执行——但它仍然有
 一个回答（provider 不接受没有结果的工具调用）。
 
+同一轮里还有两个「权限」参数，**都是强制执行的**（不是只把工具藏起来）：
+
+| 参数 | 意思 | 越界时 |
+| --- | --- | --- |
+| `tools` | 这一轮允许用的工具名（空 = 通常那套） | 清单外的工具**不执行**，模型得到一句「这一轮不准用这个工具」 |
+| `allow_paths` | 这一轮额外可以碰的目录（工作区本身一直可以） | 文件工具照旧被围栏挡住（`toolkit_exec` 不受此限） |
+
+```bash
+curl -N -X POST http://127.0.0.1:8282/api/chat -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_x","message":"只准用文件工具",
+       "tools":["toolkit_file","toolkit_task"],
+       "limits":{"max_iterations":8}}'
+```
+
 ### 工具跑多久：三个数（什么时候开始 / 用了多久 / 上限多少）
 
 一个跑三分钟的构建，在界面上和一个卡死的 agent 一模一样：只有一行转圈。用户没法判断
@@ -904,6 +918,51 @@ curl -s -X POST http://127.0.0.1:8282/api/mcp/servers/uiautomation/call \
      -H 'Content-Type: application/json' \
      -d '{"tool":"mcp__uiautomation__SearchElements","arguments":{"name":"OK"}}'
 ```
+
+两条规矩（实测）：
+
+- **工具名必须写全名** `mcp__<服务器>__<工具>`。写短名 → `502 mcp_call_failed`
+  （`there is no MCP tool called '…'`）。
+- **这条路由是拿服务端的工具清单查名字的**，而那份清单是**握手时读的那一份**。
+  服务器在运行中长出新工具（扩展层正是这么做的），要
+  `POST /api/mcp/refresh` 之后才调得动。**对话里不需要这一步**：每一轮迭代之前
+  服务端会**重新问一遍**每个 MCP 服务器「你现在能做什么」（不重启服务器，状态不丢），
+  所以模型存了一个工具、reload 一下，**同一轮里就能用**。
+
+### 扩展层：工具可以长出来（不用改 C++）
+
+`tea_a2` 自带一个扩展层（`sched/a2_ext_py/toolkit/`，它**就是一个 MCP 服务器**）：
+一个模块（一个 `.py` 文件）加载之后就是 agent 的工具，**服务端一行 C++ 都不用改**。
+
+```yaml
+# ~/.tea_agent/mcp.yaml（provider.yaml 旁边）
+servers:
+  a2ext:
+    command: "python3"
+    args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
+           "--modules", "/home/you/.tea_agent/ext",
+           "--agent-url", "http://127.0.0.1:8282"]
+```
+
+模块的约定只有两条：文件叫 `toolkit_<名字>.py`，里面有两个东西——函数
+`toolkit_<名字>()` 和它的说明 `meta_toolkit_<名字>()`。模型看到的工具名是
+`mcp__a2ext__toolkit_<名字>`。
+
+扩展服务器另外给模型四个**元工具**：
+
+| 工具 | 做什么 |
+| --- | --- |
+| `toolkit_save` | 存一个工具（名字、说明、代码）。保存前会检查：名字前缀、schema、代码能不能解析、函数在不在、缺哪些依赖 |
+| `toolkit_reload` | 重新加载所有模块（坏的会**报出来**，不悄悄丢掉） |
+| `toolkit_list_versions` | 一个工具有哪些旧版本 |
+| `toolkit_rollback` | 退回某个旧版本 |
+
+模块住在**用户自己的目录**（默认 `~/.tea_agent/ext/`）：不在发版包里（升级不覆盖），
+也不在任何工作区里（模型的 `toolkit_file` 够不着）。每次保存都有审计
+（`~/.tea_agent/ext-audit.jsonl`，含代码本身）。不想让模型存工具时，
+用 `--no-save` 启动扩展服务器即可。
+
+完整说明（含「什么时候该合并回 C++」）见 [a2_ext_py](a2_ext_py.md)。
 
 ### 语音输入
 
