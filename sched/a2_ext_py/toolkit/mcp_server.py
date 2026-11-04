@@ -115,9 +115,47 @@ def text_result(text, is_error=False):
 
 
 class Server:
-    def __init__(self, module_dir=None, agent_url=""):
+    def __init__(self, module_dir=None, agent_url="", allow_save=True):
         self.toolkit = Toolkit(module_dir)
         self.agent_url = (agent_url or "").rstrip("/")
+        # Whether the **model** may save tools. The operator can turn it off
+        # (--no-save / TEA_EXT_SAVE=0): the risk of a model writing code that
+        # later runs is accepted here, but it must be possible to switch it off
+        # in a hurry without touching the code.
+        self.allow_save = allow_save
+        self.check_module_dir()
+
+    # ---- the module directory ---------------------------------------------
+    def check_module_dir(self):
+        """Warn when the module directory sits inside a workspace.
+
+        The model's file tools are fenced to the workspace: a module
+        directory outside every workspace cannot be reached by them. Inside
+        one, it can - and then "the model may not write code" is no longer
+        true. The check is a warning, not a refusal (an operator may know
+        better), but it says so out loud.
+        """
+        if not self.agent_url:
+            return
+        try:
+            req = urllib.request.Request(self.agent_url + "/api/workspaces", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = json.loads(resp.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, OSError, ValueError):
+            return
+        module_dir = os.path.realpath(self.toolkit.module_dir)
+        for ws in body.get("workspaces") or []:
+            path = ws.get("path")
+            if not path:
+                continue
+            root = os.path.realpath(os.path.expanduser(path))
+            if module_dir == root or module_dir.startswith(root + os.sep):
+                sys.stderr.write(
+                    "a2ext: WARNING the module directory (%s) is inside the "
+                    "workspace %s - the model can write there with its file "
+                    "tools\n" % (module_dir, root))
+                sys.stderr.flush()
+                return
 
     # ---- the tools --------------------------------------------------------
     def schemas(self):
@@ -127,6 +165,11 @@ class Server:
     def call(self, name, arguments):
         arguments = arguments or {}
         if name == "toolkit_save":
+            if not self.allow_save:
+                return text_result(
+                    "the operator turned model-driven saves off "
+                    "(start the extension server without --no-save to allow them)",
+                    is_error=True)
             status, message = save_tool(name=arguments.get("name") or "",
                                         meta=arguments.get("meta"),
                                         pycode=arguments.get("pycode") or "",
@@ -200,9 +243,20 @@ def main(argv=None):
     parser.add_argument("--modules", default="", help="where the tool modules live")
     parser.add_argument("--agent-url", default=os.environ.get("TEA_AGENT_URL", ""),
                         help="the agent (so a reload can refresh its tool list)")
+    parser.add_argument("--no-save", action="store_true",
+                        help="the model may not save tools (only the operator's "
+                             "own modules are loaded)")
     args = parser.parse_args(argv)
 
-    server = Server(module_dir=args.modules or None, agent_url=args.agent_url)
+    # The risk of a model writing code that later runs is accepted; the
+    # switch is there to turn it off in a hurry.
+    env_allow = os.environ.get("TEA_EXT_SAVE", "1").strip().lower()
+    allow_save = not args.no_save and env_allow not in ("0", "no", "off", "false")
+    server = Server(module_dir=args.modules or None, agent_url=args.agent_url,
+                    allow_save=allow_save)
+    if not allow_save:
+        sys.stderr.write("a2ext: the model may not save tools (--no-save)\n")
+        sys.stderr.flush()
 
     for line in sys.stdin:
         line = line.strip()

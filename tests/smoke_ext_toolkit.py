@@ -296,6 +296,17 @@ providers:
         audit = os.path.join(os.path.expanduser("~"), ".tea_agent", "ext-audit.jsonl")
         check("the save is audited", os.path.exists(audit), audit)
 
+        # ---- the operator can turn model-driven saves off ------------------
+        sys.path.insert(0, os.path.join(REPO_ROOT, "sched"))
+        from a2_ext_py.toolkit.mcp_server import Server
+        locked = Server(module_dir=os.path.join(modules, "locked"), allow_save=False)
+        answer = locked.call("toolkit_save", {
+            "name": "toolkit_blocked", "meta": HELLO_META, "pycode": HELLO_CODE})
+        text = str((answer.get("content") or [{}])[0].get("text") or "")
+        check("the operator can turn model-driven saves off",
+              "turned" in text and not os.path.exists(
+                  os.path.join(modules, "locked", "toolkit_blocked.py")), text)
+
         # ---- the tool is in the agent's tool list now -----------------------
         _, tools = call(port, "GET", "/api/tools")
         names = [t.get("name") for t in (tools.get("tools") or [])]
