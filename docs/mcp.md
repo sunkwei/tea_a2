@@ -168,6 +168,10 @@ curl -s -X POST http://127.0.0.1:8282/api/mcp/servers/uiautomation/call \
 每条消息一行 JSON。仓库里有一个现成的例子：`tests/mock_mcp_server.py`（几十行，
 假的三件套工具：echo / add / picture）。
 
+**工具清单每一轮迭代都会重问一遍。** 握手时读的那份清单只管到那一刻；服务器在运行中
+长出新工具（扩展层正是这么做的：模型存一个工具，reload 一下），下一轮迭代就能看见——
+服务器不用重启，状态也不丢。代价是每个有 MCP 的回合多一次 `tools/list` 往返。
+
 `tools/call` 的回答里 `content` 是一组内容块：`{"type":"text","text":"…"}`、
 `{"type":"image","data":"<base64>","mimeType":"image/png"}`、
 `{"type":"resource","resource":{"text":"…"}}`。`isError: true` 表示工具自己报错了

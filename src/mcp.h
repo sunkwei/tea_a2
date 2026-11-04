@@ -91,10 +91,21 @@ class McpClient {
   bool call_tool(const std::string& tool, const nlohmann::json& arguments,
                  McpCallResult* out, std::string* err);
 
+  /// Ask the server what it can do **again**, without restarting it.
+  ///
+  /// The tool list is read once, at the handshake. A server that grows a
+  /// tool while it runs (the extension layer does exactly that) would
+  /// otherwise stay invisible until the server is restarted. Returns true
+  /// when the list changed.
+  bool refresh_tools(std::string* err);
+
   /// The tool list as the model sees it (OpenAI function definitions).
   nlohmann::json openai_tools() const;
 
  private:
+  /// Read the tool list out of a `tools/list` answer.
+  void parse_tools_list(const nlohmann::json& list);
+
   struct Pending {
     bool done = false;
     nlohmann::json result = nlohmann::json::object();
@@ -181,6 +192,10 @@ class McpRegistry {
 
   /// Stop and start every server again (the "refresh" button).
   nlohmann::json refresh();
+
+  /// Ask every server that is up for its tool list again - without
+  /// restarting anything. Returns true when a list changed.
+  bool refresh_tools();
 
   /// Connect every server that is not up yet, in the background of the
   /// caller's thread. Used at start-up so the first turn does not have to

@@ -8,6 +8,7 @@
 #include "env.h"
 #include "http.h"
 #include "log.h"
+#include "mcp.h"
 #include "trajectory.h"
 #include "util.h"
 #include "version.h"
@@ -1229,7 +1230,14 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // declares them, or when the independent search provider (the `search:`
   // section of provider.yaml) can serve them; the underlying protocol is
   // provider-specific.
-  nlohmann::json tools_json = tools_->openai_tools(provider_info, &config_->settings, config_);
+  nlohmann::json tools_json;
+  nlohmann::json tools_json_no_web;
+  // The tool list is built by this lambda, and it is **rebuilt every
+  // iteration**: a server that grew a tool while this turn was running (the
+  // extension layer does exactly that) must be visible in the next round.
+  // The model asked for a tool, the tool is there.
+  auto build_tools = [&]() {
+  tools_json = tools_->openai_tools(provider_info, &config_->settings, config_);
   // A caller that drives its own policy can hand the agent exactly the tools it
   // wants - or none at all (an empty list turns the turn into a plain
   // conversation with the model).
@@ -1256,11 +1264,15 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     }
     tools_json = kept;
   }
+  // The copy without the web tools belongs to this list: it is built again
+  // when the list changes.
+  tools_json_no_web = nlohmann::json();
+  };
+  build_tools();
 
   // Once the billed web-tool budget for this turn is spent, stop advertising
   // them: an error result alone invites the model to retry, which is slow and
   // (per call billing) expensive.
-  nlohmann::json tools_json_no_web;
   auto tools_for_request = [&]() -> const nlohmann::json& {
     const int budget = st.web_tool_max_calls_per_turn;
     if (budget <= 0 || web_tool_calls < budget) return tools_json;
@@ -1358,6 +1370,17 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       LOG_WARN("agent: the turn reached its token budget (", budget.max_total_tokens,
                ") - it stops here");
       break;
+    }
+    // The tool list is refreshed every iteration: a server that grew a tool
+    // while this turn was running (the extension layer) must be visible in
+    // the next round. The servers are asked what they can do again - they are
+    // not restarted, so a server that keeps state keeps it.
+    if (iteration > 0) {
+      McpRegistry* registry = tools_->mcp();
+      if (registry && registry->server_count() > 0) {
+        registry->refresh_tools();
+        build_tools();
+      }
     }
     if (cancel && cancel->load()) {
       out.cancelled = true;

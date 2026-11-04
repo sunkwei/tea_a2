@@ -126,6 +126,8 @@ a2_task 与 a2 **同机同用户**。这意味着：
 | **M2 请求级预算** | ✅ 做了：机器默认 **300 轮**（`settings` 里可改），`POST /api/chat` 收 `limits`（请求只能**收紧**），到点按**正常结束**收尾（`stop_reason: "budget"` + `budget_used`），墙钟对长工具也生效（`ToolContext::deadline_ms`） |
 | **M6 任务与轨迹串链** | ✅ 做了：轨迹记 `task_id` / `stop_reason` / `budget`；队列记 `trajectory_id` / `usage` / `stop_reason`，看门狗不用再猜「最近两轮」 |
 | **S2/S7 预算与权限的下发** | ✅ 做了：任务带 `limits`（预算）与 `policy`（可用工具），队列照 agent 的 `limits` 填默认值；**工具白名单从「不给模型看」改成「真的拒绝」**——模型点名要一个没给它的工具，它不执行 |
+| **「机制层能长出新能力」** | ✅ 做了：`sched/a2_ext_py/toolkit/` 是一个 MCP 服务器——模块（一个 .py 文件）加载后就是 a2 的工具，**a2 一行 C++ 都不用改**；模型自己也能写（`toolkit_save` → `toolkit_reload` → 同一轮里就用）。为此 a2 改成**每轮迭代重问一遍 MCP 的工具清单**（`McpRegistry::refresh_tools()`），新工具当场可见 |
+| **客户端只有一份** | ✅ 做了：`sched/a2_ext_py/`（`Client` + `Queue` + `ApiError`）——以前有三份拷贝（`tea_api.Tea` / `channel.Agent` / `task_server.Agent`），接口一变要改三处 |
 | M1 回合句柄 + 异步提交 | ⏳ 还没做（队列现在仍是一条 SSE 撑到底） |
 | M3 策略执行点（审批闸门 / exec 围栏） | ⏳ 还没做（`allow_paths` 仍只管文件工具，`toolkit_exec` 不受限） |
 | M4 幂等键 / M5 能力清单 / M7 请求 id | ⏳ 还没做 |

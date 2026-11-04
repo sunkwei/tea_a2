@@ -706,29 +706,53 @@ bool McpClient::connect(const McpServerConfig& cfg, std::string* err) {
     return false;
   }
 
-  tools_.clear();
-  if (list.contains("tools") && list["tools"].is_array()) {
-    const nlohmann::json& list_tools = list["tools"];
-    for (std::size_t i = 0; i < list_tools.size(); ++i) {
-      const nlohmann::json& t = list_tools[i];
-      if (!t.is_object() || !t.contains("name") || !t["name"].is_string()) continue;
-      McpTool tool;
-      tool.server = cfg_.name;
-      tool.name = t["name"].get<std::string>();
-      tool.full_name = mcp_tool_full_name(cfg_.name, tool.name);
-      if (t.contains("description") && t["description"].is_string()) {
-        tool.description = t["description"].get<std::string>();
-      }
-      if (t.contains("inputSchema") && t["inputSchema"].is_object()) {
-        tool.schema = t["inputSchema"];
-      }
-      tools_.push_back(tool);
-    }
-  }
+  parse_tools_list(list);
   connected_.store(true);
   LOG_INFO("mcp: server '", cfg_.name, "' is up (", tools_.size(), " tool(s), protocol ",
            protocol_version_, ", server ", server_name_, " ", server_version_, ")");
   return true;
+}
+
+void McpClient::parse_tools_list(const nlohmann::json& list) {
+  tools_.clear();
+  if (!list.contains("tools") || !list["tools"].is_array()) return;
+  const nlohmann::json& list_tools = list["tools"];
+  for (std::size_t i = 0; i < list_tools.size(); ++i) {
+    const nlohmann::json& t = list_tools[i];
+    if (!t.is_object() || !t.contains("name") || !t["name"].is_string()) continue;
+    McpTool tool;
+    tool.server = cfg_.name;
+    tool.name = t["name"].get<std::string>();
+    tool.full_name = mcp_tool_full_name(cfg_.name, tool.name);
+    if (t.contains("description") && t["description"].is_string()) {
+      tool.description = t["description"].get<std::string>();
+    }
+    if (t.contains("inputSchema") && t["inputSchema"].is_object()) {
+      tool.schema = t["inputSchema"];
+    }
+    tools_.push_back(tool);
+  }
+}
+
+bool McpClient::refresh_tools(std::string* err) {
+  // The server is asked what it can do again. It is not restarted: a server
+  // that grew a tool (the extension layer) keeps its state, and the tools it
+  // had are still there.
+  if (!connected_.load()) return false;
+  nlohmann::json list;
+  std::string list_error;
+  if (!request("tools/list", nlohmann::json::object(), cfg_.startup_timeout_ms, &list, nullptr,
+               &list_error)) {
+    if (err) *err = list_error;
+    return false;       // the server is busy or gone: keep what we have
+  }
+  const std::size_t before = tools_.size();
+  parse_tools_list(list);
+  const bool changed = tools_.size() != before;
+  if (changed) {
+    LOG_INFO("mcp: server '", cfg_.name, "' now offers ", tools_.size(), " tool(s)");
+  }
+  return changed;
 }
 
 void McpClient::disconnect() {
@@ -1120,6 +1144,18 @@ nlohmann::json McpRegistry::status_json() {
   }
   j["servers"] = servers;
   return j;
+}
+
+bool McpRegistry::refresh_tools() {
+  bool changed = false;
+  std::lock_guard<std::mutex> lock(mu_);
+  for (std::size_t i = 0; i < entries_.size(); ++i) {
+    if (!entries_[i].client) continue;
+    if (!entries_[i].client->connected()) continue;
+    std::string err;
+    if (entries_[i].client->refresh_tools(&err)) changed = true;
+  }
+  return changed;
 }
 
 nlohmann::json McpRegistry::refresh() {

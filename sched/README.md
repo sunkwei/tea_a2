@@ -155,21 +155,30 @@ python3 sched/watchdog.py --fleet http://127.0.0.1:8290   # 连带看机群设�
 
 深层说明：`docs/router-watchdog.md`。
 
-## 客户端库（tea_api.py）
+## 客户端库与扩展层（a2_ext_py/）
 
 写脚本时用的一层薄封装，两个类对应两个服务：
 
 ```python
-from tea_api import Tea, Queue
+from a2_ext_py import Client, Queue
 
-tea = Tea("http://127.0.0.1:8282")     # agent：模型调用、provider、额度、工作区
-quota = tea.usage("minimax")           # 还剩多少
-q = Queue("http://127.0.0.1:8283")     # 队列：任务记录、事件
+client = Client("http://127.0.0.1:8282")   # agent：模型调用、provider、额度、工作区
+quota = client.usage("minimax")             # 还剩多少
+limits = client.limits()                    # 这一轮的预算（机制层的上限）
+q = Queue("http://127.0.0.1:8283")          # 队列：任务记录、事件
 ```
 
-`Tea` 对应 C++ 的 `/api/chat`（SSE）、`/api/providers/{n}/usage`、`/api/workspaces`；
+`Client` 对应 C++ 的 `/api/chat`（SSE）、`/api/providers/{n}/usage`、`/api/workspaces`；
 `Queue` 对应队列的 `/api/tasks`。注意**任务路由已经搬到 Python 侧**了 —— 想操作任务请用 `Queue`，
-不是 `Tea`。
+不是 `Client`。
+
+（旧名 `tea_api.Tea` / `tea_api.Queue` 还认，但那是过时的写法：客户端以前有三份拷贝，
+接口一变要改三处；现在只有一份，在 `a2_ext_py/` 里。）
+
+这一层还有第二件事：**机制层可以长出新的能力**。`a2_ext_py/toolkit/` 是一个 MCP 服务器，
+模块（一个 .py 文件）加载之后就是 a2 的工具 —— 不用改 C++、不用交叉编译、不用发版。
+模型自己也能写工具（`toolkit_save` / `toolkit_reload`）。详见
+[docs/a2_ext_py.md](../docs/a2_ext_py.md)。
 
 ## 计划（plans）
 

@@ -844,6 +844,41 @@ a2 = 通道（回合、工具、文件、轨迹），a2_task = 队列（什么�
 
 下一步的三步（句柄 → 幂等/能力 → 审批/围栏）与验收标准都在那份文档里。
 
+### 2026-11-04：扩展层 a2_ext_py（机制层能长出新能力）
+
+**名字**：`a2_ext_py`（不是 `a2_py`——它不是「a2 的封装」，是「a2 的扩展层」）。
+位置 `sched/a2_ext_py/`，三层于是说清楚了：`a2`（C++ 内核）/ `a2_task`（策略）/
+`a2_ext_py`（扩展）。
+
+两件事：
+
+1. **客户端只有一份**。以前有三份拷贝：`tea_api.Tea`、`channel.Agent`、
+   `task_server.Agent`（连 `_sse` 都抄了两遍），而且 `channel.Queue.project_key`
+   是容错的（吞掉 404 返回空）、`tea_api.Queue.project_key` 是抛的——合并时**这个差异
+   差点被抹掉**，微信/telegram 两个 bot 直接挂了（`ensure_workspace` 那里）。
+   **教训**：合并两份抄本时，先把它们的**行为差异**列出来，别只合并方法。
+2. **机制层能长出新能力**。`sched/a2_ext_py/toolkit/` 是一个 **MCP 服务器**
+   （stdio，a2 按 `mcp.yaml` 启动它）：模块 = 一个 `.py` 文件（`toolkit_<名字>.py`
+   + `meta_toolkit_<名字>()`），加载后就是 a2 的工具。**a2 一行 C++ 都不用改**。
+   模型自己也能写（`toolkit_save` → `toolkit_reload`），保存前有检查（名字前缀、
+   schema、`ast.parse`、函数在不在、缺依赖报出来但不偷偷装），每次保存留旧版本
+   （`toolkit_rollback` 能退）+ 审计（`~/.tea_agent/ext-audit.jsonl`）。
+
+C++ 那侧只动了两处（`src/mcp.cpp`、`src/agent.cpp`）：
+
+* `McpClient::refresh_tools()` / `McpRegistry::refresh_tools()`：**不重启服务器**，
+  只重问一遍 `tools/list`；
+* agent 的工具清单**每轮迭代重建一次**——所以模型存了工具、reload 一下，
+  **同一轮里就能用**（服务器不用重启，状态也不丢）。
+  代价：每个有 MCP 的回合每轮多一次 `tools/list` 往返。
+
+**坑**：用户模块住在 `~/.tea_agent/ext/`，**不在发版包里**（发版会覆盖它），
+**也不在工作区里**（模型的 `toolkit_file` 够不着——围栏到工作区为止）。
+
+自举的闸门**还没有**：模型能写以后要执行的代码，这跟 DSH 的创造模式是同一个风险。
+现在只有「模块目录够不着 + 每次保存有审计 + 保存前有检查」三道浅防线，
+真闸门是机制层的 M3（审批），还没做。
+
 ### 2026-11-04：预算回来了（这次是有上界的）
 
 **改主意了**：2026-10-28 那次提交（`c582996`）把「一轮最多几轮」这个旋钮**删掉**了，
