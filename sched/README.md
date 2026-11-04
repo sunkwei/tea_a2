@@ -1,8 +1,7 @@
 # sched/ — tea_a2 的 Python 侧
 
 tea_a2 本体是一个 C++ 单二进制（`src/`，Web UI 构建期嵌进去）。`sched/` 是**跑在它旁边的
-Python 进程**，专门装那些「不该塞进二进制」的东西：任务队列、聊天前端、机群运维、语音转写，
-外加两个自用的知识提炼工具。
+Python 进程**，专门装那些「不该塞进二进制」的东西：任务队列、聊天前端、机群运维、语音转写。
 
 两边的关系是**单向的**：Python 侧通过 HTTP 调 agent（`http://127.0.0.1:8282`），
 agent 完全不知道 Python 侧的存在。所以：
@@ -37,9 +36,6 @@ agent 完全不知道 Python 侧的存在。所以：
 | `mail_watch.py` | 邮件看门狗：收信 → 判读 → 归档/起草 → 只在该我参与时通知 | 想让邮箱自己整理、只在要紧时打扰你 | [邮件看门狗](#邮件看门狗watcher) |
 | `pan_sync.py` | 百度网盘同步配置：多台机器共用一份 provider.yaml（加密 + 冲突不覆盖） | 换机器不用重抄配置 | [配置同步](#配置同步百度网盘) |
 | `pan_publish.py` | 把发布产物传到百度网盘（4MB 分片 + 回读校验）—— 包不再提交到 git | 发版 | [配置同步](#配置同步百度网盘) |
-| `bili.py` | B 站观看历史 → 摘要 → 周报（自用） | 想看「我最近在看什么」 | [个人工具](#个人工具) |
-| `zhihu.py` | 知乎抓取/阅读/发回答（自用） | 想抓知乎内容或自动答题 | [个人工具](#个人工具) |
-| `browser_login.py` + `login_state.mjs` | 两个工具共用的登录入口 | 登录态过期了 | [个人工具](#个人工具) |
 
 ## 两种角色
 
@@ -52,8 +48,7 @@ agent 完全不知道 Python 侧的存在。所以：
 
 **开发者/自用**（不随包发布，但都在这个仓库里）：
 `fleet.py`、`fleet_server.py`、`channel.py`、`telegram_bot.py`、`asr_server.py`、
-`mail_watch.py`、`mail-watch.template`、`pan_sync.py`、`pan_publish.py`、`pan-sync.template`、
-`bili.py`、`zhihu.py`、`browser_login.py`、`login_state.mjs`。
+`mail_watch.py`、`mail-watch.template`、`pan_sync.py`、`pan_publish.py`、`pan-sync.template`。
 
 ---
 
@@ -336,55 +331,15 @@ sha256，远端留一份 `release-manifest.json`。`--keep 5` 让网盘上只留
 （按版本号排），`--list` 看现在有哪些版本。发版流程见
 [构建与跨平台编译](../docs/build.md#发版包传到百度网盘不进-git)。
 
-## 个人工具
+## 个人工具（搬走了）
 
-两个自用工具，同一套结构：纯 HTTP + cookie 抓内容 → 送 LLM 出结构化摘要 → markdown digest。
-产物在 `~/.tea_agent/bili/`、`~/.tea_agent/zhihu/`；LLM 配置共用 `~/.tea_agent/provider.yaml`
+两个自用的知识提炼工具（B 站观看历史 → 字幕 → 周报；知乎抓取/阅读/发回答）**已经搬到
+另一个仓库**：`~/work/git/a2_demo/bilibili/`、`~/work/git/a2_demo/zhihu/`，
+两边共用的登录入口和 LLM 那一层在 `~/work/git/a2_demo/shared/`。
+
+它们本来就不是 tea_a2 产品的一部分，只是恰好住在 `sched/` 这一侧；现在各自是独立应用，
+有自己的 README 和测试。provider 配置仍然共用 `~/.tea_agent/provider.yaml`
 （第一个 provider 就是默认）。
-
-```bash
-python3 sched/bili.py  --login                 # 登录（B 站）
-python3 sched/bili.py  fetch --pages 2 --limit 20
-python3 sched/bili.py  summarize && python3 sched/bili.py digest --overview
-
-python3 sched/zhihu.py --login                 # 登录（知乎）
-python3 sched/zhihu.py whoami | hot | search "大模型" | invited | collections | moments
-python3 sched/zhihu.py fetch --collection 737068447
-python3 sched/zhihu.py summarize && python3 sched/zhihu.py digest --overview
-python3 sched/zhihu.py post answer --file body.md --question <id> --yes   # 真发回答
-python3 sched/zhihu.py post llm --count 10                              # 读最近看过的 10 篇 → 让 LLM 写一篇新的
-python3 sched/zhihu.py rm --answer <id>                                 # 删掉
-```
-
-### post llm：让模型写一篇新的
-
-知乎**没有浏览历史接口了**（`/api/v4/history` 404，网页 `/history` 也是 404），
-所以「最近读过的」从**收藏夹**（按收藏时间）和**本地语料**（`fetch` 抓过的）两处凑，
-去重后按时间倒序取前 N 篇。
-
-```bash
-python3 sched/zhihu.py post llm                    # 读 10 篇 → 分析 → 写一篇 → 只显示
-python3 sched/zhihu.py post llm --count 6 --out /tmp/a.md
-python3 sched/zhihu.py post llm --yes              # 真投递到知乎专栏
-```
-
-- 默认**只打印**文稿（`--yes` 才投递）；文稿也写到 `~/.tea_agent/zhihu/draft.md`。
-- 模型被问两次：一次**分析**这些文章（母题/角度/可用素材），一次**创作**（标题 + 正文）。
-- 正文是 markdown 纯文本（空行分段），转成知乎编辑器要的 HTML 后发出去。
-- 投递的流程是抓包确认的（`POST zhuanlan.zhihu.com/api/articles/drafts` 建草稿 →
-  `POST www.zhihu.com/api/v4/content/publish`，`action=article`，正文在 `data.hybrid.html`）。
-- 风格是**中文硬科幻的通用手法**（宏大尺度 + 危机 + 硬核细节 + 冷峻抒情），
-  prompt 里不冒充任何具体作家的身份。
-
-- **登录**：`--login` 开一个**有头浏览器**（playwright，`headless=false`）停在登录页，
-  你登录完**把窗口关掉**即可，storageState 会被存到工具读的那个文件
-  （知乎 `z_c0` / B 站 `SESSDATA` 是成功判据）。没有图形界面时自动退回无头 + 截二维码
-  （`--headless` 可强制）。共用实现：`sched/login_state.mjs`（浏览器）+ `sched/browser_login.py`（编排）。
-- **B 站的坑**：字幕会「串台」（`x/player/v2` 有时返回别的视频的轨），必须用权威轨道列表校验，
-  宁可没字幕也不要错的。
-- **知乎的坑**：上了 x-zse-96 签名，问题详情和问题页 403；发回答要走
-  `read_history → draft → content/publish` 三步（老的 `/answers` 接口已废）。
-- 知乎工具还会**自动关注**刚回答的问题、并在调「等你来答」接口时把邀请标为已读。
 
 ---
 
@@ -403,7 +358,7 @@ python3 sched/zhihu.py post llm --yes              # 真投递到知乎专栏
 
 ### 状态目录
 
-都在 `~/.tea_agent/` 下：`bili/`、`zhihu/`（工具数据）、`mail/`（邮件看门狗：配置+书签+digest）、
+都在 `~/.tea_agent/` 下：`mail/`（邮件看门狗：配置+书签+digest）、
 `asr/`（模型）、`fleet/`（台账+密钥）、
 `wechat/`、`telegram/`（各端状态）、`*-workspace/`（各端的固定工作区）、`provider.yaml`（LLM 配置）。
 
@@ -415,7 +370,6 @@ agent / 队列：`TEA_AGENT_URL`、`TEA_AGENT_WORKSPACE`、`TEA_TASK_URL`、`TEA
 `TEA_FLEET_TIMEOUT`、`TEA_FLEET_CONCURRENCY`、`TEA_FLEET_TOKEN`；
 语音：`TEA_ASR_HOST`、`TEA_ASR_PORT`、`TEA_ASR_MODEL_DIR`；
 聊天端：`TEA_TELEGRAM_TOKEN`、`TEA_TELEGRAM_API`、`TEA_WECHAT_CDN`；
-个人工具：`BILI_STATE`/`BILI_HOME`、`ZHIHU_STATE`/`ZHIHU_HOME`；
 邮件看门狗：`TEA_MAIL_HOME`（状态目录）、`TEA_MAIL_CONFIG`（配置文件）。
 
 ### 几条硬规矩
