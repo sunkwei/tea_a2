@@ -79,9 +79,15 @@ class TrajectoryRecorder {
   /// Start recording. Returns false (and stays inactive) when recording is
   /// disabled in the settings, the session id is unusable, or the directory
   /// cannot be created -- callers keep working either way.
+  ///
+  /// `turn_id` may be empty (the recorder makes one) or an id the caller
+  /// already handed out: the HTTP layer gives every turn a handle before the
+  /// turn starts, and the handle **is** the audit id. One id, two jobs - the
+  /// caller can ask "how did it go?" and "what did it do?" with the same
+  /// string.
   bool begin(Workspace& workspace, const std::string& session_id,
              const std::string& workspace_id, const std::string& provider,
-             const std::string& model);
+             const std::string& model, const std::string& turn_id = "");
 
   bool active() const { return active_; }
   const std::string& turn_id() const { return turn_id_; }

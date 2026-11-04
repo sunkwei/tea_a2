@@ -62,6 +62,11 @@ struct TurnOptions {
   /// iteration (FIFO) before building that iteration's request; whatever is left
   /// when the loop stops is reported back as `queue_unconsumed`. May be null.
   PromptInbox* inbox = nullptr;
+  /// The id this turn is known by. The HTTP layer hands one out before the
+  /// turn starts, so a caller that submitted the turn and walked away can ask
+  /// "how did it go?" with the same string the audit trail uses. Empty => the
+  /// trajectory recorder makes one.
+  std::string turn_id;
   /// Per-turn overrides of the model knobs (`reasoning_effort`, `temperature`,
   /// `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `seed`,
   /// `max_tokens`), in the same shape the request body uses. They win over the

@@ -75,6 +75,12 @@ constexpr size_t kFileReadLimit = 2u * 1024u * 1024u;
 /// to resync from the persisted session rather than shown a silent gap).
 constexpr std::size_t kTurnLogMaxBytes = 8u * 1024u * 1024u;
 
+/// How many **finished** turns stay queryable by their handle. A caller that
+/// submitted a turn asynchronously comes back later to ask how it went; the
+/// answer has to still be there. A finished turn is cheap (it holds a bounded
+/// replay buffer), so this is generous for a queue and still bounded.
+constexpr std::size_t kTurnHandleRetention = 64;
+
 /// Images and PDFs are fetched verbatim by the browser, so the raw route needs a
 /// much higher ceiling than the JSON `/file` view. 16 MB is generous for a
 /// screenshot yet small enough that one request cannot exhaust the device.
@@ -513,6 +519,16 @@ struct ChatTurn {
   std::string session_id;
   std::string workspace_id;
   std::string started_at;
+  /// The handle: the id the caller keeps when it submitted the turn and walked
+  /// away. It is the same id the trajectory uses, so one string answers both
+  /// "how did it go?" and "what did it do?".
+  std::string turn_id;
+  /// When the turn started (ms since the epoch): the status says how long it
+  /// has been going.
+  int64_t started_ms = 0;
+  /// Where the audit trail of this turn lives, so the status can report the
+  /// files it changed without making the caller look it up.
+  std::string trajectory_path;
   Workspace workspace;
   Session session;
 
@@ -530,6 +546,14 @@ struct ChatTurn {
   /// Sequence number the next event will carry.
   long long next_seq = 1;
   bool closed = false;
+  /// The state of the turn: "running" while the worker works, then "done",
+  /// "failed", "stopped" (the caller asked it to stop) or "budget" (a ceiling
+  /// was reached - that is not a failure, see agent.cpp).
+  std::string state = "running";
+  /// The frame that says how the turn ended (the `done` one, or the `error`
+  /// one). It carries the answer, the usage, the metrics and the stop reason,
+  /// so the status can answer without replaying the stream.
+  nlohmann::json outcome = nlohmann::json::object();
   /// False once the worker has finished the loop and is winding down: after that
   /// a late `enqueue_prompt` must be refused, otherwise it would sit in the inbox
   /// of a turn that will never read it again.
@@ -551,9 +575,16 @@ struct ChatTurn {
   /// request of the server.
   int subscribers = 0;
 
-  bool add_subscriber() {
+  /// Attach one more reader.
+  ///
+  /// `replay_only` is for a turn that already finished: its frames are still
+  /// in the buffer, and a caller that comes back later is exactly who should
+  /// read them. Only the number of readers is capped - each one pins an HTTP
+  /// worker thread for as long as it lives.
+  bool add_subscriber(bool replay_only = false) {
     std::lock_guard<std::mutex> lock(mu);
-    if (closed || subscribers >= max_subscribers_per_turn()) return false;
+    if (!replay_only && closed) return false;
+    if (subscribers >= max_subscribers_per_turn()) return false;
     ++subscribers;
     return true;
   }
@@ -600,6 +631,9 @@ struct ChatTurn {
     {
       std::lock_guard<std::mutex> lock(mu);
       closed = true;
+      // The worker ended without a frame that says how: the turn was stopped
+      // on purpose, or it broke. Say which - "the turn ended" is not an answer.
+      if (state == "running") state = cancel.load() ? "stopped" : "failed";
     }
     cv.notify_all();
   }
@@ -615,6 +649,7 @@ struct ChatTurn {
     std::lock_guard<std::mutex> lock(mu);
     nlohmann::json j = nlohmann::json::object();
     j["running"] = !closed;
+    j["turn_id"] = turn_id;
     j["session_id"] = session_id;
     j["workspace_id"] = workspace_id;
     j["started_at"] = started_at;
@@ -625,6 +660,94 @@ struct ChatTurn {
     // How many browsers are watching right now. The UI shows it so "someone
     // else is following this turn" is visible instead of guessed.
     j["subscribers"] = subscribers;
+    return j;
+  }
+
+  /// Watch the frames as they go by. The one that says how the turn ended
+  /// decides the state and fills in the outcome, so the status endpoint can
+  /// answer "how did it go?" without replaying the stream.
+  void observe_event(const nlohmann::json& event) {
+    const std::string type = event.value("type", std::string());
+    if (type == "budget") {
+      // The budget notice comes before the final frame; the `done` frame that
+      // follows carries stop_reason "budget" and decides the state for good.
+      std::lock_guard<std::mutex> lock(mu);
+      if (state == "running") state = "budget";
+      return;
+    }
+    if (type != "done" && type != "error" && type != "stopped") return;
+    std::lock_guard<std::mutex> lock(mu);
+    outcome = event;
+    if (type == "error") {
+      state = "failed";
+    } else if (type == "stopped") {
+      state = "stopped";
+    } else if (event.value("stop_reason", std::string()) == "budget") {
+      state = "budget";
+    } else if (event.value("repeated_output", false)) {
+      // The model went in circles and the guard stopped it: stopped, not done.
+      state = "stopped";
+    } else {
+      state = "done";
+    }
+  }
+
+  /// The files this turn actually changed, taken from the audit trail. Read
+  /// from disk and **outside** the lock: the recorder writes that file, and
+  /// the worker needs this mutex for every frame it emits.
+  nlohmann::json changed_files() const {
+    nlohmann::json out = nlohmann::json::array();
+    if (trajectory_path.empty()) return out;
+    std::vector<nlohmann::json> records;
+    std::string err;
+    if (!load_trajectories(trajectory_path, &records, &err)) return out;
+    for (std::size_t i = 0; i < records.size(); ++i) {
+      if (records[i].value("turn_id", std::string()) != turn_id) continue;
+      if (records[i].contains("files_changed") && records[i]["files_changed"].is_array()) {
+        out = records[i]["files_changed"];
+      }
+      break;
+    }
+    return out;
+  }
+
+  /// The handle's status: what `GET /api/turns/<id>` answers. It is the
+  /// answer to "how did it go?" without replaying the stream: the state, the
+  /// result, the usage, the metrics and the files that changed.
+  nlohmann::json handle_json(bool with_files = true) const {
+    nlohmann::json j = nlohmann::json::object();
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      j["ok"] = true;
+      j["turn_id"] = turn_id;
+      j["state"] = closed ? state : "running";
+      j["running"] = !closed;
+      j["session_id"] = session_id;
+      j["workspace_id"] = workspace_id;
+      j["started_at"] = started_at;
+      j["elapsed_ms"] = started_ms > 0 ? (now_ms() - started_ms) : static_cast<long long>(0);
+      j["last_seq"] = next_seq - 1;
+      j["oldest_seq"] = log_base;
+      j["dropped"] = log_dropped;
+      j["subscribers"] = subscribers;
+      if (outcome.is_object() && !outcome.empty()) {
+        if (outcome.contains("content")) j["result"] = outcome["content"];
+        if (outcome.contains("iterations")) j["iterations"] = outcome["iterations"];
+        if (outcome.contains("usage")) j["usage"] = outcome["usage"];
+        if (outcome.contains("metrics")) j["metrics"] = outcome["metrics"];
+        if (outcome.contains("stop_reason")) j["stop_reason"] = outcome["stop_reason"];
+        if (outcome.contains("budget")) j["budget"] = outcome["budget"];
+        if (outcome.contains("budget_used")) j["budget_used"] = outcome["budget_used"];
+        if (outcome.contains("trajectory_id")) j["trajectory_id"] = outcome["trajectory_id"];
+        if (outcome.value("repeated_output", false)) j["repeated_output"] = true;
+        // The error frame carries the message; the done frame does not.
+        if (outcome.contains("message")) j["error"] = outcome["message"];
+      }
+    }
+    if (with_files) {
+      const nlohmann::json changed = changed_files();
+      if (!changed.empty()) j["files_changed"] = changed;
+    }
     return j;
   }
 
@@ -1097,6 +1220,13 @@ struct ApiServer::Impl {
 
   std::mutex mu;  // guards registry access and `turns`
   std::map<std::string, std::shared_ptr<ChatTurn>> turns;
+  /// The same turns, by their handle. A turn stays here after it finished, so
+  /// a caller that submitted it asynchronously can still ask "how did it go?"
+  /// long after the connection is gone.
+  std::map<std::string, std::shared_ptr<ChatTurn>> turns_by_id;
+  /// The handles in the order they were created (oldest first), so the oldest
+  /// finished turn can be dropped when the retention limit is reached.
+  std::deque<std::string> turn_handles;
   /// Turns displaced by a newer turn on the same session. ~ChatTurn joins its
   /// worker, so these are kept alive here and only destroyed outside `mu`:
   /// joining under the lock would freeze every other request for as long as
@@ -1133,6 +1263,41 @@ struct ApiServer::Impl {
     std::lock_guard<std::mutex> lock(mu);
     auto it = turns.find(session_id);
     return it == turns.end() ? nullptr : it->second;
+  }
+
+  /// The turn with this handle, if it is still known. Never prunes and never
+  /// joins: callers must not hold `mu` while a ChatTurn dies (its destructor
+  /// joins the worker, which may still be inside a long tool call).
+  std::shared_ptr<ChatTurn> find_turn_by_id(const std::string& turn_id) {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = turns_by_id.find(turn_id);
+    return it == turns_by_id.end() ? nullptr : it->second;
+  }
+
+  /// Keep the handles of the finished turns queryable for a while: a caller
+  /// that submitted a turn asynchronously comes back later to ask how it went.
+  /// The oldest finished ones are dropped first; a running turn is never
+  /// dropped, however old it is.
+  void prune_handles_locked(std::vector<std::shared_ptr<ChatTurn>>* graveyard) {
+    std::size_t finished = 0;
+    for (std::size_t i = 0; i < turn_handles.size(); ++i) {
+      auto it = turns_by_id.find(turn_handles[i]);
+      if (it != turns_by_id.end() && it->second && it->second->finished()) ++finished;
+    }
+    std::size_t excess = finished > kTurnHandleRetention ? finished - kTurnHandleRetention : 0;
+    while (excess > 0 && !turn_handles.empty()) {
+      const std::string id = turn_handles.front();
+      turn_handles.pop_front();
+      auto it = turns_by_id.find(id);
+      if (it == turns_by_id.end()) continue;
+      if (it->second && !it->second->finished()) {
+        turn_handles.push_back(id);  // still working: it stays
+        continue;
+      }
+      graveyard->push_back(it->second);
+      turns_by_id.erase(it);
+      --excess;
+    }
   }
 
   bool session_turn_running(const std::string& session_id) {
@@ -4386,6 +4551,17 @@ void ApiServer::Impl::install_routes() {
       }
       interrupt = body["interrupt"].get<bool>();
     }
+    // "async": the caller submits the turn and walks away. It gets a handle
+    // back (202) and asks later how it went. Without the flag the route
+    // behaves exactly as before: one SSE stream, held until the turn ends.
+    bool async_submit = false;
+    if (body.contains("async")) {
+      if (!body["async"].is_boolean()) {
+        send_error(res, 400, "bad_request", "'async' must be true or false");
+        return;
+      }
+      async_submit = body["async"].get<bool>();
+    }
 
     // ---- same-session policy: queue by default, replace only on request -----
     //
@@ -4435,7 +4611,15 @@ void ApiServer::Impl::install_routes() {
             // The client uses this to say "another window is answering; your
             // message waits its turn" instead of pretending it started a turn.
             j["turn_running"] = true;
-            send_json(res, j);
+            // The handle of the turn that is already running: the queued
+            // prompt joins it, so that is the turn to watch.
+            j["turn_id"] = running->turn_id;
+            j["state"] = "running";
+            j["status_url"] = "/api/turns/" + running->turn_id;
+            j["events_url"] = "/api/turns/" + running->turn_id + "/events";
+            // 202 when the caller asked for a handle: the work is under way,
+            // whether it started now or joined a turn that was already running.
+            send_json(res, j, async_submit ? 202 : 200);
             return;
           }
         } else {
@@ -4484,6 +4668,11 @@ void ApiServer::Impl::install_routes() {
 
     auto turn = std::make_shared<ChatTurn>();
     turn->started_at = now_iso8601();
+    turn->started_ms = now_ms();
+    // The handle: the caller gets it back (202) and can ask how the turn went
+    // later, long after the connection is gone. The trajectory uses the same
+    // id, so the audit trail of this turn is at /api/turns/<handle>/trajectory.
+    turn->turn_id = make_id("t_");
     std::string err;
     if (!open_workspace(workspace_id, &turn->workspace, &err)) {
       send_error(res, 404, "not_found", err);
@@ -4504,6 +4693,9 @@ void ApiServer::Impl::install_routes() {
       turn->session = created;
     }
     turn->session_id = turn->session.info.id;
+    // Where the audit trail of this turn will be written: the status reports
+    // the files it changed, and it reads them from there.
+    turn->trajectory_path = trajectory_file_path(turn->workspace.run_dir(), turn->session_id);
 
     const std::string provider = json_string(body, "provider");
     const std::string model = json_string(body, "model");
@@ -4653,6 +4845,11 @@ void ApiServer::Impl::install_routes() {
         turns.erase(it);
       }
       turns[turn->session_id] = turn;
+      // The handle index: the turn stays queryable by its id after it
+      // finished, so a caller that walked away can still ask how it went.
+      turns_by_id[turn->turn_id] = turn;
+      turn_handles.push_back(turn->turn_id);
+      prune_handles_locked(&graveyard);
     }
     // Joining a finished worker is immediate; doing it here keeps `mu` free.
     graveyard.clear();
@@ -4675,7 +4872,13 @@ void ApiServer::Impl::install_routes() {
       options.allow_paths = allow_paths;
       options.budget = request_budget;
       options.knob_overrides = knob_overrides;
-      EventEmitter emit = [turn](const nlohmann::json& event) { turn->emit_event(event); };
+      // The audit trail is written under the handle's id, so one string
+      // identifies this turn everywhere.
+      options.turn_id = turn->turn_id;
+      EventEmitter emit = [turn](const nlohmann::json& event) {
+        turn->observe_event(event);
+        turn->emit_event(event);
+      };
       try {
         agent.run_turn(turn->workspace, &turn->session, message, images, options, emit,
                        &turn->cancel);
@@ -4709,6 +4912,24 @@ void ApiServer::Impl::install_routes() {
       turn->close();
     });
 
+    if (async_submit) {
+      // 202: the turn is under way and the caller may walk away. The handle
+      // is how it finds out how it went (GET /api/turns/<id>), how far it got
+      // (GET /api/turns/<id>/events) and how to stop it
+      // (POST /api/turns/<id>/stop).
+      nlohmann::json j = nlohmann::json::object();
+      j["ok"] = true;
+      j["turn_id"] = turn->turn_id;
+      j["session_id"] = turn->session_id;
+      j["workspace_id"] = turn->workspace_id;
+      j["state"] = "running";
+      j["started_at"] = turn->started_at;
+      j["status_url"] = "/api/turns/" + turn->turn_id;
+      j["events_url"] = "/api/turns/" + turn->turn_id + "/events";
+      send_json(res, j, 202);
+      return;
+    }
+
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
     res.set_header("Access-Control-Allow-Origin", "*");
@@ -4726,6 +4947,129 @@ void ApiServer::Impl::install_routes() {
                      std::to_string(max_subscribers_per_turn()) + ")");
       return;
     }
+    res.set_chunked_content_provider(
+        "text/event-stream; charset=utf-8",
+        [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
+          return turn->pump(sink, sub);
+        });
+  });
+
+  // ---- the turn handle ---------------------------------------------------
+  //
+  // A caller that submits a turn asynchronously gets a handle back and walks
+  // away: the turn keeps working, and the handle is how it finds out how it
+  // went. These routes are that handle:
+  //
+  //   GET  /api/turns                the recent handles, newest first
+  //   GET  /api/turns/{id}           the state, the result, the usage
+  //   POST /api/turns/{id}/stop      stop exactly this turn
+  //   GET  /api/turns/{id}/events    the frames (replay + live)
+  //
+  // The handle is the same id the trajectory uses, so the audit trail of the
+  // turn is at GET /api/turns/{id}/trajectory.
+  svr.Get(R"(/api/turns)", [this](const httplib::Request&, httplib::Response& res) {
+    std::vector<std::shared_ptr<ChatTurn>> graveyard;
+    std::vector<std::shared_ptr<ChatTurn>> live;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      prune_handles_locked(&graveyard);
+      // Newest first: the caller that just submitted wants its own turn at
+      // the top, not the one from an hour ago.
+      for (auto it = turn_handles.rbegin(); it != turn_handles.rend(); ++it) {
+        auto found = turns_by_id.find(*it);
+        if (found == turns_by_id.end() || !found->second) continue;
+        live.push_back(found->second);
+      }
+    }
+    graveyard.clear();  // ~ChatTurn joins the worker: never under `mu`
+    nlohmann::json list = nlohmann::json::array();
+    for (std::size_t i = 0; i < live.size(); ++i) {
+      // No file lookup here: the list is a summary, and reading the
+      // trajectory of every turn would turn one request into a hundred reads.
+      list.push_back(live[i]->handle_json(false));
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["turns"] = list;
+    send_json(res, j);
+  });
+
+  svr.Get(R"(/api/turns/([^/]+))", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string turn_id = req.matches[1].str();
+    // The handle is a file name in the audit trail, so it is held to the same
+    // rule: no separators, no dots, nothing that could walk out of a folder.
+    if (!trajectory_id_is_safe(turn_id)) {
+      send_error(res, 400, "bad_request", "that is not a turn id");
+      return;
+    }
+    std::shared_ptr<ChatTurn> turn = find_turn_by_id(turn_id);
+    if (!turn) {
+      send_error(res, 404, "unknown_turn",
+                 "no turn with this id is known; it was never submitted here, or it "
+                 "was dropped after it finished");
+      return;
+    }
+    send_json(res, turn->handle_json());
+  });
+
+  svr.Post(R"(/api/turns/([^/]+)/stop)", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string turn_id = req.matches[1].str();
+    if (!trajectory_id_is_safe(turn_id)) {
+      send_error(res, 400, "bad_request", "that is not a turn id");
+      return;
+    }
+    std::shared_ptr<ChatTurn> turn = find_turn_by_id(turn_id);
+    if (!turn) {
+      send_error(res, 404, "unknown_turn", "no turn with this id is known");
+      return;
+    }
+    // The stop is a request, not a promise: the agent checks the flag at the
+    // next model or tool boundary, so a turn that is inside a long tool keeps
+    // running until that tool returns. The state says so.
+    const bool was_running = !turn->finished();
+    turn->cancel.store(true);
+    nlohmann::json j = turn->handle_json(false);
+    j["ok"] = true;
+    j["cancelled"] = was_running;
+    if (was_running) j["state"] = "stopping";
+    send_json(res, j);
+  });
+
+  svr.Get(R"(/api/turns/([^/]+)/events)", [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string turn_id = req.matches[1].str();
+    if (!trajectory_id_is_safe(turn_id)) {
+      send_error(res, 400, "bad_request", "that is not a turn id");
+      return;
+    }
+    std::shared_ptr<ChatTurn> turn = find_turn_by_id(turn_id);
+    if (!turn) {
+      send_error(res, 404, "unknown_turn", "no turn with this id is known");
+      return;
+    }
+    // A finished turn can still be read: its frames are in the buffer, and the
+    // caller that comes back later is the one who wants them.
+    if (!turn->add_subscriber(true)) {
+      send_error(res, 429, "too_many_subscribers",
+                 "already " + std::to_string(max_subscribers_per_turn()) +
+                     " windows are following this turn; close one of them and reload");
+      return;
+    }
+    auto sub = std::make_shared<ChatTurn::Subscriber>();
+    auto slot = std::make_shared<SubscriberSlot>(turn);
+    // `since` is the last seq the client saw: the frames after it are
+    // replayed, then the stream follows live. A client that was disconnected
+    // for a while asks for the last seq it has and picks up where it left.
+    if (req.has_param("since")) {
+      const std::string raw = trim(req.get_param_value("since"));
+      if (!raw.empty() && raw.find_first_not_of("0123456789") == std::string::npos) {
+        const long long since = std::strtoll(raw.c_str(), nullptr, 10);
+        if (since > 0) sub->cursor = since + 1;
+      }
+    }
+    LOG_INFO("chat: following the turn ", turn_id, " (from seq ", sub->cursor, ")");
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+    res.set_header("Access-Control-Allow-Origin", "*");
     res.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
         [turn, sub, slot](std::size_t, httplib::DataSink& sink) {

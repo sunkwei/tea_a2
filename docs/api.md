@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.18.5`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
+| `GET` | `/api/health` | 探活、版本（`0.19.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
@@ -37,7 +37,11 @@
 | `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON） |
 | `POST` | `/api/workspaces/{id}/sessions/import` | 导入导出的 `.html`（原样或 `{"html":"…"}`）或会话 JSON，新建一个会话；重复导入不会覆盖 |
 | `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |
-| `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`） |
+| `GET` | `/api/turns` | **最近的回合句柄**，最新在前（跑着的与刚跑完的都在里面，finished 的最多留 64 个） |
+| `GET` | `/api/turns/{turn_id}` | **一个回合现在怎么样**：`state`（`running` / `done` / `failed` / `stopped` / `budget`）、`result`（模型的回答）、`usage`、`metrics`、`iterations`、`stop_reason`、`trajectory_id`、`files_changed`（这一轮动过的文件）、`elapsed_ms`、`last_seq` |
+| `POST` | `/api/turns/{turn_id}/stop` | **精确停这一轮**（不用知道 session_id）。回答 `{"ok":true,"cancelled":true,"state":"stopping"}`；停是**请求**，不是保证：模型或工具要到下一个边界才会真的停下来 |
+| `GET` | `/api/turns/{turn_id}/events?since=` | **这一轮的事件流**：回放 `since` 之后的事件（`since` 省略 = 全部），然后继续直播；轮次已经跑完也能读（回放缓冲区还在）。每一帧带 `seq`，断线以后拿最后一个 `seq` 接回来就行 |
+| `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`，也即这一轮的**句柄**） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
 | `POST` | `/api/chat` | agent loop 本身；带 `task_id` + `task_context` 时，这一轮就是「在做某个排队任务」，模型会用 `toolkit_task` 汇报进度 |
@@ -57,7 +61,7 @@
 | `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
 | `GET` | `/api/providers/{name}/models` | 问这个 provider 现在提供哪些模型：服务端用 provider 自己的 key 去问 `GET {api_url}/v1/models`（key 不下发）。返回每个模型的默认配置、来源、新增了哪些、哪些已经不再提供。上游失败返回 502 与原因 |
 | `POST` | `/api/providers/{name}/models` | 把确认后的模型列表写进 `provider.yaml`：`{"models":[{"id":…,"max_context_tokens":…,"max_output_tokens":…,"supports_tools":…,"supports_reasoning":…,"supports_vision":…}]}`。**只改这个 provider 的 `models:` 块**（别的 provider、注释、settings 块原样保留），先校验再替换 |
-| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}`。可带 `limits`（这一轮的预算，见下）、`tools`（这一轮允许用的工具）、`allow_paths`（这一轮额外可碰的目录）、`task_id` / `task_context`（这一轮在做哪个排队任务） |
+| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}`。可带 `limits`（这一轮的预算，见下）、`tools`（这一轮允许用的工具）、`allow_paths`（这一轮额外可碰的目录）、`task_id` / `task_context`（这一轮在做哪个排队任务）、`async`（**提交完就撒手**：见下「回合句柄」） |
 | `POST` | `/api/chat/stop` | 中断当前轮次（对所有人）。**必须带 `{"session_id":"…"}`**，否则 `cancelled` 一直是 false |
 | `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
 | `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
@@ -65,6 +69,47 @@
 | `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
+
+### 回合句柄：提交完可以撒手
+
+`POST /api/chat` 默认是一条 SSE 流**撑到底**：客户端不 disconnect，连接就一直占着。
+对浏览器没问题，对**调度方**（任务队列）有两个麻烦：连接被代理掐了，队列会把任务判死，
+而 agent 那边这一轮**还在跑、还在烧 token**；队列进程重启也一样——没人能停它。
+
+所以有一对接口：**提交**与**回头来取**。
+
+```bash
+# 1) 提交完就走：202 + 句柄（不是流）
+curl -s -X POST http://127.0.0.1:8282/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_x","message":"把 README 翻译成英文","async":true}'
+# {"ok":true,"turn_id":"t_1a2b3c4d5e6f","session_id":"s_…","state":"running",
+#  "status_url":"/api/turns/t_1a2b3c4d5e6f","events_url":"/api/turns/t_1a2b3c4d5e6f/events"}
+
+# 2) 回头问：这一轮怎么样了
+curl -s http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f
+# {"ok":true,"state":"done","result":"…","usage":{…},"iterations":3,
+#  "trajectory_id":"t_1a2b3c4d5e6f","elapsed_ms":4213, …}
+
+# 3) 想看过程：事件流（回放 + 直播），断了拿最后一个 seq 接回来
+curl -s 'http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f/events?since=0'
+
+# 4) 想停：精确停这一轮（不用知道 session_id）
+curl -s -X POST http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f/stop
+```
+
+几条约定：
+
+- **句柄就是审计 id**。`turn_id` 与 `done` 事件里的 `trajectory_id`、轨迹文件里的 `turn_id`
+  是同一个字符串，所以「这一轮怎么样了」与「这一轮干了什么」用同一个 id 查。
+- **状态有五种**：`running`（还在跑）、`done`（正常答完）、`failed`（出错）、
+  `stopped`（被停了，或模型在原地打转被拦下）、`budget`（**撞到预算了，不是失败**——
+  做到的部分算数，做完的事写进对话了）。
+- **不传 `async` 就还是老样子**：一条 SSE 流，行为一个字没变。现有的客户端不用改。
+- 会话上已经有轮次在跑时，异步提交**排队**，回答里带的是**正在跑的那一轮**的句柄
+  （`queued` 字段说明这是排队不是新开的一轮）。
+- 句柄在轮次跑完后**还留一会儿**（最多 64 个），所以「提交完去干别的，回头来问」
+  是成立的；再久以前的就查不到了（404 `unknown_turn`）。
 
 ### 工作区：能不能写进去
 

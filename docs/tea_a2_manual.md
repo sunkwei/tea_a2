@@ -13,10 +13,11 @@ README 讲的是「这是什么、为什么这么设计」；[HTTP 接口](api.m
 | 起服务、改端口、换模型、看日志 | [1. 起服务](#1-起服务) |
 | 用 curl 让 agent 干活 | [2. agent 的 HTTP 命令](#2-agent-的-http-命令) |
 | 排队、查进度、取消、重做 | [3. 任务队列的命令](#3-任务队列的命令) |
-| 查接口有哪些、这个字段什么意思 | [2.13](#213-接口文档在哪儿apidoc) |
-| 让模型自己联网搜索 | [2.12](#212-网页搜索deepseek-的-search--fetch) |
-| 用麦克风说话（语音输入） | [2.14](#214-语音输入) |
-| 让这台机器去控制另一台 tea_a2（级联） | [2.16](#216-级联控制另一台-tea_a2) |
+| 查接口有哪些、这个字段什么意思 | [2.14](#214-接口文档在哪儿apidoc) |
+| 让模型自己联网搜索 | [2.13](#213-网页搜索deepseek-的-search--fetch) |
+| 用麦克风说话（语音输入） | [2.15](#215-语音输入) |
+| 提交完就撒手，回头再来取结果（回合句柄） | [2.5](#25-回合句柄提交完可以撒手) |
+| 让这台机器去控制另一台 tea_a2（级联） | [2.17](#217-级联控制另一台-tea_a2) |
 | 定时做一件活儿（`not_before`、微信 `/at`） | [3.2.1](#321-定时做一件活儿) · [4](#4-聊天端的命令) |
 | 在微信 / Telegram 里排队 | [4. 聊天端的命令](#4-聊天端的命令) |
 | 写脚本调 agent | [5. 给脚本用的客户端](#5-给脚本用的客户端) |
@@ -202,7 +203,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"0.18.5","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"0.19.0","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -341,7 +342,50 @@ curl -N -X POST $B/api/chat/attach -H 'Content-Type: application/json' \
 
 跟随者超过 `TEA_AGENT_MAX_SUBSCRIBERS`（默认 8）会被 `429 too_many_subscribers` 拒绝。
 
-### 2.5 工作区
+### 2.5 回合句柄：提交完可以撒手
+
+`POST /api/chat` 默认是一条 SSE 流**撑到底**。对脚本和调度方来说这不合适：连接被
+代理掐了或客户端进程没了，这一轮还在跑、还在烧 token，而你连「它还在跑」都查不到。
+
+所以有一对接口：**提交**与**回头来取**。
+
+```bash
+# 1) 提交完就走：202 + 句柄（JSON，不是流）
+curl -s -X POST $B/api/chat -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_xxx","message":"把 README 翻译成英文","async":true}'
+# {"ok":true,"turn_id":"t_1a2b3c4d5e6f","session_id":"s_xxx","state":"running",
+#  "status_url":"/api/turns/t_1a2b3c4d5e6f","events_url":"/api/turns/t_1a2b3c4d5e6f/events"}
+
+# 2) 回头问：这一轮怎么样了
+curl -s $B/api/turns/t_1a2b3c4d5e6f
+# {"ok":true,"state":"done","result":"…","usage":{…},"iterations":3,
+#  "trajectory_id":"t_1a2b3c4d5e6f","elapsed_ms":4213,"last_seq":137, …}
+
+# 3) 想看过程：事件流（回放 + 直播）
+curl -sN "$B/api/turns/t_1a2b3c4d5e6f/events?since=0"
+# since = 最后一个收到的 seq，就从那儿接着收；轮次跑完了也能读（缓冲区还在）
+
+# 4) 想停：精确停这一轮（不用知道 session_id）
+curl -s -X POST $B/api/turns/t_1a2b3c4d5e6f/stop
+# {"ok":true,"cancelled":true,"state":"stopping"}
+
+# 5) 最近有哪些句柄（最新在前）
+curl -s $B/api/turns
+```
+
+几条约定：
+
+- **句柄就是审计 id**：`turn_id` 与 `done` 事件里的 `trajectory_id`、轨迹文件里的
+  `turn_id` 是同一个字符串，所以「这一轮怎么样了」和「这一轮干了什么」用同一个 id 查
+  （`GET /api/turns/<id>/trajectory`）。
+- **状态有五种**：`running`（还在跑）、`done`（正常答完）、`failed`（出错）、
+  `stopped`（被停了，或模型在原地打转被拦下）、`budget`（**撞到预算了，不是失败**）。
+- **不传 `async` 就还是老样子**：一条 SSE 流，行为一个字没变，现有的客户端不用改。
+- 会话上已经有轮次在跑时，异步提交**排队**，回答里带的是**正在跑的那一轮**的句柄。
+- 句柄在轮次跑完后还留一会儿（最多 64 个），回头来问是成立的；更早的查不到
+  （404 `unknown_turn`）。
+
+### 2.6 工作区
 
 ```bash
 # 列工作区
@@ -383,7 +427,7 @@ curl -s "$B/api/workspaces/ws_xxx/raw?path=build/logo.png" -o logo.png
 curl -OJ "$B/api/workspaces/ws_xxx/download?path=build/app.bin"
 ```
 
-### 2.6 会话
+### 2.7 会话
 
 ```bash
 # 列表 / 新建
@@ -409,7 +453,7 @@ curl -s -X POST $B/api/sessions/s_xxx/fork -H 'Content-Type: application/json' \
 > 轮次进行中时，改名 / 删除 / 改任务列表一律返回 `409 turn_running`——worker 会在下一次
 > 迭代把改动写回去。等它结束再来。
 
-### 2.7 任务列表（todo）
+### 2.8 任务列表（todo）
 
 列表随 `GET /api/sessions/{sid}` 一起返回；**修改**走 `PUT`：
 
@@ -431,7 +475,7 @@ curl -s -X PUT $B/api/sessions/s_xxx/todos -H 'Content-Type: application/json' \
 
 **全部做完的列表会被清掉**（系统行为，不用手动 `clear`）。
 
-### 2.8 记忆、人设、经验、日志
+### 2.9 记忆、人设、经验、日志
 
 ```bash
 # 工作区长期记忆（跨会话保留）
@@ -463,7 +507,7 @@ curl -s -X PUT "$B/api/workspaces/ws_xxx/settings" -H 'Content-Type: application
 
 保存 system prompt 后**下一轮**生效（每轮重新读盘）。
 
-### 2.9 轨迹与导出
+### 2.10 轨迹与导出
 
 ```bash
 # 每轮轨迹摘要，最新在前
@@ -483,7 +527,7 @@ curl -s -X POST "$B/api/workspaces/ws_xxx/sessions/import" \
 # 也接受 {"html":"..."} 或会话 JSON
 ```
 
-### 2.10 打包下载与销毁
+### 2.11 打包下载与销毁
 
 ```bash
 # 把 .tea_agent_run 打成 zip（也可 ?path= 换成工作区里的别的目录）
@@ -498,7 +542,7 @@ curl -s -X POST $B/api/destroy -H 'Content-Type: application/json' \
   -d '{"confirm":"destroy"}'
 ```
 
-### 2.11 绕过 agent，直接问模型
+### 2.12 绕过 agent，直接问模型
 
 `/api/chat` 跑的是完整的一圈（模型 → 工具 → 模型 …）。只是要一次模型回答，用
 `/api/llm/chat`——**不执行任何工具**，答案直接回来：
@@ -532,7 +576,7 @@ curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
 `POST /api/chat` 的这一轮也吃同一套旋钮（只对这一轮生效）。
 细节见 [HTTP 接口](api.md#一次调用能带哪些旋钮)。
 
-### 2.12 网页搜索：DeepSeek 的 search / fetch
+### 2.13 网页搜索：DeepSeek 的 search / fetch
 
 DeepSeek 的搜索和抓取是 **provider 上的两个端点**（`/v1/tools/search`、
 `/v1/tools/fetch`），不是模型自己执行的工具——tea_a2 去调它们，把结果当工具结果喂回模型。
@@ -575,7 +619,7 @@ curl -s -X POST $B/api/tools/call -H 'Content-Type: application/json' \
 
 > 搜索是**按次计费**的（provider 每次调用都收钱），所以 `web_tools: true` 的轮数有上限。
 
-### 2.13 接口文档在哪儿：`/api/doc`
+### 2.14 接口文档在哪儿：`/api/doc`
 
 设备上可能没有网、也没有仓库，但**要查接口的人手上只有这个设备**。所以接口文档
 （`docs/api.md`）在**编译期就进了二进制**，`/api/doc` 从二进制里读出来：
@@ -593,7 +637,7 @@ curl -s $B/api/doc?format=json       # {ok, version, title, markdown, html}
 测试 `tests/smoke_api_docs.py` 盯着这件事：它比对字节，还把代码里注册的每一条路由
 跟文档对一遍（**代码里有、文档里没写**的路由算失败）。
 
-### 2.14 语音输入
+### 2.15 语音输入
 
 界面上的麦克风按钮（输入框旁边）把说的话变成文字**填进输入框**——不自动发送，
 转写有错还能改。
@@ -638,7 +682,7 @@ curl -s -X POST $B/api/asr/transcribe -H 'Content-Type: audio/wav' \
    `http://192.168.x.x:8282` 访问设备时浏览器不给权限，所以按钮不出现。
 3. 浏览器不支持 `MediaRecorder`（很老的浏览器）。
 
-### 2.15 MCP 服务器
+### 2.16 MCP 服务器
 
 **和 provider.yaml 同目录**的 `mcp.yaml` 里配的 MCP 服务器（Model Context Protocol）是
 **独立的程序**：agent 启动它们，用 stdio 上的 JSON-RPC 跟它们说话，它们提供的工具变成模型
@@ -673,7 +717,7 @@ curl -s -X POST $B/api/mcp/servers/uiautomation/call \
 `/api/mcp/servers` 里写着原因（`error`），别的服务器照常工作。细节见
 [配置](config.md#mcp-服务器mcp-yaml)。
 
-### 2.16 级联：控制另一台 tea_a2
+### 2.17 级联：控制另一台 tea_a2
 
 被控端加一个令牌（`--api-token`）就多出一组**机器对机器**的路由：
 `/api/peer/<路由>` 是 `/api/<路由>` 的令牌版镜像。没配令牌时这些路由**不存在**（404）。

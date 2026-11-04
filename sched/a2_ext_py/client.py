@@ -234,19 +234,14 @@ class Client:
             for frame in self.sse(resp):
                 yield frame
 
-    def chat(self, workspace_id, message, provider=None, session_id=None,
-             task_id=None, task_context=None, allow_paths=None, model=None,
-             params=None, limits=None, policy=None, tools=None, system_prompt=None):
-        """Run one turn and yield the agent's events as they happen.
+    def _chat_body(self, workspace_id, message, provider=None, session_id=None,
+                   task_id=None, task_context=None, allow_paths=None, model=None,
+                   params=None, limits=None, policy=None, tools=None,
+                   system_prompt=None):
+        """The body of a turn. Shared by `chat()` and `submit()`.
 
-        This is the whole contract between a caller that keeps its own policy
-        and the kernel: the agent announces the session, reports on the task
-        (toolkit_task) and finishes (done / error / stopped). The caller reads
-        the progress out of the stream - it never has to ask where it is.
-
-        `limits` is the budget of this turn (the machine's ceiling, tightened
-        by the caller's own - see `GET /api/health`'s `limits`); `policy` and
-        `tools` are the permissions (which tools the model may use).
+        One place builds it, so the two ways of starting a turn cannot drift
+        apart (the knobs of a turn are the knobs of a turn).
         """
         body = {"workspace_id": workspace_id, "message": message}
         if provider:
@@ -276,6 +271,31 @@ class Client:
         allowed = list(tools or []) or list((policy or {}).get("tools") or [])
         if allowed:
             body["tools"] = allowed
+        return body
+
+    def chat(self, workspace_id, message, provider=None, session_id=None,
+             task_id=None, task_context=None, allow_paths=None, model=None,
+             params=None, limits=None, policy=None, tools=None, system_prompt=None):
+        """Run one turn and yield the agent's events as they happen.
+
+        This is the whole contract between a caller that keeps its own policy
+        and the kernel: the agent announces the session, reports on the task
+        (toolkit_task) and finishes (done / error / stopped). The caller reads
+        the progress out of the stream - it never has to ask where it is.
+
+        `limits` is the budget of this turn (the machine's ceiling, tightened
+        by the caller's own - see `GET /api/health`'s `limits`); `policy` and
+        `tools` are the permissions (which tools the model may use).
+
+        This holds one connection open for the whole turn. A caller that may
+        be interrupted (a queue, a supervisor, a phone) wants `submit()`
+        instead: it gets a handle and comes back later.
+        """
+        body = self._chat_body(
+            workspace_id, message, provider=provider, session_id=session_id,
+            task_id=task_id, task_context=task_context, allow_paths=allow_paths,
+            model=model, params=params, limits=limits, policy=policy, tools=tools,
+            system_prompt=system_prompt)
         req = urllib.request.Request(
             self.base + "/api/chat", data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST")
@@ -301,6 +321,76 @@ class Client:
     def stop(self, session_id):
         """Stop the turn that is running in this session."""
         return self._request("POST", "/api/chat/stop", {"session_id": session_id})
+
+    # ---- the turn handle: submit now, look it up later -------------------
+    #
+    # A turn that is started with `chat()` lives as long as the connection:
+    # if the caller goes away, the work goes on but nobody can ask how it
+    # went. `submit()` hands back a **handle** instead, and the handle is
+    # what the caller keeps.
+
+    def submit(self, workspace_id, message, provider=None, session_id=None,
+               task_id=None, task_context=None, allow_paths=None, model=None,
+               params=None, limits=None, policy=None, tools=None,
+               system_prompt=None):
+        """Submit a turn and walk away. Returns the handle.
+
+        The answer is {"ok": true, "turn_id": "t_…", "session_id": "s_…",
+        "state": "running", "status_url": …, "events_url": …}. The turn keeps
+        working with nobody watching; the caller comes back to
+        `turn_status(turn_id)`, `turn_events(turn_id)` or `stop_turn(turn_id)`.
+        """
+        body = self._chat_body(
+            workspace_id, message, provider=provider, session_id=session_id,
+            task_id=task_id, task_context=task_context, allow_paths=allow_paths,
+            model=model, params=params, limits=limits, policy=policy, tools=tools,
+            system_prompt=system_prompt)
+        body["async"] = True
+        return self._request("POST", "/api/chat", body)
+
+    def turn_status(self, turn_id):
+        """How did the turn with this handle go?
+
+        {"state": "running|done|failed|stopped|budget", "result": …,
+        "usage": {…}, "iterations": n, "stop_reason": …, "elapsed_ms": n, …}
+        """
+        return self._request("GET", "/api/turns/" + self._turn_path(turn_id))
+
+    def turn_events(self, turn_id, since=0):
+        """The frames of one turn: the replay first, then the live stream.
+
+        Same frames as `chat()` yields, so a caller can switch from one to
+        the other without changing how it reads the events.
+        """
+        path = "/api/turns/" + self._turn_path(turn_id) + "/events"
+        if since:
+            path += "?since=" + str(int(since))
+        req = urllib.request.Request(self.base + path,
+                                     headers={"Accept": "text/event-stream"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=self.chat_timeout or None)
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            message = raw
+            try:
+                message = (json.loads(raw).get("error") or {}).get("message") or raw
+            except ValueError:
+                pass
+            raise ApiError(exc.code, message, raw) from None
+        except urllib.error.URLError as exc:
+            raise ApiError(0, "cannot reach %s: %s" % (self.base, exc.reason)) from None
+        with resp:
+            for frame in self.sse(resp):
+                yield frame
+
+    def stop_turn(self, turn_id):
+        """Stop exactly this turn (by its handle, not by the session)."""
+        return self._request("POST", "/api/turns/" + self._turn_path(turn_id) + "/stop", {})
+
+    @staticmethod
+    def _turn_path(turn_id):
+        """A handle as a path segment. It is an id, not a path."""
+        return urllib.parse.quote(str(turn_id), safe="")
 
     def fleet_ask(self, fleet_url, token, prompt, groups=None, names=None, labels=None,
                   timeout_s=300, timeout=360):

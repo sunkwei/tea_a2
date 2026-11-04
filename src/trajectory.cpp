@@ -188,7 +188,7 @@ nlohmann::json trajectory_summary(const nlohmann::json& turn) {
 // ---------------------------------------------------------------------------
 bool TrajectoryRecorder::begin(Workspace& workspace, const std::string& session_id,
                                const std::string& workspace_id, const std::string& provider,
-                               const std::string& model) {
+                               const std::string& model, const std::string& turn_id) {
   const TrajectoryLimits limits = trajectory_limits_from_settings(workspace.settings());
   if (!limits.enabled) {
     LOG_DEBUG("trajectory: disabled by settings");
@@ -206,7 +206,14 @@ bool TrajectoryRecorder::begin(Workspace& workspace, const std::string& session_
   provider_ = provider;
   model_ = model;
   path_ = trajectory_file_path(workspace.run_dir(), session_id);
-  turn_id_ = make_id("t_");
+  // The caller may have handed out the id already (the HTTP layer does: the
+  // handle it gives back is the audit id). An id that cannot be a file name is
+  // ignored - a handle has to be safe to put in a URL and in a file name.
+  if (!turn_id.empty() && trajectory_id_is_safe(turn_id)) {
+    turn_id_ = turn_id;
+  } else {
+    turn_id_ = make_id("t_");
+  }
   started_ms_ = now_ms();
   started_at_ = now_iso8601_ms();
   finished_ = false;

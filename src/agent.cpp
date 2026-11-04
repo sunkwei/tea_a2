@@ -1182,7 +1182,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // before the first model request and is refreshed after every step, so a
   // killed process still leaves a usable partial trajectory.
   TrajectoryRecorder trajectory;
-  trajectory.begin(workspace, session->info.id, workspace.id(), provider, model);
+  trajectory.begin(workspace, session->info.id, workspace.id(), provider, model, options.turn_id);
   // The task this turn works on (the queue's task id) and the budget it ran
   // under: the audit trail says which job this was and what it was allowed to
   // spend.

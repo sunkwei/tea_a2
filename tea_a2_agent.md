@@ -877,6 +877,44 @@ a2 = 通道（回合、工具、文件、轨迹），a2_task = 队列（什么�
 
 下一步的三步（句柄 → 幂等/能力 → 审批/围栏）与验收标准都在那份文档里。
 
+### 2026-11-04：回合句柄 + 异步提交（M1，0.19.0）
+
+机制层现在有**句柄**了：调用方可以把一轮交出去，然后走开。
+
+- `POST /api/chat {"async":true}` → **202** + `{"turn_id":"t_…","session_id":"s_…",
+  "state":"running","status_url":…,"events_url":…}`。**不传 `async` 就还是老样子**
+  （一条 SSE 流，行为一个字没变）——这条是硬要求，别为了统一把老客户端改了。
+- `GET /api/turns/{id}` → 状态：`running` / `done` / `failed` / `stopped` / **`budget`**
+  （撞到预算**不是失败**），外加 `result` / `usage` / `metrics` / `iterations` /
+  `stop_reason` / `files_changed` / `elapsed_ms`。
+- `GET /api/turns/{id}/events?since=` → 回放 + 直播；**轮次跑完了也能读**（缓冲区还在）。
+- `POST /api/turns/{id}/stop` → 精确停这一轮（不用 session_id）。
+- `GET /api/turns` → 最近的句柄（最新的在前）。
+
+**句柄就是审计 id**：`turn_id` 与 `done` 事件里的 `trajectory_id`、轨迹文件里的 `turn_id`
+是**同一个字符串**（`TrajectoryRecorder::begin()` 多收一个 `turn_id`，agent 从
+`TurnOptions::turn_id` 传进去）。所以「这一轮怎么样了」与「这一轮干了什么」用同一个 id 查，
+调用方不用记两套 id。
+
+几个当时踩到的点：
+
+- **句柄要在轮次开始前就有**，所以不能等轨迹生成——`ChatTurn` 自己先生成 id，
+  再通过 `TurnOptions::turn_id` 交给 recorder。两边共用一个 id 的代价是：
+  `turn_id` 必须是**能当文件名用**的（`trajectory_id_is_safe()`）：它是 URL 的一段，
+  也是轨迹文件里的一行。
+- **跑完的轮次也得能读**：`add_subscriber()` 原来一看到 `closed` 就拒绝（那是给
+  「接回正在跑的轮次」用的）。事件流要读**已完成**轮次的回放缓冲区，所以加了
+  `replay_only` 参数：只放开「已完成」这一种情况，人数上限照旧。
+- **别在锁里读文件**：`handle_json()` 里的 `files_changed` 是从轨迹文件读的，
+  读文件放在 `mu` 外面——worker 每发一帧都要拿这把锁，卡在磁盘上会把 agent 拖住。
+- 状态是从**事件**里推出来的（`observe_event()` 看 `done` / `error` / `stopped`），
+  不是从 `cancel` 标志推的：`stopped` 是「被人停了」，`failed` 是「出错」，
+  `budget` 是「撞到预算」，三件事在轨迹里也是分开记的。
+- 客户端（`sched/a2_ext_py/client.py`）多了 `submit()` / `turn_status()` /
+  `turn_events()` / `stop_turn()`；`chat()` 与 `submit()` 共用 `_chat_body()`，
+  免得两条路慢慢长歪。
+- 测试：`tests/smoke_turn_handle.py`（36 项）。
+
 ### 2026-11-04：扩展层 a2_ext_py（机制层能长出新能力）
 
 **名字**：`a2_ext_py`（不是 `a2_py`——它不是「a2 的封装」，是「a2 的扩展层」）。
