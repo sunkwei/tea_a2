@@ -104,25 +104,9 @@ __nss_configure_lookup("hosts", "files dns");   // 仅静态构建
 也没有任务队列。这是架构决定的：C++ 内核对扩展层**一无所知**（`src/` 里没有一处提到它），
 扩展层在 a2 眼里就是一个普通的 MCP 服务器。
 
-要补上很容易——扩展宿主是**纯标准库**的 Python（不用 pip install），40 KB：
-
-```bash
-# 设备上有 python3 就行（嵌入式设备一般都有）
-scp -r sched/a2_ext_py device:/opt/tea_a2/a2_ext_py
-```
-
-```yaml
-# ~/.tea_agent/mcp.yaml
-servers:
-  a2ext:
-    command: "python3"
-    args: ["/opt/tea_a2/a2_ext_py/toolkit/mcp_server.py",
-           "--modules", "/home/you/.tea_agent/ext",
-           "--agent-url", "http://127.0.0.1:8282"]
-```
-
-（脚本自己会把 `a2_ext_py` 的父目录塞进 `sys.path`，所以按路径启动就行，不用 PYTHONPATH。
-模型自举写的工具住在 `~/.tea_agent/ext/`，**不在发版包里**。）
+**这不是缺陷，是嵌入式场景该有的样子：设备上就一个 a2，够了。** 队列与扩展层是给
+桌面/开发机那侧用的（那里本来就有 Python）。真要在别的机器上用扩展层，见
+[扩展层](a2_ext_py.md)。
 
 ### TLS 与证书
 
