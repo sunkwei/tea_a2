@@ -38,10 +38,13 @@ import threading
 import time
 import urllib.parse
 
+from http.server import BaseHTTPRequestHandler
+
 try:
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    # Python 3.7+
+    from http.server import ThreadingHTTPServer
 except ImportError:  # Python 3.6
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import HTTPServer
     from socketserver import ThreadingMixIn
 
     class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):

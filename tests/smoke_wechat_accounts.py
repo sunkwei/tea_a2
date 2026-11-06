@@ -29,7 +29,18 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+try:
+    # Python 3.7+
+    from http.server import ThreadingHTTPServer
+except ImportError:  # Python 3.6
+    from http.server import HTTPServer
+    from socketserver import ThreadingMixIn
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        """The 3.6 spelling of http.server.ThreadingHTTPServer."""
+        daemon_threads = True
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "sched"))
@@ -315,12 +326,14 @@ def main():
         multi_root = os.path.join(tmp, "multi")
         for name in ("alice", "bob"):
             os.makedirs(os.path.join(multi_root, name), exist_ok=True)
-        # alice has been scanned already, bob has not
-        with open(os.path.join(multi_root, "alice", "credentials.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"token": "token-alice", "base_url": ilink_url,
-                       "ilink_bot_id": "bot-alice", "ilink_user_id": "u-alice",
-                       "cursor": "", "contexts": {}}, f)
+        # both have been scanned already
+        for name, token in (("alice", "token-alice"), ("bob", "token-bob")):
+            with open(os.path.join(multi_root, name, "credentials.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"token": token, "base_url": ilink_url,
+                           "ilink_bot_id": "bot-" + name,
+                           "ilink_user_id": "u-" + name,
+                           "cursor": "", "contexts": {}}, f)
         multi_args = wechat_multi.build_parser().parse_args([
             "--accounts-dir", multi_root,
             "--workspaces-dir", os.path.join(tmp, "workspaces"),
@@ -345,13 +358,23 @@ def main():
         deadline = time.time() + 20
         while time.time() < deadline and not MockILink.polls:
             time.sleep(0.2)
-        multi.stop.set()
         check("the account that has been scanned polls with its own token",
               any("token-alice" in p for p in MockILink.polls), MockILink.polls[:3])
+        check("every account polls with its own token",
+              any("token-bob" in p for p in MockILink.polls), MockILink.polls[:6])
         check("every account gets a bot of its own",
               set(multi.bots) == {"alice", "bob"}, sorted(multi.bots))
-        check("the account without a scan gets a code of its own",
-              len(MockILink.qr_requests) >= 1, len(MockILink.qr_requests))
+
+        # an account whose directory is gone must not keep polling
+        shutil.rmtree(os.path.join(multi_root, "bob"))
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if "bob" not in multi.bots:
+                break
+            time.sleep(0.2)
+        check("the bot of an account that is gone stops",
+              "bob" not in multi.bots, sorted(multi.bots))
+        multi.stop.set()
 
         # ---- the page over HTTP ---------------------------------------
         import urllib.request

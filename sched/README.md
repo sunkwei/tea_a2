@@ -29,6 +29,8 @@ agent 完全不知道 Python 侧的存在。所以：
 | `tea_api.py` | 调 agent / 队列的客户端库 | 想写自己的脚本 | [客户端库](#客户端库tea_apy) |
 | `channel.py` | 聊天前端的共用半边 | 想加第三种聊天前端 | [聊天前端](#聊天前端) |
 | `wechat_bot.py` | 微信端（iLink 协议，扫码登录） | 想用微信排任务 | [聊天前端](#聊天前端) |
+| `wechat_pair.py` | 配对页面：浏览器里扫码 → 写凭证 → 起服务（多账号也走这里） | 想让别人扫一次码就接上 | [聊天前端](#聊天前端) |
+| `wechat_multi.py` | 一个进程跑多个微信账号（共用一个队列） | 一堆人各自扫一次码 | [聊天前端](#聊天前端) |
 | `telegram_bot.py` | Telegram 端（Bot API） | 想用 Telegram 排任务 | [聊天前端](#聊天前端) |
 | `fleet.py` | 机群引擎（命令行） | 一台服务器管一批设备 | [机群](#机群) |
 | `fleet_server.py` | 机群控制面（HTTP，8290） | 想让 agent/机器人驱动机群 | [机群](#机群) |
@@ -204,10 +206,15 @@ curl http://127.0.0.1:8283/api/plans/<plan_id>
 
 ```bash
 python3 sched/wechat_bot.py --login     # 扫码登录（一次就行）
-python3 sched/wechat_bot.py             # 跑起来
+python3 sched/wechat_bot.py             # 跑起来（没凭证就自己出个码等着）
+python3 sched/wechat_pair.py            # 配对页面：http://127.0.0.1:8391/（扫码→起服务）
+python3 sched/wechat_multi.py           # 一个进程跑 ~/.tea_agent/wechat/ 里的每个账号
 python3 sched/telegram_bot.py --token 123456:ABC --print-chat-id
 python3 sched/telegram_bot.py --token 123456:ABC --allow-chat 12345
 ```
+
+多账号：每个账号一个目录（`~/.tea_agent/wechat/<名字>/`：凭证、游标、context_token）、
+一个工作区、一个来源名（`wechat:<名字>`），但**共用同一个队列**（一份额度、一份排期）。
 
 - **微信**走 iLink 协议（base `https://ilinkai.weixin.qq.com`）。每条回复必须带 `context_token`
   （errcode -14 = 会话过期，要重扫）；媒体走 iLink 自己的加解密（AES-128-ECB，key = md5(token)）。

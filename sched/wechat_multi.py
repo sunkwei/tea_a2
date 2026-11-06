@@ -58,6 +58,7 @@ class Multi(object):
         self.args = args
         self.lock = threading.Lock()
         self.bots = {}            # account name -> the bot that serves it
+        self.stops = {}           # account name -> "stop this account"
         self.stop = threading.Event()
         self.accounts_root = os.path.abspath(os.path.expanduser(args.accounts_dir))
         self.workspaces_root = os.path.abspath(os.path.expanduser(args.workspaces_dir))
@@ -76,9 +77,11 @@ class Multi(object):
         for name in names:
             if name.startswith("."):
                 continue
-            if os.path.isdir(os.path.join(root, name)):
-                # An account of this machine - it may not have been scanned
-                # yet: then its bot waits for the code and shows it.
+            if os.path.isfile(os.path.join(root, name, "credentials.json")):
+                # An account of this machine: it has been scanned, so it has
+                # a bot. An account that was never scanned is left to the
+                # pairing page (it holds the code and writes the
+                # credentials when the phone confirms).
                 out.append(name)
         if os.path.isfile(os.path.join(root, "credentials.json")):
             out.insert(0, "default")
@@ -144,23 +147,36 @@ class Multi(object):
         args = wechat_bot.build_parser().parse_args(argv)
         return wechat_bot.WeChatBot(args)
 
-    def serve(self, name):
-        """Run one account - and run it again if it dies."""
-        while not self.stop.is_set():
+    def serve(self, name, event):
+        """Run one account - and run it again if it dies.
+
+        The event is the account's own "stop" button: when it is set, the
+        bot lets go and this thread ends.
+        """
+        while not self.stop.is_set() and not event.is_set():
+            bot = None
             try:
                 bot = self.make_bot(name)
+                bot.stop_event = event
                 with self.lock:
                     self.bots[name] = bot
                 bot.run()
             except Exception as exc:  # noqa: BLE001 - one account must not kill the rest
                 log("the bot of %s stopped: %s" % (name, exc))
-            if self.stop.is_set():
+            finally:
+                with self.lock:
+                    if self.bots.get(name) is bot:
+                        del self.bots[name]
+            if self.stop.is_set() or event.is_set():
                 return
             time.sleep(self.args.retry_delay)
 
     def start(self, name):
         """Give this account a thread of its own."""
-        thread = threading.Thread(target=self.serve, args=(name,), daemon=True,
+        event = threading.Event()
+        with self.lock:
+            self.stops[name] = event
+        thread = threading.Thread(target=self.serve, args=(name, event), daemon=True,
                                   name="wechat-%s" % name)
         thread.start()
         log("serving the account %s" % name)
@@ -170,14 +186,31 @@ class Multi(object):
         """Is this account being served right now?"""
         with self.lock:
             bot = self.bots.get(name)
-        return bot is not None
+            event = self.stops.get(name)
+        return bot is not None and not (event is not None and event.is_set())
 
     # -- the loop ---------------------------------------------------------
+    def stop_gone(self, names):
+        """Stop the accounts that are gone.
+
+        An account whose directory was deleted must not keep polling: a
+        second bot with the same cursor would eat the messages of the one
+        that serves it.
+        """
+        with self.lock:
+            stops = dict(self.stops)
+        for name, event in stops.items():
+            if name in names:
+                continue
+            log("the account %s is gone - stopping its bot" % name)
+            event.set()
+
     def run(self):
         """Watch the accounts: a new one is picked up as soon as it exists."""
         log("accounts: %s" % (", ".join(self.names()) or "(none yet)"))
         while not self.stop.is_set():
-            for name in self.names():
+            names = self.names()
+            for name in names:
                 if self.running(name):
                     continue
                 if self.unit_active(name):
@@ -185,6 +218,7 @@ class Multi(object):
                         % (name, self.unit_of(name)))
                     continue
                 self.start(name)
+            self.stop_gone(names)
             self.stop.wait(self.args.scan_interval)
         return 0
 

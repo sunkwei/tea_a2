@@ -628,6 +628,9 @@ class WeChatBot(channel.TaskChannel):
         name = (getattr(args, "account", "") or "").strip()
         self.accounts_root = (self.state.dir if is_default_account(name)
                                else os.path.dirname(self.state.dir))
+        # Somebody can ask the bot to stop (the multi service does that when
+        # an account is gone).
+        self.stop_event = None
         self.ilink = ILink(args.base_url, cdn_base=getattr(args, "cdn_url", CDN_BASE_URL))
 
     def channel_name(self):
@@ -661,6 +664,8 @@ class WeChatBot(channel.TaskChannel):
         """
         deadline = time.time() + self.args.login_timeout
         while time.time() < deadline:
+            if self.stopped():
+                return False
             try:
                 qr = self.ilink.get_qrcode(known_tokens(self.accounts_root))
             except ILinkError as exc:
@@ -692,6 +697,8 @@ class WeChatBot(channel.TaskChannel):
     def await_scan(self, code, deadline, verify_code=""):
         """Poll the QR code until the person scans it (or it dies)."""
         while time.time() < deadline:
+            if self.stopped():
+                return False
             time.sleep(2)
             try:
                 status = self.ilink.qr_status(code, verify_code)
@@ -931,6 +938,8 @@ class WeChatBot(channel.TaskChannel):
         """
         log("还没有凭证，出个码等扫码（配对页面：%s）" % PAIRING_HINT)
         while not self.state.token:
+            if self.stopped():
+                return
             self.state.load()
             if self.state.token:
                 break
@@ -963,10 +972,18 @@ class WeChatBot(channel.TaskChannel):
             answer = "出错了：%s: %s" % (type(exc).__name__, exc)
         self.reply(user_id, answer)
 
+    def stopped(self):
+        """Has somebody asked this bot to stop?"""
+        event = self.stop_event
+        return bool(event is not None and event.is_set())
+
     def run(self):
         started = False
         backoff = 1.0
         while True:
+            if self.stopped():
+                log("stopped")
+                return 0
             if not self.state.token:
                 # No credentials (yet): publish a QR code and wait for the
                 # scan. The service stays up, so the scan is all it takes.
