@@ -464,7 +464,72 @@ providers:
         except Exception:
             short.kill()
 
-        # ---- 10) the retention --------------------------------------------
+        # ---- 10) the resume is opt-in --------------------------------------
+        # A turn that was cut off half way may already have done half of its
+        # work: running it again without being told is worse than stopping.
+        # So the default is "it died, here is why" - and the operator has to
+        # ask for the resume.
+        old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
+        stale = {
+            "id": "t_stale01", "workspace_id": ws_id, "prompt": "x", "title": "断了的任务",
+            "provider": "minimax", "model": "", "status": "running",
+            "session_id": "s_stale01", "turn_id": "t_stale01",
+            "checkpoint": {"turn_id": "t_stale01", "session_id": "s_stale01"},
+            "progress": 10, "note": "", "steps": [], "needs_confirmation": False,
+            "question": "", "error": "", "result": "", "meta": {},
+            "created_at": old, "updated_at": old, "started_at": old, "finished_at": "",
+        }
+        idle_dir = os.path.join(tmp, "tasks-idle")
+        os.makedirs(idle_dir, exist_ok=True)
+        with open(os.path.join(idle_dir, "t_stale01.json"), "w", encoding="utf-8") as f:
+            json.dump(stale, f, ensure_ascii=False)
+        idle_port = free_port()
+        idle = start_queue(idle_port, idle_dir)
+        if not wait_health(idle_port):
+            print("the queue did not become healthy")
+            return 1
+        _, _, parsed = call(idle_port, "GET", "/v1/agent-tasks/t_stale01?workspace_id=%s"
+                            % ws_id)
+        record = data_of(parsed)
+        check("by default the interrupted task is marked failed",
+              record.get("status") == "failed", record)
+        check("and it says why", "restart" in str(record.get("error") or ""),
+              record.get("error"))
+        idle.terminate()
+        try:
+            idle.wait(timeout=10)
+        except Exception:
+            idle.kill()
+
+        # With the flag, the same task goes back into the queue: the session
+        # is still there, so the work can go on from where it stopped.
+        resume_dir = os.path.join(tmp, "tasks-resume")
+        os.makedirs(resume_dir, exist_ok=True)
+        with open(os.path.join(resume_dir, "t_stale02.json"), "w", encoding="utf-8") as f:
+            json.dump(dict(stale, id="t_stale02", session_id="s_stale02",
+                           turn_id="t_stale02",
+                           checkpoint={"turn_id": "t_stale02", "session_id": "s_stale02"}),
+                      f, ensure_ascii=False)
+        resume_port = free_port()
+        resumed = start_queue(resume_port, resume_dir,
+                               extra=["--resume-on-restart"])
+        if not wait_health(resume_port):
+            print("the queue with the resume did not become healthy")
+            return 1
+        _, _, parsed = call(resume_port, "GET", "/v1/agent-tasks/t_stale02?workspace_id=%s"
+                            % ws_id)
+        record = data_of(parsed)
+        check("with --resume-on-restart the task does not die",
+              record.get("status") != "failed" and not record.get("error"), record)
+        check("and it goes on (queued with the resume note, or already running)",
+              record.get("status") in ("queued", "running", "done"), record)
+        resumed.terminate()
+        try:
+            resumed.wait(timeout=10)
+        except Exception:
+            resumed.kill()
+
+        # ---- 11) the retention --------------------------------------------
         # The records are kept for a second and a half: an old one is cleaned
         # up, a new one stays.
         keep_port = free_port()

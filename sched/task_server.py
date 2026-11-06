@@ -1469,13 +1469,18 @@ class Engine:
                                                   "question": ""}, "progress": 0})
                     continue
             # The turn is gone. Is the **session** still there? Then the work
-            # can go on from there: the conversation is the checkpoint, and a
-            # new turn in the same session continues it. That is what
-            # "resume from the checkpoint" can mean here - the agent cannot
-            # store a half-finished loop, but it can remember the session.
+            # *could* go on from there: the conversation is the checkpoint, and
+            # a new turn in the same session continues it.
+            #
+            # But only when the operator asked for it (--resume-on-restart).
+            # The default is to let the work die with a clear reason: a turn
+            # that was cut off half way may already have done half of its
+            # work, and running it again without being told is worse than
+            # stopping.
             checkpoint = task.get("checkpoint") or {}
             session_id = str(task.get("session_id") or checkpoint.get("session_id") or "")
-            if session_id and checkpoint.get("turn_id"):
+            resume = bool(getattr(self.args, "resume_on_restart", False))
+            if resume and session_id and checkpoint.get("turn_id"):
                 self.store.update(workspace_id, task_id, lambda t: t.update({
                     "status": QUEUED,
                     "finished_at": "",
@@ -4615,6 +4620,9 @@ def main(argv=None):
                         help="任务记录留多久（天，0 = 一直留）")
     parser.add_argument("--cleanup-interval", type=float, default=3600.0,
                         help="多久清一次旧记录（秒）")
+    parser.add_argument("--resume-on-restart", action="store_true",
+                        help="重启后把断掉的任务**接着做**（同一会话里新的一轮）；"
+                             "默认是判失败并写明原因")
     parser.add_argument("--export-ttl-hours", type=float, default=24.0,
                         help="导出的包留多久（小时）")
     parser.add_argument("--quota-tokens", type=float, default=0.0,
