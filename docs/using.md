@@ -1,7 +1,7 @@
 # 用起来
 
 > 这一页讲**界面**。要直接敲命令（参数、curl、队列、微信），看
-> [使用手册](manual.md)。
+> [使用手册](tea_a2_manual.md)。
 
 界面是什么样、每个角落干什么。这一页是「打开浏览器之后」的导览。
 
@@ -185,4 +185,4 @@ provider 回报的 `usage` 为准）。
 
 ---
 
-← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](tea_a2_manual.md)

@@ -127,7 +127,7 @@ build/bin/tea_agent --workspace . --open
 | [级联](docs/peer.md) | `peers:` 配置、`toolkit_peer`、`/api/peer/*`、安全边界 |
 | **接口与内部** | |
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |
-| [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照 |
+| [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照（队列自己也在 `GET /api/doc` 上服务这一页） |
 | [内置工具与上下文](docs/tools.md) | 每个工具、文件访问范围、上下文预算、轨迹 |
 | [MCP](docs/mcp.md) | 把别的程序接进来当工具：配置、接口、与 uiautomation-mcp 联调 |
 | [与其他应用对接](docs/integrations.md) | 它调别人（MCP）/ 别人调它（HTTP、级联）/ 别人那边发生事（watcher） |

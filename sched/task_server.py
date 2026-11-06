@@ -436,6 +436,184 @@ Agent = Client
 AgentError = ApiError
 
 
+def _doc_page(title, html):
+    """A small web page around the rendered documentation."""
+    return """<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%s</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0 auto; max-width: 52rem; padding: 2rem 1.2rem 4rem;
+         font: 16px/1.7 -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif; }
+  h1, h2, h3 { line-height: 1.3; }
+  h2 { margin-top: 2.4em; border-bottom: 1px solid #8884; padding-bottom: .2em; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         font-size: .92em; background: #8881; padding: .1em .35em; border-radius: 4px; }
+  pre { background: #8881; padding: .9rem 1rem; border-radius: 8px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%%; margin: 1em 0; font-size: .95em; }
+  th, td { border: 1px solid #8884; padding: .45em .6em; text-align: left;
+           vertical-align: top; }
+  th { background: #8881; }
+  blockquote { margin: 1em 0; padding: .2em 1em; border-left: 3px solid #8886;
+               color: #8889; }
+  a { color: #3b82f6; }
+</style>
+</head><body>
+%s
+</body></html>
+""" % (_html_escape(title), html)
+
+
+def _html_escape(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def render_markdown(text):
+    """Markdown to HTML, without any dependency.
+
+    The queue must not need a pip install to show its own documentation (the
+    release package carries no third-party modules), so this renders the
+    subset that docs/tasks.md actually uses: headings, fenced code, tables,
+    lists, quotes, rules, and the inline marks (code, bold, italic, links).
+    """
+    import html as _html
+    import re as _re
+
+    out = []
+    lines = (text or "").split("\n")
+    i = 0
+    in_list = None          # "ul" / "ol"
+
+    def close_list():
+        nonlocal in_list
+        if in_list:
+            out.append("</%s>" % in_list)
+            in_list = None
+
+    def inline(chunk):
+        chunk = _html.escape(chunk, quote=False)
+        # `code`
+        chunk = _re.sub(r"`([^`]+)`", r"<code>\1</code>", chunk)
+        # [text](url) - a relative .md link points at the document the
+        # queue serves, not at a file next to the page.
+        def _link(m):
+            label, href = m.group(1), m.group(2)
+            if href.endswith(".md") and "://" not in href:
+                href = "/api/doc/" + href.rsplit("/", 1)[-1]
+            return '<a href="%s">%s</a>' % (href, label)
+        chunk = _re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link, chunk)
+        # **bold** / *italic*
+        chunk = _re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", chunk)
+        chunk = _re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", chunk)
+        return chunk
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # a fenced code block
+        if stripped.startswith("```"):
+            close_list()
+            lang = stripped[3:].strip()
+            i += 1
+            code = []
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code.append(lines[i])
+                i += 1
+            i += 1
+            cls = ' class="lang-%s"' % _html.escape(lang, quote=True) if lang else ""
+            out.append("<pre><code%s>%s</code></pre>"
+                       % (cls, _html.escape("\n".join(code), quote=False)))
+            continue
+
+        # a heading
+        m = _re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if m:
+            close_list()
+            level = len(m.group(1))
+            out.append("<h%d>%s</h%d>" % (level, inline(m.group(2).strip()), level))
+            i += 1
+            continue
+
+        # a horizontal rule
+        if _re.match(r"^(-{3,}|\*{3,}|_{3,})$", stripped):
+            close_list()
+            out.append("<hr>")
+            i += 1
+            continue
+
+        # a table: a header row, a separator row, then the body
+        if (stripped.startswith("|") and i + 1 < len(lines)
+                and _re.match(r"^\|[\s:|-]+\|$", lines[i + 1].strip())):
+            close_list()
+            head = [c.strip() for c in stripped.strip("|").split("|")]
+            i += 2
+            body = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                body.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+                i += 1
+            out.append("<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>"
+                       % ("".join("<th>%s</th>" % inline(c) for c in head),
+                          "".join("<tr>%s</tr>" % "".join("<td>%s</td>" % inline(c)
+                                                        for c in row)
+                                  for row in body)))
+            continue
+
+        # a list
+        m = _re.match(r"^(\s*)([-*+])\s+(.*)$", line)
+        if m:
+            want = "ul"
+        else:
+            m = _re.match(r"^(\s*)(\d+)[.)]\s+(.*)$", line)
+            want = "ol" if m else None
+        if want:
+            close_list()
+            in_list = want
+            out.append("<%s><li>%s</li>" % (want, inline(m.group(3).strip())))
+            i += 1
+            continue
+        if in_list and stripped:
+            # another item of the open list
+            m = _re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$", line)
+            if m:
+                out[-1] = out[-1][:-len("</li>")] + inline(m.group(1).strip()) + "</li>"
+                i += 1
+                continue
+
+        # a quote
+        if stripped.startswith(">"):
+            close_list()
+            quote = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                quote.append(lines[i].strip().lstrip(">").strip())
+                i += 1
+            out.append("<blockquote>%s</blockquote>"
+                       % inline(" ".join(q for q in quote if q)))
+            continue
+
+        # an empty line
+        if not stripped:
+            close_list()
+            i += 1
+            continue
+
+        # a paragraph
+        close_list()
+        para = [stripped]
+        i += 1
+        while i < len(lines) and lines[i].strip() and not _re.match(
+                r"^(#{1,6}\s|```|>|\||-{3,}$)", lines[i].strip()):
+            para.append(lines[i].strip())
+            i += 1
+        out.append("<p>%s</p>" % inline(" ".join(para)))
+    close_list()
+    return "\n".join(out)
+
+
 def artifact_id(path):
     """A stable id for a file the work produced.
 
@@ -2747,6 +2925,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._page()
         if path == "/api/health":
             return self._health()
+        if path == "/api/doc":
+            return self._doc()
+        if path.startswith("/api/doc/"):
+            rest = path[len("/api/doc/"):]
+            if rest.endswith(".md") and "/" not in rest:
+                return self._doc(rest)
+            return self._error(404, "not_found", "no such document")
         if not self._guard() or not self._rate_limit():
             return
         if path == "/api/tasks":
@@ -3067,6 +3252,61 @@ class Handler(BaseHTTPRequestHandler):
                                                  "identity": identity})
         self._json(200, {"workspace_id": workspace_id, "key": key,
                          "tenant_id": tenant_id, "identity": identity})
+
+    def _doc(self, name=""):
+        """The queue's own documentation, the way the agent serves its API doc.
+
+          GET /api/doc             a web page with the reference
+          GET /api/doc?format=md   the same text as Markdown
+          GET /api/doc?format=json {version, title, markdown, html}
+
+        The text is docs/tasks.md from the repository - the same file the
+        developer wrote, so there is no second copy to fall behind. It is not
+        embedded in anything: the queue is a Python script that already lives
+        next to the repository, and the file is read when it is asked for.
+        """
+        wanted = str(name or self._one("file") or "")
+        if wanted:
+            path = self.app.doc_path(wanted)
+            if not path:
+                return self._error(404, "not_found", "no such document")
+        else:
+            path = self.app.doc_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                markdown = f.read()
+        except OSError:
+            return self._error(404, "not_found",
+                               "the documentation file is missing: %s" % path)
+        fmt = (self._one("format") or "html").lower()
+        if fmt in ("markdown", "md"):
+            body = markdown.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        html = render_markdown(markdown)
+        if fmt == "json":
+            self._json(200, {"version": self.app.version(),
+                              "title": "tea_a2 task queue",
+                              "path": path,
+                              "markdown": markdown,
+                              "html": html})
+            return
+        if fmt != "html":
+            return self._error(400, "bad_request",
+                               "'format' must be html, md or json")
+        page = _doc_page("tea_a2 task queue", html)
+        body = page.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _task_events(self, task_id):
         """The task's event log, optionally only what came after the last one
@@ -4487,6 +4727,30 @@ class App:
         except (AgentError, OSError) as exc:
             log("cannot prepare the task workspace %s: %s" % (path, exc))
         return self._task_ws_id
+
+    def doc_path(self, name="tasks.md"):
+        """Where a documentation file is.
+
+        docs/ in the repository - the same files the developer wrote, so
+        there is no second copy to fall behind. The name may not leave the
+        directory: no slashes, no "..".
+        """
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        name = os.path.basename(str(name or "").strip())
+        if not name or not name.endswith(".md") or name.startswith("."):
+            return ""
+        return os.path.join(repo, "docs", name)
+
+    def version(self):
+        """Which queue this is (the agent ships in the same package)."""
+        try:
+            health = self.agent.health()
+            version = str((health or {}).get("version") or "")
+            if version:
+                return version
+        except (AgentError, AttributeError):
+            pass
+        return QUEUE_VERSION
 
     def default_workspace(self):
         """The workspace a task goes to when the caller does not name one."""

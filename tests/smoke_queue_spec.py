@@ -305,6 +305,48 @@ providers:
         status, _, parsed = call(queue_port, "GET", "/v1/agent-tasks")
         check("GET /v1/agent-tasks lists", status == 200, (status, parsed))
 
+        # ---- the documentation endpoint -----------------------------------
+        status, headers, parsed = call(queue_port, "GET", "/api/doc?format=md", raw=True)
+        check("GET /api/doc?format=md answers", status == 200, (status, parsed))
+        check("it is served as markdown",
+              "text/markdown" in headers.get("Content-Type", ""),
+              headers.get("Content-Type"))
+        doc_path = os.path.join(REPO_ROOT, "docs", "tasks.md")
+        with open(doc_path, "rb") as f:
+            on_disk = f.read()
+        check("it is the very same file the repository has",
+              parsed == on_disk, "the served text differs from docs/tasks.md")
+        status, _, parsed = call(queue_port, "GET", "/api/doc", raw=True)
+        check("GET /api/doc answers with a page",
+              status == 200 and b"<html" in parsed[:200].lower(),
+              (status, parsed[:120]))
+        status, _, parsed = call(queue_port, "GET", "/api/doc?format=json")
+        doc = data_of(parsed)
+        check("?format=json carries the version", bool(doc.get("version")), doc.keys())
+        check("?format=json carries the markdown",
+              (doc.get("markdown") or "") == on_disk.decode("utf-8"),
+              len(doc.get("markdown") or ""))
+        check("?format=json carries the rendered page",
+              "<h" in (doc.get("html") or ""), (doc.get("html") or "")[:80])
+        status, _, parsed = call(queue_port, "GET", "/api/doc?format=xml")
+        check("an unknown format is refused", status == 400, (status, parsed))
+        status, _, parsed = call(queue_port, "GET", "/api/doc/tea_a2_manual.md?format=md",
+                                 raw=True)
+        check("another document can be asked for by name", status == 200, status)
+        with open(os.path.join(REPO_ROOT, "docs", "tea_a2_manual.md"), "rb") as f:
+            manual = f.read()
+        check("it is that file, byte for byte", parsed == manual,
+              "%d vs %d" % (len(parsed or b""), len(manual)))
+        status, _, parsed = call(queue_port, "GET", "/api/doc/../server.py", raw=True)
+        check("a path that tries to leave the directory is refused",
+              status == 404, status)
+        # the rewriting happens in the rendered page (the markdown stays as written)
+        status, _, parsed = call(queue_port, "GET", "/api/doc?format=json")
+        doc = data_of(parsed)
+        check("the links in the page point at the served documents",
+              '/api/doc/tea_a2_manual.md' in (doc.get("html") or ""),
+              "the relative link was not rewritten")
+
         # ---- the queue says which version it is -------------------------
         status, _, parsed = call(queue_port, "GET", "/api/health")
         check("the queue says which version it is",

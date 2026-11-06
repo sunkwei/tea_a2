@@ -1,7 +1,7 @@
 # HTTP 接口
 
 > 这一页讲**每个接口的字段与语义**。要直接敲命令，看
-> [使用手册](manual.md)。
+> [使用手册](tea_a2_manual.md)。
 
 ## 给上层 Agent 用的接口
 
@@ -1307,4 +1307,4 @@ for event in queue.events():              # 订阅，而不是轮询
 
 ---
 
-← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](tea_a2_manual.md)

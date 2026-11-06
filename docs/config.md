@@ -1,7 +1,7 @@
 # 配置
 
 > 这一页讲**配置文件的字段**。要直接敲命令，看
-> [使用手册](manual.md)。
+> [使用手册](tea_a2_manual.md)。
 
 ## 配置
 
@@ -693,4 +693,4 @@ settings:
 
 ---
 
-← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](tea_a2_manual.md)

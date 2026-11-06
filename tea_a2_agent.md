@@ -1083,6 +1083,27 @@ id（对不上 → 409）；`--interaction-timeout` 到了没人回答 → 判�
 
 测试：`tests/smoke_queue_spec.py`（42 项）。
 
+### 2026-11-06：队列也有 /api/doc（跟 agent 同一个思路）
+
+agent 早就有 `GET /api/doc`（服务 docs/api.md，构建期嵌进二进制）。队列现在也有：
+
+- `GET /api/doc` → 网页；`?format=md` → Markdown；`?format=json` → 版本 + 全文 + 渲染好的页面；
+- **服务的就是 `docs/tasks.md`**（队列自己的文档）——不是第二份拷贝，开发者写的那份就是读者看的那份；
+- 队列把 **docs/ 整个目录**都服务出来（`/api/doc/tea_a2_manual.md`），页面里的相对链接
+  会重写成 `/api/doc/<名字>`，**点得通**；
+- 队列是 Python 脚本，本来就住在仓库里，所以**不用嵌进二进制**——要就现读。
+
+**坑**：
+
+- **别依赖 pip 装的 `markdown` 包**：发版包里没有它，用户那边会 ImportError（本机装了 3.4.1，
+  但发版清单里没有）。所以自己写了个小渲染器（标题/代码块/表格/列表/引用/行内标记）。
+- **`_doc()` 的参数**：路由按路径给名字（`/api/doc/xxx.md`），一开始只在查询参数里读，
+  结果 handler 抛 TypeError → **连接被直接掐掉**（客户端看到的是「远端关闭连接」，不是 500）。
+- 顺手修了**文档里的坏链接**：`manual.md` → `tea_a2_manual.md`（文件改名时链接没跟上，
+  10 个文件都指着它），以及 `sched/README.md` 里跨目录的 `fleet.md`。
+
+测试：tests/smoke_queue_spec.py 多了 7 项（59 项全过）。
+
 ### 2026-11-04：扩展层 a2_ext_py（机制层能长出新能力）
 
 **名字**：`a2_ext_py`（不是 `a2_py`——它不是「a2 的封装」，是「a2 的扩展层」）。

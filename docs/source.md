@@ -138,4 +138,4 @@ miniz 只取上游 release 里的**合并版两个文件**（`miniz.c` + `miniz.
 
 ---
 
-← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](tea_a2_manual.md)

@@ -609,4 +609,4 @@ Linux / macOS 首次构建若报错，最可能集中在 `src/command.cpp`（`fo
 
 ---
 
-← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](tea_a2_manual.md)

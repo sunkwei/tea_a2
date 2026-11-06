@@ -1,7 +1,12 @@
 # 任务队列（Python 侧）
 
+> 这一页就是队列自己的文档：`GET /api/doc`（网页）、`?format=md`（Markdown）、
+> `?format=json`（版本 + 全文 + 渲染好的页面）——**服务的就是这个文件**，没有第二份拷贝。
+> 队列还把 `docs/` 整个目录服务出来（`GET /api/doc/tea_a2_manual.md` 这样），页面里的
+> 相对链接会指向它，点得通。
+
 > 这一页讲**队列的策略**。要直接敲命令，看
-> [使用手册](manual.md)。
+> [使用手册](tea_a2_manual.md)。
 
 ## 任务队列：agent 是通道，队列在 Python 侧
 
@@ -675,4 +680,4 @@ provider.yaml 的 `task_model:` 说的（没写就是 minimax），也是**真�
 
 ---
 
-← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](tea_a2_manual.md)

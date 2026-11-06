@@ -1,7 +1,7 @@
 # 构建与跨平台编译
 
 > 这一页讲**怎么把二进制造出来**。要直接敲命令，看
-> [使用手册](manual.md)。
+> [使用手册](tea_a2_manual.md)。
 
 | 角色 | 要求 |
 | --- | --- |
@@ -353,4 +353,4 @@ c.delete_path("/tea_a2/releases/0.17.3")
 
 ---
 
-← 回到 [README](../README.md) · 命令清单见 [使用手册](manual.md)
+← 回到 [README](../README.md) · 命令清单见 [使用手册](tea_a2_manual.md)
