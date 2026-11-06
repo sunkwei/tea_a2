@@ -90,6 +90,40 @@ __nss_configure_lookup("hosts", "files dns");   // 仅静态构建
 把二进制单独拷到一个空目录也能启动并使用内嵌根证书，最后**用真实域名走一遍解析**——
 回归时的表现是进程被 SIGSEGV 杀掉，而不是一个难查的线上问题。
 
+#### 单文件部署里没有什么
+
+「单文件」指的是 **C++ 内核（机制层）** 一个二进制。**Python 侧的两层不在里面**：
+
+| 层 | 是什么 | 单文件部署里有吗 |
+| --- | --- | --- |
+| `a2` | 机制层：执行、沙箱、轨迹、预算 | ✅ 就是这个二进制 |
+| `a2_task` | 策略层：排队、调度、交互挂起 | ❌ `sched/task_server.py`（Python 3） |
+| `a2_ext_py` | 扩展层：模型自己长出新工具 | ❌ `sched/a2_ext_py/`（Python 3） |
+
+所以**单文件部署的设备没有「模型扩展工具」**（`toolkit_save` / `toolkit_reload` 那一套），
+也没有任务队列。这是架构决定的：C++ 内核对扩展层**一无所知**（`src/` 里没有一处提到它），
+扩展层在 a2 眼里就是一个普通的 MCP 服务器。
+
+要补上很容易——扩展宿主是**纯标准库**的 Python（不用 pip install），40 KB：
+
+```bash
+# 设备上有 python3 就行（嵌入式设备一般都有）
+scp -r sched/a2_ext_py device:/opt/tea_a2/a2_ext_py
+```
+
+```yaml
+# ~/.tea_agent/mcp.yaml
+servers:
+  a2ext:
+    command: "python3"
+    args: ["/opt/tea_a2/a2_ext_py/toolkit/mcp_server.py",
+           "--modules", "/home/you/.tea_agent/ext",
+           "--agent-url", "http://127.0.0.1:8282"]
+```
+
+（脚本自己会把 `a2_ext_py` 的父目录塞进 `sys.path`，所以按路径启动就行，不用 PYTHONPATH。
+模型自举写的工具住在 `~/.tea_agent/ext/`，**不在发版包里**。）
+
 ### TLS 与证书
 
 - Windows 默认走 WinHTTP，使用**系统证书库**，无需额外文件；拿不到状态行时自动回退内置 mbedTLS。
