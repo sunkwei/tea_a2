@@ -78,6 +78,10 @@ python3 tests/smoke_error_catalog.py                       # 请求 id（每个�
                                                           # + 能力清单（features/limits/routes）+ 429 带 Retry-After
 python3 tests/smoke_idempotency.py                          # 幂等键：同键同请求 → 同一个答案、活儿只做一次
                                                           # / 同键不同请求 → 409 / 不带键照旧 / 重启后答案还在
+python3 tests/smoke_exec_fence.py                          # exec 围栏：deny 的命令根本不跑 / allow 之外的也不跑
+                                                          # / 不给 policy 就什么都不围 / 围栏是每一轮的事
+python3 tests/smoke_queue_policy.py                        # 队列这一侧：额度换算成这一轮的 token 预算
+                                                          # / 机制层的事件也上队列的总线（turn_done 在 task_done 之前）
 python3 tests/smoke_ext_toolkit.py                          # 扩展层：模型存一个工具 → reload → 同一轮里就用它 / 落在模块目录 / 有审计 / 进了 agent 的工具表
 node tests/ui_task_form.mjs                                # 队列网页：排任务的表单（主题/工作区/定时/provider/模型/参数）+ 生成物下载（需 google-chrome）
 python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）

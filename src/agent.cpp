@@ -1734,6 +1734,8 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       tool_ctx.web_tool_calls = &web_tool_calls;
       tool_ctx.mcp = tools_->mcp();
       if (!options.task_id.empty()) tool_ctx.task_id = &options.task_id;
+      // The exec fence of this turn (empty => nothing is fenced).
+      if (!options.exec_policy.empty()) tool_ctx.exec_policy = &options.exec_policy;
       // The turn's wall clock is the tool's deadline too: a build that runs
       // past the end of the budget must not keep the turn alive.
       tool_ctx.deadline_ms = budget_deadline_ms;

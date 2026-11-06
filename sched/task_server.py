@@ -1076,17 +1076,50 @@ class Engine:
         self._machine_limits = (dict(limits), now)
         return dict(limits)
 
-    def effective_limits(self, task):
+    def effective_limits(self, task, provider=None):
         """The budget this task runs with.
 
         The task's own budget if it has one, otherwise the agent's. The agent
         keeps the final word either way: a request may only tighten a ceiling,
         never raise it.
+
+        On top of that: what is left of the provider's quota. The quota is a
+        percentage, and a percentage cannot be turned into tokens on its own -
+        the operator says what a full quota is worth (`--quota-tokens`) and how
+        much of what is left one task may take (`--quota-share`). Without that
+        number nothing is converted, and the quota stays what it was: a gate
+        in front of the work.
         """
         own = task.get("limits") or {}
-        if isinstance(own, dict) and own:
-            return dict(own)
-        return self.machine_limits()
+        limits = dict(own) if isinstance(own, dict) and own else dict(self.machine_limits())
+        quota_budget = self.quota_token_budget(provider)
+        if quota_budget:
+            current = limits.get("max_total_tokens")
+            try:
+                current = int(current or 0)
+            except (TypeError, ValueError):
+                current = 0
+            if current <= 0 or quota_budget < current:
+                limits["max_total_tokens"] = quota_budget
+        return limits
+
+    def quota_token_budget(self, provider=None):
+        """How many tokens one task may spend, from what is left of the quota.
+
+        0 when the operator did not say what the quota is worth (or the
+        provider does not report one): then the quota is only the gate it
+        always was.
+        """
+        total = float(getattr(self.args, "quota_tokens", 0) or 0)
+        if total <= 0:
+            return 0
+        share = float(getattr(self.args, "quota_share", 0.5) or 0)
+        if share <= 0:
+            return 0
+        percent, _ = self.quota_left(provider or self.effective_provider())
+        if percent is None or percent < 0:
+            return 0
+        return int(total * (percent / 100.0) * share)
 
     def provider_yaml_path(self):
         """Where provider.yaml is (the agent's tea home)."""
@@ -1662,7 +1695,7 @@ class Engine:
         # The budget of this task: its own, or the agent's. The record says
         # which one it ran under, so a task that ran out of room can be
         # answered with "how much did it get?".
-        limits = self.effective_limits(task)
+        limits = self.effective_limits(task, provider)
         # A task that was waiting for an answer carries it with it: the answer
         # is the next thing said in the task's session.
         pending = task.get("pending_message") or ""
@@ -1843,6 +1876,9 @@ class Engine:
                     seq = event.get("seq")
                     if isinstance(seq, int) and seq > since:
                         since = seq
+                    # The agent's own view of the turn, on the queue's bus -
+                    # before the queue's verdict, so the order is fixed.
+                    self._bridge_event(workspace_id, task_id, event)
                     verdict = self._on_event(workspace_id, task_id, event, state)
                     if verdict:
                         return verdict
@@ -2055,6 +2091,38 @@ class Engine:
             "finished_at": now_iso()})
         if written is not None:
             self._publish({"type": "task_failed", "task": written})
+
+    # ---- the agent's events on the queue's own bus -----------------------
+    #
+    # The agent and the queue each have their own events, and the two do not
+    # line up: the queue says task_done, the agent says done, and nobody
+    # knows which came first. From now on the agent's events come here too
+    # (with a `turn_` prefix), so the router, the watchdog and the page
+    # subscribe to **one** stream.
+
+    BRIDGED_EVENTS = {
+        "done": "turn_done",
+        "error": "turn_error",
+        "stopped": "turn_stopped",
+        "budget": "budget_exhausted",
+    }
+
+    def _bridge_event(self, workspace_id, task_id, event):
+        """Put one event of the agent on the queue's bus."""
+        kind = event.get("type") or ""
+        name = self.BRIDGED_EVENTS.get(kind)
+        if name is None and kind == "tool_result" and event.get("ok") is False:
+            name = "tool_error"
+        if name is None:
+            return
+        bridged = {
+            "type": name,
+            "turn_id": event.get("turn_id") or "",
+            "request_id": event.get("request_id") or "",
+            "detail": dict((k, v) for k, v in event.items() if k != "seq"),
+        }
+        bridged["task"] = self.store.load(workspace_id, task_id) or {}
+        self._publish(bridged)
 
     def _on_event(self, workspace_id, task_id, event, state):
         """One event of a turn. Returns the verdict, or None to keep going.
@@ -3989,6 +4057,10 @@ def main(argv=None):
                              "else %s)" % DEFAULT_PROVIDER)
     parser.add_argument("--window", default="window", choices=["window", "weekly"],
                         help="which quota window to watch (default: the short one)")
+    parser.add_argument("--quota-tokens", type=float, default=0.0,
+                        help="100%% 的额度值多少 token（0 = 不换算，额度只当开工前的闸门）")
+    parser.add_argument("--quota-share", type=float, default=0.5,
+                        help="一个任务最多能用剩下的多少（默认一半）")
     parser.add_argument("--min-remaining", type=float, default=5.0,
                         help="only work while at least this much of the window is left (%%)")
     parser.add_argument("--allow-without-quota", action="store_true",

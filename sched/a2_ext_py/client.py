@@ -290,6 +290,15 @@ class Client:
         allowed = list(tools or []) or list((policy or {}).get("tools") or [])
         if allowed:
             body["tools"] = allowed
+        # The exec fence of this turn: which commands it may run. It goes as
+        # it is - the agent keeps the open semantics when there is none.
+        exec_policy = (policy or {}).get("exec") or {}
+        if isinstance(exec_policy, dict) and (exec_policy.get("allow") or
+                                              exec_policy.get("deny")):
+            body["policy"] = {"exec": {
+                "allow": list(exec_policy.get("allow") or []),
+                "deny": list(exec_policy.get("deny") or []),
+            }}
         if idempotency_key:
             # The key says "this is one request, however often it is sent".
             # It goes in the header (the usual place) and in the body (the

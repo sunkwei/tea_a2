@@ -54,6 +54,9 @@ struct TurnOptions {
   /// supports). A caller that drives its own policy can hand the agent exactly the
   /// tools it wants - or none at all.
   std::vector<std::string> tools;
+  /// The exec fence of this turn: which commands it may run. Empty => the open
+  /// semantics (nothing is fenced). See ExecPolicy.
+  ExecPolicy exec_policy;
   /// The budget of this turn. It may only **tighten** the machine's ceilings
   /// (see Settings), never loosen them: the task queue says how much of the
   /// machine's budget this task gets, and the machine keeps the final word.

@@ -49,6 +49,36 @@ struct ToolResult {
   bool todos_changed = false;
 };
 
+/// The exec fence of one turn: which commands it may run.
+///
+/// The file tools are fenced by the workspace; the command tool was not, so a
+/// turn that was given a narrow set of directories could still run a command
+/// that touched anything. A caller that drives its own policy (the task
+/// queue) can now say what may be run:
+///
+///     "policy": {"exec": {"allow": ["npm *", "git *"], "deny": ["rm -rf *"]}}
+///
+/// An empty policy keeps the open semantics: nothing is fenced, nothing
+/// breaks.
+struct ExecPolicy {
+  /// The commands that may run. Empty => everything that is not denied.
+  std::vector<std::string> allow;
+  /// The commands that may not run. Checked first: a denied command is
+  /// denied even when it is also allowed.
+  std::vector<std::string> deny;
+  /// Is there a fence at all?
+  bool empty() const { return allow.empty() && deny.empty(); }
+};
+
+/// Is this command allowed by the fence? `why` says why not (empty when it
+/// is allowed).
+///
+/// A pattern is a prefix: "npm *" matches "npm install" and "npm", "git
+/// status" matches exactly that. The pattern is matched against the whole
+/// command, so "npm *" does not match "sudo npm install".
+bool exec_command_allowed(const ExecPolicy& policy, const std::string& command,
+                          std::string* why);
+
 struct ToolContext {
   const AppConfig* config = nullptr;
   /// The provider this turn resolved (TurnOptions may override the active one).
@@ -72,6 +102,8 @@ struct ToolContext {
   /// The MCP servers (null => no mcp.yaml is configured). The
   /// `mcp__<server>__<tool>` tools are dispatched through it.
   McpRegistry* mcp = nullptr;
+  /// The exec fence of this turn (null => no fence). See ExecPolicy.
+  const ExecPolicy* exec_policy = nullptr;
   /// The turn's deadline (absolute epoch milliseconds; 0 => no deadline). The
   /// turn's wall clock is a ceiling for the whole turn, the tools included: a
   /// command that would run past it is cut short instead of keeping the turn

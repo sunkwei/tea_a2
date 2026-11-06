@@ -14,6 +14,55 @@
 #include "util.h"
 
 namespace tea {
+
+namespace {
+
+/// Does the command match the pattern? A pattern is a prefix: "npm *" means
+/// "npm" followed by anything, "git status" means exactly that.
+bool exec_pattern_matches(const std::string& pattern, const std::string& command) {
+  std::string p = trim(pattern);
+  if (p.empty()) return false;
+  if (p.back() != '*') return command == p;
+  p.pop_back();                       // the star
+  p = trim(p);
+  if (p.empty()) return true;         // "*" matches everything
+  if (command == p) return true;
+  // "npm *" must not match "npmfoo": the word has to end there.
+  if (p.back() == ' ') return command.compare(0, p.size(), p) == 0;
+  return command.compare(0, p.size(), p) == 0 && command.size() > p.size() &&
+         command[p.size()] == ' ';
+}
+
+}  // namespace
+
+bool exec_command_allowed(const ExecPolicy& policy, const std::string& command,
+                          std::string* why) {
+  if (why) why->clear();
+  if (policy.empty()) return true;
+  const std::string cmd = trim(command);
+  for (std::size_t i = 0; i < policy.deny.size(); ++i) {
+    if (exec_pattern_matches(policy.deny[i], cmd)) {
+      if (why) {
+        *why = "the policy of this turn forbids it (denied: " + policy.deny[i] + ")";
+      }
+      return false;
+    }
+  }
+  if (policy.allow.empty()) return true;
+  for (std::size_t i = 0; i < policy.allow.size(); ++i) {
+    if (exec_pattern_matches(policy.allow[i], cmd)) return true;
+  }
+  if (why) {
+    std::string allowed;
+    for (std::size_t i = 0; i < policy.allow.size(); ++i) {
+      if (i) allowed += ", ";
+      allowed += policy.allow[i];
+    }
+    *why = "the policy of this turn does not allow it (allowed: " + allowed + ")";
+  }
+  return false;
+}
+
 namespace {
 
 std::string arg_str(const nlohmann::json& args, const char* key, const std::string& def = "") {
@@ -80,6 +129,7 @@ std::string limit_output(const std::string& text, std::size_t limit, bool* trunc
 // ---------------------------------------------------------------------------
 // toolkit_exec
 // ---------------------------------------------------------------------------
+
 ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
   ToolResult result;
   const std::string command = arg_str(args, "command");
@@ -90,6 +140,20 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
   if (!ctx.workspace || !ctx.config) {
     result.output = "error: no workspace is active";
     return result;
+  }
+  // The fence: what this turn may run. Without a policy nothing is fenced
+  // (the open semantics stay); with one, a command that is not allowed does
+  // not run at all.
+  if (ctx.exec_policy != nullptr && !ctx.exec_policy->empty()) {
+    std::string why;
+    if (!exec_command_allowed(*ctx.exec_policy, command, &why)) {
+      result.ok = false;
+      result.output = "error: " + why;
+      result.meta["command"] = command;
+      result.meta["fenced"] = true;
+      LOG_WARN("toolkit_exec: the policy fenced the command: ", sanitize_for_terminal(command));
+      return result;
+    }
   }
 
   CommandOptions options;

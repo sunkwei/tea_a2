@@ -5151,6 +5151,28 @@ void ApiServer::Impl::install_routes() {
     // drives its own policy (the task queue) says per task what it may work
     // in; the grant lasts this turn only.
     std::vector<std::string> allow_paths;
+    // The exec fence of this turn: which commands it may run. Empty => the
+    // open semantics (nothing is fenced) - a policy is opt-in.
+    ExecPolicy exec_policy;
+    {
+      nlohmann::json::const_iterator policy_it = body.find("policy");
+      if (policy_it != body.end() && policy_it->is_object()) {
+        nlohmann::json::const_iterator exec_it = policy_it->find("exec");
+        if (exec_it != policy_it->end() && exec_it->is_object()) {
+          const char* const kLists[2] = {"allow", "deny"};
+          std::vector<std::string>* targets[2] = {&exec_policy.allow, &exec_policy.deny};
+          for (int k = 0; k < 2; ++k) {
+            nlohmann::json::const_iterator list_it = exec_it->find(kLists[k]);
+            if (list_it == exec_it->end() || !list_it->is_array()) continue;
+            for (std::size_t i = 0; i < list_it->size(); ++i) {
+              if (!(*list_it)[i].is_string()) continue;
+              const std::string pattern = trim((*list_it)[i].get<std::string>());
+              if (!pattern.empty()) targets[k]->push_back(pattern);
+            }
+          }
+        }
+      }
+    }
     auto allow_it = body.find("allow_paths");
     if (allow_it != body.end() && allow_it->is_array()) {
       for (std::size_t i = 0; i < allow_it->size(); ++i) {
@@ -5279,7 +5301,7 @@ void ApiServer::Impl::install_routes() {
 
     turn->worker = std::thread([turn, cfg, reg, message, images, provider, model, system_prompt,
                              allowed_tools, task_id, task_context, allow_paths,
-                             knob_overrides, request_budget]() {
+                             exec_policy, knob_overrides, request_budget]() {
       Agent agent(cfg, reg);
       TurnOptions options;
       options.provider = provider;
@@ -5291,6 +5313,7 @@ void ApiServer::Impl::install_routes() {
       options.task_id = task_id;
       options.task_context = task_context;
       options.allow_paths = allow_paths;
+      options.exec_policy = exec_policy;
       options.budget = request_budget;
       options.knob_overrides = knob_overrides;
       // The audit trail is written under the handle's id, so one string
