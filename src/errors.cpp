@@ -89,6 +89,9 @@ std::vector<ErrorInfo> build_catalog() {
   entries.push_back({"trajectory_error", 400, false, 0,
                       "the trajectory could not be read",
                       "check the turn id and the workspace"});
+  entries.push_back({"gc_failed", 500, false, 0,
+                      "the history cleaner could not do its work",
+                      "the message says what went wrong; the history is untouched"});
   entries.push_back({"unknown_provider", 400, false, 0,
                       "no provider with that name is configured",
                       "ask GET /api/providers for the names"});

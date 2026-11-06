@@ -407,6 +407,16 @@ void apply_settings(Settings& s, const YAML::Node& node,
         static_cast<int>(yint(node, "trajectory_max_turns", s.trajectory_max_turns));
   if (yhas(node, "trajectory_max_bytes"))
     s.trajectory_max_bytes = yint(node, "trajectory_max_bytes", s.trajectory_max_bytes);
+  if (yhas(node, "history_max_age_days"))
+    s.history_max_age_days = static_cast<int>(yint(node, "history_max_age_days", s.history_max_age_days));
+  if (yhas(node, "history_max_bytes"))
+    s.history_max_bytes = yint(node, "history_max_bytes", s.history_max_bytes);
+  if (yhas(node, "history_compress_after_days"))
+    s.history_compress_after_days =
+        static_cast<int>(yint(node, "history_compress_after_days", s.history_compress_after_days));
+  if (yhas(node, "history_keep_recent"))
+    s.history_keep_recent =
+        static_cast<int>(yint(node, "history_keep_recent", s.history_keep_recent));
   if (s.keep_turns < 0) s.keep_turns = 0;
   // A negative budget is nonsense; 0 means "no limit" for that dimension.
   if (s.max_iterations < 0) s.max_iterations = 0;
@@ -417,6 +427,10 @@ void apply_settings(Settings& s, const YAML::Node& node,
   if (s.trajectory_step_max_bytes > 1024 * 1024) s.trajectory_step_max_bytes = 1024 * 1024;
   if (s.trajectory_max_turns < 1) s.trajectory_max_turns = 1;
   if (s.trajectory_max_bytes < 1024) s.trajectory_max_bytes = 1024;
+  if (s.history_max_age_days < 0) s.history_max_age_days = 0;
+  if (s.history_max_bytes < 0) s.history_max_bytes = 0;
+  if (s.history_compress_after_days < 0) s.history_compress_after_days = 0;
+  if (s.history_keep_recent < 0) s.history_keep_recent = 0;
   if (s.compaction_trigger_ratio < 0.3) s.compaction_trigger_ratio = 0.3;
   if (s.compaction_trigger_ratio > 0.95) s.compaction_trigger_ratio = 0.95;
   if (s.compaction_retain_ratio < 0.02) s.compaction_retain_ratio = 0.02;

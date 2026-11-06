@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+#include "history_gc.h"
 #include "message.h"
 
 namespace tea {
@@ -264,6 +265,11 @@ class Workspace {
                   std::string* err) const;
   bool create_session(const std::string& title, Session* out, std::string* err) const;
   bool delete_session(const std::string& id, std::string* err) const;
+  /// Clean the history of this workspace: drop what is too old, gzip what is
+  /// cold, and - when the run_dir is over its budget - drop the oldest
+  /// sessions until it fits. `report` says what happened (or, with
+  /// `limits.dry_run`, what would happen).
+  bool gc_history(const HistoryGcLimits& limits, HistoryGcReport* report, std::string* err) const;
   bool rename_session(const std::string& id, const std::string& title, std::string* err) const;
 
   /// Create a new session that starts as a copy of `id`'s transcript through the

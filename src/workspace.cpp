@@ -6,8 +6,10 @@
 #include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <map>
 
 #include "env.h"
+#include "gzip.h"
 #include "log.h"
 #include "state_lock.h"
 #include "trajectory.h"
@@ -55,6 +57,25 @@ nlohmann::json read_json_file(const std::string& path, bool* ok) {
   std::string text;
   if (!path_exists(path)) return nlohmann::json();
   if (!read_file(path, &text)) return nlohmann::json();
+  try {
+    nlohmann::json j = nlohmann::json::parse(text);
+    *ok = true;
+    return j;
+  } catch (const std::exception&) {
+    return nlohmann::json();
+  }
+}
+
+/// Read a JSON file that may have been gzipped by the history cleaner. The
+/// compressed copy is the same JSON - the cleaner only changes how the bytes
+/// are stored, never what they mean.
+nlohmann::json read_json_file_maybe_gzip(const std::string& path, bool* ok) {
+  *ok = false;
+  std::string text;
+  std::string err;
+  // read_file_maybe_gzip() finds the compressed twin when the plain file is
+  // gone, so the existence check is its job, not ours.
+  if (!read_file_maybe_gzip(path, &text, &err)) return nlohmann::json();
   try {
     nlohmann::json j = nlohmann::json::parse(text);
     *ok = true;
@@ -319,6 +340,17 @@ std::string Workspace::artifacts_dir() const { return path_join(run_dir_, "artif
 namespace {
 std::string session_file_for(const std::string& dir, const std::string& id) {
   return path_join(dir, id + ".json");
+}
+
+/// The compressed twin of a session file: what the history cleaner leaves
+/// behind for a session nobody has touched for a while.
+std::string session_gzip_file_for(const std::string& dir, const std::string& id) {
+  return session_file_for(dir, id) + ".gz";
+}
+
+/// Does the session exist at all - plain or compressed?
+bool session_file_exists(const std::string& dir, const std::string& id) {
+  return path_exists(session_file_for(dir, id)) || path_exists(session_gzip_file_for(dir, id));
 }
 }  // namespace
 
@@ -774,7 +806,7 @@ std::vector<SessionInfo> Workspace::list_sessions() const {
       for (auto it = j.begin(); it != j.end(); ++it) {
         SessionInfo s = SessionInfo::from_json(*it);
         if (s.id.empty()) continue;
-        if (!path_exists(session_file_for(dir, s.id))) continue;
+        if (!session_file_exists(dir, s.id)) continue;
         out.push_back(s);
       }
       from_index = true;
@@ -788,12 +820,23 @@ std::vector<SessionInfo> Workspace::list_sessions() const {
       for (std::size_t i = 0; i < files.size(); ++i) {
         if (files[i].is_dir) continue;
         if (files[i].name == "index.json") continue;
-        if (path_extension(files[i].name) != ".json") continue;
+        // A compressed session is "<id>.json.gz": the id is the stem without
+        // the ".json" part.
+        std::string id;
+        const std::string ext = path_extension(files[i].name);
+        if (ext == ".json") {
+          id = path_stem(files[i].name);
+        } else if (files[i].name.size() > 8 &&
+                   files[i].name.compare(files[i].name.size() - 8, 8, ".json.gz") == 0) {
+          id = files[i].name.substr(0, files[i].name.size() - 8);
+        } else {
+          continue;
+        }
         bool ok = false;
-        nlohmann::json j = read_json_file(files[i].path, &ok);
+        nlohmann::json j = read_json_file_maybe_gzip(files[i].path, &ok);
         if (!ok || !j.is_object()) continue;
         SessionInfo s;
-        s.id = path_stem(files[i].name);
+        s.id = id;
         auto title_it = j.find("title");
         if (title_it != j.end() && title_it->is_string()) s.title = title_it->get<std::string>();
         auto created_it = j.find("created_at");
@@ -826,7 +869,7 @@ std::vector<SessionInfo> Workspace::list_sessions() const {
 bool Workspace::load_session(const std::string& id, Session* out, std::string* err) const {
   const std::string path = session_file_for(sessions_dir(), id);
   bool ok = false;
-  nlohmann::json j = read_json_file(path, &ok);
+  nlohmann::json j = read_json_file_maybe_gzip(path, &ok);
   if (!ok) {
     if (err) *err = "session not found: " + id;
     return false;
@@ -958,6 +1001,12 @@ bool Workspace::save_session(const Session& session, std::string* err) const {
   if (!write_file_atomic(session_path, dump_json(j, 2) + "\n", err)) {
     return false;
   }
+  // The cleaner may have compressed this session while it was cold. It is hot
+  // again now, so the plain file is the truth and the compressed twin goes.
+  {
+    const std::string gz_path = session_path + ".gz";
+    if (path_exists(gz_path)) remove_path(gz_path, false, nullptr);
+  }
 
   // Keep the lightweight index in sync. Progress is part of it: the session
   // list shows "3/7" without opening every session file.
@@ -1001,12 +1050,12 @@ bool Workspace::load_todos(const std::string& session_id, std::vector<TodoItem>*
   StateLock lock(state_mutex());
   out->clear();
   const std::string path = session_file_for(sessions_dir(), session_id);
-  if (!path_exists(path)) {
+  if (!session_file_exists(sessions_dir(), session_id)) {
     if (err) *err = "session not found: " + session_id;
     return false;
   }
   bool ok = false;
-  const nlohmann::json j = read_json_file(path, &ok);
+  const nlohmann::json j = read_json_file_maybe_gzip(path, &ok);
   if (!ok || !j.is_object()) {
     if (err) *err = "cannot read the session file: " + path;
     return false;
@@ -1027,12 +1076,12 @@ bool Workspace::save_todos(const std::string& session_id, const std::vector<Todo
   StateLock lock(state_mutex());
   const std::string dir = sessions_dir();
   const std::string path = session_file_for(dir, session_id);
-  if (!path_exists(path)) {
+  if (!session_file_exists(dir, session_id)) {
     if (err) *err = "session not found: " + session_id;
     return false;
   }
   bool ok = false;
-  nlohmann::json j = read_json_file(path, &ok);
+  nlohmann::json j = read_json_file_maybe_gzip(path, &ok);
   if (!ok || !j.is_object()) {
     if (err) *err = "cannot read the session file: " + path;
     return false;
@@ -1044,6 +1093,10 @@ bool Workspace::save_todos(const std::string& session_id, const std::vector<Todo
   j["todos"] = items;
   if (!write_file_atomic(path, dump_json(j, 2) + "\n", err)) {
     return false;
+  }
+  {
+    const std::string gz_path = path + ".gz";
+    if (path_exists(gz_path)) remove_path(gz_path, false, nullptr);
   }
 
   // The index carries the progress ("3/7" in the session list).
@@ -1086,11 +1139,19 @@ bool Workspace::delete_session(const std::string& id, std::string* err) const {
   StateLock lock(state_mutex());
   const std::string dir = sessions_dir();
   const std::string path = session_file_for(dir, id);
-  if (!path_exists(path)) {
+  const std::string gz_path = session_gzip_file_for(dir, id);
+  if (!path_exists(path) && !path_exists(gz_path)) {
     if (err) *err = "session not found: " + id;
     return false;
   }
   remove_path(path, false, nullptr);
+  remove_path(gz_path, false, nullptr);
+  // The trajectory is the audit trail of the very same session. Deleting the
+  // conversation and leaving its turns behind on disk would keep the history
+  // (and the search index) pointing at a conversation that no longer exists.
+  const std::string traj = trajectory_file_path(run_dir_, id);
+  remove_path(traj, false, nullptr);
+  remove_path(traj + ".gz", false, nullptr);
   const std::string index_path = path_join(dir, "index.json");
   bool ok = false;
   nlohmann::json index = read_json_file(index_path, &ok);
@@ -1104,6 +1165,226 @@ bool Workspace::delete_session(const std::string& id, std::string* err) const {
     }
     write_file_atomic(index_path, dump_json(list, 2) + "\n");
   }
+  return true;
+}
+
+namespace {
+/// One file the cleaner may act on.
+struct GcEntry {
+  std::string id;
+  std::string path;
+  std::string mtime;   // ISO-8601 UTC; empty when the file has no timestamp
+  int64_t size = 0;
+  bool compressed = false;
+};
+
+/// The session id behind a transcript file name ("<id>.json" or
+/// "<id>.json.gz"). Empty for anything else (index.json included).
+std::string session_id_from_file(const std::string& name) {
+  if (name.size() > 8 && name.compare(name.size() - 8, 8, ".json.gz") == 0) {
+    return name.substr(0, name.size() - 8);
+  }
+  if (name != "index.json" && path_extension(name) == ".json") return path_stem(name);
+  return std::string();
+}
+
+/// The session id behind a trajectory file name ("<id>.jsonl" or
+/// "<id>.jsonl.gz").
+std::string trajectory_id_from_file(const std::string& name) {
+  if (name.size() > 10 && name.compare(name.size() - 10, 10, ".jsonl.gz") == 0) {
+    return name.substr(0, name.size() - 10);
+  }
+  if (path_extension(name) == ".jsonl") return path_stem(name);
+  return std::string();
+}
+}  // namespace
+
+bool Workspace::gc_history(const HistoryGcLimits& limits, HistoryGcReport* report,
+                            std::string* err) const {
+  // The state lock for the whole run: the compression replaces a file with
+  // its compressed twin, and a turn writing that session at the same moment
+  // would lose its newest words ("the old file was compressed, the new one
+  // was removed"). The lock is the same one the session writes use, so the
+  // two cannot overlap. It is recursive, so delete_session() below may take
+  // it again.
+  StateLock lock(state_mutex());
+  HistoryGcReport local;
+  if (!report) report = &local;
+  report->dry_run = limits.dry_run;
+
+  const std::string dir = sessions_dir();
+  const std::string traj_dir = path_join(run_dir_, "trajectories");
+  const int64_t now_s = now_ms() / 1000;
+  const bool do_it = !limits.dry_run;
+
+  // ---- what is there ----------------------------------------------------
+  // One entry per session: the plain file wins over a stale compressed copy.
+  std::map<std::string, GcEntry> by_id;
+  std::vector<DirEntryInfo> files;
+  std::string list_err;
+  if (list_directory(dir, &files, &list_err)) {
+    for (std::size_t i = 0; i < files.size(); ++i) {
+      if (files[i].is_dir) continue;
+      const std::string id = session_id_from_file(files[i].name);
+      if (id.empty()) continue;
+      GcEntry e;
+      e.id = id;
+      e.path = files[i].path;
+      e.mtime = files[i].mtime;
+      e.size = static_cast<int64_t>(files[i].size);
+      e.compressed = path_is_gzip(files[i].path);
+      std::map<std::string, GcEntry>::iterator it = by_id.find(id);
+      if (it == by_id.end() || (!it->second.compressed && e.compressed)) by_id[id] = e;
+    }
+  }
+  std::vector<GcEntry> sessions;
+  for (std::map<std::string, GcEntry>::const_iterator it = by_id.begin(); it != by_id.end(); ++it) {
+    sessions.push_back(it->second);
+  }
+  // Newest first: the first `keep_recent` ones are the ones being worked on.
+  std::sort(sessions.begin(), sessions.end(), [](const GcEntry& a, const GcEntry& b) {
+    if (a.mtime != b.mtime) return a.mtime > b.mtime;
+    return a.id < b.id;
+  });
+
+  std::map<std::string, GcEntry> traj_by_id;
+  files.clear();
+  if (list_directory(traj_dir, &files, &list_err)) {
+    for (std::size_t i = 0; i < files.size(); ++i) {
+      if (files[i].is_dir) continue;
+      const std::string id = trajectory_id_from_file(files[i].name);
+      if (id.empty()) continue;
+      GcEntry e;
+      e.id = id;
+      e.path = files[i].path;
+      e.mtime = files[i].mtime;
+      e.size = static_cast<int64_t>(files[i].size);
+      e.compressed = path_is_gzip(files[i].path);
+      std::map<std::string, GcEntry>::iterator it = traj_by_id.find(id);
+      if (it == traj_by_id.end() || (!it->second.compressed && e.compressed)) traj_by_id[id] = e;
+    }
+  }
+
+  report->bytes_before = tree_size(run_dir_);
+
+  // ---- 1. what is too old ----------------------------------------------
+  const std::string age_cutoff =
+      limits.max_age_days > 0
+          ? iso8601_from_unix(now_s - static_cast<int64_t>(limits.max_age_days) * 86400)
+          : std::string();
+  const std::string cold_cutoff =
+      limits.compress_after_days > 0
+          ? iso8601_from_unix(now_s - static_cast<int64_t>(limits.compress_after_days) * 86400)
+          : std::string();
+
+  // What the age pass takes away: the compression pass must not count the
+  // same file twice (a dry run would say "1 removed, 1 compressed" for one
+  // file).
+  std::vector<std::string> removed_ids;
+  if (!age_cutoff.empty()) {
+    // The age limit is an explicit statement about what is stale, so it does
+    // not spare the newest sessions: a session nobody touched for 40 days is
+    // 40 days old, whether it is the last one or not. (A session in use has a
+    // fresh mtime - every save rewrites the file.)
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+      const GcEntry& e = sessions[i];
+      if (e.mtime.empty() || e.mtime >= age_cutoff) continue;
+      if (do_it) {
+        std::string del_err;
+        if (!delete_session(e.id, &del_err)) {
+          report->notes.push_back("cannot delete session " + e.id + ": " + del_err);
+          continue;
+        }
+      }
+      report->sessions_removed++;
+      report->removed_sessions.push_back(e.id);
+      removed_ids.push_back(e.id);
+      if (traj_by_id.count(e.id)) {
+        report->trajectories_removed++;
+        removed_ids.push_back(e.id);
+      }
+    }
+    // A trajectory whose session is gone is an orphan: it belongs to a
+    // conversation that was deleted, and it is pure disk.
+    for (std::map<std::string, GcEntry>::const_iterator it = traj_by_id.begin();
+         it != traj_by_id.end(); ++it) {
+      if (by_id.count(it->first)) continue;
+      const GcEntry& e = it->second;
+      if (e.mtime.empty() || e.mtime >= age_cutoff) continue;
+      if (do_it) remove_path(e.path, false, nullptr);
+      report->trajectories_removed++;
+      removed_ids.push_back(e.id);
+    }
+  }
+
+  // ---- 2. what is cold: gzip it, do not lose it ------------------------
+  if (!cold_cutoff.empty()) {
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+      const GcEntry& e = sessions[i];
+      if (e.compressed) continue;
+      if (e.mtime.empty() || e.mtime >= cold_cutoff) continue;
+      if (std::find(removed_ids.begin(), removed_ids.end(), e.id) != removed_ids.end()) continue;
+      if (!do_it) {
+        report->sessions_compressed++;
+        report->compressed_sessions.push_back(e.id);
+        continue;
+      }
+      int64_t saved = 0;
+      std::string gz_err;
+      if (!gzip_file_in_place(e.path, &gz_err, &saved)) continue;
+      report->sessions_compressed++;
+      report->compressed_sessions.push_back(e.id);
+      report->compressed_saved += saved;
+    }
+    for (std::map<std::string, GcEntry>::const_iterator it = traj_by_id.begin();
+         it != traj_by_id.end(); ++it) {
+      const GcEntry& e = it->second;
+      if (e.compressed) continue;
+      if (e.mtime.empty() || e.mtime >= cold_cutoff) continue;
+      if (std::find(removed_ids.begin(), removed_ids.end(), e.id) != removed_ids.end()) continue;
+      if (!do_it) {
+        report->trajectories_compressed++;
+        continue;
+      }
+      int64_t saved = 0;
+      std::string gz_err;
+      if (!gzip_file_in_place(e.path, &gz_err, &saved)) continue;
+      report->trajectories_compressed++;
+      report->compressed_saved += saved;
+    }
+  }
+
+  // ---- 3. over budget: the oldest sessions go --------------------------
+  if (limits.max_bytes > 0) {
+    int64_t size = tree_size(run_dir_);
+    for (std::size_t i = sessions.size(); i > static_cast<std::size_t>(limits.keep_recent); --i) {
+      if (size <= limits.max_bytes) break;
+      const GcEntry& e = sessions[i - 1];
+      bool already_removed = false;
+      for (std::size_t k = 0; k < report->removed_sessions.size(); ++k) {
+        if (report->removed_sessions[k] == e.id) already_removed = true;
+      }
+      if (already_removed) continue;
+      if (do_it) {
+        std::string del_err;
+        if (!delete_session(e.id, &del_err)) {
+          report->notes.push_back("cannot delete session " + e.id + ": " + del_err);
+          continue;
+        }
+      }
+      report->sessions_removed++;
+      report->removed_sessions.push_back(e.id);
+      size -= e.size;
+    }
+    if (size > limits.max_bytes) {
+      report->notes.push_back(
+          "the run_dir is still over its budget: the rest is not history (logs, artifacts, "
+          "indexes) and was left alone");
+    }
+  }
+
+  report->bytes_after = do_it ? tree_size(run_dir_) : report->bytes_before;
+  report->freed_bytes = report->bytes_before - report->bytes_after;
   return true;
 }
 

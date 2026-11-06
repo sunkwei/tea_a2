@@ -38,6 +38,7 @@
 | `POST` | `/api/sessions/{sid}/fork` | 从某一轮分叉出新会话：`{"message_index":N}` 是父会话里某条**用户消息**的下标，复制到该轮结束（含回答与工具结果）；省略或负数 = 复制整个会话。返回 `session`（带 `forked_from` / `fork_turn`）与复制后的 `messages`；父会话不变 |
 | `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON） |
 | `POST` | `/api/workspaces/{id}/sessions/import` | 导入导出的 `.html`（原样或 `{"html":"…"}`）或会话 JSON，新建一个会话；重复导入不会覆盖 |
+| `POST` | `/api/workspaces/{id}/gc` | **历史清理**：按年龄删掉太旧的会话与轨迹、把冷数据 gzip 起来、run_dir 超预算时按最旧优先删会话。body 可以覆盖上限：`{"dry_run":true}` 只报告不动手，`{"max_age_days":30,"max_bytes":104857600,"compress_after_days":7,"keep_recent":5}`。回答里有 `bytes_before/after`、`freed_bytes`、`sessions_removed`、`trajectories_removed`、`sessions_compressed`、`compressed_saved`、`usage`（sessions / trajectories / 其它各占多少） |
 | `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |
 | `GET` | `/api/turns` | **最近的回合句柄**，最新在前（跑着的与刚跑完的都在里面，finished 的最多留 64 个） |
 | `GET` | `/api/turns/{turn_id}` | **一个回合现在怎么样**：`state`（`running` / `done` / `failed` / `stopped` / `budget`）、`result`（模型的回答）、`usage`、`metrics`、`iterations`、`stop_reason`、`trajectory_id`、`files_changed`（这一轮动过的文件）、`elapsed_ms`、`last_seq` |
@@ -904,6 +905,38 @@ settings:
 
 ```
 trajectory: pruned 1 turn(s) from s_9f8e7d.jsonl (kept 1 turn(s), 629 bytes; limits 1 turns / 8388608 bytes)
+```
+
+#### 历史留存：整个 run_dir 的账
+
+上面那几个上限只管**一个文件**。整个工作区的历史（会话记录 + 轨迹）是唯一只增不减的
+东西：会话记录其实比轨迹还大（一场长对话动辄几 MB），而它**本来一个上限都没有**。
+所以另有一套「按整个 run_dir 算」的留存设置，写在同一份 `settings.yaml` 里：
+
+```yaml
+settings:
+  history_max_age_days: 0        # 超过多少天的会话与轨迹删掉（0 = 永远留着）
+  history_max_bytes: 0            # run_dir 最多占多少字节，超了就按最旧优先删会话（0 = 不限）
+  history_compress_after_days: 0  # 多少天没动过的数据 gzip 起来（0 = 不压）
+  history_keep_recent: 5          # 最新 N 个会话永远不动
+```
+
+三件事各管一头：**太旧的删掉**、**冷数据压起来而不是删掉**、**超预算的按最旧删**。
+压起来的那些是普通的 gzip 文件（`gunzip` 能读），读的时候服务端自动解压——会话记录
+被压过，界面照旧能打开、能搜。
+
+清理有两个入口：
+
+* `POST /api/workspaces/{id}/gc`（见上面的路由表）：手动清一次，`{"dry_run":true}` 先看
+  它打算做什么；
+* 设了上面任一项之后，**每轮跑完会自动清一次**（同一工作区最多 10 分钟一次，不吵人）。
+
+服务没开的时候也能清（设备上「磁盘满了」不是启动服务的时刻）：
+
+```bash
+tea_agent --gc                      # 按设置清理所有已登记的工作区
+tea_agent --gc --gc-dry-run         # 只报告
+tea_agent --gc --max-age-days 30 --compress-after-days 7 --max-bytes 104857600
 ```
 
 

@@ -482,6 +482,8 @@ set(TEA_SOURCES
   src/tls.cpp
   src/command.cpp
   src/archive.cpp
+  src/gzip.cpp
+  src/history_gc.cpp
   src/mcp.cpp
   src/tools.cpp
   src/workspace.cpp

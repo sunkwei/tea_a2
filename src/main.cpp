@@ -71,7 +71,8 @@ struct Args {
 };
 
 const char* kBooleanFlags[] = {"help", "version", "selftest", "open", "no-console", "quiet",
-                               "allow-outside-workspace", "no-color", "insecure"};
+                               "allow-outside-workspace", "no-color", "insecure",
+                               "gc", "gc-dry-run"};
 
 bool is_log_level_name(const std::string& value) {
   const std::string v = to_lower(trim(value));
@@ -129,6 +130,17 @@ void print_usage() {
                   "  --help                     show this help\n"
                   "  --version                  show the version\n"
                   "  --selftest                 run built-in checks and exit\n"
+                  "\n"
+                  "History\n"
+                  "  --gc                      clean the history of every workspace and exit\n"
+                  "                            (sessions and trajectories): what is too old is\n"
+                  "                            removed, what is cold is gzipped, and a run_dir\n"
+                  "                            over its budget loses its oldest sessions\n"
+                  "  --gc-dry-run              with --gc: only report what would happen\n"
+                  "  --max-age-days <n>        override history_max_age_days for this run\n"
+                  "  --max-bytes <n>           override history_max_bytes for this run\n"
+                  "  --compress-after-days <n> override history_compress_after_days\n"
+                  "  --keep-recent <n>         never touch the newest N sessions (default 5)\n"
                   "\n"
                   "Environment\n"
                   "  TEA_AGENT_HOME             overrides the agent home directory\n"
@@ -411,6 +423,59 @@ int main(int argc, char** argv) {
     }
   }
   registry.refresh_flags();
+
+  // ---- history cleaner (--gc) -------------------------------------------
+  // The history of a workspace only ever grows, so it needs a cleaner - and
+  // the cleaner has to be reachable without the server: on a device the
+  // service may not even be running, and "the disk is full" is not the moment
+  // to start a server.
+  if (args.has("gc")) {
+    int64_t freed = 0;
+    int touched = 0;
+    for (std::size_t i = 0; i < registry.entries().size(); ++i) {
+      const WorkspaceEntry& entry = registry.entries()[i];
+      Workspace ws;
+      std::string open_err;
+      if (!ws.open(entry, config.settings, &open_err)) {
+        console_write_line("skip " + entry.path + ": " + open_err);
+        continue;
+      }
+      // The workspace's own settings.yaml decides; the command line wins.
+      const Settings& ws_settings = ws.settings();
+      HistoryGcLimits limits;
+      limits.max_age_days = ws_settings.history_max_age_days;
+      limits.max_bytes = ws_settings.history_max_bytes;
+      limits.compress_after_days = ws_settings.history_compress_after_days;
+      limits.keep_recent = ws_settings.history_keep_recent;
+      if (args.has("max-age-days")) limits.max_age_days = std::atoi(args.get("max-age-days").c_str());
+      if (args.has("max-bytes")) limits.max_bytes = std::atoll(args.get("max-bytes").c_str());
+      if (args.has("compress-after-days"))
+        limits.compress_after_days = std::atoi(args.get("compress-after-days").c_str());
+      if (args.has("keep-recent")) limits.keep_recent = std::atoi(args.get("keep-recent").c_str());
+      limits.dry_run = args.has("gc-dry-run");
+      HistoryGcReport report;
+      std::string err;
+      if (!ws.gc_history(limits, &report, &err)) {
+        console_write_line("skip " + entry.path + ": " + err);
+        continue;
+      }
+      ++touched;
+      freed += report.freed_bytes;
+      console_write_line(
+          entry.path + ": " + std::to_string(report.freed_bytes) + " byte(s) freed" +
+          (report.dry_run ? " (dry run)" : "") + " - " +
+          std::to_string(report.sessions_removed) + " session(s), " +
+          std::to_string(report.trajectories_removed) + " trajectory file(s), " +
+          std::to_string(report.sessions_compressed + report.trajectories_compressed) +
+          " compressed");
+      for (std::size_t k = 0; k < report.notes.size(); ++k) {
+        console_write_line("  note: " + report.notes[k]);
+      }
+    }
+    console_write_line("history cleaner: " + std::to_string(touched) + " workspace(s), " +
+                       std::to_string(freed) + " byte(s) freed");
+    return 0;
+  }
 
   // ---- tools + server ----------------------------------------------------
   ToolRegistry tools;

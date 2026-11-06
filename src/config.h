@@ -347,6 +347,20 @@ struct Settings {
   /// The oldest turns are dropped first.
   int trajectory_max_turns = 200;
   int64_t trajectory_max_bytes = 8 * 1024 * 1024;
+
+  // ---- history retention (the whole run_dir, not one file) ---------------
+  // The caps above bound a single trajectory file. They say nothing about
+  // fifty sessions - and the session transcripts (which are bigger than the
+  // trajectories) had no cap at all. These four settings are what the history
+  // cleaner works with; see history_gc.h.
+  /// Sessions and trajectories older than this are removed. 0 = keep forever.
+  int history_max_age_days = 0;
+  /// The run_dir may not grow past this many bytes. 0 = no budget.
+  int64_t history_max_bytes = 0;
+  /// Data untouched for this long is gzipped instead of deleted. 0 = never.
+  int history_compress_after_days = 0;
+  /// The cleaner never touches the newest N sessions.
+  int history_keep_recent = 5;
 };
 
 /// Overlay a `settings:` mapping from a YAML file on top of `settings`.

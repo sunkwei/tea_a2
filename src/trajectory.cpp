@@ -5,6 +5,7 @@
 #include <exception>
 #include <map>
 
+#include "gzip.h"
 #include "log.h"
 #include "util.h"
 #include "workspace.h"
@@ -92,14 +93,19 @@ bool load_trajectories(const std::string& path, std::vector<nlohmann::json>* out
   // and writers are turns, so the wait is a file read long.
   std::lock_guard<std::mutex> lock(trajectory_file_mutex());
   out->clear();
-  if (!path_is_file(path)) {
+  // The cleaner may have compressed a cold trajectory: same turns, fewer
+  // bytes. The compressed twin is only consulted when the plain file is gone.
+  const std::string gz_path = path + ".gz";
+  const bool plain = path_is_file(path);
+  const bool packed = !plain && path_is_file(gz_path);
+  if (!plain && !packed) {
     if (err) *err = "trajectory file not found: " + path;
     return false;
   }
   std::string data;
-  const uint64_t size = file_size(path);
+  const uint64_t size = file_size(plain ? path : gz_path);
   if (size > kTrajectoryReadCap) {
-    if (!read_file_tail(path, kTrajectoryReadCap, &data)) {
+    if (!read_file_tail(plain ? path : gz_path, kTrajectoryReadCap, &data)) {
       if (err) *err = "cannot read " + path;
       return false;
     }
@@ -107,9 +113,25 @@ bool load_trajectories(const std::string& path, std::vector<nlohmann::json>* out
     const std::size_t nl = data.find('\n');
     if (nl == std::string::npos) data.clear();
     else data.erase(0, nl + 1);
-  } else if (!read_file(path, &data)) {
-    if (err) *err = "cannot read " + path;
-    return false;
+  } else if (plain) {
+    if (!read_file(path, &data)) {
+      if (err) *err = "cannot read " + path;
+      return false;
+    }
+  } else {
+    std::string gz_err;
+    if (!read_file_maybe_gzip(gz_path, &data, &gz_err)) {
+      if (err) *err = gz_err;
+      return false;
+    }
+    if (data.size() > kTrajectoryReadCap) {
+      // A compressed file can still be big when it is opened. Keep the tail,
+      // which holds the newest turns.
+      data.erase(0, data.size() - kTrajectoryReadCap);
+      const std::size_t nl = data.find('\n');
+      if (nl == std::string::npos) data.clear();
+      else data.erase(0, nl + 1);
+    }
   }
 
   std::vector<nlohmann::json> records;
@@ -183,6 +205,28 @@ nlohmann::json trajectory_summary(const nlohmann::json& turn) {
   return s;
 }
 
+/// When the cleaner compressed a cold trajectory and the session becomes
+/// active again, the compressed copy is unpacked back into the working file.
+/// Without this the new turn would start a fresh file and the older turns
+/// (sitting in the ".gz") would drop out of the audit trail.
+void restore_compressed_trajectory(const std::string& path) {
+  if (path_is_file(path)) return;
+  const std::string gz_path = path + ".gz";
+  if (!path_is_file(gz_path)) return;
+  std::string data;
+  std::string err;
+  if (!read_file_maybe_gzip(gz_path, &data, &err)) {
+    LOG_WARN("trajectory: cannot unpack ", gz_path, ": ", err);
+    return;
+  }
+  if (!write_file_atomic(path, data, &err)) {
+    LOG_WARN("trajectory: cannot restore ", path, ": ", err);
+    return;
+  }
+  remove_path(gz_path, false, nullptr);
+  LOG_INFO("trajectory: restored ", path_filename(path), " from its compressed copy");
+}
+
 // ---------------------------------------------------------------------------
 // TrajectoryRecorder
 // ---------------------------------------------------------------------------
@@ -206,6 +250,9 @@ bool TrajectoryRecorder::begin(Workspace& workspace, const std::string& session_
   provider_ = provider;
   model_ = model;
   path_ = trajectory_file_path(workspace.run_dir(), session_id);
+  // The session was cold and the cleaner compressed its turns; it is hot again
+  // now, so the old turns go back into the working file.
+  restore_compressed_trajectory(path_);
   // The caller may have handed out the id already (the HTTP layer does: the
   // handle it gives back is the audit id). An id that cannot be a file name is
   // ignored - a handle has to be safe to put in a URL and in a file name.

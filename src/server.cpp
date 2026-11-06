@@ -27,6 +27,7 @@
 #include "archive.h"
 #include "command.h"
 #include "env.h"
+#include "gzip.h"
 #include "errors.h"
 #include "html_export.h"
 #include "http.h"
@@ -1595,6 +1596,49 @@ struct ApiServer::Impl {
     return true;
   }
 
+  /// The history cleaner, run after a turn: it keeps the run_dir inside the
+  /// budget the settings ask for and compresses what has gone cold.
+  ///
+  /// Silent and throttled on purpose: walking a run_dir is not free, and the
+  /// person using the agent should not have to hear about it. The throttling is
+  /// per workspace, so a busy workspace does not starve a quiet one.
+  void maybe_gc_history(const Workspace& ws) {
+    const Settings& s = ws.settings();
+    if (s.history_max_age_days <= 0 && s.history_max_bytes <= 0 &&
+        s.history_compress_after_days <= 0) {
+      return;   // nobody asked for a cleaner: do not walk the disk
+    }
+    {
+      static std::mutex gc_mu;
+      static std::map<std::string, int64_t> gc_last;   // workspace id -> unix seconds
+      std::lock_guard<std::mutex> lock(gc_mu);
+      const int64_t now = now_ms() / 1000;
+      std::map<std::string, int64_t>::iterator it = gc_last.find(ws.id());
+      if (it != gc_last.end() && now - it->second < 600) return;
+      gc_last[ws.id()] = now;
+    }
+    HistoryGcLimits limits;
+    limits.max_age_days = s.history_max_age_days;
+    limits.max_bytes = s.history_max_bytes;
+    limits.compress_after_days = s.history_compress_after_days;
+    limits.keep_recent = s.history_keep_recent;
+    HistoryGcReport report;
+    std::string err;
+    if (!ws.gc_history(limits, &report, &err)) {
+      LOG_WARN("history gc: ", err);
+      return;
+    }
+    if (report.sessions_removed || report.trajectories_removed || report.sessions_compressed ||
+        report.trajectories_compressed) {
+      LOG_INFO("history gc: freed ", report.freed_bytes, " byte(s) - ", report.sessions_removed,
+               " session(s), ", report.trajectories_removed, " trajectory file(s), ",
+               report.sessions_compressed + report.trajectories_compressed, " compressed");
+    }
+    for (std::size_t i = 0; i < report.notes.size(); ++i) {
+      LOG_INFO("history gc: ", report.notes[i]);
+    }
+  }
+
   /// The persona a workspace falls back to when `system_prompt.md` is empty:
   /// its own settings.yaml, else the machine-level default (tea_agent.yaml or
   /// the built-in rules). Trimmed, so it compares and displays predictably.
@@ -1856,9 +1900,13 @@ struct ApiServer::Impl {
       std::lock_guard<std::mutex> lock(mu);
       for (std::size_t i = 0; i < registry->entries().size(); ++i) {
         const WorkspaceEntry& e = registry->entries()[i];
-        const std::string file = path_join(path_join(path_join(e.path, ".tea_agent_run"), "sessions"),
-                                           session_id + ".json");
-        if (path_exists(file)) {
+        // The runtime data may live outside the project (a read-only project
+        // keeps it in the tea home), and the cleaner may have compressed the
+        // transcript - both are still this session.
+        const std::string run_dir =
+            e.run_dir.empty() ? path_join(e.path, ".tea_agent_run") : e.run_dir;
+        const std::string file = path_join(path_join(run_dir, "sessions"), session_id + ".json");
+        if (path_exists(file) || path_exists(file + ".gz")) {
           copy = e;
           found = true;
           break;
@@ -4110,6 +4158,63 @@ void ApiServer::Impl::install_routes() {
             send_json(res, j);
           });
 
+  // ---- history cleaner --------------------------------------------------
+  // POST /api/workspaces/{id}/gc
+  //   {}                          -> the limits from the settings
+  //   {"dry_run": true}           -> only report what would happen
+  //   {"max_age_days": 30, ...}   -> override the limits for this call
+  svr.Post(R"(/api/workspaces/([^/]+)/gc)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             const Settings& s = ws.settings();
+             HistoryGcLimits limits;
+             limits.max_age_days = s.history_max_age_days;
+             limits.max_bytes = s.history_max_bytes;
+             limits.compress_after_days = s.history_compress_after_days;
+             limits.keep_recent = s.history_keep_recent;
+             if (!trim(req.body).empty()) {
+               nlohmann::json body;
+               if (!parse_json_body(req, &body, res)) return;
+               if (body.contains("dry_run") && body["dry_run"].is_boolean())
+                 limits.dry_run = body["dry_run"].get<bool>();
+               if (body.contains("max_age_days") && body["max_age_days"].is_number_integer())
+                 limits.max_age_days = body["max_age_days"].get<int>();
+               if (body.contains("max_bytes") && body["max_bytes"].is_number_integer())
+                 limits.max_bytes = body["max_bytes"].get<int64_t>();
+               if (body.contains("compress_after_days") &&
+                   body["compress_after_days"].is_number_integer())
+                 limits.compress_after_days = body["compress_after_days"].get<int>();
+               if (body.contains("keep_recent") && body["keep_recent"].is_number_integer())
+                 limits.keep_recent = body["keep_recent"].get<int>();
+             }
+             HistoryGcReport report;
+             if (!ws.gc_history(limits, &report, &err)) {
+               send_error(res, 500, "gc_failed", err);
+               return;
+             }
+             nlohmann::json j = report.to_json();
+             // Where the bytes are: the history is what the cleaner can move,
+             // the rest is the workspace's own business.
+             const int64_t session_bytes = tree_size(ws.sessions_dir());
+             const int64_t trajectory_bytes = tree_size(path_join(ws.run_dir(), "trajectories"));
+             nlohmann::json usage = nlohmann::json::object();
+             usage["sessions_bytes"] = session_bytes;
+             usage["trajectories_bytes"] = trajectory_bytes;
+             usage["run_dir_bytes"] = report.bytes_before;
+             usage["other_bytes"] = report.bytes_before - session_bytes - trajectory_bytes;
+             j["usage"] = usage;
+             j["limits"] = {{"max_age_days", limits.max_age_days},
+                            {"max_bytes", limits.max_bytes},
+                            {"compress_after_days", limits.compress_after_days},
+                            {"keep_recent", limits.keep_recent}};
+             send_json(res, j);
+           });
+
   svr.Post(R"(/api/workspaces/([^/]+)/sessions)",
            [this](const httplib::Request& req, httplib::Response& res) {
              nlohmann::json body;
@@ -4540,7 +4645,8 @@ void ApiServer::Impl::install_routes() {
               return;
             }
             const std::string path = trajectory_file_path(ws.run_dir(), session_id);
-            if (!path_is_file(path)) {
+            // The cleaner may have compressed a cold trajectory.
+            if (!path_is_file(path) && !path_is_file(path + ".gz")) {
               send_error(res, 404, "not_found",
                          "no trajectory recorded for session " + session_id);
               return;
@@ -4548,7 +4654,7 @@ void ApiServer::Impl::install_routes() {
             if (req.has_param("format") &&
                 to_lower(req.get_param_value("format")) == "jsonl") {
               std::string bytes;
-              if (!read_file(path, &bytes, kTrajectoryReadLimit)) {
+              if (!read_file_maybe_gzip(path, &bytes, nullptr, kTrajectoryReadLimit)) {
                 send_error(res, 400, "read_failed", "cannot read " + path);
                 return;
               }
@@ -5299,8 +5405,8 @@ void ApiServer::Impl::install_routes() {
       idem.save_turn(turn->turn_id);
     }
 
-    turn->worker = std::thread([turn, cfg, reg, message, images, provider, model, system_prompt,
-                             allowed_tools, task_id, task_context, allow_paths,
+    turn->worker = std::thread([this, turn, cfg, reg, message, images, provider, model,
+                             system_prompt, allowed_tools, task_id, task_context, allow_paths,
                              exec_policy, knob_overrides, request_budget]() {
       Agent agent(cfg, reg);
       TurnOptions options;
@@ -5332,6 +5438,9 @@ void ApiServer::Impl::install_routes() {
         event["message"] = std::string("agent crashed: ") + e.what();
         turn->emit_event(event);
       }
+      // The turn is over: the history it left behind is what the cleaner
+      // gets to look at.
+      maybe_gc_history(turn->workspace);
       // run_turn drains the queue when it finishes, but a prompt can still land
       // in the microseconds between that drain and the worker stopping. Refuse
       // new ones first, then the drain below is final. Anything left is handed

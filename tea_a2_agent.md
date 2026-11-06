@@ -1936,3 +1936,55 @@ tea_agent.buildinfo
 
 `__pycache__` 与 `*.pyc` 仍然不进包（脚本打完会清）。
 包大了约 300 KB（压缩后）——sched/ 去掉 pycache 是 788 KB，scripts/ 是 172 KB。
+
+---
+
+## 历史留存：GC + 冷数据 gzip（2026-11-06）
+
+**问题**：轨迹（`trajectories/<sid>.jsonl`）本来就有上限（`trajectory_max_turns` /
+`trajectory_max_bytes`，按**单个文件**算），但整个工作区的历史只增不减。实测本机：
+
+| 目录 | 大小 |
+|---|---|
+| `sessions/`（会话记录） | 164 MB |
+| `trajectories/`（轨迹） | 96 MB |
+| `logs/` | 37 MB |
+| `artifacts/` | 36 MB |
+
+**会话记录比轨迹还大，而且一个上限都没有**（一场长对话 1800 条消息 = 4.4 MB）。
+另外删会话时轨迹文件**留在盘上**（孤儿）。
+
+**做法**（`src/history_gc.h`、`src/workspace.cpp` 的 `Workspace::gc_history`）：
+
+1. **太旧的删**：`history_max_age_days`（按文件 mtime，会话在用就会刷新 mtime）；
+2. **冷数据压**：`history_compress_after_days` → `foo.json` 变成 `foo.json.gz`
+   （**真的 gzip**，`gunzip` 能读；miniz 出 deflate，自己包 RFC1952 头尾 + crc32）；
+3. **超预算删最旧**：`history_max_bytes`（run_dir 总量，含日志/产物/索引——不是历史的部分
+   删不动，所以超了会在 `notes` 里说清楚）；
+4. `history_keep_recent`（默认 5）保护最新 N 个会话——**只对预算删生效**，年龄删不保
+   （年龄是显式指令；在用的会话 mtime 是新的，删不到）。
+
+**读路径透明解压**：`read_file_maybe_gzip()`（`src/gzip.cpp`）——路径不存在时自动找
+`path + ".gz"`。所以被压过的会话照旧能打开、能搜（`load_session` /
+`read_json_file_maybe_gzip` / `load_trajectories` / `find_session_workspace` 都走这条）。
+会话一旦变热（`save_session` / `save_todos`）就写回 plain 并删掉 `.gz`。
+
+**入口**：
+
+- `POST /api/workspaces/{id}/gc`（body 可覆盖上限，`{"dry_run":true}` 只报告）；
+- 每轮跑完自动清一次（同一工作区 10 分钟一次；没设任何上限就**不扫盘**）；
+- `tea_agent --gc [--gc-dry-run] [--max-age-days N] [--max-bytes N]
+  [--compress-after-days N] [--keep-recent N]`——**服务没开也能清**（设备上「磁盘满了」
+  不是启动服务的时刻）。
+
+**坑**：
+
+- `read_file_maybe_gzip(path, out, err, max_bytes)` 的第 3 个参数是 **err** 不是上限，
+  传错会编译不过（编译器会拦住，但别浪费一轮编译）。
+- `Workspace::open()` 会把 `<run_dir>/settings.yaml` 叠在机器设置上，所以**每个工作区
+  可以有自己的一套留存上限**（`history_*` 四个键）。
+- `delete_session()` 现在连带删 `trajectories/<sid>.jsonl`（和 `.gz`）——不然删了会话，
+  搜索还能搜到它的轨迹。
+- `find_session_workspace()` 之前只看 `e.path + "/.tea_agent_run"`（忽略了 `run_dir` 兜底
+  路径）和 plain 文件；两处都修了。
+- 测试：`tests/smoke_gc.py`（29 项）。
