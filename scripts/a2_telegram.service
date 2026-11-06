@@ -23,7 +23,15 @@ ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
 #      把它写进下面 ExecStart 的 --allow-chat <id>。
 #      （不给 --allow-chat 的话 bot 谁都不理——Telegram bot 是公开的，
 #        谁找到它都能发消息，所以默认只回答名单上的人。）
-ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/telegram_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283
+#
+# --triggers：消息先过队列的触发器入口（POST /api/triggers）。两条好处：
+#   * 受理的触发器带一条「线索」（thread），**下一个任务知道之前发生过什么**
+#     （prompt 里多一段「这条线索之前的事」）；
+#   * 规则先行：~/.tea_agent/triggers.conf 里 [telegram] 段写了 require 就不用
+#     为每条消息问一遍模型（既省钱又不会判错）。
+# 没有规则文件的话，每条消息都会问模型一次「这是不是活儿」——用
+# scripts/install-units.sh 装的话，它会把 sched/triggers.template 抄过去。
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/telegram_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283 --triggers
 WorkingDirectory=%h/work/git/tea_a2
 Environment=HOME=%h
 Environment=LANG=zh_CN.UTF-8

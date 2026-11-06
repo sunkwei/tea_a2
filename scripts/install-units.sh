@@ -35,6 +35,18 @@ if [ -f "scripts/a2_fleet_collect.timer" ]; then
     echo "wrote $out"
 fi
 
+# The trigger rules: the chat front ends go through the trigger entry (the
+# units carry --triggers), and without a rules file every message would ask
+# the model once whether it is work. The template already holds the chat
+# sections (all accepted). An existing file is the operator's own - never
+# touched.
+rules="$HOME/.tea_agent/triggers.conf"
+if [ ! -f "$rules" ]; then
+    mkdir -p "$HOME/.tea_agent"
+    cp "$repo/sched/triggers.template" "$rules"
+    echo "wrote $rules (from the template)"
+fi
+
 systemctl --user daemon-reload
 echo ""
 echo "now: systemctl --user enable --now a2 a2_task a2_wechat a2_telegram a2_watchdog a2_router"

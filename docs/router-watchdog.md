@@ -154,12 +154,29 @@ ignore  = 订阅, newsletter
 
 ### 渠道要不要走这个门
 
-聊天前端**默认不走**（白名单里的人跟 bot 说话通常就是有活儿干，问一遍模型既花钱又可能
-判错）。要走的加 `--triggers`：
+聊天前端**代码层面默认不走**（白名单里的人跟 bot 说话通常就是有活儿干，问一遍模型既花钱又可能
+判错）。要走就加 `--triggers`：
 
 ```bash
 python3 sched/wechat_bot.py --triggers      # 消息先过触发器入口
 ```
+
+**装出来的两个单元已经带了 `--triggers`**（`scripts/a2_telegram.service`、
+`scripts/a2_wechat.service`）——为的是线索：受理的触发器带一条「线索」（thread），
+下一个任务就知道之前发生过什么（prompt 里多一段「这条线索之前的事」）。
+代价是每条消息都要过一遍判断，所以**规则要先写好**：
+
+```ini
+# ~/.tea_agent/triggers.conf
+[telegram]
+require = /.*/      # 这个来源的每一条都受理，不问模型
+[wechat]
+require = /.*/
+```
+
+`/.*/` 是正则（匹配一切）；写成 `.*` 是找字面量「.*」，几乎永远不命中——那种情况下
+每条消息都得问模型一次。`scripts/install-units.sh` 会在没有规则文件时把
+`sched/triggers.template` 抄到 `~/.tea_agent/triggers.conf`（**已有的不覆盖**）。
 
 邮件看门狗（`sched/mail_watch.py`）**没有改**：它有自己的一套判读（更专业：分广告/账单/私人，
 还要起草回复），再套一层通用判断就是花两次钱、可能得出两个结论。
