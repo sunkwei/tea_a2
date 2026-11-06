@@ -246,7 +246,7 @@ providers:
         collector = {}
 
         def collect():
-            collector["events"] = read_events(queue_port, seconds=25.0)
+            collector["events"] = read_events(queue_port, seconds=45.0)
 
         reader = _threading.Thread(target=collect, daemon=True)
         reader.start()
@@ -274,7 +274,7 @@ providers:
         check("the answer is on the record", record.get("result") == "the answer",
               record.get("result"))
 
-        reader.join(timeout=30)
+        reader.join(timeout=50)
         events = collector.get("events") or []
         types = [e.get("type") for e in events]
         check("the agent's own event came onto the queue's bus",

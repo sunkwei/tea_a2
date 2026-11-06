@@ -20,6 +20,24 @@ from .errors import ApiError
 DEFAULT_QUEUE_BASE = "http://127.0.0.1:8283"
 
 
+def _version_at_least(version, want):
+    """Is this version at least that one? ("0.21.0" vs (0, 21, 0))"""
+    try:
+        parts = []
+        for piece in str(version or "").split(".")[:3]:
+            digits = ""
+            for ch in piece:
+                if not ch.isdigit():
+                    break
+                digits += ch
+            parts.append(int(digits or 0))
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts) >= tuple(want)
+    except (TypeError, ValueError):
+        return False
+
+
 class Queue:
     """The task queue's API: the task records and the event stream."""
 
@@ -76,13 +94,53 @@ class Queue:
         return urllib.parse.urlencode(clean)
 
     # ---- the queue --------------------------------------------------------
+    def _tasks_prefix(self):
+        """The path of the task routes.
+
+        "/v1/agent-tasks" when the queue knows it (0.21.0 and later),
+        "/api/tasks" when it does not. A newer client has to work against an
+        older queue, so the question is asked **once** and the answer is
+        remembered.
+        """
+        prefix = getattr(self, "_prefix", "")
+        if prefix:
+            return prefix
+        prefix = "/api/tasks"
+        try:
+            health = self.health()
+            if _version_at_least(health.get("version"), (0, 21, 0)):
+                prefix = "/v1/agent-tasks"
+        except Exception:
+            pass
+        self._prefix = prefix
+        return prefix
+
     def health(self):
         """The queue's own state and the agent's health behind it."""
         return self._request("GET", "/api/health", timeout=10)
 
-    def project_key(self, workspace_id):
+    def _projects_prefix(self):
+        """The path of the project routes (the version segment again)."""
+        prefix = getattr(self, "_projects", "")
+        if prefix:
+            return prefix
+        prefix = "/api/projects"
+        try:
+            health = self.health()
+            if _version_at_least(health.get("version"), (0, 21, 0)):
+                prefix = "/v1/projects"
+        except Exception:
+            pass
+        self._projects = prefix
+        return prefix
+
+    def project_key(self, workspace_id, tenant_id="", identity=""):
         """The key of one project. Only the local operator may ask for one."""
-        answer = self._request("POST", "/api/projects", {"workspace_id": workspace_id})
+        answer = self._request("POST", self._projects_prefix(), {
+            "workspace_id": workspace_id,
+            "tenant_id": tenant_id,
+            "identity": identity,
+        })
         key = str(answer.get("key") or "")
         if key:
             self.key = key
@@ -92,7 +150,7 @@ class Queue:
         """The task list (and the counts per status)."""
         query = self._query(workspace_id=workspace_id, status=status,
                             page=page, page_size=page_size)
-        return self._request("GET", "/api/tasks?" + query)
+        return self._request("GET", self._tasks_prefix() + "?" + query)
 
     def list(self, workspace_id=None, status=None):
         """The task list (the name the chat front ends use)."""
@@ -102,7 +160,7 @@ class Queue:
         """One task. `full=True` brings the events and the history with it."""
         query = self._query(workspace_id=workspace_id,
                              include="full" if full else None)
-        return self._request("GET", "/api/tasks/%s?%s" % (urllib.parse.quote(task_id), query))
+        return self._request("GET", self._tasks_prefix() + "/%s?%s" % (urllib.parse.quote(task_id), query))
 
     def get(self, task_id, workspace_id=None):
         """One task (the name the chat front ends use)."""
@@ -145,7 +203,7 @@ class Queue:
         # The same key means the same task: a retried submission must not queue
         # the work twice.
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        return self._request("POST", "/api/tasks", body, headers=headers)
+        return self._request("POST", self._tasks_prefix(), body, headers=headers)
 
     def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
                meta=None, key="", not_before="", model="", priority=0, extra=None,
@@ -186,12 +244,12 @@ class Queue:
         body = {}
         if provider:
             body["provider"] = provider
-        return self._request("POST", "/api/tasks/%s/start?%s"
+        return self._request("POST", self._tasks_prefix() + "/%s/start?%s"
                              % (urllib.parse.quote(task_id), query), body)
 
     def cancel_task(self, task_id, workspace_id=None):
         query = self._query(workspace_id=workspace_id)
-        return self._request("POST", "/api/tasks/%s/cancel?%s"
+        return self._request("POST", self._tasks_prefix() + "/%s/cancel?%s"
                              % (urllib.parse.quote(task_id), query), {})
 
     def confirm_task(self, task_id, message, workspace_id=None):
@@ -201,13 +259,13 @@ class Queue:
         the line and carries the answer with it.
         """
         query = self._query(workspace_id=workspace_id)
-        return self._request("POST", "/api/tasks/%s/confirm?%s"
+        return self._request("POST", self._tasks_prefix() + "/%s/confirm?%s"
                              % (urllib.parse.quote(task_id), query), {"message": message})
 
     def retry_task(self, task_id, workspace_id=None):
         """Try a failed task again: the same task, one attempt further."""
         query = self._query(workspace_id=workspace_id)
-        return self._request("POST", "/api/tasks/%s/retry?%s"
+        return self._request("POST", self._tasks_prefix() + "/%s/retry?%s"
                              % (urllib.parse.quote(task_id), query), {})
 
     def retry(self, task_id, workspace_id=None):
@@ -217,7 +275,7 @@ class Queue:
     def delete_task(self, task_id, workspace_id=None):
         """Forget a task (a running one is stopped first)."""
         query = self._query(workspace_id=workspace_id)
-        return self._request("DELETE", "/api/tasks/%s?%s"
+        return self._request("DELETE", self._tasks_prefix() + "/%s?%s"
                              % (urllib.parse.quote(task_id), query))
 
     def delete(self, task_id, workspace_id=None):
@@ -227,13 +285,13 @@ class Queue:
     def action(self, task_id, action, body=None, workspace_id=None):
         """One of the task's actions (retry, fail, confirm, ...)."""
         query = self._query(workspace_id=workspace_id)
-        return self._request("POST", "/api/tasks/%s/%s?%s"
+        return self._request("POST", self._tasks_prefix() + "/%s/%s?%s"
                              % (urllib.parse.quote(task_id), action, query), body or {})
 
     def task_events(self, task_id, since_event_id=0, workspace_id=None):
         """What happened to one task - the log survives a restart."""
         query = self._query(workspace_id=workspace_id, since_event_id=since_event_id)
-        return self._request("GET", "/api/tasks/%s/events?%s"
+        return self._request("GET", self._tasks_prefix() + "/%s/events?%s"
                              % (urllib.parse.quote(task_id), query))
 
     def audit(self, task_id=None, limit=200):

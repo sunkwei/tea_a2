@@ -380,21 +380,21 @@ function card(t) {
     };
     acts.appendChild(b);
   }
-  if (t.status === 'queued') act('开始', '/api/tasks/' + t.id + '/start');
-  if (t.status === 'running') act('取消', '/api/tasks/' + t.id + '/cancel');
+  if (t.status === 'queued') act('开始', '/v1/agent-tasks/' + t.id + '/start');
+  if (t.status === 'running') act('取消', '/v1/agent-tasks/' + t.id + '/cancel');
   if (t.status === 'waiting_confirmation') {
     var ans = el('button', '', '回答…');
     ans.onclick = function () {
       var msg = window.prompt('要回答什么？', '');
       if (!msg) return;
-      act('', '/api/tasks/' + t.id + '/confirm', { message: msg });
+      act('', '/v1/agent-tasks/' + t.id + '/confirm', { message: msg });
     };
     acts.appendChild(ans);
   }
   var del = el('button', 'danger', '删除');
   del.onclick = function () {
     if (!window.confirm('删除任务 ' + t.id + '？')) return;
-    fetch('/api/tasks/' + t.id + '?workspace_id=' + encodeURIComponent(t.workspace_id || ''),
+    fetch('/v1/agent-tasks/' + t.id + '?workspace_id=' + encodeURIComponent(t.workspace_id || ''),
           { method: 'DELETE' }).then(refresh);
   };
   acts.appendChild(del);
@@ -562,7 +562,7 @@ function createTask() {
     say('先写一句要做的事。', false);
     return;
   }
-  fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  fetch('/v1/agent-tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(body) })
     .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: unwrap(d) }; }); })
     .then(function (res) {
@@ -592,7 +592,7 @@ function createTask() {
 }
 
 function refresh() {
-  return fetch('/api/tasks').then(function (r) { return r.json(); }).then(function (d) {
+  return fetch('/v1/agent-tasks').then(function (r) { return r.json(); }).then(function (d) {
     state.tasks = unwrap(d).tasks || [];
     state.at = Date.now();
     render();

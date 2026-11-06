@@ -33,6 +33,7 @@ install is not an option.
 import argparse
 import base64
 import calendar
+import hashlib
 import json
 import os
 import re
@@ -115,6 +116,10 @@ AGGREGATE_SYSTEM = (
     "步骤之间有矛盾就指出来；缺什么就说明缺什么。只输出汇总本身，"
     "不要解释，不要 markdown 代码块。")
 
+# Which queue this is. The client asks before it speaks (see the
+# client's _tasks_prefix): the version segment arrived in 0.21.0.
+QUEUE_VERSION = "0.21.0"
+
 QUEUED = "queued"
 RUNNING = "running"
 WAITING = "waiting_confirmation"
@@ -167,6 +172,11 @@ def read_task_model_from_file(path):
     except OSError:
         return "", ""
     return "", ""
+
+
+def iso_from_epoch(epoch):
+    """An ISO-8601 UTC stamp from epoch seconds."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(epoch)))
 
 
 def parse_iso(text):
@@ -426,12 +436,29 @@ Agent = Client
 AgentError = ApiError
 
 
+def artifact_id(path):
+    """A stable id for a file the work produced.
+
+    The path may change its name later; the id does not (it is the hash of
+    the path), so a download link stays valid as long as the file does.
+    """
+    return "art_" + hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:12]
+
+
 def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
              not_before_text="", key="", meta=None, model_params=None,
              limits=None, policy=None):
     """A task record, from the fields a task order (or the API) carries."""
     return {
         "id": "t_" + os.urandom(6).hex(),
+        # The trace id follows the task through its whole life: it is in the
+        # events, in the audit log and in the answers, so one string ties
+        # everything about this task together.
+        "trace_id": "tr_" + os.urandom(8).hex(),
+        # The tenant this task belongs to and who submitted it. Empty when
+        # the submitter is the local operator (no key).
+        "tenant_id": "",
+        "identity": "",
         "workspace_id": workspace_id,
         "prompt": str(body.get("prompt") or "").strip(),
         "title": str(body.get("title") or "").strip(),
@@ -447,6 +474,9 @@ def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
         "limits": dict(limits or {}),
         "policy": dict(policy or {}),
         "session_id": "",
+        # The checkpoint of this task: the turn it runs in, the session and the
+        # trajectory. It is what a restarted queue picks the work up from.
+        "checkpoint": {},
         "status": QUEUED,
         "progress": 0,
         "note": "",
@@ -705,37 +735,101 @@ class Store:
             pass
         return out[-limit:]
 
+    # ---- the export jobs --------------------------------------------------
+    def _exports_dir(self):
+        return os.path.join(self.root, "exports")
+
+    def save_export(self, job):
+        """Remember an export job (it may outlive the process)."""
+        with self.lock:
+            try:
+                os.makedirs(self._exports_dir(), exist_ok=True)
+                path = os.path.join(self._exports_dir(), str(job.get("id") or "") + ".json")
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(job, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+            except OSError:
+                pass
+
+    def load_export(self, job_id):
+        """An export job (None when there is none)."""
+        if not job_id or "/" in job_id or "\\" in job_id or job_id.startswith("."):
+            return None
+        try:
+            with open(os.path.join(self._exports_dir(), job_id + ".json"),
+                      encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def export_file(self, job_id):
+        """Where the bytes of an export job are."""
+        return os.path.join(self._exports_dir(), str(job_id) + ".bin")
+
     # ---- the projects and their keys -------------------------------------
     def _projects_path(self):
         return os.path.join(self.root, "projects.json")
 
-    def project_key(self, workspace_id):
-        """The key of a project (a workspace). It is minted on first use.
+    def project_key(self, workspace_id, tenant_id="", identity=""):
+        """The key of a project (a workspace) for a tenant. It is minted on
+        first use.
 
         The key is the credential: a caller that presents it may work on that
         project - its tasks, its events, its files. A key of another project
         gets nothing (403). Without a key the caller is the local operator,
         which is what the web page on the same machine is.
+
+        A project may have **several** keys: one per tenant (and per person
+        inside that tenant). The key says **who** is asking; the tenant says
+        **whose** work it is. The same key for the same tenant and the same
+        person is handed out again - a caller that lost its key asks the
+        operator, it does not mint a new one every time.
         """
         if not workspace_id:
             return ""
+        tenant_id = str(tenant_id or "").strip()
+        identity = str(identity or "").strip()
         with self.lock:
             projects = self._read_projects()
-            entry = projects.get(workspace_id)
-            if not entry:
-                entry = {"key": base64.b32encode(os.urandom(20)).decode().strip("=")}
-                projects[workspace_id] = entry
-                self._write_projects(projects)
-            return entry.get("key") or ""
+            entry = projects.setdefault(workspace_id, {"keys": []})
+            for one in entry.get("keys") or []:
+                if (one.get("tenant_id") or "") == tenant_id and \
+                        (one.get("identity") or "") == identity:
+                    return one.get("key") or ""
+            key = base64.b32encode(os.urandom(20)).decode().strip("=")
+            entry.setdefault("keys", []).append({
+                "key": key,
+                "tenant_id": tenant_id,
+                "identity": identity,
+                "created_at": now_iso(),
+            })
+            self._write_projects(projects)
+            return key
 
     def project_of_key(self, key):
         """The project a key belongs to ("" when the key is unknown)."""
+        return self._key_entry(key, "workspace_id")
+
+    def tenant_of_key(self, key):
+        """The tenant a key belongs to ("" when the key has none)."""
+        return self._key_entry(key, "tenant_id")
+
+    def identity_of_key(self, key):
+        """Who is asking with this key ("" when the key says nothing)."""
+        return self._key_entry(key, "identity")
+
+    def _key_entry(self, key, field):
         if not key:
             return ""
         with self.lock:
             for workspace_id, entry in self._read_projects().items():
-                if entry.get("key") == key:
-                    return workspace_id
+                for one in entry.get("keys") or []:
+                    if one.get("key") != key:
+                        continue
+                    if field == "workspace_id":
+                        return workspace_id
+                    return str(one.get(field) or "")
         return ""
 
     def projects(self):
@@ -747,10 +841,29 @@ class Store:
             with open(self._projects_path(), encoding="utf-8") as f:
                 loaded = json.load(f)
             if isinstance(loaded, dict):
-                return loaded
+                return dict((workspace_id, self._normalize_project(entry))
+                            for workspace_id, entry in loaded.items())
         except (OSError, ValueError):
             pass
         return {}
+
+    @staticmethod
+    def _normalize_project(entry):
+        """A project entry, whatever shape it was written in.
+
+        The old shape was one key per project; a project may now have several
+        keys (one per tenant). An old file is read as one key without a
+        tenant - nobody loses a key by upgrading.
+        """
+        if not isinstance(entry, dict):
+            return {"keys": []}
+        keys = entry.get("keys")
+        if isinstance(keys, list):
+            return {"keys": [k for k in keys if isinstance(k, dict) and k.get("key")]}
+        key = entry.get("key")
+        if key:
+            return {"keys": [{"key": key, "tenant_id": "", "identity": ""}]}
+        return {"keys": []}
 
     def _write_projects(self, projects):
         try:
@@ -1203,6 +1316,14 @@ class Engine:
         if state.get("paused"):
             log("the queue is paused: %s" % (state.get("reason") or "no reason given"))
             return 0
+        # The questions nobody answered in time, and the records that are too
+        # old to keep. Both are housekeeping, both are cheap.
+        self.expire_interactions()
+        now = time.time()
+        cleanup_every = float(getattr(self.args, "cleanup_interval", 3600) or 3600)
+        if now - getattr(self, "_last_cleanup", 0.0) > cleanup_every:
+            self._last_cleanup = now
+            self.cleanup_old()
         provider = self.effective_provider()
         queued = self.store.list(status=QUEUED)
         if not queued:
@@ -1347,6 +1468,26 @@ class Engine:
                         {"answer": "", "report": {"needs_confirmation": False,
                                                   "question": ""}, "progress": 0})
                     continue
+            # The turn is gone. Is the **session** still there? Then the work
+            # can go on from there: the conversation is the checkpoint, and a
+            # new turn in the same session continues it. That is what
+            # "resume from the checkpoint" can mean here - the agent cannot
+            # store a half-finished loop, but it can remember the session.
+            checkpoint = task.get("checkpoint") or {}
+            session_id = str(task.get("session_id") or checkpoint.get("session_id") or "")
+            if session_id and checkpoint.get("turn_id"):
+                self.store.update(workspace_id, task_id, lambda t: t.update({
+                    "status": QUEUED,
+                    "finished_at": "",
+                    "error": "",
+                    "needs_confirmation": False,
+                    "question": "",
+                    "pending_message": "继续上一个任务：%s" % (t.get("prompt") or ""),
+                    "note": "resumed from the checkpoint",
+                }))
+                log("  task %s: the turn is gone but the session is - "
+                    "the task goes back into the queue" % task_id)
+                continue
             self.store.update(workspace_id, task_id, lambda t: t.update({
                 "status": FAILED,
                 "finished_at": now_iso(),
@@ -1397,6 +1538,60 @@ class Engine:
         thread = threading.Thread(target=work, daemon=True)
         self.running[task_id] = {"thread": thread, "workspace_id": workspace_id}
         thread.start()
+
+    def expire_interactions(self):
+        """The questions nobody answered in time.
+
+        A task that waits for a person waits with a deadline: after it, the
+        task fails (nobody is going to do that work) and the record says why.
+        """
+        timeout = float(getattr(self.args, "interaction_timeout", 0) or 0)
+        if timeout <= 0:
+            return []
+        expired = []
+        for task in self.store.list(status=WAITING):
+            interaction = task.get("interaction") or {}
+            expires = parse_iso(interaction.get("expires_at") or "")
+            if not expires or expires > time.time():
+                continue
+            workspace_id = task.get("workspace_id") or ""
+            task_id = task.get("id") or ""
+            written = self._finalize(workspace_id, task_id, FAILED, {
+                "error": "nobody answered the question in time (%.0f s)" % timeout,
+                "stop_reason": "interaction_timeout",
+                "finished_at": now_iso(),
+                "note": "the question timed out",
+            })
+            if written is not None:
+                self._publish({"type": "task_failed", "task": written})
+                expired.append(task_id)
+                log("  task %s: nobody answered in time - failed" % task_id)
+        return expired
+
+    def cleanup_old(self, days=None):
+        """The task records that are older than the retention time.
+
+        A queue that runs for months fills up with finished tasks. The
+        retention time says how long they are kept; 0 = keep everything.
+        """
+        keep_days = float(days if days is not None
+                          else (getattr(self.args, "retention_days", 0) or 0))
+        if keep_days <= 0:
+            return []
+        cutoff = time.time() - keep_days * 86400.0
+        removed = []
+        for task in self.store.list():
+            if task.get("status") == RUNNING:
+                continue
+            created = parse_iso(task.get("created_at") or "")
+            if created is None or created > cutoff:
+                continue
+            task_id = task.get("id") or ""
+            if self.store.delete(task.get("workspace_id") or "", task_id):
+                removed.append(task_id)
+        if removed:
+            log("  %d old task(s) removed (retention: %.0f days)" % (len(removed), keep_days))
+        return removed
 
     def _publish(self, event):
         """Publish an event, with the thread it belongs to attached."""
@@ -2052,9 +2247,17 @@ class Engine:
                 return
             turn_id = str(handle.get("turn_id") or "")
             session_id = str(handle.get("session_id") or session_id)
+            # The checkpoint: where this task is. A queue that comes back
+            # after a crash reads it and picks the work up from there.
             self.store.update(workspace_id, task_id, lambda t: t.update({
                 "turn_id": turn_id,
                 "session_id": session_id,
+                "checkpoint": {
+                    "turn_id": turn_id,
+                    "session_id": session_id,
+                    "trajectory_id": "",
+                    "at": now_iso(),
+                },
             }))
             if not turn_id:
                 # The agent answered without a handle. The turn may be running
@@ -2145,6 +2348,11 @@ class Engine:
             # finished task.
             items = event.get("items") or []
             if items:
+                # Every file gets an id of its own: the download link names
+                # the file, not its path (a path may be renamed later).
+                for one in items:
+                    if isinstance(one, dict):
+                        one["artifact_id"] = artifact_id(one.get("path") or "")
                 self.store.update(workspace_id, task_id,
                                   lambda t: t.update({"artifacts": items}))
         elif kind == "content_delta":
@@ -2172,6 +2380,11 @@ class Engine:
                 t["usage"] = usage
                 t["iterations"] = int(event.get("iterations") or 0)
                 t["trajectory_id"] = str(event.get("trajectory_id") or "")
+                # The checkpoint points at the audit trail of this turn.
+                checkpoint = t.get("checkpoint")
+                if isinstance(checkpoint, dict):
+                    checkpoint["trajectory_id"] = t["trajectory_id"]
+                    checkpoint["at"] = now_iso()
                 if stop_reason == "budget":
                     # 到点了，不是做完了：说清楚是哪一条预算。
                     t["note"] = "预算用完了（%s）" % (budget_used.get("limit") or "budget")
@@ -2285,6 +2498,17 @@ class Engine:
             if needs:
                 t["needs_confirmation"] = True
                 t["question"] = question
+                # The question gets an id and a deadline of its own: the
+                # caller answers *that* question, and the queue knows when it
+                # has waited long enough.
+                timeout = float(getattr(self.args, "interaction_timeout", 0) or 0)
+                t["interaction"] = {
+                    "interaction_id": "in_" + os.urandom(8).hex(),
+                    "question": question,
+                    "created_at": now_iso(),
+                    "expires_at": (iso_from_epoch(time.time() + timeout)
+                                    if timeout > 0 else ""),
+                }
 
         self.store.update(workspace_id, task_id, apply)
         fresh = self.store.load(workspace_id, task_id)
@@ -2326,9 +2550,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def _request_id(self):
         """The id of this request. It goes into the envelope and the header, so
-        a user can quote it and the log can be found."""
+        a user can quote it and the log can be found.
+
+        The caller's own id is echoed when it sends one: a system further up
+        (a proxy, a gateway, a queue of its own) can then follow one string
+        through the whole chain. An id that is not a plain token is replaced -
+        it ends up in a header and in a log line.
+        """
         if not getattr(self, "_rid", ""):
-            self._rid = "req_" + base64.b32encode(os.urandom(5)).decode().strip("=").lower()
+            given = (self.headers.get("X-Request-Id") or "").strip()
+            if given and len(given) <= 128 and all(
+                    ch.isalnum() or ch in "-_.:@" for ch in given):
+                self._rid = given
+            else:
+                self._rid = "req_" + base64.b32encode(os.urandom(5)).decode().strip("=").lower()
         return self._rid
 
     def _envelope(self, code, message, data):
@@ -2347,7 +2582,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _error(self, status, code, message):
+    def _error(self, status, code, message, retry_after=0):
         """An error is the same envelope with a number instead of a zero."""
         numeric = ERROR_CODES.get(code)
         if numeric is None:
@@ -2361,6 +2596,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Request-Id", self._request_id())
+        if retry_after > 0:
+            # "Come back later" has to say when.
+            self.send_header("Retry-After", str(int(retry_after)))
         self.end_headers()
         self.wfile.write(raw)
 
@@ -2403,11 +2641,21 @@ class Handler(BaseHTTPRequestHandler):
         No key at all = the local operator. A key that is not in the book =
         nobody: it must not pass for the operator, or a typo (or a guess)
         would turn into a master key that sees every project.
+
+        A caller that names a tenant must be **of** that tenant: the key says
+        whose work it may touch, and a mismatch is 403 - not a quiet success.
         """
         key = self._key()
         if key and not self.app.store.project_of_key(key):
             self._error(401, "unauthenticated", "this key belongs to no project")
             return False
+        tenant = (self.headers.get("X-Tenant-Id") or "").strip()
+        if tenant:
+            own = self.app.store.tenant_of_key(key)
+            if own and own != tenant:
+                self._error(403, "forbidden",
+                            "this key does not belong to the tenant %r" % tenant)
+                return False
         return True
 
     def _forbid(self, what):
@@ -2434,6 +2682,53 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.app
 
     # -- routes ---------------------------------------------------------
+    def _versioned(self, path):
+        """The old path for a versioned one (the requirement's /v1/...).
+
+        The requirement asks for /v1/agent-tasks; the queue has always been
+        /api/tasks. Both work: the version segment is added, nothing is
+        removed, and there is one set of handlers behind them.
+        """
+        if path == "/v1/agent-tasks":
+            return "/api/tasks"
+        if path.startswith("/v1/agent-tasks/"):
+            rest = path[len("/v1/agent-tasks/"):]
+            # The requirement's name for answering a question.
+            if rest.endswith("/interactions"):
+                rest = rest[:-len("/interactions")] + "/confirm"
+            return "/api/tasks/" + rest
+        if path == "/v1/projects":
+            return "/api/projects"
+        if path.startswith("/v1/queues/") and path.endswith("/status"):
+            return "/api/queue/state"
+        if path.startswith("/v1/exports/"):
+            return "/api/exports/" + path[len("/v1/exports/"):]
+        return path
+
+    def _rate_limit(self):
+        """One caller's allowance: N requests a minute (0 = no limit).
+
+        The limit is per key (the tenant's), not per machine: one busy
+        tenant must not lock the others out.
+        """
+        limit = int(getattr(self.app.args, "rate_limit_per_minute", 0) or 0)
+        if limit <= 0:
+            return True
+        key = self._key() or "local-operator"
+        now = time.time()
+        with self.app.rate_lock:
+            hits = [t for t in self.app.rate_hits.get(key, []) if now - t < 60.0]
+            if len(hits) >= limit:
+                self.app.rate_hits[key] = hits
+                wait = max(1, int(60.0 - (now - hits[0])))
+                self._error(429, "rate_limited",
+                            "too many requests: at most %d a minute" % limit,
+                            retry_after=wait)
+                return False
+            hits.append(now)
+            self.app.rate_hits[key] = hits
+        return True
+
     def do_OPTIONS(self):  # noqa: N802
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -2442,12 +2737,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):  # noqa: N802
-        path = urllib.parse.urlparse(self.path).path
+        path = self._versioned(urllib.parse.urlparse(self.path).path)
         if path in ("/", "/ui", "/index.html"):
             return self._page()
         if path == "/api/health":
             return self._health()
-        if not self._guard():
+        if not self._guard() or not self._rate_limit():
             return
         if path == "/api/tasks":
             return self._list()
@@ -2480,6 +2775,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._workspaces()
         if path == "/api/providers":
             return self._providers()
+        if path.startswith("/api/exports/"):
+            rest = path[len("/api/exports/"):]
+            if rest.endswith("/download"):
+                return self._export_download(rest[:-len("/download")])
+            return self._export_job(rest)
         if path.startswith("/api/tasks/"):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
@@ -2490,13 +2790,17 @@ class Handler(BaseHTTPRequestHandler):
                     return self._export(task_id)
                 if action == "download":
                     return self._download(task_id)
+                if action == "result":
+                    return self._result(task_id)
+                if action.startswith("artifacts/"):
+                    return self._artifact(task_id, action[len("artifacts/"):])
                 return self._error(404, "not_found", "no such action: %s" % action)
             return self._get(rest)
         return self._error(404, "not_found", "no such endpoint: %s" % path)
 
     def do_POST(self):  # noqa: N802
-        path = urllib.parse.urlparse(self.path).path
-        if not self._guard():
+        path = self._versioned(urllib.parse.urlparse(self.path).path)
+        if not self._guard() or not self._rate_limit():
             return
         if path == "/api/tasks":
             return self._create()
@@ -2522,13 +2826,15 @@ class Handler(BaseHTTPRequestHandler):
             rest = path[len("/api/tasks/"):]
             if "/" in rest:
                 task_id, action = rest.split("/", 1)
+                if action == "export":
+                    return self._export_start(task_id)
                 return self._action(task_id, action)
             return self._error(404, "not_found", "no such action")
         return self._error(404, "not_found", "no such endpoint: %s" % path)
 
     def do_DELETE(self):  # noqa: N802
-        path = urllib.parse.urlparse(self.path).path
-        if not self._guard():
+        path = self._versioned(urllib.parse.urlparse(self.path).path)
+        if not self._guard() or not self._rate_limit():
             return
         if path.startswith("/api/tasks/"):
             return self._delete(path.rsplit("/", 1)[-1])
@@ -2562,6 +2868,10 @@ class Handler(BaseHTTPRequestHandler):
         left, _ = self.app.engine.quota_left(provider)
         self._json(200, {
             "ok": True,
+            # Which queue this is. A client asks before it speaks: the
+            # version segment (/v1/agent-tasks) arrived in 0.21.0, and a
+            # newer client has to work against an older queue.
+            "version": QUEUE_VERSION,
             "agent": agent.base,
             "agent_ok": agent_ok,
             "agent_health": health,
@@ -2738,9 +3048,16 @@ class Handler(BaseHTTPRequestHandler):
         workspace_id = str(body.get("workspace_id") or "").strip()
         if not workspace_id:
             return self._error(400, "bad_request", "'workspace_id' is required")
-        key = self.app.store.project_key(workspace_id)
-        self.app.store.audit("project_key", "", {"workspace_id": workspace_id})
-        self._json(200, {"workspace_id": workspace_id, "key": key})
+        # The tenant this key belongs to and who is asking with it. A project
+        # may have several keys: one per tenant, one per person.
+        tenant_id = str(body.get("tenant_id") or "").strip()
+        identity = str(body.get("identity") or "").strip()
+        key = self.app.store.project_key(workspace_id, tenant_id, identity)
+        self.app.store.audit("project_key", "", {"workspace_id": workspace_id,
+                                                 "tenant_id": tenant_id,
+                                                 "identity": identity})
+        self._json(200, {"workspace_id": workspace_id, "key": key,
+                         "tenant_id": tenant_id, "identity": identity})
 
     def _task_events(self, task_id):
         """The task's event log, optionally only what came after the last one
@@ -2763,22 +3080,68 @@ class Handler(BaseHTTPRequestHandler):
         final answer, the conversation, the events, the files. The layout is
         the one the requirement suggests.
         """
+        fmt = (self._one("format") or "json").lower()
+        with_artifacts = self._one("include_artifacts").lower() not in ("0", "false", "no")
+        task = self._task_of(task_id)
+        if task is None:
+            return
+        if fmt == "zip":
+            body, manifest = self._export_bytes(task, fmt, with_artifacts)
+            if body is None:
+                return self._error(500, "export_failed", "the export could not be built")
+            self.app.store.audit("export", task_id, {"format": "zip", "bytes": len(body)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="task-%s.zip"' % task_id)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if fmt != "json":
+            return self._error(400, "bad_request", "format must be json or zip")
+        document = self._export_document(task, with_artifacts)
+        self.app.store.audit("export", task_id, {"format": "json"})
+        self._json(200, document)
+
+    def _export_bytes(self, task, fmt, with_artifacts):
+        """The export of a task as bytes (the zip). Returns (bytes, manifest)."""
         import io
         import zipfile
 
-        workspace_id = self._one("workspace_id")
-        task = self.app.store.load(workspace_id, task_id)
-        if task is None:
-            return self._error(404, "not_found", "no task %r" % task_id)
-        if not self._check_project(task):
-            return self._forbid("task %s" % task_id)
-        fmt = (self._one("format") or "json").lower()
-        with_artifacts = self._one("include_artifacts").lower() not in ("0", "false", "no")
-        session = self.app.agent.session(task.get("session_id") or "")
-        messages = session.get("messages") or []
+        task_id = task.get("id") or ""
         events = self.app.store.events(task_id)
         artifacts = task.get("artifacts") or []
-        manifest = {
+        manifest = self._manifest(task, artifacts)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            z.writestr("final_answer.md", (task.get("result") or "").encode("utf-8"))
+            z.writestr("error.json", json.dumps(
+                {"error": task.get("error") or ""}, ensure_ascii=False, indent=2))
+            z.writestr("conversation.jsonl", "".join(
+                json.dumps(m, ensure_ascii=False) + "\n" for m in
+                self._conversation(task)).encode("utf-8"))
+            z.writestr("events.jsonl", "".join(
+                json.dumps(e, ensure_ascii=False) + "\n" for e in events).encode("utf-8"))
+            if with_artifacts:
+                for art in artifacts:
+                    rel = str(art.get("path") or "")
+                    if not rel:
+                        continue
+                    data = self.app.agent.download(task.get("workspace_id") or "", rel)
+                    if not data:
+                        continue
+                    z.writestr("artifacts/" + rel.lstrip("/"), data)
+        return buf.getvalue(), manifest
+
+    def _conversation(self, task):
+        session = self.app.agent.session(task.get("session_id") or "")
+        return session.get("messages") or []
+
+    def _manifest(self, task, artifacts):
+        task_id = task.get("id") or ""
+        return {
             "task_id": task_id,
             "workspace_id": task.get("workspace_id") or "",
             "title": task.get("title") or "",
@@ -2793,43 +3156,210 @@ class Handler(BaseHTTPRequestHandler):
             "artifacts": artifacts,
             "exported_at": now_iso(),
         }
-        if fmt == "zip":
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-                z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-                z.writestr("final_answer.md", (task.get("result") or "").encode("utf-8"))
-                z.writestr("error.json", json.dumps(
-                    {"error": task.get("error") or ""}, ensure_ascii=False, indent=2))
-                z.writestr("conversation.jsonl", "".join(
-                    json.dumps(m, ensure_ascii=False) + "\n" for m in messages).encode("utf-8"))
-                z.writestr("events.jsonl", "".join(
-                    json.dumps(e, ensure_ascii=False) + "\n" for e in events).encode("utf-8"))
-                if with_artifacts:
-                    for art in artifacts:
-                        rel = str(art.get("path") or "")
-                        if not rel:
-                            continue
-                        data = self.app.agent.download(task.get("workspace_id") or "", rel)
-                        if not data:
-                            continue
-                        name = "artifacts/" + rel.lstrip("/")
-                        z.writestr(name, data)
-            body = buf.getvalue()
-            self.app.store.audit("export", task_id, {"format": "zip", "bytes": len(body)})
-            self.send_response(200)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Disposition",
-                             'attachment; filename="task-%s.zip"' % task_id)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+
+    def _export_document(self, task, with_artifacts):
+        """The export of a task as one document (the json form)."""
+        task_id = task.get("id") or ""
+        artifacts = task.get("artifacts") or []
+        return {
+            "manifest": self._manifest(task, artifacts),
+            "final_answer": task.get("result") or "",
+            "events": self.app.store.events(task_id),
+            "conversation": self._conversation(task),
+            "artifacts": artifacts,
+            "trace_id": task.get("trace_id") or "",
+        }
+
+
+    def _task_of(self, task_id):
+        """The task, if the caller may see it.
+
+        None when it may not: the answer has already been sent, so the caller
+        only has to stop.
+        """
+        workspace_id = self._one("workspace_id")
+        task = self.app.store.load(workspace_id, task_id)
+        if task is None:
+            self._error(404, "not_found", "no task %r" % task_id)
+            return None
+        if not self._check_project(task):
+            self._forbid("task %s" % task_id)
+            return None
+        return task
+
+    def _result(self, task_id):
+        """The result of a task: the answer, the usage and the files.
+
+        The requirement asks for a summary of the result and a list of the
+        artifacts (and their ids, so they can be downloaded one by one).
+        """
+        task = self._task_of(task_id)
+        if task is None:
             return
-        if fmt != "json":
+        artifacts = []
+        for art in task.get("artifacts") or []:
+            if not isinstance(art, dict):
+                continue
+            path = str(art.get("path") or "")
+            one = dict(art)
+            one["artifact_id"] = artifact_id(path)
+            one["download_url"] = "/v1/agent-tasks/%s/artifacts/%s" % (
+                task_id, one["artifact_id"])
+            artifacts.append(one)
+        self._json(200, {
+            "task_id": task_id,
+            "status": task.get("status") or "",
+            "result": task.get("result") or "",
+            "error": task.get("error") or "",
+            "stop_reason": task.get("stop_reason") or "",
+            "usage": task.get("usage") or {},
+            "iterations": task.get("iterations") or 0,
+            "trajectory_id": task.get("trajectory_id") or "",
+            "session_id": task.get("session_id") or "",
+            "artifacts": artifacts,
+            "trace_id": task.get("trace_id") or "",
+            "finished_at": task.get("finished_at") or "",
+        })
+
+    def _artifact(self, task_id, wanted):
+        """One file the task produced, by its id.
+
+        The id is the hash of the path: the path may be renamed later, the
+        id does not change. The file is fetched from the agent (it lives in
+        the agent's workspace) and the project key guards it, like the tasks.
+        """
+        task = self._task_of(task_id)
+        if task is None:
+            return
+        for art in task.get("artifacts") or []:
+            if not isinstance(art, dict):
+                continue
+            path = str(art.get("path") or "")
+            if artifact_id(path) != wanted:
+                continue
+            data = self.app.agent.download(task.get("workspace_id") or "", path)
+            if not data:
+                return self._error(404, "not_found",
+                                   "the file is gone (or empty): %r" % path[:80])
+            self.app.store.audit("download", task_id, {"artifact_id": wanted})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="%s"' % os.path.basename(path))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self._error(404, "not_found", "no artifact %r for this task" % wanted)
+
+    # ---- the export as a job ----------------------------------------------
+    def _export_start(self, task_id):
+        """Start an export and answer with the job.
+
+        A big export takes a while (the conversation, the events, the files):
+        the caller gets a job id and comes back for it. The small ones are
+        still served directly by GET .../export.
+        """
+        body = self._body() or {}
+        fmt = str(body.get("format") or "zip").lower()
+        with_artifacts = body.get("include_artifacts", True)
+        with_artifacts = bool(with_artifacts) and str(with_artifacts).lower() not in (
+            "0", "false", "no")
+        task = self._task_of(task_id)
+        if task is None:
+            return
+        if fmt not in ("zip", "json"):
             return self._error(400, "bad_request", "format must be json or zip")
-        document = {"manifest": manifest, "final_answer": task.get("result") or "",
-                    "events": events, "conversation": messages, "artifacts": artifacts}
-        self.app.store.audit("export", task_id, {"format": "json"})
-        self._json(200, document)
+        job_id = "ex_" + os.urandom(8).hex()
+        ttl = float(getattr(self.app.args, "export_ttl_hours", 24.0) or 24.0)
+        job = {
+            "id": job_id,
+            "task_id": task_id,
+            "format": fmt,
+            "status": "running",
+            "created_at": now_iso(),
+            "expires_at": iso_from_epoch(time.time() + ttl * 3600.0),
+            "bytes": 0,
+            "error": "",
+        }
+        self.app.store.save_export(job)
+        threading.Thread(target=self._export_run,
+                         args=(job_id, task_id, fmt, with_artifacts), daemon=True).start()
+        self.app.store.audit("export_start", task_id, {"format": fmt, "export_id": job_id})
+        self._json(202, {"export_id": job_id, "task_id": task_id, "status": "running",
+                         "expires_at": job["expires_at"],
+                         "status_url": "/v1/exports/" + job_id})
+
+    def _export_run(self, job_id, task_id, fmt, with_artifacts):
+        """Build the export in the background."""
+        job = self.app.store.load_export(job_id) or {}
+        try:
+            task = self.app.store.load("", task_id)
+            if task is None:
+                raise RuntimeError("the task is gone")
+            if fmt == "zip":
+                data, manifest = self._export_bytes(task, fmt, with_artifacts)
+                path = self.app.store.export_file(job_id)
+                with open(path, "wb") as f:
+                    f.write(data)
+                job["bytes"] = len(data)
+                job["manifest"] = manifest
+            else:
+                document = self._export_document(task, with_artifacts)
+                data = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
+                path = self.app.store.export_file(job_id)
+                with open(path, "wb") as f:
+                    f.write(data)
+                job["bytes"] = len(data)
+            job["status"] = "done"
+            job["finished_at"] = now_iso()
+        except Exception as exc:  # noqa: BLE001 - a job may fail, the queue may not
+            job["status"] = "failed"
+            job["error"] = "%s: %s" % (type(exc).__name__, exc)
+            job["finished_at"] = now_iso()
+        self.app.store.save_export(job)
+
+    def _export_job(self, job_id):
+        """The state of an export job."""
+        job = self.app.store.load_export(job_id)
+        if job is None:
+            return self._error(404, "not_found", "no export job %r" % job_id)
+        task = self.app.store.load("", job.get("task_id") or "")
+        if task is not None and not self._check_project(task):
+            return self._forbid("export %s" % job_id)
+        out = dict(job)
+        out.pop("manifest", None)
+        if job.get("status") == "done":
+            out["download_url"] = "/v1/exports/%s/download" % job_id
+        self._json(200, out)
+
+    def _export_download(self, job_id):
+        """The bytes of a finished export job."""
+        job = self.app.store.load_export(job_id)
+        if job is None:
+            return self._error(404, "not_found", "no export job %r" % job_id)
+        task = self.app.store.load("", job.get("task_id") or "")
+        if task is not None and not self._check_project(task):
+            return self._forbid("export %s" % job_id)
+        if job.get("status") != "done":
+            return self._error(409, "bad_request", "the export is not finished yet")
+        expires = parse_iso(job.get("expires_at") or "")
+        if expires is not None and expires < time.time():
+            return self._error(410, "not_found", "this export has expired")
+        try:
+            with open(self.app.store.export_file(job_id), "rb") as f:
+                data = f.read()
+        except OSError:
+            return self._error(404, "not_found", "the export file is gone")
+        fmt = job.get("format") or "zip"
+        self.send_response(200)
+        self.send_header("Content-Type",
+                         "application/zip" if fmt == "zip" else "application/json")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="task-%s.%s"' % (job.get("task_id") or "task", fmt))
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _download(self, task_id):
         """One file the task produced.
@@ -2991,13 +3521,18 @@ class Handler(BaseHTTPRequestHandler):
                         not_before=not_before, not_before_text=not_before_text, key=key,
                         meta=body.get("meta") if isinstance(body.get("meta"), dict) else {},
                         model_params=model_params, limits=limits, policy=policy)
+        # Whose work this is and who asked for it: the key says. The local
+        # operator (no key) leaves both empty.
+        task["tenant_id"] = self.app.store.tenant_of_key(self._key())
+        task["identity"] = self.app.store.identity_of_key(self._key())
         # Where the work runs: "" = the local agent, "fleet" = the devices'.
         task["target"] = str(body.get("target") or "").strip()
         if isinstance(body.get("fleet"), dict):
             task["fleet"] = dict(body["fleet"])
         self.app.store.create(task)
         self.app.publish("task_created", task)
-        self.app.store.audit("submit", task["id"], {"prompt": prompt[:200], "key": key})
+        self.app.store.audit("submit", task["id"], {"prompt": prompt[:200], "key": key},
+                             actor=self.app.store.identity_of_key(self._key()))
         self._json(200, self.app.decorate(task))
 
     def _delete(self, task_id):
@@ -3075,9 +3610,18 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         if body is None:
             return self._error(400, "bad_request", "the request body is not JSON")
-        message = str(body.get("message") or "").strip()
+        message = str(body.get("message") or body.get("response") or "").strip()
         if not message:
             return self._error(400, "bad_request", "'message' is required")
+        # The answer may name the question it answers. A mismatch is a
+        # conflict, not a new answer: the question that is open is the one
+        # that gets answered.
+        wanted = str(body.get("interaction_id") or "").strip()
+        current = str((task.get("interaction") or {}).get("interaction_id") or "")
+        if wanted and current and wanted != current:
+            return self._error(409, "bad_request",
+                               "interaction %r is not the question that is open (%r)"
+                               % (wanted, current))
         if not task.get("needs_confirmation"):
             # Replying twice to the same question must not queue the task
             # twice: the answer is already there, so this is a no-op.
@@ -3094,6 +3638,7 @@ class Handler(BaseHTTPRequestHandler):
             "status": QUEUED,
             "needs_confirmation": False,
             "question": "",
+            "interaction": {},
             "pending_message": message,
             "note": "answered: " + message[:80],
         }))
@@ -3453,6 +3998,11 @@ class App:
         self.args = args
         self._page = None
         self._task_ws_id = ""
+        # The rate limiter's memory: one list of timestamps per key (the
+        # tenant's). It is in memory on purpose - a limit that survives a
+        # restart is a limit nobody expects.
+        self.rate_lock = threading.Lock()
+        self.rate_hits = {}
         data_dir = args.data_dir
         if not data_dir:
             data_dir = os.path.join(os.path.abspath(os.path.expanduser(args.workspace_path)),
@@ -4057,6 +4607,16 @@ def main(argv=None):
                              "else %s)" % DEFAULT_PROVIDER)
     parser.add_argument("--window", default="window", choices=["window", "weekly"],
                         help="which quota window to watch (default: the short one)")
+    parser.add_argument("--rate-limit-per-minute", type=int, default=0,
+                        help="每个钥匙每分钟最多几个请求（0 = 不限）")
+    parser.add_argument("--interaction-timeout", type=float, default=0.0,
+                        help="等人回答最多等多久（秒，0 = 一直等）")
+    parser.add_argument("--retention-days", type=float, default=0.0,
+                        help="任务记录留多久（天，0 = 一直留）")
+    parser.add_argument("--cleanup-interval", type=float, default=3600.0,
+                        help="多久清一次旧记录（秒）")
+    parser.add_argument("--export-ttl-hours", type=float, default=24.0,
+                        help="导出的包留多久（小时）")
     parser.add_argument("--quota-tokens", type=float, default=0.0,
                         help="100%% 的额度值多少 token（0 = 不换算，额度只当开工前的闸门）")
     parser.add_argument("--quota-share", type=float, default=0.5,

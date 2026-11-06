@@ -237,7 +237,7 @@ class Watchdog(object):
     def fail_task(self, task, reason):
         """Mark a stuck task failed (only with --auto)."""
         status, answer = http_json(
-            self.tasks_url + "/api/tasks/%s/fail" % task.get("id"), "POST",
+            self.tasks_url + "/v1/agent-tasks/%s/fail" % task.get("id"), "POST",
             {"reason": reason}, timeout=self.args.timeout)
         if status == 0 or status >= 400:
             log("cannot fail task %s: %s" % (task.get("id"), answer))
@@ -258,7 +258,7 @@ class Watchdog(object):
         if not self.fail_task(task, reason):
             return False
         status, answer = http_json(
-            self.tasks_url + "/api/tasks/%s/retry" % task.get("id"), "POST",
+            self.tasks_url + "/v1/agent-tasks/%s/retry" % task.get("id"), "POST",
             {}, timeout=self.args.timeout)
         if status == 0 or status >= 400:
             log("cannot retry task %s: %s" % (task.get("id"), answer))
@@ -383,7 +383,7 @@ class Watchdog(object):
     # ---- the checks --------------------------------------------------------
     def running_tasks(self):
         """The tasks the queue says are running right now."""
-        status, body = http_json(self.tasks_url + "/api/tasks?status=running",
+        status, body = http_json(self.tasks_url + "/v1/agent-tasks?status=running",
                                  timeout=self.args.timeout)
         if status == 0:
             return None, body
@@ -468,7 +468,7 @@ class Watchdog(object):
         """
         if not self.args.stall_after:
             return []
-        status, body = http_json(self.tasks_url + "/api/tasks", timeout=self.args.timeout)
+        status, body = http_json(self.tasks_url + "/v1/agent-tasks", timeout=self.args.timeout)
         if status == 0:
             return []
         data = unwrap(body)

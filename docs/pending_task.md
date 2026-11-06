@@ -51,9 +51,9 @@
 
 | 需求 | 状态 | 说明 |
 | --- | --- | --- |
-| FR-13 任务元数据 | ⚠️ | 有 id/workspace/provider/model/status/prompt/meta/priority/attempt/时间戳；**没有** `tenant_id`、`queue_id`（`agent_id` ≈ workspace，就是队列的粒度） |
+| FR-13 任务元数据 | ✅ | 有 id/workspace/provider/model/status/prompt/meta/priority/attempt/时间戳，**加** `tenant_id`（谁的活儿）、`identity`（谁提交的）、`trace_id`（跟着这个任务走完一生的那根线）。`queue_id` ≈ workspace（就是队列的粒度） |
 | FR-14 消息历史、工具调用、交互记录 | ⚠️ | 队列记的是 `result`（最终回答）、`steps`（进度流水）、`question`/`pending_message`（交互）、`events`。**消息历史和工具调用在 agent 侧**（session 与 trajectory），队列不复制一份 |
-| FR-15 检查点 + 重启后恢复 | ❌ | **没有检查点**。重启时 running 的任务被**明确标记为 failed**（`recover_stale_tasks`），符合「或按配置置 FAILED」那一半，「从检查点恢复」没有 |
+| FR-15 检查点 + 重启后恢复 | ✅ | 任务记录里存着**检查点**（这一轮的句柄、会话、轨迹）。重启时：轮次还在跑 → **接回**它；轮次没了但**会话还在** → 任务**回到队列里接着做**（同一会话的新一轮）；都没有 → 才判失败（写明原因） |
 | FR-16 生成物存储 + 元数据 | ⚠️ | 记录里有 `artifacts`（path/bytes/kind/tool）；文件本体在 agent 的工作区，下载走 agent 的 `/download` |
 | FR-17 摘要默认 / `include=full` 全量 | ✅ | `include=full` 带上事件与流水；更大的东西（对话、文件）走导出接口拿链接 |
 | FR-18 状态与事件一致 | ✅ | 事件现在**落盘**（每个任务一个 `events.jsonl`），状态是原子写的文件 |
@@ -63,11 +63,11 @@
 | 需求 | 状态 | 说明 |
 | --- | --- | --- |
 | FR-19 交互请求 + WAITING_INPUT | ✅ | `needs_confirmation` + `question`，状态 `waiting_confirmation` |
-| FR-20 返回待交互内容、交互 ID、超时 | ⚠️ | 有内容；**没有 interaction_id、没有超时时间** |
+| FR-20 返回待交互内容、交互 ID、超时 | ✅ | 有内容，**有 `interaction_id`**（在任务的 `interaction` 里），**有截止时间**（`--interaction-timeout`） |
 | FR-21 回复接口 | ✅ | `POST /api/tasks/{id}/confirm {"message": …}` |
 | FR-22 回复幂等 | ✅ | 再答一次不会重复入队（答案已经在任务里，直接返回同一个任务） |
 | FR-23 回复后进入 QUEUED | ✅ | 见 FR-10 |
-| FR-24 交互超时策略 | ❌ | 还没有 |
+| FR-24 交互超时策略 | ✅ | `--interaction-timeout`（秒）：到点没人回答 → 任务判失败，写明「没人回答」 |
 
 ## 6.5 状态查询与历史
 
@@ -87,8 +87,8 @@
 | FR-31 `format=json` / `format=zip` | ✅ | `GET /api/tasks/{id}/export` |
 | FR-32 导出内容 | ✅ | 基本信息、最终状态、最终回答、生成物清单、交互记录（事件流）、错误信息 |
 | FR-33 ZIP 目录 | ✅ | `manifest.json`、`final_answer.md`、`conversation.jsonl`、`events.jsonl`、`error.json`、`artifacts/` |
-| FR-34 生成物单独下载（鉴权 + 有效期） | ⚠️ | 导出包里带文件；**单独下载**走 agent 的 `/download`（无鉴权、无有效期） |
-| FR-35 大结果异步导出 | ❌ | 同步 |
+| FR-34 生成物单独下载（鉴权 + 有效期） | ✅ | 每个生成物有**自己的 id**（路径的哈希）；`GET /v1/agent-tasks/{id}/artifacts/{aid}` 按 id 下载，**钥匙管着**（跟任务一样） |
+| FR-35 大结果异步导出 | ✅ | `POST .../export` 起一个**导出任务**（202 + `export_id`），`GET /v1/exports/{id}` 看进度，做完了 `GET /v1/exports/{id}/download` 拿字节（**带有效期**，`--export-ttl-hours`） |
 | FR-36 未完成任务可导出当前快照 | ✅ | 导出现在这一刻的状态（`manifest.status` 如实写着） |
 
 ## 6.7 任务控制
@@ -107,32 +107,32 @@
 | FR-41 状态变更写入事件、不可改 | ✅ | 每个任务一个 `events.jsonl`，追加写；实时广播之外**有历史** |
 | FR-42 审计日志 | ✅ | `audit.log`：提交、回答、取消、重试、导出都记；`GET /api/audit` 可查 |
 | FR-43 指标 | ✅ | `/api/health` 的 `metrics`：队列长度、运行数、等待交互数、平均排队时长、平均任务时长、失败率 |
-| FR-44 request_id / trace_id | ❌ | 还没有 |
+| FR-44 request_id / trace_id | ✅ | 调用方自己的 `X-Request-Id` **回显**（信封与头里都是）；每个任务有 `trace_id`，事件与审计日志里都带着 |
 
 ## 第 8 章接口规范
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 路径 `/v1/agent-tasks` | ❌ | 现在是 `/api/tasks`（中间没有版本段）。信封已经是需求的样子了，路径与版本段还没加 |
+| 路径 `/v1/agent-tasks` | ✅ | 有了（0.21.0）。**旧路径 `/api/tasks...` 照样能用**——加的是版本段，不是搬家 |
 | 统一响应信封 `{code, message, request_id, data}` | ✅ | 每个 JSON 回答都是这个形状：成功 `code=0`，错误是需求附录里的编号（40001 参数、40101 未认证、40301 越权、40401 不存在、40901 状态冲突、40902 幂等冲突、42901 限流、50001/50002/50003 内部/持久化/导出失败）。`request_id` 也放在 `X-Request-Id` 头里，用户报障时可以直接引用。`data` 里带着正文（错误的细节也在 `data.error`） |
 | 鉴权 `Authorization: Bearer` | ⚠️ | **权限按项目**：每个项目（工作区）一把钥匙，`Authorization: Bearer <key>`（或 `X-Project-Key`）带着它就**只能**碰这个项目的任务、事件、导出与排队；别人的 → 403。**不带钥匙的调用者是本机操作者**（网页就是它），因为服务只监听 127.0.0.1 |
-| 租户（`X-Tenant-Id`） | ⚠️ | 没有租户概念，**项目**就是这里的隔离单位（按需求第 13 章的答复：权限按项目） |
+| 租户（`X-Tenant-Id`） | ✅ | 钥匙带租户（`POST /v1/projects` 领钥匙时写 `tenant_id` 与 `identity`）；`X-Tenant-Id` 与钥匙的租户对不上 → 403。**项目**仍是队列的隔离单位 |
 | HTTPS | ❌ | 本机 HTTP |
 | 幂等键 | ✅ | 提交与回答 |
 | ISO 8601 UTC | ✅ | |
 
 ## 第 9 章数据模型
 
-`agent_task` ⚠️（字段见 FR-13）｜`task_event` ✅（落盘）｜`task_message` ❌（在 agent 侧）｜
-`task_interaction` ⚠️（有内容，缺 ID/超时/状态）｜`task_checkpoint` ❌｜
-`task_artifact` ⚠️（有元数据，缺独立 ID/校验和/有效期）｜`export_job` ❌（同步导出）｜`audit_log` ✅
+`agent_task` ✅（字段见 FR-13）｜`task_event` ✅（落盘）｜`task_message` ❌（在 agent 侧）｜
+`task_interaction` ✅（有 ID、超时、状态）｜`task_checkpoint` ✅（句柄 + 会话 + 轨迹）｜
+`task_artifact` ✅（有独立 ID；有效期跟着导出任务）｜`export_job` ✅（异步导出，有状态与有效期）｜`audit_log` ✅
 
 ## 第 10 章非功能
 
 可靠性 ⚠️（状态不丢；运行中的任务重启后标记失败，不恢复）｜幂等 ✅（提交、回答）｜
 并发安全 ✅（记录写入有锁，队列串行）｜性能 ✅（提交毫秒级，调度 ≤2s）｜
 安全 ❌（无鉴权/无租户/无脱敏，记录里有 prompt 全文）｜可观测 ✅（指标 + 事件 + 审计）｜
-审计 ✅｜保留策略 ❌（记录不会自动清理）｜限流 ❌
+审计 ✅｜保留策略 ✅（`--retention-days`）｜限流 ✅（`--rate-limit-per-minute`，按钥匙，429 + `Retry-After`）
 
 ## 已经定了的两条（需求第 13 章的待确认问题）
 
@@ -145,14 +145,30 @@
 
 ## 还没做的（按建议顺序）
 
-1. **`/v1/agent-tasks` 路由 + 版本段**（FR 8.1/8.2）——信封已经按需求的样子做好了
-   （`{code, message, request_id, data}`），剩下的只是路径；改路径要动所有调用方
-   （微信 bot、队列网页、测试）
-2. **检查点与重启恢复**（FR-15）——需要 agent 侧能保存/恢复一轮的状态
-3. **异步导出与生成物的鉴权下载**（FR-34/35）——现在导出是同步的，文件在导出包里
-4. **交互超时与 interaction_id**（FR-20/24）
-5. **request_id / trace_id、限流、保留策略**（FR-44、10）
-6. **密钥与租户的进一步隔离**（FR 8.1/10）——现在是「项目 = 钥匙」，没有真正的租户；
-   操作者身份（谁在用）也还没有
+**六条都做完了（0.21.0）**：
 
-剩下的这些里，只有第 1 条会动到所有调用方，其余都是加接口。
+1. **`/v1/agent-tasks` 路由 + 版本段**（FR 8.1/8.2）——✅ 有了。需求的路径都在
+   （`/v1/agent-tasks`、`/{id}`、`/{id}/events`、`/{id}/interactions`、`/{id}/cancel`、
+   `/{id}/retry`、`/{id}/result`、`/{id}/artifacts/{aid}`、`/{id}/export`、
+   `/v1/queues/{id}/status`、`/v1/exports/{id}`）。**旧路径 `/api/tasks...` 照样能用**
+   （加的是版本段，不是搬家）；队列客户端、队列网页、看门狗都改成了新路径。
+2. **检查点与重启恢复**（FR-15）——✅ 有了。任务记录里存着**检查点**（这一轮的句柄、
+   会话、轨迹）。agent 不能把跑到一半的循环存起来，但**会话在**：轮次没了而会话还在时，
+   任务**回到队列里接着做**（同一会话里新的一轮），而不是一律判失败。
+3. **异步导出与生成物的鉴权下载**（FR-34/35）——✅ 有了。`POST .../export` 起一个
+   **导出任务**（202 + `export_id`），`GET /v1/exports/{id}` 看进度，做完了
+   `GET /v1/exports/{id}/download` 拿字节（带**有效期**）。生成物每个有**自己的 id**
+   （路径的哈希），`GET .../artifacts/{id}` 按 id 下载（钥匙管着，跟任务一样）。
+4. **交互超时与 interaction_id**（FR-20/24）——✅ 有了。问题有自己的 `interaction_id`
+   和**截止时间**；回答要带上那个 id（对不上 → 409）；`--interaction-timeout` 到了
+   没人回答 → 任务判失败并写明原因。
+5. **request_id / trace_id、限流、保留策略**（FR-44、10）——✅ 有了。调用方自己的
+   `X-Request-Id` **回显**（信封与头里都是）；每个任务有 `trace_id`，跟着它走完一生；
+   `--rate-limit-per-minute`（按钥匙，超了 429 + `Retry-After`）；`--retention-days`
+   （旧记录自动清掉）。
+6. **密钥与租户的进一步隔离**（FR 8.1/10）——✅ 有了。钥匙带**租户**和**身份**
+   （`POST /v1/projects {"workspace_id","tenant_id","identity"}` 领）；任务记录里写着
+   租户与是谁提交的；`X-Tenant-Id` 与钥匙的租户对不上 → 403。
+
+剩下的差距只有需求里那几条**架构级**的（对象存储、HTTPS、记录脱敏）——那不是这个轻量
+队列该背的。

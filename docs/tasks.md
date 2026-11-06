@@ -53,6 +53,45 @@ tea_agent（C++，基础能力）              task server（Python，可选伴�
 `turn_id` 和任务记录）。于是看门狗、router、网页**只订一处**，而且顺序是定的：
 **先**是 agent 的视角，**后**是队列的判决。
 
+**版本段**（0.21.0 起）：队列的接口现在有两套写法——需求书里的 `/v1/agent-tasks...`
+和一直以来的 `/api/tasks...`。**加的是版本段，不是搬家**：旧的照样能用，客户端、队列
+网页、看门狗都改成了新路径。
+
+需求里的路径都在：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/v1/agent-tasks` | 提交 |
+| GET | `/v1/agent-tasks` | 列表 |
+| GET | `/v1/agent-tasks/{id}` | 单个任务 |
+| GET | `/v1/agent-tasks/{id}/events` | 事件日志（`since_event_id` 增量） |
+| GET | `/v1/agent-tasks/{id}/result` | **结果摘要** + 生成物清单（每个生成物有自己的 id） |
+| GET | `/v1/agent-tasks/{id}/artifacts/{aid}` | 按 id 下载一个生成物（钥匙管着） |
+| GET | `/v1/agent-tasks/{id}/export` | 导出（同步） |
+| POST | `/v1/agent-tasks/{id}/export` | **起一个导出任务**（202 + `export_id`） |
+| GET | `/v1/exports/{id}` | 导出任务的进度 |
+| GET | `/v1/exports/{id}/download` | 导出任务的字节（带有效期） |
+| POST | `/v1/agent-tasks/{id}/interactions` | **回答**那个问题（要带 `interaction_id`） |
+| POST | `/v1/agent-tasks/{id}/cancel` \| `/retry` \| `/start` | 取消 / 重试 / 启动 |
+| GET | `/v1/queues/{id}/status` | 这个队列的状态（暂停、计数） |
+| GET | `/v1/projects` | 项目（钥匙） |
+
+**检查点与接着做**（0.21.0 起）：任务记录里存着**检查点**（这一轮的句柄、会话、轨迹）。
+队列重启后：轮次还在跑 → **接回**它；轮次没了但**会话还在** → 任务**回到队列里接着做**
+（同一会话里的新的一轮，agent 不能把跑到一半的循环存起来，但会话在）；都没有 → 才判失败。
+
+**问题有自己的编号与期限**（0.21.0 起）：任务等人回答时，问题的 `interaction_id` 与
+`expires_at` 记在任务的 `interaction` 里；回答要带上那个 id（对不上 → 409）；
+`--interaction-timeout`（秒）到了没人回答 → 任务判失败，写明「没人回答」。
+
+**谁在问，是谁的活儿**（0.21.0 起）：领钥匙时可以写租户与身份
+（`POST /v1/projects {"workspace_id":"ws_x","tenant_id":"acme","identity":"张三"}`），
+任务记录里写着租户与是谁提交的；`X-Tenant-Id` 与钥匙的租户对不上 → **403**。
+
+**限流与保留**（0.21.0 起）：`--rate-limit-per-minute N`（按钥匙，超了 429 +
+`Retry-After`）、`--retention-days N`（旧记录自动清掉）、`--export-ttl-hours N`
+（导出的包留多久）、`--cleanup-interval`（多久清一次）。
+
 **提交用幂等键**（0.19.3 起）：队列提交那一轮时带 `Idempotency-Key: task:<任务号>:<第几轮>`
 ——所以**提交本身超时了可以重发**：agent 那边记住的是同一轮，拿到的是同一个 `turn_id`，
 活儿不会被做两遍。任务号后面的「第几轮」是**这一轮**的序号（不是重试次数）：一个任务等
