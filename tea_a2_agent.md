@@ -1102,6 +1102,12 @@ agent 早就有 `GET /api/doc`（服务 docs/api.md，构建期嵌进二进制�
 - 顺手修了**文档里的坏链接**：`manual.md` → `tea_a2_manual.md`（文件改名时链接没跟上，
   10 个文件都指着它），以及 `sched/README.md` 里跨目录的 `fleet.md`。
 
+**队列的版本号该报自己的**：先改成「跟着 agent 走」（同包发布），但那是**问错了问题**——
+客户端问队列「你认不认识 /v1/agent-tasks」，答案得是**队列自己的**版本，不是它哥们的。
+（agent 与队列同包发布，但 agent 可能还没重启 → 报出来的是旧版本。）于是：队列报自己的
+`QUEUE_VERSION`，agent 的版本另开一个字段 `agent_version`；并且用**测试**把两处版本号钉住
+（队列报的 == `src/version.cpp` 里的），免得发版时改了一个忘了另一个。
+
 测试：tests/smoke_queue_spec.py 多了 7 项（59 项全过）。
 
 ### 2026-11-04：扩展层 a2_ext_py（机制层能长出新能力）

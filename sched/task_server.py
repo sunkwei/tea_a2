@@ -3061,11 +3061,10 @@ class Handler(BaseHTTPRequestHandler):
             # Which queue this is. A client asks before it speaks: the
             # version segment (/v1/agent-tasks) arrived in 0.21.0, and a
             # newer client has to work against an older queue.
-            #
-            # The queue and the agent ship in the same package, so the
-            # agent's version is the queue's version. The constant is only
-            # the answer when the agent cannot be reached.
-            "version": str(health.get("version") or QUEUE_VERSION),
+            "version": self.app.version(),
+            # The agent behind the queue (they ship in the same package, but
+            # the agent may not have been restarted yet).
+            "agent_version": str(health.get("version") or ""),
             "agent": agent.base,
             "agent_ok": agent_ok,
             "agent_health": health,
@@ -4742,15 +4741,23 @@ class App:
         return os.path.join(repo, "docs", name)
 
     def version(self):
-        """Which queue this is (the agent ships in the same package)."""
+        """Which queue this is.
+
+        The queue's **own** version: a client asks the queue whether the
+        queue's API knows something (the version segment arrived in 0.21.0),
+        and the agent's version is not the answer to that question - it is
+        merely the version of the sibling in the same package. The agent's
+        version is reported separately (agent_version).
+        """
+        return QUEUE_VERSION
+
+    def agent_version(self):
+        """Which agent is behind the queue (empty when it cannot be reached)."""
         try:
             health = self.agent.health()
-            version = str((health or {}).get("version") or "")
-            if version:
-                return version
+            return str((health or {}).get("version") or "")
         except (AgentError, AttributeError):
-            pass
-        return QUEUE_VERSION
+            return ""
 
     def default_workspace(self):
         """The workspace a task goes to when the caller does not name one."""

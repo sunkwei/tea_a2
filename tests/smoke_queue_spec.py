@@ -349,8 +349,24 @@ providers:
 
         # ---- the queue says which version it is -------------------------
         status, _, parsed = call(queue_port, "GET", "/api/health")
+        health = data_of(parsed)
         check("the queue says which version it is",
-              status == 200 and bool(data_of(parsed).get("version")), parsed)
+              status == 200 and bool(health.get("version")), health)
+        check("it says which agent is behind it",
+              bool(health.get("agent_version")), health)
+        # The queue's own version must not drift from the binary's: a client
+        # asks the queue whether the queue's API knows something.
+        with open(os.path.join(REPO_ROOT, "src", "version.cpp"), encoding="utf-8") as f:
+            source = f.read()
+        binary_version = ""
+        for line in source.split("\n"):
+            if "kVersionString" in line and '"' in line:
+                binary_version = line.split('"')[1]
+                break
+        check("the queue's version is the binary's version",
+              health.get("version") == binary_version,
+              "the queue says %r, the binary says %r"
+              % (health.get("version"), binary_version))
 
         # ---- 2) the request id and the trace id ---------------------------
         status, headers, parsed = call(queue_port, "GET", "/v1/agent-tasks",
