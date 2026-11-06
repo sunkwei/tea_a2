@@ -164,7 +164,8 @@ brew install mingw-w64      # 只有要交叉出 Windows 版时才需要
 
 Windows 本机：装 Visual Studio Build Tools（MSVC，配 `scripts\build.bat`）或 winlibs
 MinGW-w64（`scripts\build-mingw.bat` 会依次找 `%MINGW_HOME%`、`.toolchain\mingw64`、`PATH`）。
-两条路径都会设置 `VSLANG=1033`（MSVC）或 `TEMP`（MinGW），细节见 [快速开始](../README.md#快速开始)。
+两条路径都会设置 `VSLANG=1033`（MSVC）或 `TEMP`（MinGW）；构建的整体步骤见
+[README 的「三分钟跑起来」](../README.md#三分钟跑起来)，本机编译的细节在下一节。
 
 ### 本机编译
 
