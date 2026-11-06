@@ -72,6 +72,8 @@ python3 tests/smoke_turn_budget.py                         # 一轮的预算：�
 python3 tests/smoke_turn_handle.py                         # 回合句柄：异步提交（202 + turn_id）/ 查状态 / 回放事件 / 精确停这一轮
                                                           # + 句柄就是轨迹 id + 撞预算算 budget 不算失败 + 不传 async 还是老样子
 python3 tests/smoke_task_budget.py                         # 队列这一侧：任务带预算与权限 / 下发给 agent / 收回 stop_reason 与用量 / 不准用的工具不执行
+python3 tests/smoke_task_turn_handle.py                    # 队列改「提交 + 订阅」：记录上有 turn_id / 队列重启把在跑的那轮接回来
+                                                          # / 轮次已完时从状态取结论 / 超时停那一轮不留孤儿 / 老 agent 照旧能用
 python3 tests/smoke_ext_toolkit.py                          # 扩展层：模型存一个工具 → reload → 同一轮里就用它 / 落在模块目录 / 有审计 / 进了 agent 的工具表
 node tests/ui_task_form.mjs                                # 队列网页：排任务的表单（主题/工作区/定时/provider/模型/参数）+ 生成物下载（需 google-chrome）
 python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）

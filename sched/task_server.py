@@ -991,6 +991,12 @@ class Engine:
         self.summarizing = set()
         self.running = {}     # task id -> {"thread":..., "workspace_id":...}
         self._quota = (None, None, 0.0)   # (percent, window, read_at)
+        # Does the agent on the other end know about **turn handles** (the
+        # 0.19.0 interface: submit a turn, get an id, follow it)? The answer
+        # is asked once and remembered: an agent that does not know the
+        # interface still works, it just gets the old way (one stream per
+        # task, held to the end).
+        self._agent_handles = None
 
     # ---- the quota gate ---------------------------------------------------
     def quota_left(self, provider, fresh=False):
@@ -1260,12 +1266,20 @@ class Engine:
 
     # ---- the tasks this process inherited --------------------------------
     def recover_stale_tasks(self, min_age=None):
-        """A task that was running when this process started is not running any more.
+        """A task that was running when this process started.
 
-        The worker thread died with the process, so the record would sit in
-        "running" for ever: the scheduler only starts queued tasks, and
-        POST .../start refuses anything else. Mark those tasks failed, with a
-        reason that says what happened, so they can be queued again.
+        Two cases, and they are very different:
+
+        * the task has a **turn id** and the agent still knows that turn: the
+          work did not die with this process - it is still running on the
+          agent's side. The queue **takes it over** (follows the turn again)
+          instead of declaring the task dead. This is the whole point of the
+          turn handle: a queue that restarts no longer kills work that is
+          still going on;
+        * there is no turn id (a task from before the handles existed), or the
+          agent does not know it any more: the work really is lost, so the
+          task is marked failed with a reason that says what happened, and it
+          can be queued again.
 
         Only tasks that have not been touched for a minute are recovered: another
         task server working on the same records would otherwise have its task
@@ -1279,6 +1293,27 @@ class Engine:
                 continue                    # somebody is still working on it
             workspace_id = task.get("workspace_id")
             task_id = task.get("id")
+            turn_id = str(task.get("turn_id") or "")
+            if turn_id:
+                status = self._turn_state(turn_id)
+                if status is not None:
+                    name = str(status.get("state") or "")
+                    if name == "running":
+                        # The work is still going on: take it over.
+                        log("  task %s was running when the server started - "
+                            "turn %s is still running, taking it over" % (task_id, turn_id))
+                        self._take_over(workspace_id, task_id, turn_id)
+                        continue
+                    # The turn is over. Its verdict is the task's verdict -
+                    # and it publishes its own event, so it does not belong
+                    # in the list of tasks that failed.
+                    log("  task %s was running when the server started - turn %s is %s"
+                        % (task_id, turn_id, name))
+                    self._finalize_from_status(
+                        workspace_id, task_id, status,
+                        {"answer": "", "report": {"needs_confirmation": False,
+                                                  "question": ""}, "progress": 0})
+                    continue
             self.store.update(workspace_id, task_id, lambda t: t.update({
                 "status": FAILED,
                 "finished_at": now_iso(),
@@ -1291,6 +1326,44 @@ class Engine:
             if task is not None:
                 self._publish({"type": "task_failed", "task": task})
         return recovered
+
+    def _turn_state(self, turn_id):
+        """How a turn is going, or None when the agent does not know it."""
+        try:
+            return self.agent.turn_status(turn_id)
+        except AgentError as exc:
+            if getattr(exc, "code", 0) == 404:
+                return None
+            log("  the state of turn %s could not be read (%s)" % (turn_id, exc))
+            return None
+        except Exception as exc:  # noqa: BLE001
+            log("  the state of turn %s could not be read (%s)" % (turn_id, exc))
+            return None
+
+    def _take_over(self, workspace_id, task_id, turn_id):
+        """Follow a turn that outlived the process that started it."""
+        if task_id in self.running:
+            return
+
+        def work():
+            state = {"answer": "", "progress": 0,
+                     "report": {"needs_confirmation": False, "question": ""}}
+            try:
+                self._follow_turn(workspace_id, task_id, turn_id, state)
+            except Exception as exc:  # noqa: BLE001 - the queue must not die
+                log("  task %s: taking turn %s over failed (%s: %s)",
+                    task_id, turn_id, type(exc).__name__, exc)
+                self._finalize(workspace_id, task_id, FAILED, {
+                    "error": "the task could not be taken over: %s" % exc,
+                    "finished_at": now_iso()})
+                self._publish({"type": "task_failed",
+                               "task": self.store.load(workspace_id, task_id)})
+            finally:
+                self.running.pop(task_id, None)
+
+        thread = threading.Thread(target=work, daemon=True)
+        self.running[task_id] = {"thread": thread, "workspace_id": workspace_id}
+        thread.start()
 
     def _publish(self, event):
         """Publish an event, with the thread it belongs to attached."""
@@ -1501,10 +1574,18 @@ class Engine:
         })
         if written is None:
             return None
+        # Stop **this** turn: the handle says exactly which round to stop, so
+        # another round on the same session (another task, another window) is
+        # not hit by accident. Without a handle (an old record) the session
+        # is stopped as before.
+        turn_id = str(task.get("turn_id") or "")
         session_id = task.get("session_id")
-        if session_id:
+        if turn_id or session_id:
             try:
-                self.agent.stop(session_id)
+                if turn_id:
+                    self.agent.stop_turn(turn_id)
+                else:
+                    self.agent.stop(session_id)
             except AgentError as exc:
                 log("could not stop the turn of %s: %s" % (task_id, exc))
         self._publish({"type": "task_failed", "task": written})
@@ -1568,12 +1649,12 @@ class Engine:
         task_id = task.get("id")
         workspace_id = task.get("workspace_id")
         if task_id in self.running:
-            log("  task %s is already running here", task_id)
+            log("  task %s is already running here" % task_id)
             return False
         if task.get("kind") == "plan":
             # A plan is a container: its steps are the work. Running the
             # container would ask the model to do the whole thing at once.
-            log("  task %s is a plan, not work: it is not run", task_id)
+            log("  task %s is a plan, not work: it is not run" % task_id)
             return False
 
         provider = provider or task.get("provider") or self.effective_provider()
@@ -1596,6 +1677,9 @@ class Engine:
             "note": "started",
             "pending_message": "",
             "limits": limits,
+            # The turn of the previous run: it is over, and its handle must
+            # not be inherited - a restart has to take over *this* run.
+            "turn_id": "",
         }))
 
         thread = threading.Thread(target=self._run,
@@ -1677,6 +1761,177 @@ class Engine:
         finally:
             self.running.pop(task_id, None)
 
+    # ---- the turn handle: submit now, follow it later ---------------------
+    #
+    # The old way: one SSE connection per task, held until the turn ends. The
+    # connection **was** the task's life: break it and the task was dead,
+    # even though the agent went on working on it. The new way: the queue
+    # submits the turn and gets an **id** back; the id is what it keeps.
+
+    def agent_supports_handles(self):
+        """Does the agent know the turn-handle interface? (0.19.0 and later)
+
+        An older agent answers "async": true with the stream itself, so the
+        queue has to know which way to go. The answer is asked once - the
+        agent does not change its mind while the queue runs.
+        """
+        if self._agent_handles is None:
+            handles = False
+            version = ""
+            try:
+                health = self.agent.health()
+                version = str(health.get("version") or "")
+                parts = []
+                for piece in version.split(".")[:3]:
+                    digits = "".join(ch for ch in piece if ch.isdigit())
+                    parts.append(int(digits) if digits else 0)
+                while len(parts) < 3:
+                    parts.append(0)
+                handles = tuple(parts) >= (0, 19, 0)
+            except Exception:  # noqa: BLE001 - an agent that cannot be asked
+                handles = False        # is an agent that cannot be reached
+            self._agent_handles = handles
+            log("the agent %s turn handles (version %s)"
+                % ("knows" if handles else "does not know", version or "unknown"))
+        return self._agent_handles
+
+    def _follow_turn(self, workspace_id, task_id, turn_id, state):
+        """Follow one turn to its verdict.
+
+        The turn lives on the agent's side; this is a subscription to it. When
+        the subscription breaks - a proxy, a network hiccup, the agent
+        restarting - the turn is **not** lost: we ask the agent how it went
+        and pick the stream up again from the last frame we saw. Only a turn
+        that really ended ends the task.
+
+        Returns the verdict ("done" / "failed" / "cancelled" / "waiting").
+        """
+        since = 0
+        budget = float(getattr(self.args, "chat_timeout", 3600) or 3600)
+        deadline = time.time() + budget
+        touched = time.time()
+        # How often the record is touched, so another queue instance does not
+        # take the task away while it is being worked on. It has to be well
+        # inside that instance's window.
+        stale_after = float(getattr(self.args, "stale_after", 300) or 300)
+        heartbeat = max(5.0, min(30.0, stale_after / 3.0))
+        while True:
+            try:
+                for event in self.agent.turn_events(turn_id, since=since):
+                    seq = event.get("seq")
+                    if isinstance(seq, int) and seq > since:
+                        since = seq
+                    verdict = self._on_event(workspace_id, task_id, event, state)
+                    if verdict:
+                        return verdict
+            except AgentError as exc:
+                if getattr(exc, "code", 0) == 404:
+                    # The agent does not know this turn any more: it is gone
+                    # (the server restarted, or the handle was dropped).
+                    log("  the agent does not know turn %s any more" % turn_id)
+                    return "failed"
+                log("  the turn %s could not be followed (%s); asking again" % (turn_id, exc))
+            except Exception as exc:  # noqa: BLE001 - the network breaks
+                log("  the stream of turn %s broke (%s: %s); asking again"
+                    % (turn_id, type(exc).__name__, exc))
+            # The stream ended without a verdict. Ask the agent how it went:
+            # the work may well be done already.
+            try:
+                status = self.agent.turn_status(turn_id)
+            except AgentError as exc:
+                if getattr(exc, "code", 0) == 404:
+                    log("  the agent does not know turn %s any more" % turn_id)
+                    return "failed"
+                status = None
+            except Exception as exc:  # noqa: BLE001
+                log("  the state of turn %s could not be read (%s)" % (turn_id, exc))
+                status = None
+            if status is not None:
+                name = str(status.get("state") or "")
+                if name == "running":
+                    pass                      # still working: keep waiting
+                else:
+                    return self._finalize_from_status(workspace_id, task_id, status, state)
+            if time.time() > deadline:
+                # Out of time. The turn is stopped **first**: a task that
+                # nobody watches must not go on burning the provider's
+                # tokens - that is the orphan this whole change is about.
+                try:
+                    self.agent.stop_turn(turn_id)
+                    log("  turn %s was stopped: the task ran out of time" % turn_id)
+                except Exception as exc:  # noqa: BLE001
+                    log("  turn %s could not be stopped (%s)" % (turn_id, exc))
+                self._finalize(workspace_id, task_id, FAILED, {
+                    "error": "the task ran out of time (%d s); the turn was stopped"
+                             % int(budget),
+                    "stop_reason": "timeout",
+                    "finished_at": now_iso()})
+                self._publish({"type": "task_failed",
+                               "task": self.store.load(workspace_id, task_id)})
+                return "failed"
+            # Keep the record warm: another queue instance leaves a task
+            # alone while it is being touched. The heartbeat has to be well
+            # inside the window the other instance uses to decide "nobody is
+            # working on this any more".
+            if time.time() - touched > heartbeat:
+                self.store.update(workspace_id, task_id, lambda t: t.update({}))
+                touched = time.time()
+            time.sleep(1.0)
+
+    def _finalize_from_status(self, workspace_id, task_id, status, state):
+        """Write the verdict of a turn the queue did not see the end of.
+
+        The agent knows how the turn ended; the queue missed the frames (the
+        connection broke). The status carries the answer, the usage and the
+        reason - enough to write the record honestly.
+        """
+        name = str(status.get("state") or "")
+        answer = str(status.get("result") or "")
+        report = state.get("report") or {}
+        usage = status.get("usage")
+        usage = dict(usage) if isinstance(usage, dict) else {}
+        stop_reason = str(status.get("stop_reason") or "")
+        if name == "stopped":
+            written = self._finalize(workspace_id, task_id, CANCELLED, {
+                "stop_reason": stop_reason or "cancelled",
+                "finished_at": now_iso()})
+            if written is not None:
+                self._publish({"type": "task_cancelled", "task": written})
+            return "cancelled"
+        if name == "failed":
+            written = self._finalize(workspace_id, task_id, FAILED, {
+                "error": str(status.get("error") or "the turn failed"),
+                "stop_reason": "error",
+                "finished_at": now_iso()})
+            if written is not None:
+                self._publish({"type": "task_failed", "task": written})
+                self.note_thread(written, "error", str(status.get("error") or "这一轮失败了"))
+            return "failed"
+        # "done" or "budget": the work is done, whether or not it fits in the
+        # budget. A budget stop is not a failure.
+        task_status = WAITING if report.get("needs_confirmation") else DONE
+        fields = {
+            "progress": 100 if task_status == DONE else state.get("progress", 0),
+            "result": answer,
+            "finished_at": now_iso(),
+            "error": "",
+            "stop_reason": stop_reason,
+            "usage": usage,
+            "iterations": int(status.get("iterations") or 0),
+            "trajectory_id": str(status.get("trajectory_id") or ""),
+        }
+        if stop_reason == "budget":
+            fields["note"] = "预算用完了（budget）"
+        written = self._finalize(workspace_id, task_id, task_status, fields)
+        if written is not None:
+            self._publish({"type": "task_done" if task_status == DONE
+                           else "task_waiting_confirmation", "task": written})
+            if task_status == DONE:
+                self.note_thread(written, "result", answer)
+            else:
+                self.note_thread(written, "question", report.get("question") or "")
+        return "done" if task_status == DONE else "waiting"
+
     def _consume(self, workspace_id, task_id, provider, context, message=None):
         task = self.store.load(workspace_id, task_id)
         if task is None:
@@ -1695,78 +1950,56 @@ class Engine:
         params = task.get("model_params") or {}
         limits = task.get("limits") or {}
         policy = task.get("policy") or {}
+        # What the queue knows about this turn while it runs. It is passed
+        # around instead of being a local variable, because the turn can be
+        # picked up again by another process (a restarted queue).
+        state = {"answer": "", "report": report, "progress": 0}
+
+        if self.agent_supports_handles():
+            # ---- submit and follow ----------------------------------------
+            # The turn is handed over and gets an id. The queue keeps the id
+            # on the record: that is what makes the work recoverable (a
+            # restarted queue picks the turn up again instead of declaring
+            # the task dead).
+            handle = self.agent.submit(workspace_id, message, provider=provider,
+                                       session_id=session_id, task_id=task_id,
+                                       task_context=context, allow_paths=allow_paths,
+                                       model=model or None, params=params,
+                                       limits=limits, policy=policy)
+            turn_id = str(handle.get("turn_id") or "")
+            session_id = str(handle.get("session_id") or session_id)
+            self.store.update(workspace_id, task_id, lambda t: t.update({
+                "turn_id": turn_id,
+                "session_id": session_id,
+            }))
+            if not turn_id:
+                # The agent answered without a handle. The turn may be running
+                # with nobody watching, so this is a failure, not something to
+                # paper over: the record says so.
+                log("  the agent did not hand out a turn id - the task cannot be followed")
+                self._finalize(workspace_id, task_id, FAILED, {
+                    "error": "the agent did not hand out a turn id; this agent does not "
+                             "support turn handles (0.19.0 or later is needed)",
+                    "stop_reason": "no_handle",
+                    "finished_at": now_iso()})
+                self._publish({"type": "task_failed",
+                               "task": self.store.load(workspace_id, task_id)})
+                return
+            log("  task %s: turn %s submitted" % (task_id, turn_id))
+            self._follow_turn(workspace_id, task_id, turn_id, state)
+            return
+
+        # ---- the old way: one stream, held to the end --------------------
+        # For an agent that does not know the turn-handle interface (older
+        # than 0.19.0). The connection is the task's life: if it breaks, the
+        # task is lost - which is exactly why the new way exists.
         for event in self.agent.chat(workspace_id, message, provider=provider,
                                      session_id=session_id, task_id=task_id,
                                      task_context=context, allow_paths=allow_paths,
                                      model=model or None, params=params,
                                      limits=limits, policy=policy):
-            kind = event.get("type")
-            if kind == "start":
-                session_id = event.get("session_id") or session_id
-                self.store.update(workspace_id, task_id,
-                                  lambda t: t.update({"session_id": session_id}))
-            elif kind == "tool_call" and event.get("name") == "toolkit_task":
-                self._apply_report(workspace_id, task_id, event, report)
-            elif kind == "artifacts":
-                # The files this turn produced: the page shows them under the
-                # finished task.
-                items = event.get("items") or []
-                if items:
-                    self.store.update(workspace_id, task_id,
-                                      lambda t: t.update({"artifacts": items}))
-            elif kind == "content_delta":
-                answer += event.get("text") or ""
-            elif kind == "done":
-                answer = event.get("content") or answer
-                status = WAITING if report["needs_confirmation"] else DONE
-                # How the turn ended and what it cost. A turn that ran out of
-                # budget is **not** a failure - it says so, and the numbers are
-                # on the record.
-                stop_reason = str(event.get("stop_reason") or "")
-                budget_used = event.get("budget_used")
-                budget_used = dict(budget_used) if isinstance(budget_used, dict) else {}
-                usage = event.get("usage")
-                usage = dict(usage) if isinstance(usage, dict) else {}
-
-                def done_fields(t):
-                    t["progress"] = 100 if status == DONE else t.get("progress", 0)
-                    t["result"] = answer
-                    t["finished_at"] = now_iso()
-                    t["error"] = ""
-                    t["stop_reason"] = stop_reason
-                    t["budget_used"] = budget_used
-                    t["usage"] = usage
-                    t["iterations"] = int(event.get("iterations") or 0)
-                    t["trajectory_id"] = str(event.get("trajectory_id") or "")
-                    if stop_reason == "budget":
-                        # 到点了，不是做完了：说清楚是哪一条预算。
-                        t["note"] = "预算用完了（%s）" % (budget_used.get("limit") or "budget")
-
-                written = self._finalize(workspace_id, task_id, status, done_fields)
-                if written is not None:
-                    self._publish(
-                        {"type": "task_done" if status == DONE else "task_waiting_confirmation",
-                         "task": written})
-                    if status == DONE:
-                        self.note_thread(written, "result", answer)
-                    else:
-                        self.note_thread(written, "question", report.get("question") or "")
-                return
-            elif kind == "error":
-                written = self._finalize(workspace_id, task_id, FAILED, {
-                    "error": event.get("message") or "the turn failed",
-                    "stop_reason": "error",
-                    "finished_at": now_iso()})
-                if written is not None:
-                    self._publish({"type": "task_failed", "task": written})
-                    self.note_thread(written, "error", event.get("message") or "这一轮失败了")
-                return
-            elif kind == "stopped":
-                written = self._finalize(workspace_id, task_id, CANCELLED, {
-                    "stop_reason": "cancelled",
-                    "finished_at": now_iso()})
-                if written is not None:
-                    self._publish({"type": "task_cancelled", "task": written})
+            verdict = self._on_event(workspace_id, task_id, event, state)
+            if verdict:
                 return
         # The stream ended without a verdict (the agent died, the connection broke).
         written = self._finalize(workspace_id, task_id, FAILED, {
@@ -1774,6 +2007,86 @@ class Engine:
             "finished_at": now_iso()})
         if written is not None:
             self._publish({"type": "task_failed", "task": written})
+
+    def _on_event(self, workspace_id, task_id, event, state):
+        """One event of a turn. Returns the verdict, or None to keep going.
+
+        The verdict is "done" / "waiting" / "failed" / "cancelled"; the task
+        is finished when it is not None.
+        """
+        report = state["report"]
+        answer = state["answer"]
+        kind = event.get("type")
+        if kind == "start":
+            session_id = event.get("session_id") or ""
+            if session_id:
+                self.store.update(workspace_id, task_id,
+                                  lambda t: t.update({"session_id": session_id}))
+        elif kind == "tool_call" and event.get("name") == "toolkit_task":
+            self._apply_report(workspace_id, task_id, event, report)
+        elif kind == "artifacts":
+            # The files this turn produced: the page shows them under the
+            # finished task.
+            items = event.get("items") or []
+            if items:
+                self.store.update(workspace_id, task_id,
+                                  lambda t: t.update({"artifacts": items}))
+        elif kind == "content_delta":
+            state["answer"] = answer + (event.get("text") or "")
+        elif kind == "done":
+            answer = event.get("content") or answer
+            state["answer"] = answer
+            status = WAITING if report["needs_confirmation"] else DONE
+            # How the turn ended and what it cost. A turn that ran out of
+            # budget is **not** a failure - it says so, and the numbers are
+            # on the record.
+            stop_reason = str(event.get("stop_reason") or "")
+            budget_used = event.get("budget_used")
+            budget_used = dict(budget_used) if isinstance(budget_used, dict) else {}
+            usage = event.get("usage")
+            usage = dict(usage) if isinstance(usage, dict) else {}
+
+            def done_fields(t):
+                t["progress"] = 100 if status == DONE else t.get("progress", 0)
+                t["result"] = answer
+                t["finished_at"] = now_iso()
+                t["error"] = ""
+                t["stop_reason"] = stop_reason
+                t["budget_used"] = budget_used
+                t["usage"] = usage
+                t["iterations"] = int(event.get("iterations") or 0)
+                t["trajectory_id"] = str(event.get("trajectory_id") or "")
+                if stop_reason == "budget":
+                    # 到点了，不是做完了：说清楚是哪一条预算。
+                    t["note"] = "预算用完了（%s）" % (budget_used.get("limit") or "budget")
+
+            written = self._finalize(workspace_id, task_id, status, done_fields)
+            if written is not None:
+                self._publish(
+                    {"type": "task_done" if status == DONE else "task_waiting_confirmation",
+                     "task": written})
+                if status == DONE:
+                    self.note_thread(written, "result", answer)
+                else:
+                    self.note_thread(written, "question", report.get("question") or "")
+            return "waiting" if status == WAITING else "done"
+        elif kind == "error":
+            written = self._finalize(workspace_id, task_id, FAILED, {
+                "error": event.get("message") or "the turn failed",
+                "stop_reason": "error",
+                "finished_at": now_iso()})
+            if written is not None:
+                self._publish({"type": "task_failed", "task": written})
+                self.note_thread(written, "error", event.get("message") or "这一轮失败了")
+            return "failed"
+        elif kind == "stopped":
+            written = self._finalize(workspace_id, task_id, CANCELLED, {
+                "stop_reason": "cancelled",
+                "finished_at": now_iso()})
+            if written is not None:
+                self._publish({"type": "task_cancelled", "task": written})
+            return "cancelled"
+        return None
 
     def _consume_fleet(self, workspace_id, task_id, provider, context, message=None):
         """Run the task on the devices: each device's OWN agent answers.
@@ -3743,8 +4056,12 @@ def main(argv=None):
     app.task_workspace_id()
 
     # The records of a previous run: a task that was running then is not
-    # running now (its worker died with that process).
-    app.engine.recover_stale_tasks()
+    # running now (its worker died with that process). Everything that is
+    # running is taken over, however fresh its record is: this process has
+    # just started, so it cannot be the one that was working on it - and a
+    # task whose turn is still alive on the agent's side is **not** lost
+    # work, it is work that is still going on.
+    app.engine.recover_stale_tasks(min_age=0)
 
     try:
         health = app.agent.health()

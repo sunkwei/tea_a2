@@ -128,6 +128,7 @@ a2_task 与 a2 **同机同用户**。这意味着：
 | **S2/S7 预算与权限的下发** | ✅ 做了：任务带 `limits`（预算）与 `policy`（可用工具），队列照 agent 的 `limits` 填默认值；**工具白名单从「不给模型看」改成「真的拒绝」**——模型点名要一个没给它的工具，它不执行 |
 | **「机制层能长出新能力」** | ✅ 做了：`sched/a2_ext_py/toolkit/` 是一个 MCP 服务器——模块（一个 .py 文件）加载后就是 a2 的工具，**a2 一行 C++ 都不用改**；模型自己也能写（`toolkit_save` → `toolkit_reload` → 同一轮里就用）。为此 a2 改成**每轮迭代重问一遍 MCP 的工具清单**（`McpRegistry::refresh_tools()`），新工具当场可见 |
 | **客户端只有一份** | ✅ 做了：`sched/a2_ext_py/`（`Client` + `Queue` + `ApiError`）——以前有三份拷贝（`tea_api.Tea` / `channel.Agent` / `task_server.Agent`），接口一变要改三处 |
+| **S1 策略层改成「提交 + 订阅」** | ✅ 做了（0.19.0）：队列把每一轮**交出去**（`POST /api/chat {"async":true}`）拿 `turn_id`，再订它的帧（`GET /api/turns/{id}/events?since=`）；断了就问 `GET /api/turns/{id}` 再接回去。**队列重启能认领**在跑的那一轮（`turn_id` 在任务记录里），不再一律判死；**超时停的是那一轮**（`POST /api/turns/{id}/stop`），不留孤儿轮次；**老 agent（<0.19.0）照旧走老路**（按版本判断） |
 | **M1 回合句柄 + 异步提交** | ✅ 做了（0.19.0）：`POST /api/chat {"async":true}` → **202 + `turn_id`**（不是流）；`GET /api/turns/{id}` 查状态（`state`/`result`/`usage`/`metrics`/`files_changed`）；`GET /api/turns/{id}/events?since=` 回放+直播；`POST /api/turns/{id}/stop` 精确停这一轮；`GET /api/turns` 列最近的句柄。**句柄就是轨迹 id**（`turn_id` = `done` 事件里的 `trajectory_id`），所以「怎么样了」与「干了什么」用同一个字符串查。不传 `async` 行为一个字没变 |
 | M3 策略执行点（审批闸门 / exec 围栏） | ⏳ 还没做（`allow_paths` 仍只管文件工具，`toolkit_exec` 不受限）。**审批闸门那一半不做了**（2026-11-04 决定：模型自举的风险被接受），剩下的只是「策略层下发的权限」 |
 | M4 幂等键 / M5 能力清单 / M7 请求 id | ⏳ 还没做 |
@@ -289,7 +290,14 @@ GET /api/capabilities
 > 这里只列**因为"a2 当机制层"才需要**的改动；队列已有的能力（额度闸门、计划、依赖、
 > 触发器、router、看门狗、微信/telegram 前端、导出）不在此列。
 
-### S1 改成「提交 + 订阅」 【跟着 M1】
+### S1 改成「提交 + 订阅」 【跟着 M1】—— ✅ 0.19.0 做了
+
+> **落地情况（0.19.0）**：`sched/task_server.py` 的 `_consume()` 现在是「提交 → 记
+> `turn_id` → 订事件流」。三个好处都拿到了：**断线不再等于失败**（问一句状态再接回去）、
+> **队列重启能认领**在跑的回合（`recover_stale_tasks()` 改成接回而不是判死）、
+> **超时停的是那一轮**（不留孤儿轮次在烧 token）。老 agent（<0.19.0）按版本判断，
+> 照旧走「一条 SSE 撑到底」的老路。
+> 测试：`tests/smoke_task_turn_handle.py`（24 项）。
 
 - `Agent.chat()` 换成：`POST /api/chat {"async":true}` → 拿 `turn_id` →
   订阅 `GET /api/turns/{id}/events?since=`（或轮询 `/api/turns/{id}`）；
