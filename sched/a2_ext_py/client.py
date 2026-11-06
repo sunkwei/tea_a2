@@ -69,6 +69,25 @@ class Client:
         return urllib.parse.urlencode(clean)
 
     # ---- the machine -------------------------------------------------------
+    def capabilities(self):
+        """What this agent can do: the features a caller may rely on.
+
+        The features are the contract between the layers: a caller reads them
+        once and picks its way (no `async_turns` means the old way of holding
+        a stream open). An agent that is too old has no such endpoint - the
+        caller falls back to its version then.
+        """
+        return self._request("GET", "/api/capabilities")
+
+    def error_catalog(self):
+        """Every error the API can answer with, and what it means.
+
+        A list of {code, http, retryable, retry_after, meaning, hint}: a
+        caller looks a code up instead of parsing an English sentence to find
+        out whether it may try again.
+        """
+        return self._request("GET", "/api/errors").get("errors") or []
+
     def health(self):
         """Is the agent up, and what is it configured with.
 

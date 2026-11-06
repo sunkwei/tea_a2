@@ -9,10 +9,12 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.19.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
+| `GET` | `/api/health` | 探活、版本（`0.19.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
+| `GET` | `/api/capabilities` | **这台机器能做什么**：`{version, git_hash, features{async_turns, turn_handles, limits, policy, approvals, idempotency, exec_fence, mcp, request_id, error_catalog}, limits{max_active_turns, max_subscribers, max_tool_output}, routes[{method, path, since}]}`。上层（任务队列）读一次，按 `features` 降级——没有 `async_turns` 就退回「一条 SSE 撑到底」的老路 |
+| `GET` | `/api/errors` | **错误目录**：每一个接口可能回的错误，带 `{code, http, retryable, retry_after, meaning, hint}`。调用方**查表**就行，不必去读英文消息猜「这个能不能重试」 |
 | `POST` | `/api/exec` | **机群通道**：在这台设备上跑一条命令，**不经过模型**，返回退出码和输出。**没配 `--api-token` 时这个路由不存在（404）**；配了就要带 `Authorization: Bearer <token>`（或 `X-Api-Token`） |
 | `GET` | `/api/peer/health` | **对端通道**：`/api/health` 的令牌版镜像（见下「机器对机器的通道」） |
 | `GET` | `/api/peer/status` | **对端通道**：`/api/status` 的令牌版镜像 |
@@ -69,6 +71,29 @@
 | `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
+
+### 请求 id 与错误目录
+
+**每个回答都带一个请求 id**（`X-Request-Id` 头）：调用方自己带了就**回显**（可以
+自己编一个 trace id），没带就**生成**一个（`req_` 开头）。同一个 id 还会出现在：
+
+- **错误体里**：`{"error":{"code","message","retryable","hint","request_id"}}`；
+- **每一帧 SSE 里**（`request_id` 字段）——一帧事件因此能追回到发起它的那次调用。
+
+所以「客户端说它卡住了」这件事，可以用这一个字符串在日志里查到底。
+
+**错误目录**（`GET /api/errors`）：接口能回的每一个错误，都有一行说明：
+
+```jsonc
+{"code": "too_many_turns", "http": 429, "retryable": true, "retry_after": 5,
+ "meaning": "this server is already running as many turns as it allows",
+ "hint": "wait for one to finish, then try again"}
+```
+
+`retryable` 是给程序看的（「能不能再来一次」），`meaning`/`hint` 是给人看的。
+**429 一律带 `Retry-After`**（秒）。目录里的每一行都对着源码核过：
+`tests/smoke_error_catalog.py` 读 `src/server.cpp`，确认**每一个能发出去的错误码都在
+目录里、状态也一样**，反过来目录里也不许有发不出去的条目。
 
 ### 回合句柄：提交完可以撒手
 

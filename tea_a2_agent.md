@@ -946,6 +946,37 @@ a2 = 通道（回合、工具、文件、轨迹），a2_task = 队列（什么�
 - 测试：`tests/smoke_task_turn_handle.py`（24 项：句柄在记录上、重启被接回、
   轮次已完时从状态取结论、超时停轮次不留孤儿、老 agent 照旧能用）。
 
+### 2026-11-06：请求 id、错误目录、能力清单（M5 + M7，0.19.2）
+
+三件让**程序**（而不是人）用得上接口的事：
+
+1. **`X-Request-Id`**：每个回答都带。调用方自己带的**回显**（可以自己编 trace id），
+   没带的生成一个（`req_` 开头）。同一个 id 出现在**错误体**和**每一帧 SSE** 里——
+   所以「客户端说它卡住了」可以用一个字符串在日志里查到底。
+2. **错误目录**（`GET /api/errors`）：每个错误带 `{code, http, retryable, retry_after,
+   meaning, hint}`。`retryable` 是给程序的（「能不能再来一次」），429 一律带
+   `Retry-After`。
+3. **能力清单**（`GET /api/capabilities`）：`features` 里的每个键都是实打实的开关。
+   队列**读它降级**（`features.async_turns` 为 false 就走老路），读不到就用版本号兜底。
+
+几个当时踩到的点：
+
+- **cpp-httplib 只有一个 `pre_routing` 钩子，后注册的会顶掉先注册的**！我把
+  「给每个请求发 id」注册成 pre-routing，结果**完全不生效**——因为对端通道
+  （`/api/peer/*` 的令牌门）早就注册了一个，在它后面注册就把我的顶掉了。
+  现在两件事合成一个函数 `pre_route()`（id + 令牌门），只注册一次。
+  **症状是「代码明明写了却不生效」，日志里一行都没有**——查这个要记得先怀疑钩子。
+- **`Request::headers` 是 const 的**：`req.headers.insert(...)` 编不过。请求 id 因此
+  放在**响应**上（`res.set_header`），处理函数再从 `res` 读回来（`response_request_id()`）。
+- **错误码目录要按 (状态, 码) 配对，不能只按码**：`config_missing` 既是 404（根本没有
+  provider.yaml）又是 409（没东西可替换），`session_error` / `write_failed` /
+  `no_active_turn` / `images_not_queued` 同理。按码建 map 会**静默丢掉**其中一条
+  （map 的重复键保留第一个）——所以目录是一个 **vector**，每条自带状态。
+- 目录对着源码核：`tests/smoke_error_catalog.py` 读 `src/server.cpp` 里的
+  `send_error(res, 状态, "码")`，两边集合必须**完全一样**（少一条 = 目录有洞，
+  多一条 = 目录里有个发不出去的条目）。
+- 测试：`tests/smoke_error_catalog.py`（30 项）。
+
 ### 2026-11-04：扩展层 a2_ext_py（机制层能长出新能力）
 
 **名字**：`a2_ext_py`（不是 `a2_py`——它不是「a2 的封装」，是「a2 的扩展层」）。

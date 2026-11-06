@@ -131,7 +131,9 @@ a2_task 与 a2 **同机同用户**。这意味着：
 | **S1 策略层改成「提交 + 订阅」** | ✅ 做了（0.19.0）：队列把每一轮**交出去**（`POST /api/chat {"async":true}`）拿 `turn_id`，再订它的帧（`GET /api/turns/{id}/events?since=`）；断了就问 `GET /api/turns/{id}` 再接回去。**队列重启能认领**在跑的那一轮（`turn_id` 在任务记录里），不再一律判死；**超时停的是那一轮**（`POST /api/turns/{id}/stop`），不留孤儿轮次；**老 agent（<0.19.0）照旧走老路**（按版本判断） |
 | **M1 回合句柄 + 异步提交** | ✅ 做了（0.19.0）：`POST /api/chat {"async":true}` → **202 + `turn_id`**（不是流）；`GET /api/turns/{id}` 查状态（`state`/`result`/`usage`/`metrics`/`files_changed`）；`GET /api/turns/{id}/events?since=` 回放+直播；`POST /api/turns/{id}/stop` 精确停这一轮；`GET /api/turns` 列最近的句柄。**句柄就是轨迹 id**（`turn_id` = `done` 事件里的 `trajectory_id`），所以「怎么样了」与「干了什么」用同一个字符串查。不传 `async` 行为一个字没变 |
 | M3 策略执行点（审批闸门 / exec 围栏） | ⏳ 还没做（`allow_paths` 仍只管文件工具，`toolkit_exec` 不受限）。**审批闸门那一半不做了**（2026-11-04 决定：模型自举的风险被接受），剩下的只是「策略层下发的权限」 |
-| M4 幂等键 / M5 能力清单 / M7 请求 id | ⏳ 还没做 |
+| **M5 能力清单** | ✅ 做了（0.19.2）：`GET /api/capabilities` → `{version, features{async_turns, turn_handles, limits, policy, approvals, idempotency, exec_fence, mcp, request_id, error_catalog}, limits{…}, routes[{method,path,since}]}`。队列**读它降级**（`features.async_turns` 为 false 就走老路），不再靠版本号猜 |
+| **M7 请求 id 与错误目录** | ✅ 做了（0.19.2）：每个回答带 `X-Request-Id`（调用方带的**回显**，没带的生成），错误体带 `request_id` / `retryable` / `hint`，**每一帧 SSE 也带**（一帧能追回到那次调用）；`GET /api/errors` 是错误目录（`{code, http, retryable, retry_after, meaning, hint}`），**429 一律带 `Retry-After`**；目录对着源码核过（测试读 `src/server.cpp`） |
+| M4 幂等键 | ⏳ 还没做（回合/工具这一层的 `Idempotency-Key`；任务层已有） |
 
 ---
 
@@ -246,7 +248,12 @@ POST /api/turns/{turn_id}/approvals/ap_… {"decision":"allow_once|allow_always|
 **注意**：a2_task **已经有**任务级幂等（`task_server.py:2623`），所以这一条是**补齐回合/工具这一层**，
 两边风格一致（都用 `Idempotency-Key` 头 + body 里的同名字段）。
 
-### M5 能力清单 【该做，少写胶水】
+### M5 能力清单 【该做，少写胶水】—— ✅ 0.19.2 做了
+
+> **落地情况（0.19.2）**：`GET /api/capabilities` 已经在了，`features` 里的每个键都是
+> 实打实的开关（`async_turns` / `turn_handles` 真的能用，`approvals` / `idempotency` /
+> `exec_fence` 确实还没有）。队列（`sched/task_server.py`）**读它降级**：读不到就用
+> 版本号兜底（更老的 agent 连这个接口都没有）。
 
 **问题**：策略层现在**硬编码**在 0.18.5 的接口上（`Agent.primary_model()` 打 `/api/providers/{n}/models`、
 看门狗打 `/api/sessions/{id}/trajectory`）。a2 升级、队列没升级时，只有"404 了才知道"。
@@ -277,7 +284,12 @@ GET /api/capabilities
 - 策略层：任务记录里存 `turn_id` + `trajectory_id` + `usage`（`new_task()` 加三个字段），
   于是「任务 → 回合 → 轨迹」是一条可点的链，看门狗也不用再猜"最近两轮"。
 
-### M7 请求 id 与错误目录 【可选，但很便宜】
+### M7 请求 id 与错误目录 【可选，但很便宜】—— ✅ 0.19.2 做了
+
+> **落地情况（0.19.2）**：`X-Request-Id` 从 HTTP 贯到错误体、再贯到每一帧 SSE；
+> `GET /api/errors` 是错误目录，**对着源码核过**（测试读 `src/server.cpp`，两边的
+> (状态, 码) 集合必须完全一样）。`/api/errors` 与 `/api/capabilities` 都进了
+> `/api/doc`（`docs/api.md` 编译进二进制）。
 
 - `X-Request-Id` 从 HTTP 贯到每个 SSE 帧（现在 `src/server.cpp` 里一个都没有）；
 - `GET /api/errors` → `{code, http, retryable, meaning, hint}`；429 一律带 `Retry-After`。

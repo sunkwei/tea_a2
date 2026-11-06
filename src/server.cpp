@@ -27,6 +27,7 @@
 #include "archive.h"
 #include "command.h"
 #include "env.h"
+#include "errors.h"
 #include "html_export.h"
 #include "http.h"
 #include "log.h"
@@ -191,6 +192,39 @@ bool decode_image_payload(const std::string& raw, std::string* bytes, std::strin
   return true;
 }
 
+/// The header that carries the request's id from the caller to the answer.
+const char* const kRequestIdHeader = "X-Request-Id";
+
+/// True when an id is safe to put in a header and in a log line: letters,
+/// digits, dash, underscore, dot and colon, up to 128 characters. An id that
+/// comes from outside must never be able to inject a header or a newline.
+bool request_id_is_safe(const std::string& id) {
+  if (id.empty() || id.size() > 128) return false;
+  for (std::size_t i = 0; i < id.size(); ++i) {
+    const char c = id[i];
+    const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == ':';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+/// The id of the request being answered: the caller's own if it sent a sane
+/// one, a fresh one otherwise. Every answer carries it, every frame of a
+/// turn carries it, and the error body carries it - so one id ties a call, the
+/// turn it started and the log lines in between together.
+std::string request_id_of(const httplib::Request& req) {
+  const std::string given = trim(req.get_header_value(kRequestIdHeader));
+  if (request_id_is_safe(given)) return given;
+  return make_id("req_");
+}
+
+/// The request id of the answer being written (set by the pre-routing
+/// handler). Empty when the answer did not go through it.
+std::string response_request_id(const httplib::Response& res) {
+  return res.get_header_value(kRequestIdHeader);
+}
+
 void send_json(httplib::Response& res, const nlohmann::json& body, int status = 200) {
   res.status = status;
   res.set_header("Access-Control-Allow-Origin", "*");
@@ -198,12 +232,31 @@ void send_json(httplib::Response& res, const nlohmann::json& body, int status = 
   res.set_content(dump_json(body), "application/json; charset=utf-8");
 }
 
+/// An error, with what the catalog knows about it.
+///
+/// The message is for a human; `retryable` and `hint` are for the caller:
+/// a client should not have to read English to find out whether it may try
+/// again. `request_id` ties the answer to the log and to the turn.
 void send_error(httplib::Response& res, int status, const std::string& code,
                 const std::string& message) {
   nlohmann::json body = nlohmann::json::object();
   nlohmann::json error = nlohmann::json::object();
   error["code"] = code;
   error["message"] = message;
+  const ErrorInfo* info = error_info(code, status);
+  if (info != nullptr) {
+    error["retryable"] = info->retryable;
+    if (info->hint != nullptr && *info->hint != '\0') error["hint"] = info->hint;
+    // "Come back later" needs to say when. 429 always does.
+    if (info->retry_after > 0) {
+      res.set_header("Retry-After", std::to_string(info->retry_after));
+    }
+  }
+  const std::string req_id = response_request_id(res);
+  if (!req_id.empty()) {
+    error["request_id"] = req_id;
+    body["request_id"] = req_id;
+  }
   body["error"] = error;
   send_json(res, body, status);
 }
@@ -529,6 +582,9 @@ struct ChatTurn {
   /// Where the audit trail of this turn lives, so the status can report the
   /// files it changed without making the caller look it up.
   std::string trajectory_path;
+  /// The id of the request that started this turn. Every frame of the turn
+  /// carries it, so a frame can be traced back to the call that caused it.
+  std::string request_id;
   Workspace workspace;
   Session session;
 
@@ -611,6 +667,9 @@ struct ChatTurn {
       // The sequence number is what makes a reconnect lossless: the client tells
       // us the last one it saw and we replay everything after it.
       stamped["seq"] = next_seq++;
+      // The id of the request that started the turn: one string ties a frame
+      // to the call, to the log and to the audit trail.
+      if (!request_id.empty()) stamped["request_id"] = request_id;
       frame = "data: " + dump_json(stamped) + "\n\n";
       log.push_back(frame);
       log_bytes += frame.size();
@@ -1242,6 +1301,11 @@ struct ApiServer::Impl {
   // ---- helpers -----------------------------------------------------------
   void install_routes();
 
+  /// The pre-routing hook: the request gets its id, and the peer channel is
+  /// kept behind its token. See the definition for why it is one function.
+  httplib::Server::HandlerResponse pre_route(const httplib::Request& req,
+                                             httplib::Response& res);
+
   /// Run the web tools the model asked for, put the results back into the
   /// request and let the caller ask the model again.
   ///
@@ -1745,6 +1809,64 @@ bool ApiServer::Impl::run_web_tools(ChatRequest* req, ChatResult* result,
   return true;
 }
 
+/// What happens before the router runs: the request gets its id, and the peer
+/// channel is kept behind its token.
+///
+/// Both live in one function because cpp-httplib has a single pre-routing
+/// hook: a second registration would silently replace the first (and the
+/// request id would quietly stop being set).
+httplib::Server::HandlerResponse ApiServer::Impl::pre_route(const httplib::Request& req,
+                                                             httplib::Response& res) {
+  // Every answer carries the id of the request that caused it: the caller's
+  // own if it sent a sane one, a fresh one otherwise. The id sits on the
+  // response, so a handler that needs it (the one that starts a turn, for
+  // example) reads the very same one back - that is what ties a call, the
+  // turn it started and the log lines in between together.
+  res.set_header(kRequestIdHeader, request_id_of(req));
+
+  // The peer channel: /api/peer/<route> is the token-guarded mirror of
+  // /api/<route>. It is a whitelist: everything else under /api/peer/ is a
+  // 404 that says so - the peer channel is not a second copy of the whole API.
+  const std::string prefix = "/api/peer/";
+  if (req.path.size() <= prefix.size() ||
+      req.path.compare(0, prefix.size(), prefix) != 0) {
+    return httplib::Server::HandlerResponse::Unhandled;
+  }
+  if (api_token.empty()) {
+    // No token => no peer channel. 404, not 403: the route is not part of
+    // this build's surface at all.
+    send_error(res, 404, "not_found",
+               "this device has no peer channel (start it with --api-token <token>)");
+    return httplib::Server::HandlerResponse::Handled;
+  }
+  if (!secret_equals(request_token(req), api_token)) {
+    send_error(res, 401, "unauthorized",
+               "the peer channel needs the API token (Authorization: Bearer <token>)");
+    return httplib::Server::HandlerResponse::Handled;
+  }
+  const std::string tail = req.path.substr(prefix.size());
+  static const char* kMirrored[] = {"chat", "chat/stop", "exec",  "status",
+                                    "health", "tools", "workspaces"};
+  bool known = false;
+  for (std::size_t i = 0; i < sizeof(kMirrored) / sizeof(kMirrored[0]); ++i) {
+    if (tail == kMirrored[i]) {
+      known = true;
+      break;
+    }
+  }
+  if (!known) {
+    send_error(res, 404, "not_found", "the peer channel has no route '" + tail + "'");
+    return httplib::Server::HandlerResponse::Handled;
+  }
+  // cpp-httplib hands the pre-routing handler a *const* request, but the
+  // object comes from the request being served (it is not const), and the
+  // path is what the router matches on. Rewriting it here is what lets the
+  // mirror work without touching a single route registration.
+  httplib::Request& routed = const_cast<httplib::Request&>(req);
+  routed.path = "/api/" + tail;
+  return httplib::Server::HandlerResponse::Unhandled;
+}
+
 void ApiServer::Impl::install_routes() {
   httplib::Server& svr = server;
 
@@ -1933,45 +2055,11 @@ void ApiServer::Impl::install_routes() {
   //
   // The mirror is a whitelist. Everything else under /api/peer/ is a 404 that
   // says so - the peer channel is not a second copy of the whole API.
+  // There is only **one** pre-routing hook in cpp-httplib, and registering a
+  // second one replaces the first. So everything that has to happen before the
+  // router runs lives in one place: `pre_route()`.
   svr.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
-    const std::string prefix = "/api/peer/";
-    if (req.path.size() <= prefix.size() ||
-        req.path.compare(0, prefix.size(), prefix) != 0) {
-      return httplib::Server::HandlerResponse::Unhandled;
-    }
-    if (api_token.empty()) {
-      // No token => no peer channel. 404, not 403: the route is not part of
-      // this build's surface at all.
-      send_error(res, 404, "not_found",
-                 "this device has no peer channel (start it with --api-token <token>)");
-      return httplib::Server::HandlerResponse::Handled;
-    }
-    if (!secret_equals(request_token(req), api_token)) {
-      send_error(res, 401, "unauthorized",
-                 "the peer channel needs the API token (Authorization: Bearer <token>)");
-      return httplib::Server::HandlerResponse::Handled;
-    }
-    const std::string tail = req.path.substr(prefix.size());
-    static const char* kMirrored[] = {"chat", "chat/stop", "exec",  "status",
-                                      "health", "tools", "workspaces"};
-    bool known = false;
-    for (std::size_t i = 0; i < sizeof(kMirrored) / sizeof(kMirrored[0]); ++i) {
-      if (tail == kMirrored[i]) {
-        known = true;
-        break;
-      }
-    }
-    if (!known) {
-      send_error(res, 404, "not_found", "the peer channel has no route '" + tail + "'");
-      return httplib::Server::HandlerResponse::Handled;
-    }
-    // cpp-httplib hands the pre-routing handler a *const* request, but the
-    // object comes from the request being served (it is not const), and the
-    // path is what the router matches on. Rewriting it here is what lets the
-    // mirror work without touching a single route registration.
-    httplib::Request& routed = const_cast<httplib::Request&>(req);
-    routed.path = "/api/" + tail;
-    return httplib::Server::HandlerResponse::Unhandled;
+    return pre_route(req, res);
   });
 
   // ---- CORS preflight ----------------------------------------------------
@@ -2046,6 +2134,83 @@ void ApiServer::Impl::install_routes() {
   // Both routes are guarded by the shared token. With no token configured
   // /api/exec does not exist (404) and /api/status is open like /api/health -
   // a default install therefore grows no new reachable surface.
+  // ---- the catalog and the capabilities --------------------------------
+  //
+  // Two documents that let a caller know what this machine can do, without
+  // reading the source and without guessing from an error message.
+
+  svr.Get("/api/errors", [this](const httplib::Request&, httplib::Response& res) {
+    nlohmann::json list = nlohmann::json::array();
+    const std::vector<ErrorInfo>& all = error_catalog();
+    for (std::size_t i = 0; i < all.size(); ++i) {
+      nlohmann::json item = nlohmann::json::object();
+      item["code"] = all[i].code;
+      item["http"] = all[i].http;
+      item["retryable"] = all[i].retryable;
+      item["retry_after"] = all[i].retry_after;
+      item["meaning"] = std::string(all[i].meaning != nullptr ? all[i].meaning : "");
+      item["hint"] = std::string(all[i].hint != nullptr ? all[i].hint : "");
+      list.push_back(item);
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["errors"] = list;
+    send_json(res, j);
+  });
+
+  svr.Get("/api/capabilities", [this](const httplib::Request&, httplib::Response& res) {
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["version"] = std::string(tea::version_string());
+    j["git_hash"] = tea::version_git_hash();
+    // What this machine can do. A caller (the task queue) reads it once and
+    // picks its way: a feature that is false is one it must not use.
+    nlohmann::json features = nlohmann::json::object();
+    features["async_turns"] = true;    // POST /api/chat {"async":true} -> a handle
+    features["turn_handles"] = true;   // GET /api/turns/{id}, .../events, .../stop
+    features["limits"] = true;         // a turn may be given a budget
+    features["policy"] = true;         // a turn may be given a tool whitelist
+    features["approvals"] = false;     // the agent cannot stop a turn and ask
+    features["idempotency"] = false;   // no Idempotency-Key on the turn level
+    features["exec_fence"] = false;    // the command tool is not fenced
+    features["mcp"] = true;            // MCP servers can add tools
+    features["request_id"] = true;     // every answer carries X-Request-Id
+    features["error_catalog"] = true;  // GET /api/errors
+    j["features"] = features;
+    // The ceilings this machine imposes, so a caller can plan inside them.
+    nlohmann::json limits = nlohmann::json::object();
+    limits["max_active_turns"] = static_cast<long long>(max_active_turns());
+    limits["max_subscribers"] = static_cast<long long>(max_subscribers_per_turn());
+    limits["max_tool_output"] = static_cast<long long>(config->settings.max_tool_output);
+    j["limits"] = limits;
+    // The routes a caller may rely on, and since when. The list is short on
+    // purpose: it is the contract between the layers, not the whole API.
+    nlohmann::json routes = nlohmann::json::array();
+    const char* const kRoutes[][3] = {
+        {"GET", "/api/health", "0.16.0"},
+        {"GET", "/api/capabilities", "0.19.2"},
+        {"GET", "/api/errors", "0.19.2"},
+        {"POST", "/api/chat", "0.16.0"},
+        {"GET", "/api/turns", "0.19.0"},
+        {"GET", "/api/turns/{turn_id}", "0.19.0"},
+        {"GET", "/api/turns/{turn_id}/events", "0.19.0"},
+        {"POST", "/api/turns/{turn_id}/stop", "0.19.0"},
+        {"GET", "/api/turns/{turn_id}/trajectory", "0.18.5"},
+        {"POST", "/api/chat/stop", "0.16.0"},
+        {"GET", "/api/workspaces", "0.16.0"},
+        {"GET", "/api/providers/{name}/usage", "0.18.5"},
+    };
+    for (std::size_t i = 0; i < sizeof(kRoutes) / sizeof(kRoutes[0]); ++i) {
+      nlohmann::json one = nlohmann::json::object();
+      one["method"] = std::string(kRoutes[i][0]);
+      one["path"] = std::string(kRoutes[i][1]);
+      one["since"] = std::string(kRoutes[i][2]);
+      routes.push_back(one);
+    }
+    j["routes"] = routes;
+    send_json(res, j);
+  });
+
   svr.Get("/api/status", [this](const httplib::Request& req, httplib::Response& res) {
     if (!api_token.empty() && !secret_equals(request_token(req), api_token)) {
       send_error(res, 401, "unauthorized",
@@ -4673,6 +4838,8 @@ void ApiServer::Impl::install_routes() {
     // later, long after the connection is gone. The trajectory uses the same
     // id, so the audit trail of this turn is at /api/turns/<handle>/trajectory.
     turn->turn_id = make_id("t_");
+    // The id of this request: it goes on every frame of the turn.
+    turn->request_id = response_request_id(res);
     std::string err;
     if (!open_workspace(workspace_id, &turn->workspace, &err)) {
       send_error(res, 404, "not_found", err);

@@ -1332,7 +1332,7 @@ class Engine:
         try:
             return self.agent.turn_status(turn_id)
         except AgentError as exc:
-            if getattr(exc, "code", 0) == 404:
+            if getattr(exc, "status", 0) == 404:
                 return None
             log("  the state of turn %s could not be read (%s)" % (turn_id, exc))
             return None
@@ -1351,8 +1351,8 @@ class Engine:
             try:
                 self._follow_turn(workspace_id, task_id, turn_id, state)
             except Exception as exc:  # noqa: BLE001 - the queue must not die
-                log("  task %s: taking turn %s over failed (%s: %s)",
-                    task_id, turn_id, type(exc).__name__, exc)
+                log("  task %s: taking turn %s over failed (%s: %s)"
+                    % (task_id, turn_id, type(exc).__name__, exc))
                 self._finalize(workspace_id, task_id, FAILED, {
                     "error": "the task could not be taken over: %s" % exc,
                     "finished_at": now_iso()})
@@ -1769,31 +1769,49 @@ class Engine:
     # submits the turn and gets an **id** back; the id is what it keeps.
 
     def agent_supports_handles(self):
-        """Does the agent know the turn-handle interface? (0.19.0 and later)
+        """Does the agent know the turn-handle interface?
 
-        An older agent answers "async": true with the stream itself, so the
-        queue has to know which way to go. The answer is asked once - the
-        agent does not change its mind while the queue runs.
+        The agent says so itself: `GET /api/capabilities` reports
+        `features.async_turns`. An agent that is too old has no such endpoint,
+        so its version is the next best thing (0.19.0 is where the handles
+        came in). The answer is asked once - the agent does not change its
+        mind while the queue runs.
         """
         if self._agent_handles is None:
             handles = False
             version = ""
             try:
-                health = self.agent.health()
-                version = str(health.get("version") or "")
-                parts = []
-                for piece in version.split(".")[:3]:
-                    digits = "".join(ch for ch in piece if ch.isdigit())
-                    parts.append(int(digits) if digits else 0)
-                while len(parts) < 3:
-                    parts.append(0)
-                handles = tuple(parts) >= (0, 19, 0)
-            except Exception:  # noqa: BLE001 - an agent that cannot be asked
-                handles = False        # is an agent that cannot be reached
+                caps = self.agent.capabilities()
+                features = caps.get("features") or {}
+                handles = bool(features.get("async_turns"))
+                version = str(caps.get("version") or "")
+            except AgentError as exc:
+                if getattr(exc, "status", 0) != 404:
+                    log("the agent did not answer with capabilities (%s); "
+                        "falling back to its version" % exc)
+                version, handles = self._agent_version_handles()
+            except Exception as exc:  # noqa: BLE001 - an agent that cannot be asked
+                log("the agent could not be asked about its capabilities (%s)" % exc)
+                version, handles = self._agent_version_handles()
             self._agent_handles = handles
             log("the agent %s turn handles (version %s)"
                 % ("knows" if handles else "does not know", version or "unknown"))
         return self._agent_handles
+
+    def _agent_version_handles(self):
+        """(version, has_handles) from `GET /api/health` - the old way."""
+        try:
+            health = self.agent.health()
+        except Exception:  # noqa: BLE001 - an agent that cannot be reached
+            return ("", False)
+        version = str(health.get("version") or "")
+        parts = []
+        for piece in version.split(".")[:3]:
+            digits = "".join(ch for ch in piece if ch.isdigit())
+            parts.append(int(digits) if digits else 0)
+        while len(parts) < 3:
+            parts.append(0)
+        return (version, tuple(parts) >= (0, 19, 0))
 
     def _follow_turn(self, workspace_id, task_id, turn_id, state):
         """Follow one turn to its verdict.
@@ -1825,7 +1843,7 @@ class Engine:
                     if verdict:
                         return verdict
             except AgentError as exc:
-                if getattr(exc, "code", 0) == 404:
+                if getattr(exc, "status", 0) == 404:
                     # The agent does not know this turn any more: it is gone
                     # (the server restarted, or the handle was dropped).
                     log("  the agent does not know turn %s any more" % turn_id)
@@ -1839,7 +1857,7 @@ class Engine:
             try:
                 status = self.agent.turn_status(turn_id)
             except AgentError as exc:
-                if getattr(exc, "code", 0) == 404:
+                if getattr(exc, "status", 0) == 404:
                     log("  the agent does not know turn %s any more" % turn_id)
                     return "failed"
                 status = None
