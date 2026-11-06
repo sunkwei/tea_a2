@@ -118,7 +118,7 @@ AGGREGATE_SYSTEM = (
 
 # Which queue this is. The client asks before it speaks (see the
 # client's _tasks_prefix): the version segment arrived in 0.21.0.
-QUEUE_VERSION = "0.21.0"
+QUEUE_VERSION = "0.21.1"
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -2876,7 +2876,11 @@ class Handler(BaseHTTPRequestHandler):
             # Which queue this is. A client asks before it speaks: the
             # version segment (/v1/agent-tasks) arrived in 0.21.0, and a
             # newer client has to work against an older queue.
-            "version": QUEUE_VERSION,
+            #
+            # The queue and the agent ship in the same package, so the
+            # agent's version is the queue's version. The constant is only
+            # the answer when the agent cannot be reached.
+            "version": str(health.get("version") or QUEUE_VERSION),
             "agent": agent.base,
             "agent_ok": agent_ok,
             "agent_health": health,
