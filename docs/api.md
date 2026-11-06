@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.21.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
+| `GET` | `/api/health` | 探活、版本（`0.21.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
