@@ -30,6 +30,7 @@
 #include "errors.h"
 #include "html_export.h"
 #include "http.h"
+#include "idempotency.h"
 #include "log.h"
 #include "model_discovery.h"
 #include "provider_yaml.h"
@@ -225,11 +226,21 @@ std::string response_request_id(const httplib::Response& res) {
   return res.get_header_value(kRequestIdHeader);
 }
 
+/// Told by `send_json` what the answer of the request being served was, so
+/// the idempotency context can remember it. Defined further down (it needs
+/// the context, which needs `send_error`).
+void note_idempotency_answer(int status, const std::string& body);
+
 void send_json(httplib::Response& res, const nlohmann::json& body, int status = 200) {
   res.status = status;
   res.set_header("Access-Control-Allow-Origin", "*");
   res.set_header("Cache-Control", "no-store");
-  res.set_content(dump_json(body), "application/json; charset=utf-8");
+  const std::string text = dump_json(body);
+  // The answer of a request that carries an idempotency key is remembered
+  // before it goes out: a retry that arrives a moment later must find it,
+  // not start the work a second time.
+  note_idempotency_answer(status, text);
+  res.set_content(text, "application/json; charset=utf-8");
 }
 
 /// An error, with what the catalog knows about it.
@@ -259,6 +270,133 @@ void send_error(httplib::Response& res, int status, const std::string& code,
   }
   body["error"] = error;
   send_json(res, body, status);
+}
+
+class IdempotencyContext;
+
+/// The context of the request being served on this thread, if it has one.
+thread_local IdempotencyContext* g_idempotency = nullptr;
+
+/// The idempotency context of the request being served.
+///
+/// One per request that carries an idempotency key. It holds the store's lock
+/// for the whole request, so two requests with the same key cannot both do
+/// the work: the second one finds the answer of the first.
+///
+/// The answer is remembered **before** it goes out (see `note_idempotency_answer`),
+/// so a retry that arrives a moment later finds it. Only a good answer
+/// (2xx) is remembered: a failed attempt has to be retryable, and a retry
+/// with the same key has to be able to try again.
+class IdempotencyContext {
+ public:
+  IdempotencyContext(IdempotencyStore* store, const std::string& key,
+                      const std::string& fingerprint, httplib::Response& res)
+      : store_(store), key_(key), fingerprint_(fingerprint), res_(res) {
+    if (store_ == nullptr || key_.empty()) {
+      store_ = nullptr;
+      return;
+    }
+    // The lock is held until the context is destroyed: the whole "look, do
+    // the work, remember" sequence has to be one.
+    lock_.reset(new std::lock_guard<std::mutex>(store_->mutex()));
+    previous_ = g_idempotency;
+    g_idempotency = this;
+    IdempotencyRecord remembered;
+    if (!store_->load(key_, &remembered)) return;      // nothing known yet
+    if (remembered.fingerprint != fingerprint_) {
+      // The same key, a different question. That is a mistake, not a retry:
+      // answering it would give the caller somebody else's answer.
+      send_error(res_, 409, "idempotency_conflict",
+                 "this idempotency key was already used for a different request");
+      done_ = true;
+      return;
+    }
+    replay_body_ = remembered.body;
+    replay_status_ = remembered.status;
+    if (!remembered.turn_id.empty()) {
+      // The same question, and the answer was a turn: the turn it started is
+      // what the caller gets. Whether that turn is still alive is the
+      // caller's business (it knows what a turn is) - the route decides:
+      // a turn that died with the server has to be done again.
+      replay_turn_id_ = remembered.turn_id;
+      return;
+    }
+    if (!remembered.body.empty()) {
+      // The same question, and the answer was a plain answer: the same
+      // answer, without doing the work again.
+      res_.status = remembered.status;
+      res_.set_header("Access-Control-Allow-Origin", "*");
+      res_.set_header("Cache-Control", "no-store");
+      res_.set_content(remembered.body, "application/json; charset=utf-8");
+      done_ = true;
+      return;
+    }
+  }
+
+  /// The remembered answer (empty when there is none).
+  const std::string& replay_body() const { return replay_body_; }
+  int replay_status() const { return replay_status_; }
+
+  ~IdempotencyContext() {
+    if (g_idempotency == this) g_idempotency = previous_;
+  }
+
+  /// True when the answer is already known and has been sent (replayed), or
+  /// when the request conflicts with an earlier one. The caller must stop.
+  bool done() const { return done_; }
+
+  /// The turn an earlier request with this key started (the stream path).
+  const std::string& replay_turn_id() const { return replay_turn_id_; }
+
+  /// The turn this request started. The answer itself is remembered by
+  /// `send_json` (which knows the body), so this only notes the turn.
+  void remember_turn(const std::string& turn_id) { turn_id_ = turn_id; }
+
+  /// Remember the turn of a request whose answer was a **stream**: there is
+  /// no body to remember, only the turn a retry has to follow.
+  void save_turn(const std::string& turn_id) {
+    if (store_ == nullptr || key_.empty() || saved_) return;
+    turn_id_ = turn_id;
+    IdempotencyRecord record;
+    record.fingerprint = fingerprint_;
+    record.turn_id = turn_id;
+    record.created_ms = now_ms();
+    store_->save(key_, record);
+    saved_ = true;
+  }
+
+  /// The answer of this request. Called by `send_json` before the answer
+  /// goes out.
+  void record(int status, const std::string& body) {
+    if (store_ == nullptr || key_.empty() || saved_) return;
+    if (status < 200 || status >= 300) return;   // a failed attempt may be retried
+    IdempotencyRecord record;
+    record.fingerprint = fingerprint_;
+    record.status = status;
+    record.body = body;
+    record.turn_id = turn_id_;
+    record.created_ms = now_ms();
+    store_->save(key_, record);
+    saved_ = true;
+  }
+
+ private:
+  IdempotencyStore* store_ = nullptr;
+  std::string key_;
+  std::string fingerprint_;
+  httplib::Response& res_;
+  std::unique_ptr<std::lock_guard<std::mutex> > lock_;
+  IdempotencyContext* previous_ = nullptr;
+  bool done_ = false;
+  bool saved_ = false;
+  std::string turn_id_;
+  std::string replay_turn_id_;
+  std::string replay_body_;
+  int replay_status_ = 200;
+};
+
+void note_idempotency_answer(int status, const std::string& body) {
+  if (g_idempotency != nullptr) g_idempotency->record(status, body);
 }
 
 void send_ok(httplib::Response& res) {
@@ -670,6 +808,9 @@ struct ChatTurn {
       // The id of the request that started the turn: one string ties a frame
       // to the call, to the log and to the audit trail.
       if (!request_id.empty()) stamped["request_id"] = request_id;
+      // The turn itself: a client that follows a stream learns which turn it
+      // is watching (and can then ask for its status).
+      if (!turn_id.empty()) stamped["turn_id"] = turn_id;
       frame = "data: " + dump_json(stamped) + "\n\n";
       log.push_back(frame);
       log_bytes += frame.size();
@@ -900,6 +1041,36 @@ struct SubscriberSlot {
     if (turn) turn->remove_subscriber();
   }
 };
+
+/// Set the answer up to follow a turn: the frames after `since`, then the
+/// live ones.
+///
+/// Used by /api/chat/attach and by the idempotent replay (a retry of a
+/// request whose answer was a stream finds the turn it started and follows
+/// that one). `replay_only` allows a turn that already finished: its frames
+/// are still in the buffer, and a caller that comes back later is exactly
+/// who should read them.
+bool follow_turn(httplib::Response& res, const std::shared_ptr<ChatTurn>& turn,
+                  long long since, bool replay_only) {
+  if (!turn->add_subscriber(replay_only)) {
+    send_error(res, 429, "too_many_subscribers",
+               "already " + std::to_string(max_subscribers_per_turn()) +
+                   " windows are following this turn; close one of them and reload");
+    return false;
+  }
+  auto sub = std::make_shared<ChatTurn::Subscriber>();
+  auto slot = std::make_shared<SubscriberSlot>(turn);
+  if (since > 0) sub->cursor = since + 1;
+  res.set_header("Cache-Control", "no-cache");
+  res.set_header("X-Accel-Buffering", "no");
+  res.set_header("Access-Control-Allow-Origin", "*");
+  res.set_chunked_content_provider(
+      "text/event-stream; charset=utf-8",
+      [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
+        return turn->pump(sink, sub);
+      });
+  return true;
+}
 
 /// A download name that survives every browser, shell and filesystem: ASCII only,
 /// no separators, and a UTC stamp so two downloads do not collide.
@@ -1276,6 +1447,10 @@ struct ApiServer::Impl {
   /// no error anywhere - when it cannot.
   bool tea_home_writable = true;
   std::string tea_home_error;
+
+  /// The answers of the requests that carried an idempotency key, so a
+  /// retry gets the same answer instead of making the machine work twice.
+  std::unique_ptr<IdempotencyStore> idempotency;
 
   std::mutex mu;  // guards registry access and `turns`
   std::map<std::string, std::shared_ptr<ChatTurn>> turns;
@@ -1870,6 +2045,11 @@ httplib::Server::HandlerResponse ApiServer::Impl::pre_route(const httplib::Reque
 void ApiServer::Impl::install_routes() {
   httplib::Server& svr = server;
 
+  // The remembered answers live in the tea home, next to workspaces.json:
+  // a queue that comes back after a crash and retries the same request has
+  // to find the turn it already started.
+  idempotency.reset(new IdempotencyStore(config->tea_home));
+
   svr.set_payload_max_length(64ull * 1024ull * 1024ull);
   svr.set_read_timeout(60, 0);
   // A streaming response owns this thread until it ends, so a dead-but-not-closed
@@ -1913,6 +2093,16 @@ void ApiServer::Impl::install_routes() {
   svr.Post("/api/tools/call", [this](const httplib::Request& req, httplib::Response& res) {
     nlohmann::json body;
     if (!parse_json_body(req, &body, res)) return;
+    // The idempotency key: the web tools are billed per call, so a retry
+    // must not make a second one.
+    nlohmann::json fingerprint_body = body;
+    fingerprint_body.erase("idempotency_key");
+    IdempotencyContext idem(
+        idempotency.get(),
+        idempotency_key_of(req.get_header_value("Idempotency-Key"),
+                           json_string(body, "idempotency_key")),
+        idempotency_fingerprint(req.path, dump_json(fingerprint_body)), res);
+    if (idem.done()) return;          // the answer was replayed, or it conflicts
     const std::string tool_name = trim(json_string(body, "tool"));
     if (tool_name.empty()) {
       send_error(res, 400, "bad_request", "'tool' is required");
@@ -2417,6 +2607,20 @@ void ApiServer::Impl::install_routes() {
   svr.Post("/api/llm/chat", [this](const httplib::Request& req, httplib::Response& res) {
     nlohmann::json body;
     if (!parse_json_body(req, &body, res)) return;
+    // The idempotency key: a model call costs money, so a retry must not
+    // make a second one. The streaming variant cannot have one: a stream
+    // cannot be replayed, so there is nothing to remember.
+    std::unique_ptr<IdempotencyContext> idem;
+    if (!body.value("stream", false)) {
+      nlohmann::json fingerprint_body = body;
+      fingerprint_body.erase("idempotency_key");
+      idem.reset(new IdempotencyContext(
+          idempotency.get(),
+          idempotency_key_of(req.get_header_value("Idempotency-Key"),
+                             json_string(body, "idempotency_key")),
+          idempotency_fingerprint(req.path, dump_json(fingerprint_body)), res));
+      if (idem->done()) return;      // the answer was replayed, or it conflicts
+    }
     if (!config->loaded) {
       send_error(res, 409, "config_missing",
                  "no provider.yaml is configured yet; upload it in the web UI");
@@ -4686,6 +4890,57 @@ void ApiServer::Impl::install_routes() {
     nlohmann::json body;
     if (!parse_json_body(req, &body, res)) return;
 
+    // "async": the caller submits the turn and walks away. It gets a handle
+    // back (202) and asks later how it went. Without the flag the route
+    // behaves exactly as before: one SSE stream, held until the turn ends.
+    bool async_submit = false;
+    if (body.contains("async")) {
+      if (!body["async"].is_boolean()) {
+        send_error(res, 400, "bad_request", "'async' must be true or false");
+        return;
+      }
+      async_submit = body["async"].get<bool>();
+    }
+
+    // ---- the idempotency key -------------------------------------------
+    // The same request asked twice is one request: the answer is remembered
+    // (in the tea home, so it survives a restart), and a retry gets it back
+    // instead of starting a second turn. The key may come in the header or
+    // in the body - the task queue sends both.
+    nlohmann::json fingerprint_body = body;
+    fingerprint_body.erase("idempotency_key");
+    IdempotencyContext idem(
+        idempotency.get(),
+        idempotency_key_of(req.get_header_value("Idempotency-Key"),
+                           json_string(body, "idempotency_key")),
+        idempotency_fingerprint(req.path, dump_json(fingerprint_body)), res);
+    if (idem.done()) return;          // the answer was replayed, or it conflicts
+    if (!idem.replay_turn_id().empty()) {
+      // The same request: the turn it started is still known. Follow it
+      // instead of starting a new one.
+      std::shared_ptr<ChatTurn> earlier = find_turn_by_id(idem.replay_turn_id());
+      if (earlier) {
+        LOG_INFO("chat: the idempotency key names a turn that already exists: ",
+                 idem.replay_turn_id());
+        if (async_submit) {
+          // The same answer as the first time: the same turn, the same
+          // handle, the same 202.
+          if (!idem.replay_body().empty()) {
+            res.status = idem.replay_status();
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_header("Cache-Control", "no-store");
+            res.set_content(idem.replay_body(), "application/json; charset=utf-8");
+          }
+          return;
+        }
+        follow_turn(res, earlier, 0, true);
+        return;
+      }
+      // The turn is gone (the server restarted): the work died with it, so
+      // it has to be done again. The remembered answer is replaced below.
+      LOG_INFO("chat: the turn of the idempotency key is gone: ", idem.replay_turn_id());
+    }
+
     if (!config->loaded) {
       send_error(res, 409, "config_missing",
                  "no provider.yaml is configured yet; upload it in the web UI");
@@ -4715,17 +4970,6 @@ void ApiServer::Impl::install_routes() {
         return;
       }
       interrupt = body["interrupt"].get<bool>();
-    }
-    // "async": the caller submits the turn and walks away. It gets a handle
-    // back (202) and asks later how it went. Without the flag the route
-    // behaves exactly as before: one SSE stream, held until the turn ends.
-    bool async_submit = false;
-    if (body.contains("async")) {
-      if (!body["async"].is_boolean()) {
-        send_error(res, 400, "bad_request", "'async' must be true or false");
-        return;
-      }
-      async_submit = body["async"].get<bool>();
     }
 
     // ---- same-session policy: queue by default, replace only on request -----
@@ -5023,6 +5267,16 @@ void ApiServer::Impl::install_routes() {
 
     AppConfig* cfg = config;
     ToolRegistry* reg = tools;
+    // The turn this request started: a retry with the same idempotency key
+    // finds it here and follows it instead of starting a new one. The answer
+    // (the 202 body) is remembered by `send_json`; a stream has no body, so
+    // the turn itself is what is remembered.
+    if (async_submit) {
+      idem.remember_turn(turn->turn_id);
+    } else {
+      idem.save_turn(turn->turn_id);
+    }
+
     turn->worker = std::thread([turn, cfg, reg, message, images, provider, model, system_prompt,
                              allowed_tools, task_id, task_context, allow_paths,
                              knob_overrides, request_budget]() {
@@ -5331,33 +5585,18 @@ void ApiServer::Impl::install_routes() {
       send_error(res, 404, "no_active_turn", "this session's turn has already finished");
       return;
     }
-    if (!turn->add_subscriber()) {
-      send_error(res, 429, "too_many_subscribers",
-                 "already " + std::to_string(max_subscribers_per_turn()) +
-                     " windows are following this turn; close one of them and reload");
-      return;
-    }
-    auto sub = std::make_shared<ChatTurn::Subscriber>();
-    auto slot = std::make_shared<SubscriberSlot>(turn);
     // `since` is the last seq the client saw. A seq older than the buffer (or no
     // seq at all) replays from the oldest frame still held; when frames were
     // dropped, pump() sends a `resync` event first so the client reloads the
     // persisted session instead of showing a hole.
+    long long since = 0;
     nlohmann::json::const_iterator since_it = body.find("since");
     if (since_it != body.end() && since_it->is_number_integer()) {
-      const long long since = since_it->get<long long>();
-      if (since > 0) sub->cursor = since + 1;
+      since = since_it->get<long long>();
     }
     LOG_INFO("chat: re-attaching to the running turn of session ", session_id, " (replay from seq ",
-             sub->cursor, ", ", turn->subscriber_count(), " subscriber(s))");
-    res.set_header("Cache-Control", "no-cache");
-    res.set_header("X-Accel-Buffering", "no");
-    res.set_header("Access-Control-Allow-Origin", "*");
-    res.set_chunked_content_provider(
-        "text/event-stream; charset=utf-8",
-        [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
-          return turn->pump(sink, sub);
-        });
+             since + 1, ", ", turn->subscriber_count(), " subscriber(s))");
+    follow_turn(res, turn, since, false);
   });
 
   svr.Post("/api/chat/stop", [this](const httplib::Request& req, httplib::Response& res) {

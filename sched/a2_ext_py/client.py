@@ -256,7 +256,7 @@ class Client:
     def _chat_body(self, workspace_id, message, provider=None, session_id=None,
                    task_id=None, task_context=None, allow_paths=None, model=None,
                    params=None, limits=None, policy=None, tools=None,
-                   system_prompt=None):
+                   system_prompt=None, idempotency_key=None):
         """The body of a turn. Shared by `chat()` and `submit()`.
 
         One place builds it, so the two ways of starting a turn cannot drift
@@ -290,11 +290,17 @@ class Client:
         allowed = list(tools or []) or list((policy or {}).get("tools") or [])
         if allowed:
             body["tools"] = allowed
+        if idempotency_key:
+            # The key says "this is one request, however often it is sent".
+            # It goes in the header (the usual place) and in the body (the
+            # task queue's convention) - the agent takes either.
+            body["idempotency_key"] = str(idempotency_key)
         return body
 
     def chat(self, workspace_id, message, provider=None, session_id=None,
              task_id=None, task_context=None, allow_paths=None, model=None,
-             params=None, limits=None, policy=None, tools=None, system_prompt=None):
+             params=None, limits=None, policy=None, tools=None, system_prompt=None,
+             idempotency_key=None):
         """Run one turn and yield the agent's events as they happen.
 
         This is the whole contract between a caller that keeps its own policy
@@ -314,10 +320,13 @@ class Client:
             workspace_id, message, provider=provider, session_id=session_id,
             task_id=task_id, task_context=task_context, allow_paths=allow_paths,
             model=model, params=params, limits=limits, policy=policy, tools=tools,
-            system_prompt=system_prompt)
+            system_prompt=system_prompt, idempotency_key=idempotency_key)
+        headers = {"Content-Type": "application/json"}
+        if idempotency_key:
+            headers["Idempotency-Key"] = str(idempotency_key)
         req = urllib.request.Request(
             self.base + "/api/chat", data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST")
+            headers=headers, method="POST")
         try:
             resp = urllib.request.urlopen(req, timeout=self.chat_timeout or None)
         except (socket.timeout, TimeoutError):
@@ -351,7 +360,7 @@ class Client:
     def submit(self, workspace_id, message, provider=None, session_id=None,
                task_id=None, task_context=None, allow_paths=None, model=None,
                params=None, limits=None, policy=None, tools=None,
-               system_prompt=None):
+               system_prompt=None, idempotency_key=None):
         """Submit a turn and walk away. Returns the handle.
 
         The answer is {"ok": true, "turn_id": "t_…", "session_id": "s_…",
@@ -363,9 +372,12 @@ class Client:
             workspace_id, message, provider=provider, session_id=session_id,
             task_id=task_id, task_context=task_context, allow_paths=allow_paths,
             model=model, params=params, limits=limits, policy=policy, tools=tools,
-            system_prompt=system_prompt)
+            system_prompt=system_prompt, idempotency_key=idempotency_key)
         body["async"] = True
-        return self._request("POST", "/api/chat", body)
+        headers = {}
+        if idempotency_key:
+            headers["Idempotency-Key"] = str(idempotency_key)
+        return self._request("POST", "/api/chat", body, headers=headers)
 
     def turn_status(self, turn_id):
         """How did the turn with this handle go?

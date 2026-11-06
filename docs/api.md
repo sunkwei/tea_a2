@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`0.19.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
+| `GET` | `/api/health` | 探活、版本（`0.19.3`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
@@ -46,7 +46,7 @@
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`，也即这一轮的**句柄**） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
 | `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
-| `POST` | `/api/chat` | agent loop 本身；带 `task_id` + `task_context` 时，这一轮就是「在做某个排队任务」，模型会用 `toolkit_task` 汇报进度 |
+| `POST` | `/api/chat` | agent loop 本身；带 `task_id` + `task_context` 时，这一轮就是「在做某个排队任务」，模型会用 `toolkit_task` 汇报进度。带 **`Idempotency-Key`** 时，同一个键的同一个请求**只做一次**（见下「幂等键」） |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
 | `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件。设置页的「重置 provider」走的就是它。配置成功后，**这台机器还没有任何工作区**时，服务端会把 **`$HOME` 注册成一个工作区**（对话、文件、记忆都要有个落脚的地方，默认就用家目录），响应里多一个 `workspace` 字段；已经注册过工作区的机器**不受影响**：原来那个不会被改动，也不会再多出一个。 |
 | `POST` | `/api/config/reload` | **重新读一遍磁盘上的** `provider.yaml` 并热加载（文件是手写或从别处拷过来的时候用；光刷新网页没用，配置在服务端的内存里）。先校验再替换：文件不存在 → 404 `config_missing`，文件坏了 → 400 `invalid_config`（**当前配置不动**）；有轮次在跑时 409 |
@@ -71,6 +71,38 @@
 | `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
+
+### 幂等键：同一个请求问两次，就是一个请求
+
+会重试的调用方（队列、看门狗、信号不好的手机）最怕的一件事：**重试把活儿做两遍**——
+多烧一次钱，多跑一遍命令。所以写请求可以带一个 **`Idempotency-Key`**（头里或 body 的
+`idempotency_key` 字段里都行，任务队列两个都带）：
+
+```bash
+# 第一次：202 + 句柄
+curl -s -X POST $B/api/chat -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: task-42-1' \
+  -d '{"workspace_id":"ws_x","message":"把 README 翻译成英文","async":true}'
+# {"ok":true,"turn_id":"t_…","session_id":"s_…", …}
+
+# 再来一次（网络超时了、队列重试了）：**同一个答案**，那一轮没有重跑
+curl -s -X POST $B/api/chat -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: task-42-1' \
+  -d '{"workspace_id":"ws_x","message":"把 README 翻译成英文","async":true}'
+# {"ok":true,"turn_id":"t_…"（同一个）, …}
+```
+
+规矩：
+
+- **同一个键 + 同一个请求** → 同一个答案（同一个 `turn_id`），**活儿只做一次**。
+  不带 `async` 的流式那条路也一样：重试会**接回**已经在跑的那一轮，不是再开一轮。
+- **同一个键 + 不同的请求** → `409 idempotency_conflict`。这不是重试，是拿错了钥匙：
+  照着回答会给调用方别人的答案。
+- **不带键** → 一切照旧，每次请求都是新的一轮。
+- 答案记在 **tea home** 里（`<tea_home>/idempotency/`，与 `workspaces.json` 同级），
+  **重启也不丢**：队列崩了再起来，重发同一个请求，拿回的还是那一轮。
+- 只记住**成功**的答案（2xx）。失败的那次可以重试——重试必须还能再来一次。
+- 记 24 小时。
 
 ### 请求 id 与错误目录
 

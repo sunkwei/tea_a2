@@ -131,6 +131,9 @@ std::vector<ErrorInfo> build_catalog() {
   entries.push_back({"fixed_by_cli", 409, false, 0,
                       "this is set on the command line and cannot be changed here",
                       "change it in the service unit and restart"});
+  entries.push_back({"idempotency_conflict", 409, false, 0,
+                      "this idempotency key was already used for a different request",
+                      "use a new key, or send exactly the request the key was used for"});
   entries.push_back({"images_not_queued", 409, false, 0,
                       "a queued prompt cannot carry images",
                       "wait for the running turn to finish, then send the images"});

@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"0.19.2\"")
+    "  const char* const kVersionString = \"0.19.3\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -493,6 +493,8 @@ set(TEA_SOURCES
   src/provider_yaml.cpp
   src/server.cpp
   src/errors.cpp
+  src/idempotency.cpp
+  src/sha256.cpp
   src/shell.cpp
   src/version.cpp
   ${TEA_WEB_ASSETS_CPP}

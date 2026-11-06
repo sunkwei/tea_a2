@@ -1680,6 +1680,10 @@ class Engine:
             # The turn of the previous run: it is over, and its handle must
             # not be inherited - a restart has to take over *this* run.
             "turn_id": "",
+            # Which turn of this task this is. The idempotency key is built
+            # from it, so a new turn (after an answer, after a retry) is new
+            # work while a retry of the same turn is the same work.
+            "turn_seq": int(task.get("turn_seq") or 0) + 1,
         }))
 
         thread = threading.Thread(target=self._run,
@@ -1979,11 +1983,37 @@ class Engine:
             # on the record: that is what makes the work recoverable (a
             # restarted queue picks the turn up again instead of declaring
             # the task dead).
-            handle = self.agent.submit(workspace_id, message, provider=provider,
-                                       session_id=session_id, task_id=task_id,
-                                       task_context=context, allow_paths=allow_paths,
-                                       model=model or None, params=params,
-                                       limits=limits, policy=policy)
+            # The idempotency key: this turn of this task, asked for once. If
+            # the answer is lost (a timeout, a proxy), the retry below asks
+            # again with the same key and gets **the same turn** back - the
+            # work is not done twice.
+            #
+            # The number in the key is the **turn**, not the attempt: a task
+            # that waits for an answer and then goes on (the confirmation
+            # flow) starts a *new* turn, and that turn is new work.
+            idem_key = "task:%s:%s" % (task_id, str(task.get("turn_seq") or 1))
+            handle = None
+            for tries in range(3):
+                try:
+                    handle = self.agent.submit(
+                        workspace_id, message, provider=provider,
+                        session_id=session_id, task_id=task_id,
+                        task_context=context, allow_paths=allow_paths,
+                        model=model or None, params=params,
+                        limits=limits, policy=policy, idempotency_key=idem_key)
+                    break
+                except AgentError as exc:
+                    log("  task %s: the turn could not be submitted (%s)", task_id, exc)
+                    if tries < 2:
+                        time.sleep(1.0)
+            if handle is None:
+                self._finalize(workspace_id, task_id, FAILED, {
+                    "error": "the turn could not be submitted",
+                    "stop_reason": "submit_failed",
+                    "finished_at": now_iso()})
+                self._publish({"type": "task_failed",
+                               "task": self.store.load(workspace_id, task_id)})
+                return
             turn_id = str(handle.get("turn_id") or "")
             session_id = str(handle.get("session_id") or session_id)
             self.store.update(workspace_id, task_id, lambda t: t.update({

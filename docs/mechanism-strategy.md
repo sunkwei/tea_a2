@@ -133,7 +133,7 @@ a2_task 与 a2 **同机同用户**。这意味着：
 | M3 策略执行点（审批闸门 / exec 围栏） | ⏳ 还没做（`allow_paths` 仍只管文件工具，`toolkit_exec` 不受限）。**审批闸门那一半不做了**（2026-11-04 决定：模型自举的风险被接受），剩下的只是「策略层下发的权限」 |
 | **M5 能力清单** | ✅ 做了（0.19.2）：`GET /api/capabilities` → `{version, features{async_turns, turn_handles, limits, policy, approvals, idempotency, exec_fence, mcp, request_id, error_catalog}, limits{…}, routes[{method,path,since}]}`。队列**读它降级**（`features.async_turns` 为 false 就走老路），不再靠版本号猜 |
 | **M7 请求 id 与错误目录** | ✅ 做了（0.19.2）：每个回答带 `X-Request-Id`（调用方带的**回显**，没带的生成），错误体带 `request_id` / `retryable` / `hint`，**每一帧 SSE 也带**（一帧能追回到那次调用）；`GET /api/errors` 是错误目录（`{code, http, retryable, retry_after, meaning, hint}`），**429 一律带 `Retry-After`**；目录对着源码核过（测试读 `src/server.cpp`） |
-| M4 幂等键 | ⏳ 还没做（回合/工具这一层的 `Idempotency-Key`；任务层已有） |
+| **M4 幂等键** | ✅ 做了（0.19.3）：`POST /api/chat`、`/api/tools/call`、`/api/llm/chat` 认 `Idempotency-Key`（头或 body 的 `idempotency_key`）。同键同请求 → **同一个答案**（同一个 `turn_id`），活儿只做一次；流式那条路重试会**接回**已经在跑的那一轮。**同键不同请求** → `409 idempotency_conflict`。答案记在 tea home（`<tea_home>/idempotency/`，重启不丢），只记 2xx（失败的那次可以重试），记 24 小时。队列这一侧：提交那一轮带 `task:<id>:<turn_seq>` 的键，**提交超时可以重发**（拿到的是同一轮） |
 
 ---
 
@@ -237,7 +237,12 @@ POST /api/turns/{turn_id}/approvals/ap_… {"decision":"allow_once|allow_always|
 `needs_confirmation + question`，人在网页/微信/telegram 上答，队列调
 `POST /api/turns/{id}/approvals/{aid}`。
 
-### M4 幂等键 【该做，改动最小】
+### M4 幂等键 【该做，改动最小】—— ✅ 0.19.3 做了
+
+> **落地情况（0.19.3）**：`POST /api/chat`（流式与 `async` 两条路）、`/api/tools/call`、
+> `/api/llm/chat` 都认 `Idempotency-Key`。答案存在 tea home 里，一个键一个文件
+> （文件名是键的 sha256，所以键从外面来也当不了路径）。**只记 2xx**——失败的那次
+> 必须能重试。队列这一侧用 `task:<id>:<turn_seq>` 当键，提交超时会重发。
 
 **问题**：a2 侧所有写操作都不认 `Idempotency-Key`。策略层是**重试机器**
 （队列轮询、看门狗 `retry`、计划重跑、网络超时后重发）。一次超时重试 = 跑两遍命令 + 扣两次钱。
