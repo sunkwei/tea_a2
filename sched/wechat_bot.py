@@ -54,8 +54,17 @@ import task_order
 DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
 DEFAULT_AGENT = channel.DEFAULT_AGENT
 DEFAULT_TASKS = channel.DEFAULT_TASKS
+# One WeChat account = one directory: its own credentials, its own cursor,
+# its own context tokens. The default account keeps the old place
+# (~/.tea_agent/wechat), a named one lives in ~/.tea_agent/wechat/<name>.
+# The tokens of every account are known to the machine - the protocol wants
+# them in `local_token_list`, so a second scan of an account that is already
+# bound here is recognized instead of making a second bot for it.
 DEFAULT_STATE_DIR = os.path.expanduser("~/.tea_agent/wechat")
 DEFAULT_WORKSPACE_PATH = os.path.expanduser("~/.tea_agent/wechat-workspace")
+# The pairing page (sched/wechat_pair.py): the place where a person scans
+# the code and the service starts. The log points at it.
+PAIRING_HINT = "http://127.0.0.1:8391/"
 # The WeChat CDN: the media (images, video, files, voice) live there, encrypted
 # with AES-128-ECB. The bot talks to it directly - the iLink server only hands
 # out the tickets.
@@ -370,6 +379,11 @@ class State:
                      "cursor": "", "contexts": {}}
         self.load()
 
+    @property
+    def dir(self):
+        """The directory the credentials live in."""
+        return os.path.dirname(self.path)
+
     def load(self):
         try:
             with open(self.path, encoding="utf-8") as f:
@@ -407,6 +421,144 @@ class State:
     @property
     def cursor(self):
         return self.data.get("cursor", "")
+
+
+def safe_name(name):
+    """A name that is safe as a directory name."""
+    out = re.sub(r"[^0-9A-Za-z._\-\u4e00-\u9fff]", "-", (name or "").strip())
+    return out.strip(".-") or "account"
+
+
+def is_default_account(name):
+    """Is this the account without a name of its own?"""
+    return (name or "").strip() in ("", "default")
+
+
+def account_state_dir(name=""):
+    """Where the state of one account lives."""
+    if is_default_account(name):
+        return DEFAULT_STATE_DIR
+    return os.path.join(DEFAULT_STATE_DIR, safe_name(name))
+
+
+def account_workspace(name=""):
+    """The workspace of one account: its own, so two accounts do not mix."""
+    if is_default_account(name):
+        return DEFAULT_WORKSPACE_PATH
+    return os.path.expanduser("~/.tea_agent/wechat-%s-workspace" % safe_name(name))
+
+
+def read_credentials(path):
+    """The credentials of one account (empty when there are none)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def credential_files(root=DEFAULT_STATE_DIR):
+    """Every credentials file on this machine (the default one first)."""
+    out = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        names = []
+    for name in names:
+        path = os.path.join(root, name, "credentials.json")
+        if os.path.isfile(path):
+            out.append(path)
+    default = os.path.join(root, "credentials.json")
+    if os.path.isfile(default):
+        out.append(default)
+    return out
+
+
+def known_tokens(root=DEFAULT_STATE_DIR, limit=10):
+    """The bot tokens this machine knows (the newest first).
+
+    The protocol asks for them in `local_token_list`: the server then
+    answers `binded_redirect` when the person scans a bot that is already
+    bound here, instead of issuing a duplicate session.
+    """
+    found = []
+    for path in credential_files(root):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        token = read_credentials(path).get("token") or ""
+        if token:
+            found.append((mtime, token))
+    found.sort(reverse=True)
+    out = []
+    for _, token in found:
+        if token not in out:
+            out.append(token)
+    return out[:limit]
+
+
+def save_qr(directory, content):
+    """Put the QR code where it can be shown, and say what it is.
+
+    The protocol gives the code as a URL: usually a small page that shows
+    the code and asks the phone to confirm it. That page does not allow
+    itself to be embedded in another page (X-Frame-Options), so it has to
+    be opened - on the screen the phone can see. Sometimes the code is the
+    picture itself; then it is saved next to the credentials.
+
+      {"url": <the link>, "image": <the file>, "kind": "url"|"image"}
+    """
+    text = (content or "").strip()
+    out = {"url": "", "image": "", "kind": ""}
+    if not text:
+        return out
+    os.makedirs(directory, exist_ok=True)
+    if text.startswith("http://") or text.startswith("https://"):
+        out["url"] = text
+        out["kind"] = "url"
+        data = b""
+        try:
+            req = urllib.request.Request(text, method="GET")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+        except (urllib.error.URLError, OSError, ValueError):
+            data = b""
+        if channel.looks_like_image(data):
+            path = os.path.join(directory, "qr.png")
+            try:
+                with open(path, "wb") as f:
+                    f.write(data)
+                out["image"] = path
+                out["kind"] = "image"
+            except OSError:
+                pass
+        return out
+    if text.startswith("data:"):
+        text = text.partition(",")[2]
+    if not re.fullmatch(r"[A-Za-z0-9+/=\s]+", text):
+        return out
+    try:
+        data = base64.b64decode(text + "=" * (-len(text) % 4))
+    except (ValueError, binascii.Error):
+        return out
+    if not channel.looks_like_image(data):
+        return out
+    path = os.path.join(directory, "qr.png")
+    try:
+        with open(path, "wb") as f:
+            f.write(data)
+    except OSError:
+        return out
+    out["image"] = path
+    out["kind"] = "image"
+    return out
+
+
+def save_qr_image(directory, content):
+    """The picture of the QR code (empty when the code is only a link)."""
+    return save_qr(directory, content)["image"]
 
 
 def text_of(raw):
@@ -461,26 +613,84 @@ class WeChatBot(channel.TaskChannel):
             "· /help 这条说明")
 
     def __init__(self, args):
+        resolve_paths(args)
         channel.TaskChannel.__init__(self, args)
         self.state = State(os.path.join(args.state_dir, "credentials.json"))
+        # The directory of the account exists from the start: the code, the
+        # pair code and the credentials all live in it.
+        try:
+            os.makedirs(self.state.dir, exist_ok=True)
+        except OSError:
+            pass
+        # Where the accounts of this machine live: the directory of the
+        # default account, or the one its parent (a named account lives in
+        # a directory of its own).
+        name = (getattr(args, "account", "") or "").strip()
+        self.accounts_root = (self.state.dir if is_default_account(name)
+                               else os.path.dirname(self.state.dir))
         self.ilink = ILink(args.base_url, cdn_base=getattr(args, "cdn_url", CDN_BASE_URL))
 
     def channel_name(self):
-        return "wechat"
+        """The name of this channel - it is the trigger source too.
+
+        A named account is a source of its own ("wechat:alice"), so the
+        rules and the threads of two accounts never mix.
+        """
+        name = (getattr(self.args, "account", "") or "").strip()
+        if is_default_account(name):
+            return "wechat"
+        return "wechat:%s" % name
+
+    def pairing_busy(self):
+        """Is somebody else already scanning for this account?
+
+        The pairing page writes a marker while it holds a QR code: the bot
+        must not ask for a second one, or the person would have two codes
+        to choose from.
+        """
+        return os.path.exists(os.path.join(self.state.dir, "pairing"))
 
     # -- login ------------------------------------------------------------
     def login(self, verify_code=""):
-        """Show a QR code and wait for the scan."""
-        qr = self.ilink.get_qrcode()
-        code = qr.get("qrcode") or qr.get("qrcode_id") or ""
-        image = qr.get("qrcode_img_content") or qr.get("qrcode_url") or ""
-        print("")
-        print("用微信扫这个码登录：")
-        print("  " + (image or code))
-        if image and image.startswith("http"):
-            print("  （浏览器打开上面的链接，手机微信扫它）")
-        print("")
+        """Show a QR code and wait for the scan.
+
+        The code is also written into the account's directory (`qr.png`)
+        and the URL is in the log: the person who scans does not have to
+        sit at this terminal - the pairing page (sched/wechat_pair.py)
+        shows the same code and starts the service when the scan is done.
+        """
         deadline = time.time() + self.args.login_timeout
+        while time.time() < deadline:
+            try:
+                qr = self.ilink.get_qrcode(known_tokens(self.accounts_root))
+            except ILinkError as exc:
+                log("cannot ask for a QR code: %s" % exc)
+                time.sleep(5)
+                continue
+            code = qr.get("qrcode") or qr.get("qrcode_id") or ""
+            image = qr.get("qrcode_img_content") or qr.get("qrcode_url") or ""
+            info = save_qr(self.state.dir, image)
+            # The link is written down as well: the pairing page shows it,
+            # so the person who scans does not have to read the log.
+            if info["url"]:
+                try:
+                    with open(os.path.join(self.state.dir, "qr.url"), "w",
+                              encoding="utf-8") as f:
+                        f.write(info["url"])
+                except OSError:
+                    pass
+            log("用微信扫这个码登录：%s" % (info["url"] or info["image"] or code))
+            log("  （那个链接要在「手机能看见的屏幕」上打开，页面上就是二维码）")
+            log("  配对页面：%s" % PAIRING_HINT)
+            if self.await_scan(code, deadline, verify_code):
+                return True
+            verify_code = ""          # a new code deserves a new chance
+            time.sleep(1)
+        log("登录超时")
+        return False
+
+    def await_scan(self, code, deadline, verify_code=""):
+        """Poll the QR code until the person scans it (or it dies)."""
         while time.time() < deadline:
             time.sleep(2)
             try:
@@ -488,15 +698,38 @@ class WeChatBot(channel.TaskChannel):
             except ILinkError as exc:
                 log("qr: %s" % exc)
                 continue
-            state = status.get("status", "")
-            if state == "wait":
+            state = str(status.get("status") or "")
+            if state in ("", "wait"):
                 continue
             if state == "scaned":
                 log("已扫码，等你确认…")
                 continue
             if state == "expired":
-                log("二维码过期，重新来一次")
+                log("二维码过期，重新来一个")
                 return False
+            if state == "need_verifycode":
+                # Risk control: the phone shows a few digits. They can be
+                # typed here, given as an argument, or written into the
+                # account's directory (the pairing page does that).
+                given = self.ask_verify_code()
+                if given:
+                    verify_code = given
+                    log("收到验证码，继续等")
+                continue
+            if state == "verify_code_blocked":
+                log("验证码错得太多，这个码废了，重新来一个")
+                return False
+            if state == "scaned_but_redirect":
+                host = str(status.get("redirect_host") or "")
+                if host:
+                    self.ilink.base_url = host if "://" in host else "https://" + host
+                    log("跟着跳转继续问：%s" % self.ilink.base_url)
+                continue
+            if state == "binded_redirect":
+                # The person scanned a bot that is already bound to this
+                # machine: take its credentials over instead of making a
+                # second bot for the same account.
+                return self.take_over_bound()
             if state == "confirmed":
                 self.state.data.update({
                     "token": status.get("bot_token", ""),
@@ -507,7 +740,52 @@ class WeChatBot(channel.TaskChannel):
                 self.state.save()
                 log("登录成功，凭证已存到 %s" % self.state.path)
                 return True
-        log("登录超时")
+        return False
+
+    def ask_verify_code(self):
+        """The digits the phone shows (risk control).
+
+        Three ways to give them: the file in the account's directory (the
+        pairing page writes it), the argument, or the terminal.
+        """
+        path = os.path.join(self.state.dir, "verify_code")
+        try:
+            with open(path, encoding="utf-8") as f:
+                code = f.read().strip()
+            if code:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                return code
+        except OSError:
+            pass
+        code = str(getattr(self.args, "verify_code", "") or "").strip()
+        if code:
+            return code
+        try:
+            if sys.stdin.isatty():
+                return input("手机微信上显示的验证码：").strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        return ""
+
+    def take_over_bound(self):
+        """Use the credentials of the bot that is already bound here."""
+        for path in credential_files(self.accounts_root):
+            data = read_credentials(path)
+            if not data.get("token"):
+                continue
+            self.state.data.update({
+                "token": data.get("token") or "",
+                "base_url": data.get("base_url") or self.args.base_url,
+                "ilink_bot_id": data.get("ilink_bot_id") or "",
+                "ilink_user_id": data.get("ilink_user_id") or "",
+            })
+            self.state.save()
+            log("这个微信号已经绑在这台机器上了，直接用它的凭证")
+            return True
+        log("服务器说这个码已经绑定了，可本机没有找到它的凭证")
         return False
 
     # -- the files ---------------------------------------------------------
@@ -643,17 +921,25 @@ class WeChatBot(channel.TaskChannel):
         return payload.get("msgs") or []
 
     def wait_for_credentials(self):
-        """Wait until someone has scanned the QR code.
+        """Wait until somebody has scanned the QR code.
 
-        As a service this is the normal way in: the unit starts, the operator
-        runs --login once, and the bot picks the credentials up from the state
-        file. Waiting is friendlier than exiting (and being restarted by
-        systemd every few seconds).
+        As a service this is the normal way in: the unit starts, the first
+        thing that happens is a QR code - in the log, in the account's
+        directory (`qr.png`) and on the pairing page. Whoever scans it (a
+        phone, from anywhere) connects the bot; the service waits until
+        then. Nobody has to sit at the machine.
         """
-        log("还没有凭证，等着扫码（另开一个终端跑：python3 sched/wechat_bot.py --login）")
+        log("还没有凭证，出个码等扫码（配对页面：%s）" % PAIRING_HINT)
         while not self.state.token:
-            time.sleep(5)
             self.state.load()
+            if self.state.token:
+                break
+            if self.pairing_busy():
+                # The pairing page holds the code; wait for its result.
+                time.sleep(5)
+                continue
+            if not self.login():
+                time.sleep(5)
         log("拿到凭证了")
 
     def process_message(self, raw):
@@ -678,21 +964,30 @@ class WeChatBot(channel.TaskChannel):
         self.reply(user_id, answer)
 
     def run(self):
-        if not self.state.token:
-            self.wait_for_credentials()
-        self.ensure_workspace()
-        threading.Thread(target=self.watch_tasks, daemon=True).start()
+        started = False
         backoff = 1.0
         while True:
+            if not self.state.token:
+                # No credentials (yet): publish a QR code and wait for the
+                # scan. The service stays up, so the scan is all it takes.
+                self.wait_for_credentials()
+                continue
+            if not started:
+                self.ensure_workspace()
+                threading.Thread(target=self.watch_tasks, daemon=True).start()
+                started = True
             try:
                 messages = self.poll_once()
                 backoff = 1.0
             except ILinkError as exc:
                 if exc.errcode == -14:
-                    log("会话过期了，需要重新扫码登录（--login）")
+                    # The session is gone (they expire after a day or so):
+                    # put a new code out and wait for the next scan.
+                    log("会话过期了，重新出一个码，扫一下就接上（配对页面：%s）"
+                        % PAIRING_HINT)
                     self.state.data["token"] = ""
                     self.state.save()
-                    return 3
+                    continue
                 log("poll: %s" % exc)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 30)
@@ -702,6 +997,25 @@ class WeChatBot(channel.TaskChannel):
                     continue
                 self.process_message(raw)
 
+
+def resolve_paths(args):
+    """The paths of this account: its own state, its own workspace.
+
+    Without a name the bot keeps the old place (one account on the
+    machine). With a name every account gets a directory of its own, so two
+    WeChat accounts never share a cursor or a context token - and the queue
+    keeps their tasks apart too (each workspace is its own project).
+    """
+    name = (getattr(args, "account", "") or "").strip()
+    if getattr(args, "state_dir", None) is None:
+        args.state_dir = account_state_dir(name)
+    if getattr(args, "workspace_path", None) is None:
+        args.workspace_path = account_workspace(name)
+    if getattr(args, "workspace_name", None) is None:
+        args.workspace_name = ("微信/%s" % name) if name else "微信"
+    return args
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="The WeChat side of the task queue.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="the iLink server")
@@ -709,11 +1023,15 @@ def build_parser():
                         help="the agent's HTTP API (for the workspace list)")
     parser.add_argument("--tasks", default=os.environ.get("TEA_TASK_URL", DEFAULT_TASKS),
                         help="the task server's HTTP API")
-    parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR,
+    parser.add_argument("--account", default="",
+                        help="the name of this WeChat account (default: the only one)")
+    parser.add_argument("--state-dir", default=None,
                         help="where the credentials and the context tokens live")
-    parser.add_argument("--workspace-path", default=DEFAULT_WORKSPACE_PATH,
+    parser.add_argument("--workspace-path", default=None,
                         help="the workspace the WeChat tasks work in")
-    parser.add_argument("--workspace-name", default="微信", help="its name in the agent")
+    parser.add_argument("--workspace-name", default=None, help="its name in the agent")
+    parser.add_argument("--verify-code", default="",
+                        help="the digits the phone shows, if the server asks for them")
     parser.add_argument("--provider", default=os.environ.get("TEA_TASK_PROVIDER", ""),
                         help="the provider whose quota gates the work (default: the queue's)")
     parser.add_argument("--allow-path", action="append", default=[],

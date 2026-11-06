@@ -1020,9 +1020,11 @@ python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0
 | `--agent <url>` | agent 的 HTTP API | `http://127.0.0.1:8282` |
 | `--tasks <url>` | 队列的 HTTP API | `http://127.0.0.1:8283` |
 | `--base-url <url>` | iLink 服务器 | `https://ilinkai.weixin.qq.com` |
-| `--state-dir <path>` | 凭证与 context_token 放哪 | `~/.tea_agent/wechat` |
+| `--account <name>` | 这个微信账号的名字（多账号时用；来源名变成 `wechat:<名字>`） | 只有一个（`wechat`） |
+| `--state-dir <path>` | 凭证与 context_token 放哪 | `~/.tea_agent/wechat`（有名字时 `~/.tea_agent/wechat/<名字>`） |
 | `--workspace-path <path>` | 微信任务在哪个工作区做 | `~/.tea_agent/wechat-workspace` |
 | `--workspace-name <name>` | 它在 agent 里叫什么 | `微信` |
+| `--verify-code <code>` | 手机上显示的验证码（风控时要） | |
 | `--provider <name>` | 用谁的额度 | 队列的 |
 | `--allow-path <dir>` | 微信任务能额外碰哪个目录（可重复） | |
 | `--cdn-url <url>` | 微信 CDN（文件走它） | 官方地址 |
@@ -1032,6 +1034,34 @@ python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0
 微信端的环境变量：`TEA_AGENT_URL`（agent 的地址）、`TEA_TASK_URL`（队列的地址，
 默认 `http://127.0.0.1:8283`）、`TEA_TASK_PROVIDER`（用谁的额度）、
 `TEA_WECHAT_CDN`（微信 CDN 的地址）。
+
+#### 配对页面与多账号
+
+服务起来时没有凭证，它自己就出一个二维码（链接进日志，图片进账号目录），
+谁扫了码谁就把它接上；会话过期也一样，不用人管。想在浏览器里扫码、用完自动起服务：
+
+```bash
+python3 sched/wechat_pair.py             # 配对页面：http://127.0.0.1:8391/
+python3 sched/wechat_multi.py            # 一个进程跑 ~/.tea_agent/wechat/ 里的每个账号
+```
+
+| `wechat_pair.py` 的参数 | 作用 | 默认 |
+| --- | --- | --- |
+| `--host <addr>` | 听哪个地址（手机上要用就 `0.0.0.0`） | `127.0.0.1` |
+| `--port <n>` | 端口 | `8391` |
+| `--token <s>` | 每个请求都要带的令牌（`?token=`） | 无 |
+| `--root <path>` | 账号目录 | `~/.tea_agent/wechat` |
+
+| `wechat_multi.py` 的参数 | 作用 | 默认 |
+| --- | --- | --- |
+| `--accounts <a,b>` | 只跑这几个账号 | 目录里的每个 |
+| `--accounts-dir <path>` | 账号目录 | `~/.tea_agent/wechat` |
+| `--scan-interval <s>` | 多久看一眼有没有新账号 | `10` |
+| `--no-skip-units` | 连已有自己单元的账号也一起跑（默认不碰） | 不碰 |
+
+单元：`a2_wechat.service`（默认账号）、`a2_wechat@<名字>.service`（一个账号一个单元）、
+`a2_wechat_mul.service`（一个进程所有账号）、`a2_wechat_pair.service`（配对页面）。
+每个账号有自己的工作区和自己的来源名（`wechat:<名字>`），但**共用同一个队列**。
 
 #### 微信里的命令
 

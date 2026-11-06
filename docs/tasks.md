@@ -249,6 +249,35 @@ python3 sched/wechat_bot.py --login
 python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283
 ```
 
+**扫码就能起来（不用坐在机器前）**：服务起来时如果还没有凭证，它自己就出一个二维码——
+链接写进日志，图片写进账号目录（`~/.tea_agent/wechat/qr.png`）。谁扫了码，谁就把它接上。
+会话过期（大概一天，errcode -14）也一样：服务重新出一个码等着，不用重启、不用再跑 `--login`。
+
+**配对页面**（浏览器里扫码，扫完自动把服务拉起来）：
+
+```bash
+python3 sched/wechat_pair.py                    # http://127.0.0.1:8391/
+systemctl --user enable --now a2_wechat_pair
+```
+
+页面上写一个账号名 → 出二维码 → 手机扫 → 凭证写好 → 对应的服务自动起来。
+手机上要用：把 `--host` 改成 `0.0.0.0`（最好再加 `--token`），或者用 SSH 隧道把 8391 转过来。
+接口：`GET /api/accounts`、`POST /add`、`POST /code`（手机上的验证码）、`POST /start`、`POST /stop`。
+
+**多个微信号**（两种方式，可以混用）：
+
+| 方式 | 单元 | 谁在跑 |
+| --- | --- | --- |
+| 一个账号一个单元 | `a2_wechat@alice.service` | 只有 alice |
+| 一个进程 many 个账号 | `a2_wechat_mul.service` | `~/.tea_agent/wechat/` 里的每个账号 |
+
+每个账号有自己的目录（`~/.tea_agent/wechat/<名字>/`：凭证、游标、context_token）、
+自己的工作区（所以队列里的任务也分开）、自己的来源名（`wechat:alice`，规则和线索也分开）。
+**所有账号共用同一个任务队列**（a2_task）：一份额度、一份排期、一个任务列表。
+
+`a2_wechat_mul` 自己盯着账号目录：谁扫过码，它就把谁接上（不用写单元、不用 start）。
+已经有自己单元的账号它不碰——两个 bot 用同一个游标轮询，会把彼此的消息吃掉。
+
 **开机自启（systemd user unit）**：`scripts/a2_wechat.service` 是一份**跟机器无关的模板**
 （路径写的是 `%h`，即运行单元的用户的主目录；仓库默认在 `~/work/git/tea_a2`）。装：
 
@@ -259,7 +288,8 @@ systemctl --user status a2_wechat
 tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=none
 ```
 
-`install-units.sh` 把 `a2` / `a2_task` / `a2_wechat` / `a2_telegram` 四个单元装到
+`install-units.sh` 把 `a2` / `a2_task` / `a2_wechat` / `a2_telegram`（还有
+`a2_wechat@`（模板）/ `a2_wechat_mul` / `a2_wechat_pair`）装到
 `~/.config/systemd/user/`，
 把模板里的仓库路径换成本机的，然后 `daemon-reload`。**目标机器的目录不一样不用手改**：
 给对路径就行；实在要手改，模板里要改的只有 `ExecStart` / `WorkingDirectory` /
@@ -271,6 +301,18 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 协议是**微信 iLink Bot API**（<https://www.wechatbot.dev/zh/protocol>）：HTTP + 长轮询，
 所以只用标准库就够（设备上没有 pip 也能跑）。凭证和每个用户的 `context_token` 存在
 `~/.tea_agent/wechat/credentials.json`（context_token 是回复的路由凭据，重启不能丢）。
+
+协议上有几件事是文档里写明的、实测也撞得上：
+
+- **一个微信号 ↔ 一个 bot**。同一个微信号再扫一次，服务器回 `binded_redirect`
+  （"已经连过了"）：这时客户端**接管**已有的凭证，而不是再做一个 bot。
+  平台也不让一个微信号绑两个 bot（"暂不支持连接多个 OpenClaw"）。
+- **一个客户端可以有很多个 bot**：协议让客户端把已知的 bot_token 带上
+  （`local_token_list`，最多十个，新的在前），服务器才知道"这个已经在这儿了"。
+- **每个 bot 的游标和 context_token 都是自己的**，不能混用——所以每个账号一个目录。
+- **会话会过期**（大概 24 小时，errcode -14）：服务重新出一个码等着。
+- 风控时会要一个**验证码**（`need_verifycode`）：手机上显示的数字，填在配对页面上，
+  或者写进账号目录的 `verify_code` 文件。
 
 微信里的命令：
 

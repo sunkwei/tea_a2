@@ -1,0 +1,37 @@
+# 一个服务，很多个微信号。
+#
+#   systemctl --user enable --now a2_wechat_mul
+#
+# 这个单元盯着 ~/.tea_agent/wechat/：谁扫过码，凭证就在那儿，这个服务
+# 就把它接上（不用再写单元、不用再 start）。所有账号共用同一个任务队列
+#（a2_task）：一份额度、一份排期、一个任务列表；但每个账号有自己的工作区，
+# 所以两个微信号的活儿不会混在一起。
+#
+# 每个账号要是有自己的单元在跑（a2_wechat@alice.service），这个服务就不碰
+# 它——两个 bot 用同一个游标去轮询，会把彼此的消息吃掉。
+#
+# 单个账号也可以用单元：a2_wechat.service / a2_wechat@<名字>.service。
+# 两种方式可以混着来。
+[Unit]
+Description=tea_a2 WeChat bot (every account in one process)
+Documentation=file://%h/work/git/tea_a2/docs/tasks.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/wechat_multi.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283 --triggers
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+# 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
+# `journalctl --user` 读不到，所以直接 append 到文件。
+StandardOutput=append:%h/.tea_agent/logs/a2_wechat_mul.log
+StandardError=append:%h/.tea_agent/logs/a2_wechat_mul.log
+
+[Install]
+WantedBy=default.target

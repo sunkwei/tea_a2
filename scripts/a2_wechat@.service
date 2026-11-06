@@ -1,0 +1,38 @@
+# 模板单元：一个微信号 = 一个实例。
+#
+#   systemctl --user start a2_wechat@alice     #  alice 这个微信号
+#   systemctl --user status a2_wechat@alice
+#   systemctl --user stop  a2_wechat@alice
+#
+# %i 是实例名（就是账号名）。每个实例有自己的目录（凭证、游标、
+# context_token）、自己的工作区（所以队列里的任务也分开）和自己的日志。
+#
+# 扫码：服务起来就会在日志里给一个二维码链接，同时写一份到
+# ~/.tea_agent/wechat/<账号名>/qr.png。也可以用配对页面
+# （sched/wechat_pair.py，默认 http://127.0.0.1:8391/）扫，扫完它替你
+# 启动这个单元。
+#
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装。
+[Unit]
+Description=tea_a2 WeChat bot (%i)
+Documentation=file://%h/work/git/tea_a2/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283 --triggers --account %i
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+# 这个实例自己的工作区：%i 排的活儿都在这里做，不碰别人的仓库。
+# 想换目录，两处都改：这里和 --workspace-path（或者直接用 --workspace-path 传）。
+StandardOutput=append:%h/.tea_agent/logs/a2_wechat-%i.log
+StandardError=append:%h/.tea_agent/logs/a2_wechat-%i.log
+
+[Install]
+WantedBy=default.target

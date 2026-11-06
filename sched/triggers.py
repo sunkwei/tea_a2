@@ -149,6 +149,31 @@ class Rules(object):
         self.mtime = mtime
         self.sources = parse_rules(text)
 
+    @staticmethod
+    def family_of(source):
+        """The family of a source: "wechat:alice" -> "wechat".
+
+        A named account (a second WeChat account on the same machine) has
+        its own section in the rules file, but the section of the channel
+        is about the channel: it applies to every account on it.
+        """
+        text = str(source or "").strip()
+        if ":" in text:
+            return text.split(":", 1)[0]
+        return text
+
+    def rules_for(self, source):
+        """The rules of one source: its own section and the one of the family."""
+        exact = self.sources.get(source) or {}
+        family = self.family_of(source)
+        if not family or family == source:
+            return exact
+        base = self.sources.get(family) or {}
+        merged = {"require": [], "ignore": []}
+        for key in ("require", "ignore"):
+            merged[key] = list(base.get(key) or []) + list(exact.get(key) or [])
+        return merged
+
     def decide(self, source, text):
         """("accept"|"ignore"|None, reason).
 
@@ -156,7 +181,7 @@ class Rules(object):
         else (the model).
         """
         self.load()
-        rules = self.sources.get(source) or {}
+        rules = self.rules_for(source)
         haystack = (text or "").lower()
         # "ignore" wins over "require": a rule that says "this is not work"
         # is a deliberate decision, and the cost of dropping a greeting is

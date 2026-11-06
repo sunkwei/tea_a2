@@ -145,6 +145,9 @@ __nss_configure_lookup("hosts", "files dns");   // 仅静态构建
 | `a2.service` | agent —— 工作区通道（内置网页 UI） | 8383 |
 | `a2_task.service` | 任务队列（Python）：排队 / 执行 / 状态 / 结果 | 8283 |
 | `a2_wechat.service` | 队列的微信前端（走触发器入口 → 带线索） | — |
+| `a2_wechat@<名字>.service` | 微信前端的一个实例 = 一个微信号（多账号） | — |
+| `a2_wechat_mul.service` | 微信前端：一个进程跑目录里的每个账号（共用一个队列） | — |
+| `a2_wechat_pair.service` | 配对页面：浏览器里扫码，扫完自动起服务 | 8391 |
 | `a2_telegram.service` | 队列的 Telegram 前端（走触发器入口 → 带线索） | — |
 | `a2_watchdog.service` | 看门狗：在 agent 和队列**外面**盯着卡住的任务、agent 的健康、额度 | — |
 | `a2_router.service` | Router：把分开的工作区会话串成一条线索（下一个任务知道之前发生了什么） | — |

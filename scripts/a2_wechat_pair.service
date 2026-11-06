@@ -1,0 +1,30 @@
+# 配对页面：一个人扫一次码，微信这一端就接上了。
+#
+#   systemctl --user enable --now a2_wechat_pair
+#   浏览器打开 http://127.0.0.1:8391/
+#
+# 手机上要用：把 --host 改成 0.0.0.0（或者用 SSH 隧道把端口转过来），
+# 并且最好加 --token（页面上带 ?token=...）。
+[Unit]
+Description=tea_a2 WeChat pairing page (scan a QR code, the bot starts)
+Documentation=file://%h/work/git/tea_a2/docs/tasks.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/wechat_pair.py --host 127.0.0.1 --port 8391
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+# 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
+# `journalctl --user` 读不到，所以直接 append 到文件。
+StandardOutput=append:%h/.tea_agent/logs/a2_wechat_pair.log
+StandardError=append:%h/.tea_agent/logs/a2_wechat_pair.log
+
+[Install]
+WantedBy=default.target
