@@ -139,6 +139,32 @@ providers:
   check('it is shown for an open session', btn && btn.hidden === false, JSON.stringify(btn));
   check('the tooltip names the session', btn && btn.title.indexOf(TITLE) >= 0, btn && btn.title);
 
+  // ---- the menu ---------------------------------------------------------
+  // The button is a menu now: four downloads, each of them one HTML file.
+  await evalJs(`document.getElementById('session-export').click(); true`);
+  await sleep(300);
+  const menu = await evalJs(`(function(){
+    var dd = document.getElementById('session-export-menu');
+    if (!dd) return null;
+    var items = Array.prototype.map.call(dd.querySelectorAll('.dd-item'), function (n) {
+      return { title: (n.querySelector('.dd-title') || {}).textContent || '',
+               hint: (n.querySelector('.dd-hint') || {}).textContent || '' };
+    });
+    return { hidden: dd.classList.contains('hidden'), items: items,
+             expanded: document.getElementById('session-export').getAttribute('aria-expanded') };
+  })()`);
+  check('the button opens a menu', menu && menu.hidden === false, JSON.stringify(menu));
+  check('the menu offers the four downloads', menu && menu.items.length === 4,
+    JSON.stringify(menu && menu.items));
+  check('they are the four of the spec',
+    menu && menu.items.map(function (i) { return i.title; }).join('|') ===
+      '下载当前会话|下载当前完整会话|下载主题|下载完整主题',
+    JSON.stringify(menu && menu.items.map(function (i) { return i.title; })));
+  check('the menu says which turn is current',
+    menu && menu.items[0].hint.indexOf('第 2 条') >= 0, JSON.stringify(menu && menu.items[0]));
+  check('the button says it is open', menu && menu.expanded === 'true',
+    JSON.stringify(menu && menu.expanded));
+
   // ---- capture the download --------------------------------------------
   await evalJs(`(function(){
     window.__dl = null;
@@ -156,7 +182,13 @@ providers:
     };
     return true;
   })()`);
-  await evalJs(`document.getElementById('session-export').click(); true`);
+  // The last item is "下载完整主题": the whole topic with everything in it.
+  await evalJs(`(function(){
+    var items = document.querySelectorAll('#session-export-menu .dd-item');
+    if (!items.length) return false;
+    items[items.length - 1].click();
+    return true;
+  })()`);
   let dl = null;
   for (let i = 0; i < 60; i++) {
     await sleep(300);

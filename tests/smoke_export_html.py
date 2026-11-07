@@ -285,6 +285,84 @@ providers:
               isinstance(payload.get("images"), dict) and
               ".tea_agent_run/artifacts/images/img_test.png" in payload.get("images", {}))
 
+        # ---- the download menu: one turn or the whole topic -------------------
+        # The seeded session has three user messages, so it has three turns:
+        # "请检查..." (with the answer and the tool call), "这张图里是什么？"
+        # (with the picture) and "引用了 </script>..." (nothing after it).
+        status, headers, raw = call(port, "GET",
+                                    "/api/sessions/%s/export?scope=turn&detail=brief&turn=1" % sid)
+        dl_text = raw.decode("utf-8")
+        check("a single turn can be exported", status == 200, status)
+        check("it says what it is", headers.get("X-Export-Scope") == "turn"
+              and headers.get("X-Export-Detail") == "brief", headers)
+        check("the file name tells the four files apart",
+              "turn-1-brief" in headers.get("Content-Disposition", ""),
+              headers.get("Content-Disposition"))
+        check("it is still a standalone document",
+              dl_text.startswith("<!doctype html>") and dl_text.rstrip().endswith("</html>")
+              and "<style>" in dl_text, dl_text[:60])
+        check("it has the question of that turn", "请检查" in dl_text)
+        check("it has the answer of that turn", "第一点" in dl_text)
+        check("it leaves the other turn out", "这张图里是什么" not in dl_text)
+        check("the brief version has no thinking", "先想想" not in dl_text)
+        check("the brief version has no tool calls", "调用 toolkit_exec" not in dl_text)
+        check("the brief version has no tool output", "line\nline" not in dl_text)
+
+        status, headers, raw = call(port, "GET",
+                                    "/api/sessions/%s/export?scope=turn&detail=full&turn=1" % sid)
+        dl_text = raw.decode("utf-8")
+        check("a turn can be exported with everything in it", status == 200, status)
+        check("it says what it is", headers.get("X-Export-Detail") == "full", headers)
+        check("it has the thinking", "先想想" in dl_text)
+        check("it has the tool call", "调用 toolkit_exec" in dl_text)
+        check("it says the call worked", 'class="badge ok"' in dl_text and "成功" in dl_text)
+        check("it has the call arguments", '"command"' in dl_text)
+        check("it leaves the tool output out", "line\nline" not in dl_text
+              and "导出时截断" not in dl_text)
+        check("it leaves the other turn out", "这张图里是什么" not in dl_text)
+
+        status, headers, raw = call(port, "GET",
+                                    "/api/sessions/%s/export?scope=topic&detail=brief" % sid)
+        dl_text = raw.decode("utf-8")
+        check("the whole topic can be exported", status == 200, status)
+        check("it says what it is", headers.get("X-Export-Scope") == "topic"
+              and headers.get("X-Export-Detail") == "brief", headers)
+        check("it has every question", "请检查" in dl_text and "这张图里是什么" in dl_text)
+        check("it has the answers", "第一点" in dl_text)
+        check("it has no thinking and no tool calls",
+              "先想想" not in dl_text and "调用 toolkit_exec" not in dl_text)
+
+        status, headers, raw = call(port, "GET",
+                                    "/api/sessions/%s/export?scope=topic&detail=full" % sid)
+        dl_text = raw.decode("utf-8")
+        check("the whole topic can be exported with everything in it", status == 200, status)
+        check("it has every question and answer",
+              "请检查" in dl_text and "这张图里是什么" in dl_text and "第一点" in dl_text)
+        check("it has the thinking and the tool calls",
+              "先想想" in dl_text and "调用 toolkit_exec" in dl_text)
+        check("it still leaves the tool output out",
+              "line\nline" not in dl_text and "导出时截断" not in dl_text)
+        check("it numbers the turns", "第 1 条会话" in dl_text and "第 2 条会话" in dl_text)
+        check("it carries the session JSON", 'id="tea-session-data"' in dl_text)
+        dl_payload = json.loads(re.search(
+            r'<script type="application/json" id="tea-session-data">(.*?)</script>',
+            dl_text, re.S).group(1).replace("<\\/", "</"))
+        check("the JSON has the exported messages",
+              len(dl_payload.get("messages") or []) == len(messages),
+              len(dl_payload.get("messages") or []))
+        check("the JSON does not carry the tool output",
+              all("line\nline" not in (m.get("content") or "")
+                  for m in dl_payload.get("messages") or []))
+
+        # turn=0 means the newest turn; a turn that does not exist is a 404.
+        status, _, raw = call(port, "GET",
+                               "/api/sessions/%s/export?scope=turn&detail=brief" % sid)
+        check("no number means the newest turn", status == 200
+              and "引用了" in raw.decode("utf-8"), status)
+        status, _, _ = call(port, "GET",
+                             "/api/sessions/%s/export?scope=turn&detail=brief&turn=99" % sid)
+        check("a turn that does not exist is 404", status == 404, status)
+
         # ---- import back into another workspace -------------------------------
         status, _, raw = call(port, "POST", "/api/workspaces/%s/sessions/import" % wid_b,
                               raw_body=text)

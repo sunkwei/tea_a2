@@ -108,16 +108,20 @@
             <path d="M9.6 6.4a2.6 2.6 0 0 0-3.7 0L3.8 8.5a2.6 2.6 0 0 0 3.7 3.7l1-1"/>
           </svg>
         </button>
-        <!-- 把当前会话导出成一个自带 CSS/图片的 HTML 文件：拷到别的机器上双击即可阅读 -->
-        <button id="session-export" class="icon-btn hidden" type="button"
-                title="导出当前会话为单个 HTML 文件（离线可读，含图片）"
-                aria-label="导出当前会话">
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M8 2.4v7.2"/>
-            <path d="M5.2 7l2.8 3 2.8-3"/>
-            <path d="M2.8 12.4h10.4"/>
-          </svg>
-        </button>
+        <!-- 下载菜单：当前会话 / 当前完整会话 / 主题 / 完整主题，都是单个 HTML 文件 -->
+        <div class="dd-wrap" id="session-export-wrap">
+          <button id="session-export" class="icon-btn hidden" type="button"
+                  aria-haspopup="true" aria-expanded="false"
+                  title="下载：当前会话 / 完整会话 / 主题 / 完整主题（单个 HTML 文件，离线可读）"
+                  aria-label="下载会话">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 2.4v7.2"/>
+              <path d="M5.2 7l2.8 3 2.8-3"/>
+              <path d="M2.8 12.4h10.4"/>
+            </svg>
+          </button>
+          <div id="session-export-menu" class="dropdown hidden"></div>
+        </div>
         <!-- 订阅额度：当前 provider 声明了 supports_usage 才出现（点一下重新查） -->
         <button id="usage-chip" class="chip usage hidden" type="button"
                 title="订阅额度（点击刷新）" aria-label="订阅额度">

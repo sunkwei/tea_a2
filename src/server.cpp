@@ -4298,19 +4298,64 @@ void ApiServer::Impl::install_routes() {
               send_error(res, 404, "not_found", err);
               return;
             }
+            // The download menu asks for a slice of the conversation: one turn
+            // ("会话") or the whole topic ("主题"), with the questions and the
+            // answers or with everything in between. Without those parameters
+            // the export is the full transcript, exactly as it always was.
+            const std::string scope = to_lower(trim(req.get_param_value("scope")));
+            const std::string detail = to_lower(trim(req.get_param_value("detail")));
+            ExportSelection selection;
+            if (!scope.empty() || !detail.empty()) {
+              selection.scope = (scope == "turn") ? ExportSelection::Scope::kTurn
+                                                  : ExportSelection::Scope::kTopic;
+              selection.detail = (detail == "brief") ? ExportSelection::Detail::kBrief
+                                                     : ExportSelection::Detail::kFull;
+              selection.turn = atoi(req.get_param_value("turn").c_str());
+            }
             std::map<std::string, std::string> image_data;
-            const std::string html =
-                export_session_html(ws, session, std::string(tea::version_string()), ExportLimits(),
-                                    &image_data);
-            const std::string name = export_file_name(session.info.title);
+            std::string html;
+            std::string name;
+            std::size_t messages = session.messages.size();
+            if (selection.scope == ExportSelection::Scope::kLegacy) {
+              html = export_session_html(ws, session, std::string(tea::version_string()),
+                                         ExportLimits(), &image_data);
+              name = export_file_name(session.info.title);
+            } else {
+              // "turn 0" means the last turn: the newest thing said.
+              if (selection.scope == ExportSelection::Scope::kTurn) {
+                const std::size_t turns = session_turn_count(session);
+                if (selection.turn < 1) selection.turn = static_cast<int>(turns);
+                if (turns == 0 || static_cast<std::size_t>(selection.turn) > turns) {
+                  send_error(res, 404, "not_found", "no such turn in this session");
+                  return;
+                }
+              }
+              html = export_conversation_html(ws, session, std::string(tea::version_string()),
+                                              selection, ExportLimits(), &image_data,
+                                              &messages);
+              std::string tag =
+                  (selection.scope == ExportSelection::Scope::kTurn) ? "turn" : "topic";
+              if (selection.scope == ExportSelection::Scope::kTurn) {
+                tag += "-" + std::to_string(selection.turn);
+              }
+              tag += (selection.detail == ExportSelection::Detail::kBrief) ? "-brief" : "-full";
+              name = export_file_name_for(session.info.title, tag);
+            }
             res.set_header("Content-Disposition",
                            "attachment; filename=\"" + name + "\"; filename*=UTF-8''" +
                                rfc5987_name(name));
             res.set_header("Cache-Control", "no-store");
             res.set_header("Access-Control-Allow-Origin", "*");
             res.set_header("X-Session-Messages",
-                           std::to_string(static_cast<long long>(session.messages.size())));
+                           std::to_string(static_cast<long long>(messages)));
             res.set_header("X-Export-Images", std::to_string(image_data.size()));
+            if (selection.scope != ExportSelection::Scope::kLegacy) {
+              res.set_header("X-Export-Scope",
+                             selection.scope == ExportSelection::Scope::kTurn ? "turn" : "topic");
+              res.set_header("X-Export-Detail",
+                             selection.detail == ExportSelection::Detail::kBrief ? "brief"
+                                                                                 : "full");
+            }
             LOG_INFO("export: session ", session.info.id, " -> ", name, " (", html.size(),
                      " B, ", image_data.size(), " image(s))");
             res.set_content(html, "text/html; charset=utf-8");

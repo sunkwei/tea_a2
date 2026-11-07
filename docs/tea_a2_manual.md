@@ -521,6 +521,12 @@ curl -s "$B/api/turns/t_xxx/trajectory"
 # 导出一个自包含的 HTML（离线可读）
 curl -sJ "$B/api/sessions/s_xxx/export" -o session.html
 
+# 只要一段：scope=turn（一条问答）| topic（整个主题）；turn=第几条（从 1 起算，
+# 省略 = 最新一条）；detail=brief（提问 + 最终回答）| full（再加思考与工具调用）
+curl -sJ "$B/api/sessions/s_xxx/export?scope=turn&detail=brief&turn=2" -o turn.html
+curl -sJ "$B/api/sessions/s_xxx/export?scope=topic&detail=full" -o topic.html
+# 回答头：X-Export-Scope / X-Export-Detail
+
 # 把导出的 HTML 导回去（新建一个会话，不覆盖）
 curl -s -X POST "$B/api/workspaces/ws_xxx/sessions/import" \
      -H 'Content-Type: text/html' --data-binary @session.html

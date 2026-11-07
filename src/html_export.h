@@ -34,6 +34,44 @@ struct ExportLimits {
   std::size_t json_image_bytes = 16u * 1024u * 1024u;
 };
 
+/// What a download contains.
+///
+/// The Web UI offers four files from one session: a single turn ("会话") or
+/// the whole topic ("主题"), and for each of them either the questions and the
+/// final answers, or everything in between (thinking, tool calls, answers).
+/// `kLegacy` is the original export - the full transcript with the tool
+/// output, the pictures and the JSON block - and is what the route returns
+/// when nothing is asked for.
+struct ExportSelection {
+  enum class Scope { kLegacy, kTurn, kTopic };
+  enum class Detail { kFull, kBrief };
+  Scope scope = Scope::kLegacy;
+  Detail detail = Detail::kFull;
+  /// 1-based number of the user turn, counted the way the UI counts them (the
+  /// right-hand jump index). Only used with Scope::kTurn; 0 means "the last
+  /// turn".
+  int turn = 0;
+};
+
+/// How many user turns a session has. The UI numbers the turns the same way,
+/// so "turn 3" means the same thing on both sides of the wire.
+std::size_t session_turn_count(const Session& session);
+
+/// Render a slice of `session` as a standalone HTML document: one turn or the
+/// whole topic, with the questions and the final answers, or with everything
+/// (thinking, tool calls - their arguments and whether they worked - and the
+/// answers). The tool output is left out on purpose: a transcript is read,
+/// not replayed, and the output is where the megabytes are.
+///
+/// The file carries the same stylesheet as the full export and the same JSON
+/// block, so it can be read offline and imported back.
+std::string export_conversation_html(const Workspace& workspace, const Session& session,
+                                     const std::string& version,
+                                     const ExportSelection& selection,
+                                     const ExportLimits& limits = ExportLimits(),
+                                     std::map<std::string, std::string>* image_data = nullptr,
+                                     std::size_t* message_count = nullptr);
+
 /// Render `session` as a standalone HTML document. `version` is stamped in the
 /// header ("tea_agent 0.7.0") so a reader knows what wrote the file.
 ///
@@ -69,6 +107,11 @@ bool import_session_payload(const Workspace& workspace, const nlohmann::json& pa
 /// A download name that survives every browser, shell and filesystem:
 /// ASCII only, no separators, plus a UTC stamp so two exports do not collide.
 std::string export_file_name(const std::string& session_title);
+
+/// The same name with a tag in it ("turn-3-brief", "topic-full"), so the four
+/// files of one session do not overwrite each other. An empty tag gives the
+/// plain name.
+std::string export_file_name_for(const std::string& session_title, const std::string& tag);
 
 /// Minimal Markdown -> HTML, mirroring what the built-in UI renders: fenced
 /// code blocks (with language label), headings, lists, blockquotes, tables,

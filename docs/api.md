@@ -36,7 +36,7 @@
 | `GET` / `PUT` | `/api/sessions/{sid}/todos` | 任务列表：GET 随 `/api/sessions/{sid}` 一起返回；PUT 用 `{"items":[…]}` 整体替换，或 `{"index":n,"status":"…"}` 改一条（`index` **从 1 起算**）。计划在轮次结束时关掉，两轮之间 `todos` 是空的、步骤在 `todo_carry` 里；这时 PUT 改的是 `todo_carry`（改完它就变回活着的计划） |
 | `PATCH` / `DELETE` | `/api/sessions/{sid}` | 重命名（`{"title":"…"}`）/ 删除会话 |
 | `POST` | `/api/sessions/{sid}/fork` | 从某一轮分叉出新会话：`{"message_index":N}` 是父会话里某条**用户消息**的下标，复制到该轮结束（含回答与工具结果）；省略或负数 = 复制整个会话。返回 `session`（带 `forked_from` / `fork_turn`）与复制后的 `messages`；父会话不变 |
-| `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON） |
+| `GET` | `/api/sessions/{sid}/export` | 导出成单个自包含 HTML（CSS/图片内联，离线可读，末尾带可导入的会话 JSON）。**不带参数 = 整段会话**（含工具输出）；`?scope=turn&detail=brief&turn=N` 只要**第 N 条问答**（N 从 1 起算，省略 = 最新一条），`?scope=topic&detail=brief` 是**整个主题**的问答；`detail=full` 再加上思考过程与工具调用（**只记参数与成功与否，不带输出**）。回答头带 `X-Export-Scope` / `X-Export-Detail` |
 | `POST` | `/api/workspaces/{id}/sessions/import` | 导入导出的 `.html`（原样或 `{"html":"…"}`）或会话 JSON，新建一个会话；重复导入不会覆盖 |
 | `POST` | `/api/workspaces/{id}/gc` | **历史清理**：按年龄删掉太旧的会话与轨迹、把冷数据 gzip 起来、run_dir 超预算时按最旧优先删会话。body 可以覆盖上限：`{"dry_run":true}` 只报告不动手，`{"max_age_days":30,"max_bytes":104857600,"compress_after_days":7,"keep_recent":5}`。回答里有 `bytes_before/after`、`freed_bytes`、`sessions_removed`、`trajectories_removed`、`sessions_compressed`、`compressed_saved`、`usage`（sessions / trajectories / 其它各占多少） |
 | `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -851,6 +853,302 @@ std::string message_html(const Workspace& ws, const Message& m, std::size_t* ima
 
 }  // namespace
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// the download menu: one turn ("会话") or the whole topic ("主题")
+// ---------------------------------------------------------------------------
+
+/// A turn is one question and everything that came after it until the next
+/// question. The UI counts them the same way (the right-hand jump index
+/// numbers the user messages), so "turn 3" means the same on both sides.
+struct ExportTurn {
+  std::size_t user_index = 0;       // the question itself
+  std::vector<std::size_t> indices;  // every message of the turn, in order
+};
+
+std::vector<ExportTurn> split_turns(const Session& session) {
+  std::vector<ExportTurn> turns;
+  for (std::size_t i = 0; i < session.messages.size(); ++i) {
+    const Message& m = session.messages[i];
+    if (m.role == "user") {
+      ExportTurn t;
+      t.user_index = i;
+      t.indices.push_back(i);
+      turns.push_back(t);
+      continue;
+    }
+    // Whatever came before the first question is not part of a turn.
+    if (turns.empty()) continue;
+    turns.back().indices.push_back(i);
+  }
+  return turns;
+}
+
+/// The answer of a turn: the last thing the assistant said before the next
+/// question. A turn that ended in a tool call has no answer - the transcript
+/// then shows the call itself.
+std::size_t final_answer_index(const Session& session, const ExportTurn& turn) {
+  for (std::size_t k = turn.indices.size(); k > 0; --k) {
+    const std::size_t idx = turn.indices[k - 1];
+    const Message& m = session.messages[idx];
+    if (m.role == "assistant" && !trim(m.content).empty()) return idx;
+  }
+  return static_cast<std::size_t>(-1);
+}
+
+/// The tool results of a turn, by the id of the call they answer, plus the
+/// ids the assistant actually declared: a result whose call is missing has
+/// nowhere to go otherwise.
+struct TurnCalls {
+  std::map<std::string, const Message*> results;
+  std::set<std::string> declared;
+};
+
+TurnCalls turn_calls(const Session& session, const ExportTurn& turn) {
+  TurnCalls out;
+  for (std::size_t i = 0; i < turn.indices.size(); ++i) {
+    const Message& m = session.messages[turn.indices[i]];
+    if (m.role == "tool") {
+      if (!m.tool_call_id.empty()) out.results[m.tool_call_id] = &m;
+    } else if (m.role == "assistant") {
+      for (std::size_t k = 0; k < m.tool_calls.size(); ++k) {
+        out.declared.insert(m.tool_calls[k].id);
+      }
+    }
+  }
+  return out;
+}
+
+/// Was the call answered, and how did it go? The output itself is not in the
+/// file: a transcript says what was called and whether it worked.
+std::string call_status_html(const TurnCalls& calls, const ToolCall& call) {
+  std::map<std::string, const Message*>::const_iterator it = calls.results.find(call.id);
+  if (it == calls.results.end() || it->second == NULL) {
+    return "<span class=\"badge info\">未返回</span>";
+  }
+  if (it->second->cancelled) return "<span class=\"badge info\">已中断</span>";
+  if (it->second->ok) return "<span class=\"badge ok\">成功</span>";
+  return "<span class=\"badge fail\">失败</span>";
+}
+
+std::string who_line(const std::string& label, const Message& m) {
+  std::string out = "<div class=\"who\">" + label;
+  if (!m.created_at.empty()) out += " <span class=\"t\">" + esc(m.created_at) + "</span>";
+  out += "</div>";
+  return out;
+}
+
+/// The question of a turn: what the user wrote, and the pictures they pasted.
+std::string question_html(const Workspace& ws, const Message& m, std::size_t* image_budget,
+                          const ExportLimits& limits, std::size_t* json_budget,
+                          std::map<std::string, std::string>* image_data,
+                          bool* images_omitted) {
+  std::ostringstream out;
+  out << "<li class=\"msg user\">" << who_line("用户", m);
+  if (!trim(m.content).empty()) {
+    out << "<div class=\"body\">" << markdown_to_html(m.content) << "</div>";
+  }
+  for (std::size_t i = 0; i < m.images.size(); ++i) {
+    out << image_block(ws, m.images[i], image_budget, limits, json_budget, image_data,
+                       images_omitted);
+  }
+  out << "</li>\n";
+  return out.str();
+}
+
+/// One answer of the assistant: what it thought, what it said, what it called.
+std::string answer_html(const Workspace& ws, const Message& m, const TurnCalls& calls,
+                        std::size_t* image_budget, const ExportLimits& limits,
+                        std::size_t* json_budget,
+                        std::map<std::string, std::string>* image_data, bool* images_omitted) {
+  std::ostringstream out;
+  out << "<li class=\"msg assistant\">" << who_line("助手", m);
+  if (!m.reasoning.empty()) {
+    out << "<details class=\"reasoning\"><summary>思考过程</summary><pre>"
+        << esc(m.reasoning) << "</pre></details>";
+  }
+  if (!trim(m.content).empty()) {
+    out << "<div class=\"body\">" << markdown_to_html(m.content) << "</div>";
+  }
+  for (std::size_t i = 0; i < m.tool_calls.size(); ++i) {
+    const ToolCall& call = m.tool_calls[i];
+    const std::string args = call.raw_arguments.empty() ? dump_json(call.arguments, 2)
+                                                       : call.raw_arguments;
+    out << "<details class=\"call\"><summary>调用 " << esc(call.name) << " "
+        << call_status_html(calls, call);
+    const std::string pv = preview_line(args, 80);
+    if (!pv.empty()) out << "<span class=\"pv\">" << pv << "</span>";
+    out << "</summary><pre>" << esc(args) << "</pre></details>\n";
+  }
+  for (std::size_t i = 0; i < m.images.size(); ++i) {
+    out << image_block(ws, m.images[i], image_budget, limits, json_budget, image_data,
+                       images_omitted);
+  }
+  out << "</li>\n";
+  return out.str();
+}
+
+}  // namespace
+
+std::size_t session_turn_count(const Session& session) {
+  std::size_t n = 0;
+  for (std::size_t i = 0; i < session.messages.size(); ++i) {
+    if (session.messages[i].role == "user") ++n;
+  }
+  return n;
+}
+
+std::string export_conversation_html(const Workspace& workspace, const Session& session,
+                                     const std::string& version,
+                                     const ExportSelection& selection,
+                                     const ExportLimits& limits,
+                                     std::map<std::string, std::string>* image_data,
+                                     std::size_t* message_count) {
+  const std::string title = session.info.title.empty() ? "会话" : session.info.title;
+  std::size_t budget = limits.total_image_bytes;
+  std::size_t json_budget = limits.json_image_bytes;
+  bool images_omitted = false;
+  std::map<std::string, std::string> own_images;
+  std::map<std::string, std::string>* images = image_data ? image_data : &own_images;
+
+  const std::vector<ExportTurn> turns = split_turns(session);
+  const bool brief = selection.detail == ExportSelection::Detail::kBrief;
+
+  // Which turns are in the file. "turn 0" means the last one: the newest
+  // thing said, which is what "the current turn" means to somebody who did
+  // not pick a number.
+  std::size_t first = 0;
+  std::size_t count = turns.size();
+  int number = selection.turn;
+  if (selection.scope == ExportSelection::Scope::kTurn) {
+    if (number < 1) number = static_cast<int>(turns.size());
+    if (number < 1 || static_cast<std::size_t>(number) > turns.size()) {
+      first = 0;
+      count = 0;
+    } else {
+      first = static_cast<std::size_t>(number) - 1;
+      count = 1;
+    }
+  }
+
+  // The messages that end up in the file - and therefore the messages the
+  // JSON block carries. The tool output is not in the file, so it is not in
+  // the JSON either: what the reader sees is what the file carries.
+  Session shown;
+  shown.info = session.info;
+  shown.info.message_count = 0;
+  if (selection.scope == ExportSelection::Scope::kTurn && number >= 1) {
+    shown.info.title = title + "（第 " + std::to_string(number) + " 条）";
+  }
+
+  std::ostringstream body;
+  for (std::size_t t = first; t < first + count && t < turns.size(); ++t) {
+    const ExportTurn& turn = turns[t];
+    const TurnCalls calls = turn_calls(session, turn);
+    body << "<li class=\"msg system\"><div class=\"who\">第 " << (t + 1) << " 条会话</div></li>\n";
+
+    const Message& q = session.messages[turn.user_index];
+    body << question_html(workspace, q, &budget, limits, &json_budget, images, &images_omitted);
+    shown.messages.push_back(q);
+
+    if (brief) {
+      // Only the question and the answer: the reader wants the exchange, not
+      // the machinery behind it.
+      const std::size_t ans = final_answer_index(session, turn);
+      if (ans != static_cast<std::size_t>(-1)) {
+        const Message& a = session.messages[ans];
+        body << "<li class=\"msg assistant\">" << who_line("助手", a);
+        if (!trim(a.content).empty()) {
+          body << "<div class=\"body\">" << markdown_to_html(a.content) << "</div>";
+        }
+        body << "</li>\n";
+        // The brief version shows the answer and nothing else: the thinking
+        // and the calls behind it are not in the file, so they are not in the
+        // JSON block either.
+        Message brief = a;
+        brief.reasoning.clear();
+        brief.tool_calls.clear();
+        shown.messages.push_back(brief);
+      }
+      continue;
+    }
+
+    for (std::size_t i = 0; i < turn.indices.size(); ++i) {
+      const std::size_t idx = turn.indices[i];
+      if (idx == turn.user_index) continue;  // the question is already out
+      const Message& m = session.messages[idx];
+      if (m.role == "assistant") {
+        body << answer_html(workspace, m, calls, &budget, limits, &json_budget, images,
+                            &images_omitted);
+        shown.messages.push_back(m);
+      } else if (m.role == "tool") {
+        // The result is already on the call it answers (the badge). A result
+        // without a call would vanish - say so instead.
+        if (m.tool_call_id.empty() ||
+            calls.declared.find(m.tool_call_id) == calls.declared.end()) {
+          body << "<li class=\"msg tool\">" << who_line("工具", m)
+               << "<div class=\"body\">（没有对应的调用记录）</div></li>\n";
+        }
+        Message trimmed = m;
+        trimmed.content = "（本次下载不含工具输出）";
+        shown.messages.push_back(trimmed);
+      }
+    }
+  }
+
+  std::ostringstream out;
+  out << "<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n"
+         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>"
+      << esc(title) << " · " << esc(workspace.entry().name) << "</title>\n<style>"
+      << kStyle << "</style>\n</head>\n<body>\n<main>\n<header class=\"top\">\n<h1>"
+      << esc(title) << "</h1>\n<dl class=\"meta\">\n";
+  out << "<dt>工作区</dt><dd>" << esc(workspace.entry().name) << " · "
+      << esc(workspace.root()) << "</dd>\n";
+  out << "<dt>主题</dt><dd>" << esc(session.info.id) << "</dd>\n";
+  if (selection.scope == ExportSelection::Scope::kTurn) {
+    out << "<dt>范围</dt><dd>当前会话（第 " << number << " 条，共 " << turns.size()
+        << " 条）</dd>\n";
+  } else {
+    out << "<dt>范围</dt><dd>整个主题（" << turns.size() << " 条会话）</dd>\n";
+  }
+  out << "<dt>内容</dt><dd>"
+      << (brief ? "用户输入与最终回答" : "用户输入、思考、工具调用与最终回答") << "</dd>\n";
+  out << "<dt>时间</dt><dd>" << esc(session.info.created_at);
+  if (!session.info.updated_at.empty() && session.info.updated_at != session.info.created_at) {
+    out << " → " << esc(session.info.updated_at);
+  }
+  out << "</dd>\n";
+  out << "<dt>导出</dt><dd>tea_agent " << esc(version) << " · " << esc(now_iso8601())
+      << "</dd>\n</dl>\n";
+  out << "<p class=\"lede\">这是 tea_agent 导出的静态快照：不依赖服务器、不请求网络，"
+         "直接双击打开即可阅读。工具输出没有包含在本次下载里（只记录了调用参数与成功与否）。"
+         "页末的 <code>tea-session-data</code> 块保存了本次导出的会话 JSON，"
+         "可用 <code>POST /api/workspaces/{id}/sessions/import</code> 恢复成一个新会话。</p>\n"
+         "</header>\n<ol class=\"turns\">\n";
+  out << body.str();
+  out << "</ol>\n<footer>由 tea_agent " << esc(version) << " 于 " << esc(now_iso8601())
+      << " 导出，共 " << shown.messages.size()
+      << " 条消息。此文件不含任何外部资源。</footer>\n</main>\n";
+
+  // The JSON block is the restore path. "</" is escaped so a message containing
+  // "</script>" cannot end the block early.
+  const std::string payload =
+      dump_json(export_session_json(workspace, shown, version, images, images_omitted), 2);
+  std::string safe_payload;
+  for (std::size_t i = 0; i < payload.size(); ++i) {
+    if (payload[i] == '<' && i + 1 < payload.size() && payload[i + 1] == '/') {
+      safe_payload += "<\\/";
+      ++i;
+    } else {
+      safe_payload += payload[i];
+    }
+  }
+  out << "<script type=\"application/json\" id=\"tea-session-data\">\n" << safe_payload
+      << "\n</script>\n</body>\n</html>\n";
+  if (message_count) *message_count = shown.messages.size();
+  return out.str();
+}
 nlohmann::json export_session_json(const Workspace& workspace, const Session& session,
                                    const std::string& version,
                                    const std::map<std::string, std::string>* image_data,
@@ -1046,7 +1344,7 @@ std::string render_markdown_page(const std::string& title, const std::string& ma
   return out.str();
 }
 
-std::string export_file_name(const std::string& session_title) {
+std::string export_file_name_for(const std::string& session_title, const std::string& tag) {
   std::string base;
   for (std::size_t i = 0; i < session_title.size(); ++i) {
     const unsigned char c = static_cast<unsigned char>(session_title[i]);
@@ -1068,7 +1366,13 @@ std::string export_file_name(const std::string& session_title) {
   }
   const std::string when =
       digits.size() >= 14 ? (digits.substr(0, 8) + "-" + digits.substr(8, 6)) : digits;
-  return "tea_agent-" + base + (when.empty() ? "" : "-" + when) + ".html";
+  // The tag ("turn-3-brief") tells the four files of one session apart.
+  return "tea_agent-" + base + (tag.empty() ? "" : "-" + tag) +
+         (when.empty() ? "" : "-" + when) + ".html";
+}
+
+std::string export_file_name(const std::string& session_title) {
+  return export_file_name_for(session_title, "");
 }
 
 std::string export_session_html(const Workspace& workspace, const Session& session,

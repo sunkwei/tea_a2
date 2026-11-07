@@ -2981,6 +2981,10 @@
     $('ws-dropdown').classList.add('hidden');
     $('model-chip').setAttribute('aria-expanded', 'false');
     $('ws-chip').setAttribute('aria-expanded', 'false');
+    var dd = $('session-export-menu');
+    if (dd) dd.classList.add('hidden');
+    var ex = $('session-export');
+    if (ex) ex.setAttribute('aria-expanded', 'false');
   }
   function buildModels() {
     state.models = [];
@@ -4360,15 +4364,23 @@
 
   /* ---------- 导出 / 导入会话（单文件 HTML） ---------- */
   // 导出的 HTML 自带 CSS 与图片（data: URL），拷到任何机器上双击即可离线阅读；
-  // 同一个文件里还带着整段会话 JSON，所以可以导入回来（甚至导入到另一个工作区）。
+  // 同一个文件里还带着这段会话的 JSON，所以可以导入回来（甚至导入到另一个工作区）。
   function updateExportButton() {
+    var wrap = $('session-export-wrap');
     var b = $('session-export');
+    var has = !!state.session;
+    if (wrap) wrap.classList.toggle('hidden', !has);
     if (b) {
-      b.classList.toggle('hidden', !state.session);
-      b.disabled = !state.session || !state.workspace;
-      b.title = state.session
-        ? '导出「' + (state.session.title || state.session.id) + '」为单个 HTML 文件（离线可读，含图片）'
-        : '导出当前会话';
+      b.classList.toggle('hidden', !has);
+      b.disabled = !has || !state.workspace;
+      b.title = has
+        ? '下载「' + (state.session.title || state.session.id) + '」：当前会话 / 完整会话 / 主题 / 完整主题（HTML）'
+        : '下载当前会话';
+    }
+    // 没有会话的时候菜单里没有东西可下：收起来。
+    if (!has) {
+      var dd = $('session-export-menu');
+      if (dd) dd.classList.add('hidden');
     }
     var link = $('session-link');
     if (link) {
@@ -4408,19 +4420,75 @@
       fallback();
     }
   }
-  function exportSession() {
+  /// 右侧索引当前停在第几条（一问一答算一条）。索引只有一轮时会被藏起来，
+  /// 这时就是最新的一条 —— 「当前会话」指的就是它。
+  function currentTurnOrdinal() {
+    var turns = turnList();
+    if (!turns.length) return 0;
+    var rail = $('turn-index');
+    var active = 0;
+    if (rail && !rail.classList.contains('hidden')) {
+      active = parseInt(rail.getAttribute('data-active') || '0', 10) || 0;
+    }
+    if (active < 1 || active > turns.length) active = turns.length;
+    return active;
+  }
+
+  /// 下载菜单的四项。
+  ///
+  /// 「会话」是一问一答（右侧索引里的那一条），「主题」是整个会话（地址栏 ?s=
+  /// 指向的那个）。简版只留用户输入与最终回答；完整版再加上思考过程与工具
+  /// 调用（只记参数与成功与否，不带输出 —— 输出动辄几百 KB，导出是用来读的）。
+  var EXPORT_ITEMS = [
+    { scope: 'turn', detail: 'brief', title: '下载当前会话',
+      hint: '用户输入 + 最终回答' },
+    { scope: 'turn', detail: 'full', title: '下载当前完整会话',
+      hint: '用户输入 + 思考过程 + 工具调用 + 最终回答' },
+    { scope: 'topic', detail: 'brief', title: '下载主题',
+      hint: '所有会话：用户输入 + 最终回答' },
+    { scope: 'topic', detail: 'full', title: '下载完整主题',
+      hint: '所有会话：用户输入 + 思考过程 + 工具调用 + 最终回答' }
+  ];
+
+  function renderExportMenu() {
+    var dd = $('session-export-menu');
+    if (!dd) return;
+    clear(dd);
+    var n = currentTurnOrdinal();
+    var total = turnList().length;
+    EXPORT_ITEMS.forEach(function (it) {
+      var b = btn('dd-item stack', '', function () {
+        closeDropdowns();
+        downloadExport(it);
+      });
+      b.appendChild(el('span', 'dd-title', it.title));
+      var hint = it.hint;
+      if (it.scope === 'turn') {
+        hint = n ? ('第 ' + n + ' 条（共 ' + total + ' 条）· ' + hint)
+                 : '本主题还没有问答';
+        if (!n) b.disabled = true;
+      }
+      b.appendChild(el('span', 'dd-hint', hint));
+      dd.appendChild(b);
+    });
+  }
+
+  /// 下载一个 HTML 文件。服务端按 scope/detail/turn 渲染：当前会话或整个主题，
+  /// 简版（提问 + 最终回答）或完整版（再加思考过程与工具调用）。
+  function downloadExport(item) {
     if (!state.session || !state.workspace) { toast('请先打开一个会话'); return; }
     var b = $('session-export');
-    b.disabled = true;
-    fetch(apiUrl('api/sessions/' + encodeURIComponent(state.session.id) + '/export'))
+    if (b) b.disabled = true;
+    var q = '?scope=' + item.scope + '&detail=' + item.detail;
+    if (item.scope === 'turn') q += '&turn=' + currentTurnOrdinal();
+    fetch(apiUrl('api/sessions/' + encodeURIComponent(state.session.id) + '/export' + q))
       .then(function (r) { return r.ok ? r : httpError(r); })
       .then(function (r) { return saveBlobResponse(r, 'tea_agent-session.html'); })
       .then(function (d) {
-        toast('已导出 ' + d.head.name + '（' + fmtBytes(d.blob.size) + '，' +
-          (d.head.entries || '含') + ' 条消息）');
+        toast('已下载 ' + d.head.name + '（' + fmtBytes(d.blob.size) + '）');
       }, function (e) {
-        toast('导出失败：' + (e && e.message ? e.message : String(e)));
-      }).then(function () { b.disabled = false; });
+        toast('下载失败：' + (e && e.message ? e.message : String(e)));
+      }).then(function () { if (b) b.disabled = false; });
   }
   function importSessionFile(file) {
     if (!file || !state.workspace) return;
@@ -6858,7 +6926,17 @@
       state.todoCollapsed = !state.todoCollapsed;
       renderTodos();
     };
-    $('session-export').onclick = exportSession;
+    $('session-export').onclick = function (e) {
+      e.stopPropagation();
+      var dd = $('session-export-menu');
+      var open = dd.classList.contains('hidden');
+      closeDropdowns();
+      if (open) {
+        renderExportMenu();
+        dd.classList.remove('hidden');
+        $('session-export').setAttribute('aria-expanded', 'true');
+      }
+    };
     $('session-link').onclick = copyTopicLink;
     $('session-import').onclick = function () {
       if (!state.workspace) { toast('请先选择工作区'); return; }
