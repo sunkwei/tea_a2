@@ -155,6 +155,7 @@ for event in queue.events():
 | --- | --- | --- |
 | `toolkit_screenshot.py` | `toolkit_screenshot` | 抓屏存成 PNG（工作区里），配合 `toolkit_load_image` 给模型看 |
 | `toolkit_mouse.py` | `toolkit_mouse` | 鼠标：移动/单击/双击/右键/拖拽/滚轮 |
+| `toolkit_keyboard.py` | `toolkit_keyboard` | 键盘：打字（中文也行）/单键/组合键 |
 
 只用标准库（Win32 走 ctypes，PNG 容器自己写），不用 pip 装东西。装法见那个目录里的
 README。
@@ -167,6 +168,9 @@ README。
 - **`mcp.yaml` 里的 Windows 路径要用单引号**：YAML 的双引号标量会处理反斜杠转义，
   `command: "C:\Users\..."` 里的 `\U` 不是合法转义 → yaml-cpp 拒绝整个文件 → MCP
   配置被**静默丢掉**（表现是「文件不存在、服务器一个都没起来」，日志里一行都没有）。
+- **打字之前先确认焦点**：`SendInput` 的按键进的是当前焦点窗口。先把目标窗口请到前台
+  （`AttachThreadInput` + `SetForegroundWindow`），**再读一次 `GetForegroundWindow()` 核对**，
+  然后才按键盘——否则那条消息会打进你当时正在看的浏览器或终端里。
 
 ---
 
