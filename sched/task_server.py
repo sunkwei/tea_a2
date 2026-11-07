@@ -118,7 +118,7 @@ AGGREGATE_SYSTEM = (
 
 # Which queue this is. The client asks before it speaks (see the
 # client's _tasks_prefix): the version segment arrived in 0.21.0.
-QUEUE_VERSION = "1.0.0"
+QUEUE_VERSION = "1.0.1"
 
 QUEUED = "queued"
 RUNNING = "running"

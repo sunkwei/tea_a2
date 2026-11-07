@@ -2538,6 +2538,19 @@
     }).then(finalizeStream, function (err) {
       finalizeStream();
       if (err && err.name === 'AbortError') return;
+      // 服务在重启：等它回来再接回去（最多等两分钟）
+      if (isConnectionError(err)) {
+        waitForServer(80, function (back) {
+          if (!back) {
+            state.streamError = '服务还没有回来。页面会自己再试，你也可以刷新一下。';
+            renderChat();
+            return;
+          }
+          loadHealth(true).catch(function () {});    // 状态灯立刻跟上
+          if (state.session && state.session.id === sid && !state.streaming) attachTurn(sid);
+        });
+        return;
+      }
       // 连接断了不等于那一轮结束了：过一会儿再问一次服务端，还在跑就再接回去。
       if (state.attachRetries < 3) {
         state.attachRetries++;
@@ -2728,6 +2741,13 @@
     }, function (err) {
       if (forkFailed) return;         // 分叉失败时输入已还回，别再报一次流错误
       if (!err || err.name !== 'AbortError') {
+        if (isConnectionError(err) && state.session && state.session.id) {
+          // 服务重启了：自己接回去，别把半个会话留在屏幕上
+          var sid = state.session.id;
+          finalizeStream();
+          recoverAfterRestart(sid, text);
+          return;
+        }
         state.streamError = '请求失败：' + (err && err.message ? err.message : String(err));
         loadHealth(true).catch(function () {});   // 请求都发不出去：立刻如实反映
       }
@@ -2947,6 +2967,76 @@
     applyStatus('down', '未连接');
   }
   function markChecking() { applyStatus('wait', '连接中…'); }
+
+  /* ---------- 服务重启了，网页自己接回去 ---------- */
+  //
+  // 连接断了有两种：服务重启了，或者网络抖了一下。两种都不该让人手动刷新页面：
+  // 这里等服务回来，重新读一遍会话；那一轮还在跑就接回去接着看，没了就把落盘
+  // 的对话摆出来，让人接着问。刚才那条消息如果没送达，放回输入框——不替用户重发。
+  var reconnectSid = '';
+  var healthWasDown = false;
+
+  function isConnectionError(err) {
+    if (!err) return false;
+    if (err.name === 'TypeError') return true;           // fetch 连不上
+    return /failed to fetch|network|load failed|connection/i.test(String(err.message || err));
+  }
+
+  /// 等服务回来：轮询 /api/health，最多 tries 次（每次 1.5 秒）。
+  function waitForServer(tries, done) {
+    if (tries <= 0) { done(false); return; }
+    api('api/health').then(function () { done(true); }, function () {
+      setTimeout(function () { waitForServer(tries - 1, done); }, 1500);
+    });
+  }
+
+  function messageWasSaved(text) {
+    var wanted = String(text || '').trim();
+    if (!wanted) return true;
+    return (state.messages || []).some(function (m) {
+      return m && m.role === 'user' && String(m.content || '').trim() === wanted;
+    });
+  }
+
+  function recoverAfterRestart(sid, pendingText) {
+    if (!sid) return;
+    if (reconnectSid === sid) return;                     // 已经在接了
+    reconnectSid = sid;
+    state.streamError = null;
+    state.ended = false;
+    state.live = { role: 'assistant', reasoning: '',
+      blocks: [{ type: 'notice', text: '服务重启了，正在重新连接…' }], outputs: {} };
+    state.liveNode = null; state.liveView = null;
+    renderChat();
+    waitForServer(80, function (back) {
+      reconnectSid = '';
+      if (!back) {
+        state.live = null; state.liveNode = null; state.liveView = null;
+        state.streamError = '服务还没有回来。页面会自己再试，你也可以刷新一下。';
+        renderChat();
+        return;
+      }
+      // 服务回来了：把这段对话重新读一遍（落盘的消息一条不少）
+      loadHealth(true).catch(function () {});        // 状态灯立刻跟上，别等下一个轮询
+      openSession(sid).then(function () {
+        state.streamError = null;
+        renderChat();
+        if (pendingText && !messageWasSaved(pendingText)) {
+          var ta = $('input');
+          ta.value = ta.value ? ta.value + '\n\n' + pendingText : pendingText;
+          autoGrow();
+          toast('刚才那条消息没有送达，已放回输入框');
+        }
+        // 那一轮可能还在跑（另一台机器发起的，或队列接着做的）：接回去继续看
+        return maybeAttach(sid);
+      }).then(function () {
+        toast('服务重启了，已重新连接');
+      }, function () {
+        state.streamError = '服务回来了，但这段对话没读回来。刷新一下就好。';
+        renderChat();
+      });
+    });
+  }
 
   /// A non-health request succeeded. If the pill says "未连接", re-verify now
   /// (debounced) instead of waiting up to a full poll interval.
@@ -3863,9 +3953,15 @@
       healthFailures = 0;
       state.health = h;
       markOnline();
+      // 服务刚回来（刚才还是断的）：那一轮可能还在跑，接回去接着看
+      if (healthWasDown) {
+        healthWasDown = false;
+        if (state.session && !state.streaming) maybeAttach(state.session.id);
+      }
       return h;
     }, function (e) {
       healthFailures++;
+      healthWasDown = true;
       if (force || healthFailures >= 2) markOffline(e);
       throw e;
     });

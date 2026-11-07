@@ -125,6 +125,7 @@ if (-not $SkipUi) {
                  'ui_workspace_delete.mjs',
                  'ui_agent_doc.mjs', 'ui_tool_images.mjs', 'ui_artifacts.mjs',
                  'ui_crumbs.mjs', 'ui_destroy.mjs', 'ui_files_download.mjs',
+                 'ui_restart_reconnect.mjs',
                  'ui_session_export.mjs')
         foreach ($u in $ui) {
             if ($Only -and $u -notlike "*$Only*") { continue }

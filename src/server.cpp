@@ -171,6 +171,73 @@ bool port_is_free(const std::string& host, int port, std::string* why) {
   return false;
 }
 
+#ifdef _WIN32
+/// Is somebody listening on this port right now?
+///
+/// The exclusive bind cannot answer that: on Windows it also fails when the
+/// port only holds the sockets of a crashed instance in TIME_WAIT, and those
+/// do not accept connections. A crashed agent therefore looked like a running
+/// one - and the restart after a crash was refused. So the two questions are
+/// asked separately: the exclusive bind says "the port may not be taken", and
+/// a connect says "somebody is there".
+bool port_has_listener(int port) {
+  struct addrinfo hints;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo* found = nullptr;
+  const std::string service = std::to_string(port);
+  if (::getaddrinfo("127.0.0.1", service.c_str(), &hints, &found) != 0 || !found) {
+    return false;
+  }
+  bool listening = false;
+  for (struct addrinfo* ai = found; ai; ai = ai->ai_next) {
+    tea_socket_t fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd == kBadSocket) continue;
+    u_long nonblock = 1;
+    ::ioctlsocket(fd, FIONBIO, &nonblock);
+    const int rc = ::connect(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen));
+    if (rc == 0) {
+      listening = true;
+    } else {
+      const int err = ::WSAGetLastError();
+      if (err == WSAEWOULDBLOCK) {
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(fd, &writable);
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 300000;      // a local answer is instant; a filtered one is not
+        const int sel = ::select(0, NULL, &writable, NULL, &tv);
+        if (sel > 0) {
+          int so_error = 0;
+          int len = sizeof(so_error);
+          if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len) == 0
+              && so_error == 0) {
+            listening = true;
+          }
+        } else if (sel == 0) {
+          listening = true;       // no answer: assume the worst
+        }
+      } else if (err != WSAECONNREFUSED) {
+        listening = true;         // unknown: assume the worst
+      }
+    }
+    close_tea_socket(fd);
+    if (listening) break;
+  }
+  ::freeaddrinfo(found);
+  return listening;
+}
+#else
+/// On POSIX the probe binds with SO_REUSEADDR, exactly like httplib does, so
+/// it already fails only when another socket is listening on the port.
+inline bool port_has_listener(int port) {
+  (void)port;
+  return false;
+}
+#endif
+
 /// Record who is serving this port, so the next instance can say it.
 void write_port_file(const std::string& path, const std::string& host, int port) {
   if (path.empty()) return;
@@ -6438,7 +6505,7 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
       impl_->config ? port_file_path(impl_->config->tea_home) : std::string();
   {
     std::string why;
-    if (!port_is_free(host, options_.port, &why)) {
+    if (!port_is_free(host, options_.port, &why) && port_has_listener(options_.port)) {
       std::string message =
           "port " + std::to_string(options_.port) + " is already in use";
       const nlohmann::json holder = read_port_file(port_record);
