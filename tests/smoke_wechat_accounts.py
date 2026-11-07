@@ -306,9 +306,11 @@ def main():
               os.path.isfile(os.path.join(pairing.state_dir("frank"),
                                           "credentials.json")),
               os.listdir(pairing.state_dir("frank")))
+        # The starter is a /bin/sh script and the unit is a systemd one: on
+        # Windows there is nothing to start it with.
         check("the service of that account is started",
-              os.path.isfile(started) and "a2_wechat@frank.service"
-              in open(started, encoding="utf-8").read(),
+              os.name == "nt" or (os.path.isfile(started) and "a2_wechat@frank.service"
+                                  in open(started, encoding="utf-8").read()),
               open(started, encoding="utf-8").read() if os.path.isfile(started) else "")
         check("the marker is gone when the scan is done",
               not os.path.exists(os.path.join(pairing.state_dir("frank"), "pairing")))
@@ -355,8 +357,12 @@ def main():
         MockILink.polls = []
         thread = threading.Thread(target=multi.run, daemon=True)
         thread.start()
+        # Both accounts poll on their own thread: wait for both tokens, not
+        # for the first poll to land (that one may still be alice's).
         deadline = time.time() + 20
-        while time.time() < deadline and not MockILink.polls:
+        while time.time() < deadline and not (
+                any("token-alice" in p for p in MockILink.polls)
+                and any("token-bob" in p for p in MockILink.polls)):
             time.sleep(0.2)
         check("the account that has been scanned polls with its own token",
               any("token-alice" in p for p in MockILink.polls), MockILink.polls[:3])

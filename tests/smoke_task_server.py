@@ -477,11 +477,15 @@ providers:
               status == 400, (status, body))
 
         # ---- a task that may touch another directory ------------------------
+        extra_dirs = [os.path.join(tmp, "allow_one"), os.path.join(tmp, "allow_two")]
+        for one_dir in extra_dirs:
+            os.makedirs(one_dir, exist_ok=True)
         status, allowed = call(task_port, "POST", "/api/tasks",
                                {"prompt": "may look elsewhere",
-                                "allow_paths": ["/tmp/one", "/tmp/two"]})
+                                "allow_paths": extra_dirs})
+        got = [os.path.realpath(p) for p in (allowed.get("allow_paths") or [])]
         check("a task can ask for extra directories",
-              status == 200 and allowed.get("allow_paths") == ["/tmp/one", "/tmp/two"],
+              status == 200 and got == [os.path.realpath(p) for p in extra_dirs],
               (status, allowed.get("allow_paths")))
         status, body = call(task_port, "POST", "/api/tasks",
                             {"prompt": "x", "allow_paths": "not/a/list"})
@@ -899,10 +903,10 @@ providers:
                     "  把这个跑一遍。\n"
                     "workspace: %s\n"
                     "allow_paths:\n"
-                    "  - /tmp\n"
+                    "  - %s\n"
                     "not_before: +5\n"
                     "tags:\n"
-                    "  - 文档\n" % ws_dir)
+                    "  - 文档\n" % (ws_dir, tmp))
         result = subprocess.run(
             [sys.executable, SERVER, "--submit-order", order, "--data-dir", data_dir,
              "--agent", "http://127.0.0.1:%d" % agent_port, "--no-serve"],
@@ -922,7 +926,9 @@ providers:
                   one.get("not_before_text") == "+5" and one.get("not_before"),
                   (one.get("not_before"), one.get("not_before_text")))
             check("the order's extra directory came through",
-                  "/tmp" in (one.get("allow_paths") or []), one.get("allow_paths"))
+                  os.path.realpath(tmp) in [os.path.realpath(p)
+                                            for p in (one.get("allow_paths") or [])],
+                  one.get("allow_paths"))
             check("the order's tags came through",
                   "文档" in ((one.get("meta") or {}).get("tags") or []), one.get("meta"))
 

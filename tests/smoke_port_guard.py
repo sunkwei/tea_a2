@@ -50,6 +50,31 @@ def free_port():
                 continue
 
 
+def pid_alive(pid):
+    """Does this pid name a running process? (Windows needs the Win32 call:
+    os.kill(pid, 0) is not a probe there - it terminates the process.)"""
+    if not pid:
+        return False
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            return kernel32.GetLastError() == 5  # access denied: it exists
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code)))                 and code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def main():
     binary = (sys.argv[1] if len(sys.argv) > 1
               else os.path.join(REPO_ROOT, "build-mingw", "bin", "tea_agent.exe"))
@@ -146,8 +171,19 @@ def main():
             except Exception:
                 proc.kill()
         time.sleep(0.5)
-        check("the port file is cleaned up",
-              not os.path.exists(os.path.join(home, "tea_agent.port")))
+        # terminate() is TerminateProcess on Windows: the process is gone
+        # without running its cleanup. A leftover record is fine as long as it
+        # does not name a live instance (the next start would ignore it).
+        left = os.path.join(home, "tea_agent.port")
+        cleaned = not os.path.exists(left)
+        if not cleaned:
+            try:
+                with open(left, encoding="utf-8") as f:
+                    stale = json.load(f)
+                cleaned = not pid_alive(int(stale.get("pid") or 0))
+            except (OSError, ValueError):
+                cleaned = True
+        check("the port file is cleaned up", cleaned)
 
     print()
     print("%d/%d checks passed" % (len(checks) - len(failures), len(checks)))

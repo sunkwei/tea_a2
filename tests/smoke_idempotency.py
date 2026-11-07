@@ -291,6 +291,9 @@ providers:
         check("the retry with the body key gets the same turn",
               in_body2.get("turn_id") == in_body.get("turn_id"),
               (in_body.get("turn_id"), in_body2.get("turn_id")))
+        wait_calls(4)
+        check("the body key asked the model once", len(Provider.calls) == 4,
+              Provider.calls)
 
         # ---- 6) the stream path: the retry follows the same turn ----------
         Provider.calls = []

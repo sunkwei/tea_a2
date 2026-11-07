@@ -118,7 +118,7 @@ AGGREGATE_SYSTEM = (
 
 # Which queue this is. The client asks before it speaks (see the
 # client's _tasks_prefix): the version segment arrived in 0.21.0.
-QUEUE_VERSION = "0.22.0"
+QUEUE_VERSION = "1.0.0"
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -3272,7 +3272,9 @@ class Handler(BaseHTTPRequestHandler):
         else:
             path = self.app.doc_path()
         try:
-            with open(path, encoding="utf-8") as f:
+            # newline="" keeps CRLF as it is on disk: the documentation is served
+            # byte for byte (and the queue runs on Windows as well as on Linux).
+            with open(path, encoding="utf-8", newline="") as f:
                 markdown = f.read()
         except OSError:
             return self._error(404, "not_found",
@@ -4689,16 +4691,34 @@ class App:
             pass
         return ""
 
+    def workspace_paths(self):
+        """workspace id -> path, read from the agent at most once every few
+        seconds.
+
+        The task list decorates every task with its workspace path, and a page
+        of a few hundred tasks means a few hundred questions to the agent. When
+        the agent is down (or merely slow) each one is a connect timeout, so the
+        list took minutes instead of milliseconds. One cached answer serves the
+        whole page; a workspace registered meanwhile shows up five seconds
+        later.
+        """
+        cached = getattr(self, "_ws_paths", None)
+        now = time.time()
+        if cached and now - cached[0] < 5.0:
+            return cached[1]
+        paths = {}
+        try:
+            for ws in self.agent.workspaces():
+                paths[ws.get("id") or ""] = ws.get("path", "")
+        except AgentError:
+            pass
+        self._ws_paths = (now, paths)
+        return paths
+
     def workspace_path(self, workspace_id):
         if not workspace_id:
             return ""
-        try:
-            for ws in self.agent.workspaces():
-                if ws.get("id") == workspace_id:
-                    return ws.get("path", "")
-        except AgentError:
-            pass
-        return ""
+        return self.workspace_paths().get(workspace_id, "")
 
     def task_workspace_id(self):
         """The queue's OWN workspace: a directory of its own, registered with

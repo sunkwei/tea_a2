@@ -95,7 +95,7 @@ class Agent:
              "--no-console", "--log-file", os.path.join(tea_home, "logs", "tea_agent.log")]
             + list(extra_args or []),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=dict(os.environ, HOME=home))
+            env=dict(os.environ, HOME=home, USERPROFILE=home))
 
     def wait(self):
         return wait_health(self.port)

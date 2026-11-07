@@ -16,8 +16,14 @@
 #include <sstream>
 #include <thread>
 
-#ifndef _WIN32
+#include <cerrno>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <netdb.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include "httplib.h"
@@ -43,6 +49,154 @@
 #include "web_assets.h"
 
 namespace tea {
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// The port guard
+// ---------------------------------------------------------------------------
+//
+// httplib sets SO_REUSEADDR on its listener, and on Windows that option lets a
+// *second* process bind a port that is already being listened on: both listen,
+// the kernel hands each new connection to one of them, and what the user sees
+// is "the web UI does not save" instead of "the port is taken".
+//
+// So the port is probed before httplib is allowed to take it: a socket with
+// SO_EXCLUSIVEADDRUSE binds it, and if that fails somebody else owns it. The
+// instance that does get the port writes <tea_home>/tea_agent.port, so the
+// second one can name the holder instead of guessing.
+
+#ifdef _WIN32
+typedef SOCKET tea_socket_t;
+const tea_socket_t kBadSocket = INVALID_SOCKET;
+void close_tea_socket(tea_socket_t s) { ::closesocket(s); }
+std::string socket_error_text() {
+  return "winsock error " + std::to_string(static_cast<long>(::WSAGetLastError()));
+}
+#else
+typedef int tea_socket_t;
+const tea_socket_t kBadSocket = -1;
+void close_tea_socket(tea_socket_t s) { ::close(s); }
+std::string socket_error_text() { return std::strerror(errno); }
+#endif
+
+long current_pid() {
+#ifdef _WIN32
+  return static_cast<long>(::_getpid());
+#else
+  return static_cast<long>(::getpid());
+#endif
+}
+
+bool pid_is_alive(long pid) {
+  if (pid <= 0) return false;
+#ifdef _WIN32
+  HANDLE handle =
+      ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+  if (!handle) return ::GetLastError() == ERROR_ACCESS_DENIED;
+  DWORD code = 0;
+  const bool alive = ::GetExitCodeProcess(handle, &code) && code == STILL_ACTIVE;
+  ::CloseHandle(handle);
+  return alive;
+#else
+  if (::kill(static_cast<pid_t>(pid), 0) == 0) return true;
+  return errno == EPERM;
+#endif
+}
+
+std::string port_file_path(const std::string& tea_home) {
+  if (tea_home.empty()) return std::string();
+  return path_join(tea_home, "tea_agent.port");
+}
+
+/// What the instance that holds the port wrote down. An empty object when the
+/// file is missing or unreadable.
+nlohmann::json read_port_file(const std::string& path) {
+  nlohmann::json empty = nlohmann::json::object();
+  if (path.empty()) return empty;
+  std::string text;
+  if (!read_file(path, &text, 64 * 1024)) return empty;
+  nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+  if (j.is_discarded() || !j.is_object()) return empty;
+  return j;
+}
+
+long pid_of(const nlohmann::json& j) {
+  if (!j.contains("pid") || !j["pid"].is_number()) return 0;
+  return static_cast<long>(j["pid"].get<long long>());
+}
+
+/// True when (host, port) can be bound. The socket is closed right away: this
+/// is a probe, not the listener - httplib binds it for real a moment later.
+bool port_is_free(const std::string& host, int port, std::string* why) {
+  struct addrinfo hints;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE;
+  struct addrinfo* found = nullptr;
+  const std::string service = std::to_string(port);
+  const char* node = host.empty() ? nullptr : host.c_str();
+  if (::getaddrinfo(node, service.c_str(), &hints, &found) != 0 || !found) {
+    if (why) *why = "cannot resolve " + host;
+    return true;  // let httplib report the real problem
+  }
+  bool any_tried = false;
+  bool any_ok = false;
+  std::string os_error;
+  for (struct addrinfo* ai = found; ai; ai = ai->ai_next) {
+    tea_socket_t fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd == kBadSocket) continue;
+    any_tried = true;
+#ifdef _WIN32
+    const BOOL exclusive = TRUE;
+    ::setsockopt(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                 reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
+#else
+    const int reuse = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+#endif
+    if (::bind(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) {
+      any_ok = true;
+    } else {
+      os_error = socket_error_text();
+    }
+    close_tea_socket(fd);
+    if (any_ok) break;
+  }
+  ::freeaddrinfo(found);
+  if (any_ok || !any_tried) return true;
+  if (why) *why = os_error;
+  return false;
+}
+
+/// Record who is serving this port, so the next instance can say it.
+void write_port_file(const std::string& path, const std::string& host, int port) {
+  if (path.empty()) return;
+  nlohmann::json j = nlohmann::json::object();
+  j["pid"] = current_pid();
+  j["port"] = port;
+  j["host"] = host;
+  j["version"] = std::string(version_string());
+  j["since"] = now_iso8601();
+  std::string err;
+  if (!write_file_atomic(path, j.dump(2) + "\n", &err)) {
+    LOG_WARN("port: cannot write ", path, ": ", err);
+  }
+}
+
+/// Remove the record when this process wrote it. Two instances with one tea
+/// home must not delete each other's file.
+void remove_port_file(const std::string& path) {
+  if (path.empty()) return;
+  const nlohmann::json j = read_port_file(path);
+  if (pid_of(j) != current_pid()) return;
+  std::string err;
+  remove_path(path, false, &err);
+}
+
+}  // namespace
 
 std::vector<std::string> reachable_urls(const std::string& bind_host, int port) {
   std::vector<std::string> urls;
@@ -6278,6 +6432,34 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
   }
 
   const std::string host = options.host.empty() ? "127.0.0.1" : options.host;
+  // The port is taken exclusively; see The port guard above. Without this two
+  // instances listen on one port and split the connections between them.
+  const std::string port_record =
+      impl_->config ? port_file_path(impl_->config->tea_home) : std::string();
+  {
+    std::string why;
+    if (!port_is_free(host, options_.port, &why)) {
+      std::string message =
+          "port " + std::to_string(options_.port) + " is already in use";
+      const nlohmann::json holder = read_port_file(port_record);
+      const long holder_pid = pid_of(holder);
+      if (holder_pid > 0 && pid_is_alive(holder_pid)) {
+        message += " by tea_agent (pid " + std::to_string(holder_pid);
+        const std::string since = holder.value("since", std::string());
+        if (!since.empty()) message += ", since " + since;
+        message += ")";
+      } else {
+        message += " by another program";
+      }
+      message += " - stop it, or start this one on another port (--port " +
+                 std::to_string(options_.port < 65535 ? options_.port + 1
+                                                      : options_.port - 1) + ")";
+      if (!why.empty()) message += " (" + why + ")";
+      if (err) *err = message;
+      return false;
+    }
+  }
+
   impl_->listen_thread = std::thread([this, host]() {
     // An exception escaping this thread used to call std::terminate straight
     // away ("terminate called without an active exception"), leaving nothing
@@ -6309,11 +6491,13 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
     return false;
   }
   LOG_INFO("server: listening on http://", host, ":", options_.port);
+  write_port_file(port_record, host, options_.port);
   return true;
 }
 
 void ApiServer::stop() {
   if (!impl_) return;
+  remove_port_file(port_file_path(impl_->config ? impl_->config->tea_home : std::string()));
   // The shells are children of this process: they have to go with it.
   impl_->shells.close_all();
   {

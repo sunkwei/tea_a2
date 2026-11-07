@@ -246,7 +246,10 @@ def main():
         # returns nothing new.
         status, body, cursor2, data2 = read(cursor, 0)
         check("the cursor does not go back", cursor2 >= cursor, (cursor, cursor2))
-        check("there is nothing new to read", data2 == b"", data2[:120])
+        # A real terminal may repaint its prompt between the two reads; what
+        # must not happen is the old output being handed out a second time.
+        check("reading again does not repeat the output",
+              b"tea-shell-marker" not in data2, data2[:120])
 
         # Another session must not see this one's output.
         status, other = client.post("/api/shell/session", {"cols": 80, "rows": 24})

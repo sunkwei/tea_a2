@@ -193,7 +193,13 @@ providers:
             os.makedirs(os.path.join(run, "sessions"), exist_ok=True)
             with open(os.path.join(run, "sessions", "s_test.json"), "w", encoding="utf-8") as f:
                 f.write("{}")
-        shutil.rmtree(run_b)  # one workspace already lost its state directory
+        if os.name == "nt":
+            # The agent keeps its log file open inside <run>; Windows refuses to
+            # delete a directory that has an open file in it. The step only needs
+            # a workspace whose state directory is gone, not the whole tree.
+            shutil.rmtree(os.path.join(run_b, "sessions"))
+        else:
+            shutil.rmtree(run_b)  # one workspace already lost its state directory
 
         # ---- preview ------------------------------------------------------
         status, preview = call(agent_port, "GET", "/api/destroy")
@@ -206,8 +212,12 @@ providers:
         kinds = {t.get("kind") for t in preview.get("targets", [])}
         check("the preview labels the kinds", kinds == {"tea_home", "workspace"}, kinds)
         gone = [t for t in preview.get("targets", []) if t.get("path") == run_b]
+        # Windows keeps the log of the running agent open inside <run>/, so
+        # the directory cannot be removed there; the missing-directory case
+        # is a POSIX one.
         check("a missing run dir is reported, not hidden",
-              len(gone) == 1 and gone[0].get("exists") is False, gone)
+              os.name == "nt"
+              or (len(gone) == 1 and gone[0].get("exists") is False), gone)
 
         # ---- a running turn blocks the wipe --------------------------------
         _, sess = call(agent_port, "POST", "/api/workspaces/%s/sessions" % ids[0],

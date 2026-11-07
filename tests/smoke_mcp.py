@@ -200,8 +200,8 @@ providers:
         write_config("""mcp:
   servers:
     inline:
-      command: "%s"
-      args: ["%s"]
+      command: '%s'
+      args: ['%s']
 """ % (sys.executable, MOCK_MCP))
         status, body = reload_config()
         check("a provider.yaml with an mcp: section still loads", status == 200, (status, body))
@@ -218,8 +218,8 @@ providers:
         # interpreter, the script is the first argument.
         write_mcp("""servers:
   mock:
-    command: "%s"
-    args: ["%s"]
+    command: '%s'
+    args: ['%s']
 """ % (sys.executable, MOCK_MCP))
         status, body = reload_config()
         check("a config with an mcp.yaml loads", status == 200, (status, body))
@@ -282,8 +282,8 @@ providers:
         # ---- a server that cannot be started ------------------------------
         write_mcp("""servers:
   mock:
-    command: "%s"
-    args: ["%s"]
+    command: '%s'
+    args: ['%s']
   broken:
     command: /nonexistent/mcp-server-that-is-not-there
 """ % (sys.executable, MOCK_MCP))
@@ -315,8 +315,8 @@ providers:
         # ---- a server that answers nonsense -------------------------------
         write_mcp("""servers:
   mock:
-    command: "%s"
-    args: ["%s", "--garbage"]
+    command: '%s'
+    args: ['%s', "--garbage"]
 """ % (sys.executable, MOCK_MCP))
         status, body = reload_config()
         check("a config with a nonsense server still loads", status == 200, (status, body))
@@ -331,8 +331,8 @@ providers:
         # ---- refresh re-reads the file -------------------------------------
         write_mcp("""servers:
   mock:
-    command: "%s"
-    args: ["%s"]
+    command: '%s'
+    args: ['%s']
 """ % (sys.executable, MOCK_MCP))
         status, body = call(port, "POST", "/api/mcp/refresh")
         servers = body.get("servers") or []
@@ -342,11 +342,11 @@ providers:
 
         write_mcp("""servers:
   mock:
-    command: "%s"
-    args: ["%s"]
+    command: '%s'
+    args: ['%s']
   second:
-    command: "%s"
-    args: ["%s"]
+    command: '%s'
+    args: ['%s']
 """ % (sys.executable, MOCK_MCP, sys.executable, MOCK_MCP))
         status, body = call(port, "POST", "/api/mcp/refresh")
         names = [s.get("name") for s in (body.get("servers") or [])]

@@ -347,7 +347,8 @@ providers:
               any(r.get("path") == "/api/chat" for r in routes)
               and any(r.get("path") == "/api/turns/{turn_id}" for r in routes),
               routes)
-        check("it names the version", str(caps.get("version") or "").startswith("0."),
+        check("it names the version",
+              re.match(r"^\d+\.\d+\.\d+$", str(caps.get("version") or "")) is not None,
               caps.get("version"))
 
         # ---- 3) the request id --------------------------------------------

@@ -1060,6 +1060,27 @@ class Lock(object):
 
 
 def alive(pid):
+    """Is this pid a running process?
+
+    On Windows os.kill(pid, 0) is not a probe: it calls TerminateProcess, so
+    asking "are you alive?" would stop the other watcher. The Win32 call is the
+    only safe answer there.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            # 5 = access denied: the process is there, we just may not read it.
+            return kernel32.GetLastError() == 5
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) \
+                and code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

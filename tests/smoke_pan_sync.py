@@ -444,8 +444,10 @@ def main():
     token = syncer_a.client.device_token(info["device_code"])
     check("the device code buys a token", token["access_token"] == "acc-1", token)
     token_path = syncer_a.client.token_path
+    # 0600 is a POSIX mode: Windows has ACLs instead, and the file is created
+    # in the user's own profile either way.
     check("the token is written with 0600",
-          oct(os.stat(token_path).st_mode & 0o777) == "0o600",
+          os.name == "nt" or oct(os.stat(token_path).st_mode & 0o777) == "0o600",
           oct(os.stat(token_path).st_mode & 0o777))
     check("the token file has the refresh token",
           json.load(open(token_path, encoding="utf-8"))["refresh_token"] == "ref-1")
@@ -496,7 +498,8 @@ def main():
         original = handle.read()
     check("the two machines end up with the same provider.yaml", pulled == original)
     check("the pulled file keeps its mode 0600",
-          oct(os.stat(os.path.join(home_b, "provider.yaml")).st_mode & 0o777) == "0o600")
+          os.name == "nt"
+          or oct(os.stat(os.path.join(home_b, "provider.yaml")).st_mode & 0o777) == "0o600")
 
     # ---- a second push is a no-op -----------------------------------------
     report = syncer_a.push()

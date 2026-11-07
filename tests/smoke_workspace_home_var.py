@@ -114,7 +114,7 @@ def main():
         return os.path.realpath(p or "")
 
     port = free_port()
-    env = dict(os.environ, HOME=home)
+    env = dict(os.environ, HOME=home, USERPROFILE=home)
     proc = subprocess.Popen([
         binary, "--config", config, "--tea-home", tea_home,
         "--host", "127.0.0.1", "--port", str(port), "--no-console",
@@ -165,8 +165,9 @@ def main():
         # ---- a missing directory is still refused --------------------------
         status, err, _ = call(port, "POST", "/api/workspaces", {"path": "$HOME/nope"})
         check("a missing directory is refused", status == 400, (status, err))
+        message = ((err or {}).get("error") or {}).get("message") or ""
         check("the message names the expanded path",
-              real(os.path.join(home, "nope")) in json.dumps(err), err)
+              real(os.path.join(home, "nope")) in message, err)
 
         # ---- relative paths are still refused ------------------------------
         status, err, _ = call(port, "POST", "/api/workspaces", {"path": "relative/dir"})
@@ -195,7 +196,7 @@ def main():
         # Quoted, so the shell does NOT expand it: the agent has to.
         "--workspace", "$HOME/cli_proj",
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        env=dict(os.environ, HOME=cli_home))
+        env=dict(os.environ, HOME=cli_home, USERPROFILE=cli_home))
     try:
         if not wait_health(cli_port):
             print("the command line instance did not become healthy")

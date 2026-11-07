@@ -15,8 +15,13 @@ cmake-build-*/
 # version in the repo slows every clone and turns `git log` into noise.
 # The build output stays local; the release zip lives in release/ and on the
 # netdisk (/tea_a2/releases/<version>/).
-release/*.zip
-release/tmp/
+# The whole directory: zips, exes, the buildinfo copy and the checksums are
+# release artifacts that live on the netdisk, not in git.
+release/
+
+# A Windows repair script for this machine (integrity labels), not part of
+# the product and not something a release package should carry.
+scripts/restore-normal-integrity.cmd
 
 # Editor / OS noise
 .vscode/

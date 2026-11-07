@@ -123,6 +123,10 @@ providers:
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Network.enable');
+  // The pill only polls while the page is in the foreground (document.hidden
+  // stops the 10s timer), and a fresh headless page counts as hidden on
+  // some builds. Emulate a focused tab so the poll really runs.
+  await send('Emulation.setFocusEmulationEnabled', { enabled: true });
   await send('Page.navigate', { url: `http://127.0.0.1:${agentPort}/` });
 
   const connected = await waitFor(async () => {
