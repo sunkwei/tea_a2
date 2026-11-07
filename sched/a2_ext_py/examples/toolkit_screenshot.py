@@ -24,6 +24,18 @@ from ctypes import wintypes
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 
+# The screen metrics are in *logical* pixels unless the process says it is
+# DPI aware - and GDI draws in physical pixels. Without this the picture
+# covers only the top left corner of the screen (and the mouse lands in the
+# wrong place). Per monitor aware v2 is what a modern app does.
+try:
+    user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    try:
+        ctypes.WinDLL("shcore").SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
 SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
 SM_XVIRTUALSCREEN = 76

@@ -13,6 +13,17 @@ from ctypes import wintypes
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
+# The screen metrics are in *logical* pixels unless the process says it is
+# DPI aware, while SendInput and GetCursorPos work in physical pixels. Without
+# this the mouse lands in the wrong place on a scaled display.
+try:
+    user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    try:
+        ctypes.WinDLL("shcore").SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
 INPUT_MOUSE = 0
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
