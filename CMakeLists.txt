@@ -603,6 +603,23 @@ set_target_properties(tea_agent PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# --- the Windows tray companion (Windows only) --------------------------------
+# appstub puts an icon into the notification area and keeps the agent and the
+# task queue running. It is a Windows-only program: on Linux the same job is
+# done by systemd --user units. Build it with the tree (-DTEA_BUILD_APPSTUB=OFF
+# to leave it out) or on its own (cmake -S tools/appstub -B build-appstub).
+if(WIN32)
+  set(TEA_APPSTUB_DEFAULT ON)
+else()
+  set(TEA_APPSTUB_DEFAULT OFF)
+endif()
+option(TEA_BUILD_APPSTUB
+       "Build the Windows tray companion (appstub, Windows only)"
+       ${TEA_APPSTUB_DEFAULT})
+if(TEA_BUILD_APPSTUB)
+  add_subdirectory(tools/appstub)
+endif()
+
 # --- rebuild while the previous build is still running -----------------------
 # Windows will not let the linker overwrite a running .exe (LNK1104 /
 # "Permission denied"), which would turn every "edit, build, look at the UI"
