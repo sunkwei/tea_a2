@@ -230,6 +230,32 @@ scripts\install-autostart.bat -DryRun
   `systemctl --user enable --now tea_agent`，条件不合适（没有 systemd）时用 `@reboot` 的
   crontab 也能达到同样效果。
 
+## Windows 托盘宿主（appstub）
+
+想在 Windows 上有个图标管着这几样东西（agent、任务队列……），仓库里带了 **appstub**：
+一个通知栏图标 + 一个看护程序。
+
+| | |
+| --- | --- |
+| 源码 | `tools/appstub/`（**只支持 Windows**；Linux 上同样的活儿由 systemd --user 单元干） |
+| 编译 | 跟着仓库一起编（Windows 上默认会编它）：`scripts\build.bat` → `build-msvc\bin\appstub.exe`；不要它就 `-DTEA_BUILD_APPSTUB=OFF` |
+| 部署 | `tools\appstub\scripts\deploy.ps1`（复制到 `%LOCALAPPDATA%\appstub`，那才是真正在跑的那份） |
+| 开机自启 | `tools\appstub\scripts\install-autostart.ps1`（任务计划程序，登录触发，`InteractiveToken`） |
+| 详细 | [`tools/appstub/README.md`](../tools/appstub/README.md) |
+
+它能做的：
+
+- **菜单**：左键/右键出菜单（启动、停止、打开网页、退出）。
+- **看护**：子进程退出码非 0 就拉起来（`"restart": "on-failure"`）。
+- **盯构建产物**：`watch_file`（默认就是子程序自己的 exe）比正在跑的那份新，就重启它——
+  「改代码 → 编译 → 服务自己换新」不用手动重启。
+
+**注意**
+
+- 别和手动实例同时跑：两边用同一个 tea home（`~/.tea_agent`），会抢 `workspaces.json`。
+- 部署脚本是**优雅停止**旧实例的（发 `WM_CLOSE`，程序在窗口销毁时删掉自己的托盘图标）；
+  直接杀进程会在通知栏里留下一个**幽灵图标**，shell 要等鼠标滑上去才把它清掉。
+
 ---
 
 

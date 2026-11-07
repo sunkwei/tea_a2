@@ -1,0 +1,47 @@
+{
+  "log_dir": "%LOCALAPPDATA%\\appstub",
+  "apps": [
+    {
+      "id": "a2-agent",
+      "name": "tea_a2 agent",
+      "command": "C:\\Users\\Hetin\\work\\git\\tea_a2\\build-msvc\\bin\\tea_agent.exe",
+      "args": [
+        "--port", "8383",
+        "--log-file", "%USERPROFILE%\\.tea_agent\\logs\\tea_agent-stub.log"
+      ],
+      "cwd": "C:\\Users\\Hetin\\work\\git\\tea_a2",
+      "env": {
+        "TEA_AGENT_HOME": "%USERPROFILE%\\.tea_agent"
+      },
+      "port": 8383,
+      "url": "http://127.0.0.1:8383/",
+      "autostart": true,
+      "restart": "on-failure",
+      "restart_delay_ms": 3000
+    },
+    {
+      "id": "a2-task",
+      "name": "tea_a2 任务队列",
+      "command": "C:\\Users\\Hetin\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+      "args": [
+        "C:\\Users\\Hetin\\work\\git\\tea_a2\\sched\\task_server.py",
+        "--agent", "http://127.0.0.1:8383",
+        "--port", "8283"
+      ],
+      "cwd": "C:\\Users\\Hetin\\work\\git\\tea_a2\\sched",
+      "watch_file": "C:\\Users\\Hetin\\work\\git\\tea_a2\\sched\\task_server.py",
+      "env": {
+        "TEA_AGENT_HOME": "%USERPROFILE%\\.tea_agent",
+        "TEA_AGENT_URL": "http://127.0.0.1:8383",
+        "TEA_TASK_WORKSPACE": "%USERPROFILE%\\.tea_agent\\task-workspace",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONUTF8": "1"
+      },
+      "port": 8283,
+      "url": "http://127.0.0.1:8283/",
+      "autostart": true,
+      "restart": "on-failure",
+      "restart_delay_ms": 5000
+    }
+  ]
+}
