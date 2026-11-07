@@ -147,6 +147,27 @@ for event in queue.events():
 
 旧的 import 名还认（`from tea_api import Tea, Queue`），但那是过时的写法。
 
+## 现成的例子
+
+`sched/a2_ext_py/examples/` 里有两个可以直接用的模块（Windows 上的 GUI 测试常用）：
+
+| 文件 | 工具 | 干什么 |
+| --- | --- | --- |
+| `toolkit_screenshot.py` | `toolkit_screenshot` | 抓屏存成 PNG（工作区里），配合 `toolkit_load_image` 给模型看 |
+| `toolkit_mouse.py` | `toolkit_mouse` | 鼠标：移动/单击/双击/右键/拖拽/滚轮 |
+
+只用标准库（Win32 走 ctypes，PNG 容器自己写），不用 pip 装东西。装法见那个目录里的
+README。
+
+两个坑：
+
+- **模块可以自己 import**：加载器用同一个字典当 globals 和 locals，模块级的
+  `import os` 在函数和类体里都看得见（早先用两个字典，模块级 import 落在 locals，
+  函数和类体都看不见——「模块可以自己 import 需要的东西」其实是坏的）。
+- **`mcp.yaml` 里的 Windows 路径要用单引号**：YAML 的双引号标量会处理反斜杠转义，
+  `command: "C:\Users\..."` 里的 `\U` 不是合法转义 → yaml-cpp 拒绝整个文件 → MCP
+  配置被**静默丢掉**（表现是「文件不存在、服务器一个都没起来」，日志里一行都没有）。
+
 ---
 
 ← 回到 [README](../README.md) · MCP 见 [MCP](mcp.md) · 队列见 [任务队列](tasks.md) ·

@@ -243,11 +243,16 @@ providers:
         supports_tools: true
 """ % mock_port)
     # The MCP server the agent starts: the extension layer itself.
+    # The paths are quoted with single quotes: in YAML a double quoted
+    # scalar processes backslash escapes, and a Windows path ("C:\\Users\\...")
+    # is not a valid escape - yaml-cpp then refuses the whole file and the
+    # MCP configuration is dropped *silently* (the file is not found, the
+    # servers are never started).
     with open(os.path.join(home, "mcp.yaml"), "w", encoding="utf-8") as f:
         f.write("""servers:
   a2ext:
-    command: "%s"
-    args: ["%s", "--modules", "%s", "--agent-url", "http://127.0.0.1:%d"]
+    command: '%s'
+    args: ['%s', '--modules', '%s', '--agent-url', 'http://127.0.0.1:%d']
 """ % (sys.executable, EXT_SERVER, modules, port))
 
     proc = subprocess.Popen([
@@ -306,6 +311,33 @@ providers:
         check("the operator can turn model-driven saves off",
               "turned" in text and not os.path.exists(
                   os.path.join(modules, "locked", "toolkit_blocked.py")), text)
+
+        # ---- a module may import what it needs --------------------------
+        # The loader execs a module with separate globals and locals. With two
+        # dicts a module level import lands in the locals, where neither a
+        # function (its __globals__ is the globals dict) nor a class body can
+        # see it - so "a module may import what it needs" did not work.
+        with open(os.path.join(modules, "toolkit_imports.py"), "w", encoding="utf-8") as f:
+            f.write('import os\n\n\n'
+                    'class Where:\n'
+                    '    sep = os.sep\n\n\n'
+                    'def toolkit_imports():\n'
+                    '    """Where are we?"""\n'
+                    '    return os.getcwd() + Where.sep\n\n\n'
+                    'def meta_toolkit_imports():\n'
+                    '    return {"name": "toolkit_imports",\n'
+                    '            "description": "Where are we?",\n'
+                    '            "inputSchema": {"type": "object", "properties": {}}}\n')
+        server = Server(module_dir=modules)
+        answer = server.call("toolkit_reload", {})
+        text = str((answer.get("content") or [{}])[0].get("text") or "")
+        broken = text.split("these files did not load:")[-1] if "these files did not load:" in text else ""
+        check("a module that imports something loads",
+              "toolkit_imports" not in broken, text)
+        answer = server.call("toolkit_imports", {})
+        text = str((answer.get("content") or [{}])[0].get("text") or "")
+        check("the imported name works in a function and in a class body",
+              text.endswith(os.sep) and "Error" not in text, text)
 
         # ---- the tool is in the agent's tool list now -----------------------
         _, tools = call(port, "GET", "/api/tools")

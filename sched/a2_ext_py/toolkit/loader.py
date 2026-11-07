@@ -72,10 +72,17 @@ class Toolkit:
 
             # A restricted namespace: the module gets the builtins and
             # nothing else of ours. It may import what it needs itself.
+            #
+            # Globals and locals are the *same* dict on purpose. With two
+            # dicts, a module level import lands in the locals - and neither a
+            # function (its __globals__ is the globals dict) nor a class body
+            # can see it there. So "a module may import what it needs" did
+            # not work: every module died with "NameError: name 'os' is not
+            # defined".
             namespace = {"__builtins__": __builtins__}
-            local = {}
+            local = namespace
             try:
-                exec(compile(code, path, "exec"), namespace, local)  # noqa: S102
+                exec(compile(code, path, "exec"), namespace, namespace)  # noqa: S102
             except Exception as exc:  # noqa: BLE001 - a broken module is data, not a crash
                 invalid.append({"name": name, "reason": "%s: %s" % (type(exc).__name__, exc)})
                 continue
