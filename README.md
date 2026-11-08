@@ -105,7 +105,7 @@ build/bin/tea_agent --workspace . --open
 | **级联**（`toolkit_peer`） | 一台 tea_a2 直接控制另一台。见 [级联](docs/peer.md) |
 | **机群**（`sched/fleet_server.py`） | 一台服务器管 40 台设备：台账、每日采集、灰度升级、审计。见 [机群运维](docs/fleet.md) |
 | **看门狗 / Router**（`sched/watchdog.py`、`sched/router.py`） | 在外面盯着卡住的任务与跑偏的 worker；把分开的工作区会话串成一条线索。见 [Router 与 Watchdog](docs/router-watchdog.md) |
-| **扩展层**（`sched/a2_ext_py/`） | 一个 .py 文件就是一件新工具，不用改 C++、不用发版，模型自己也能写。见 [扩展层](docs/a2_ext_py.md) |
+| **扩展层**（`sched/a2_ext_py/`） | 一个 .py 文件就是一件新工具，不用改 C++、不用发版，模型自己也能写。现成三件套：**截图 / 鼠标 / 键盘**（Windows 与 Linux 都能用）。见 [扩展层](docs/a2_ext_py.md) |
 | **与其他应用对接**（`sched/mail_watch.py` 等） | 邮件/日历/告警自己走进来，**只在需要你参与时通知你**。见 [对接](docs/integrations.md) |
 | **配置同步**（`sched/pan_sync.py`） | 多台机器共用一份**加密**的配置。见 [网盘同步配置](docs/pan-sync.md) |
 | **语音输入**（`sched/asr_server.py`） | 本地 SenseVoiceSmall 转写（也可换成任何 OpenAI 兼容的转写服务）。见 [配置](docs/config.md#语音输入asr-段) |

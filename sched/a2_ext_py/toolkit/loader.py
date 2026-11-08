@@ -15,6 +15,7 @@ What it refuses to do quietly:
     order is part of the prompt cache).
 """
 
+import base64
 import os
 import os.path as osp
 
@@ -25,11 +26,28 @@ class ToolError(Exception):
     """A tool could not be loaded or could not be called."""
 
 
+def image_mime(data):
+    """The mime type of an image, by its magic bytes (not by its name).
+
+    The agent sniffs the picture the same way, so a wrong answer here would
+    be a picture the model cannot read.
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
 class Toolkit:
     """The loaded tools: name -> (function, schema)."""
 
     def __init__(self, module_dir=None):
-        self.module_dir = osp.abspath(os.path.expanduser(
+        self.module_dir = osp.abspath(osp.expanduser(
             module_dir or os.environ.get("TEA_EXT_DIR")
             or osp.join("~", ".tea_agent", "ext")))
         os.makedirs(self.module_dir, exist_ok=True)
@@ -120,11 +138,19 @@ class Toolkit:
         return [self.metas[name] for name in sorted(self.metas)]
 
     def call(self, name, arguments):
-        """Call one tool. Returns its result as text.
+        """Call one tool. Returns its result.
 
         The arguments are checked against the function's signature before the
         call, and the error names the legal parameters - a model that passed
         the wrong keyword must be able to correct itself in one try.
+
+        The result is a string - unless the tool answers with a dict, which
+        is how a tool hands a picture to the model:
+
+            {"text": "what happened", "image": "/path/to/picture.png"}
+
+        The server turns that into a text block and an image block, so the
+        model *sees* the picture instead of only being told where it is.
         """
         if name not in self.funcs:
             raise ToolError("there is no tool called %r" % name)
@@ -148,4 +174,23 @@ class Toolkit:
                                  % (unknown, ", ".join(names) or "(none)"))
                 raise ToolError(" | ".join(hints)) from None
         result = func(**args)
-        return result if isinstance(result, str) else repr(result)
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            return result
+        return repr(result)
+
+    # ---- pictures ---------------------------------------------------------
+    @staticmethod
+    def image_block(path):
+        """An MCP image block for a file (None when it cannot be read)."""
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            return None
+        if not data:
+            return None
+        return {"type": "image",
+                "data": base64.b64encode(data).decode("ascii"),
+                "mimeType": image_mime(data)}

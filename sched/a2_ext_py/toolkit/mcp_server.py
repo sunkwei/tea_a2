@@ -8,10 +8,15 @@ offers are:
   * the four meta tools - save a tool, reload, list the versions, roll back;
   * every tool the saved modules expose.
 
-The point of the MCP seam: **a2 needs no C++ change for a new tool**. The
+The point of the MCP seam: **a2 needs no C++ change for a new tool**.  The
 module is Python, it runs in *this* process, and the call happens inside
 a2's loop - so the turn's budget, the trajectory and the stop semantics are
-a2's, unchanged. A module that hangs hangs this server, not the agent.
+a2's, unchanged.  A module that hangs hangs this server, not the agent.
+
+A module may answer with more than text: a dict
+``{"text": "...", "image": "/path/to/picture.png"}`` becomes a text block
+*and* an image block, so a model that can see actually sees the picture
+(a2 stores it in the workspace and attaches it to the conversation).
 
 Usage (as a2 starts it):
 
@@ -20,7 +25,7 @@ Usage (as a2 starts it):
 
 `--agent-url` is optional: with it, a reload also asks a2 to re-read the
 tool list (`POST /api/mcp/refresh`), so the new tool is usable in the next
-turn. Without it, the caller has to do it.
+turn. Without it, the caller has to do that.
 """
 
 import argparse
@@ -68,8 +73,7 @@ META_TOOLS = [
     },
     {
         "name": "toolkit_reload",
-        "description": ("Reload every tool function, and make the saved ones "
-                        "usable. Reports the files that did not load and why."),
+        "description": "Reload every tool function, and make the saved ones usable. Reports the files that did not load and why.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -77,8 +81,10 @@ META_TOOLS = [
         "description": "List the versions of a tool that can be rolled back to.",
         "inputSchema": {
             "type": "object",
-            "properties": {"name": {"type": "string",
-                                     "description": "the tool name"}},
+            "properties": {
+                "name": {"type": "string",
+                         "description": "the tool name"},
+            },
             "required": ["name"],
         },
     },
@@ -88,8 +94,10 @@ META_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "the tool name"},
-                "version": {"type": "string", "description": "the version, e.g. 1.0.0"},
+                "name": {"type": "string",
+                         "description": "the tool name"},
+                "version": {"type": "string",
+                            "description": "the version to roll back to, e.g. 1.0.0"},
             },
             "required": ["name", "version"],
         },
@@ -162,6 +170,30 @@ class Server:
         """The meta tools plus everything the modules offer."""
         return META_TOOLS + self.toolkit.schemas()
 
+    def module_result(self, outcome):
+        """The answer of a module: text, and maybe a picture.
+
+        A module that answers with a dict may hand a picture to the model:
+        `{"text": ..., "image": "/path/to/picture.png"}`.  The image becomes
+        an MCP image block - a2 stores it in the workspace and attaches it to
+        the conversation, so a model that can see really sees it.
+        """
+        if isinstance(outcome, str):
+            return text_result(outcome)
+        text = str((outcome or {}).get("text") or "")
+        content = []
+        image = (outcome or {}).get("image")
+        if image:
+            block = self.toolkit.image_block(os.path.expanduser(str(image)))
+            if block:
+                content.append(block)
+            else:
+                text += ("\n(the picture %s could not be read - the model will "
+                         "not see it)" % image)
+        if text or not content:
+            content.insert(0, {"type": "text", "text": text})
+        return {"content": content, "isError": False}
+
     def call(self, name, arguments):
         arguments = arguments or {}
         if name == "toolkit_save":
@@ -176,7 +208,6 @@ class Server:
                                         module_dir=self.toolkit.module_dir,
                                         version=str(arguments.get("version") or ""))
             if status == 0:
-                # The file is on disk; the tool is usable after a reload.
                 return text_result(message + ". Call toolkit_reload to use it.")
             return text_result(message, is_error=True)
         if name == "toolkit_reload":
@@ -207,7 +238,7 @@ class Server:
             return text_result(message, is_error=True)
         # A tool from a module.
         try:
-            return text_result(self.toolkit.call(name, arguments))
+            return self.module_result(self.toolkit.call(name, arguments))
         except ToolError as exc:
             return text_result(str(exc), is_error=True)
         except Exception as exc:  # noqa: BLE001 - a broken tool is data, not a crash

@@ -1988,3 +1988,79 @@ tea_agent.buildinfo
 - `find_session_workspace()` 之前只看 `e.path + "/.tea_agent_run"`（忽略了 `run_dir` 兜底
   路径）和 plain 文件；两处都修了。
 - 测试：`tests/smoke_gc.py`（29 项）。
+
+---
+
+## 桌面三件套：截图 / 鼠标 / 键盘（扩展层，Linux 与 Windows 都有了）
+
+扩展层那三个例子（`sched/a2_ext_py/examples/toolkit_{screenshot,mouse,keyboard}.py`）
+原来是**只有 Windows 的**（Win32 + SendInput）。这次把 **Linux 补上了**——本机是
+KDE Plasma 6 **Wayland**（`DISPLAY=:1` 是 rootless 的 XWayland，Firefox/Konsole 都是
+原生 Wayland 程序），所以三个工具都得换一套后端。
+
+**为什么 Linux 上不能用 X11 那套**：
+
+- **XTest 到不了原生 Wayland 程序**。XWayland 是 rootless 的，X11 的指针/键盘事件
+  只走 XWayland 那一层；Wayland 程序（这里是浏览器、终端）根本收不到。
+  → 键鼠走 **uinput**（内核里的虚拟设备，`/dev/uinput`）：合成器把它当真的键盘
+  鼠标，于是每个程序都收得到。实测：uinput 注入的事件被 KWin 转发给了 XWayland
+  客户端（`xev` 看得见 MotionNotify/ButtonPress/KeyPress）。
+- **XWayland 抓不到屏**。它的根窗口不是屏幕（只有 X11 程序那点内容）。
+  → 截图问合成器要：`spectacle -b -n -f -p -o <file>`（约 0.7 s；没有 spectacle
+  就 grim / gnome-screenshot / maim；再没有才用 X11 的 XGetImage）。
+
+**坐标是一个空间**：鼠标的坐标 = 截图的像素（屏幕物理像素）。本机屏幕是
+1920×1080 物理、缩放 1.1（xrandr 报 1745×982 的逻辑大小）。所以：
+
+- 屏幕大小从 `~/.config/kwinoutputconfig.json`（KDE 的输出配置，`mode.width/height`
+  是物理大小，`scale` 是缩放）拿；拿不到就用 xrandr 的逻辑大小 × 缩放。
+- 截图缩小过（`max_width`）时，把图片宽度告诉鼠标（`image_width`），它换算回屏幕。
+- X11 指针的位置（xdotool）是**逻辑**像素，要乘缩放才是我们的空间；而且 Wayland
+  上它只在指针悬在 X11 窗口上方时才跟着动——所以它只是兜底，工具自己记着上次
+  放到哪儿。
+
+**中文怎么打进去**：中文不在键盘上（keymap 里没有那个 keysym），uinput 也发不了
+任意 Unicode。→ **走剪贴板**：KDE 的 Klipper 有 DBus 接口
+（`org.kde.klipper.klipper.setClipboardContents`，用 `gdbus call`），把文本放进去，
+再按 `shift+insert` 粘贴。没有 Klipper 就 `wl-copy`/`xclip`/`xsel`。
+实测（kdialog 输入框）：`hello 测试中文 tea_a2` 原样进去 ✓。
+
+**输入法会翻译**（本机有 fcitx5 + 云拼音）：开着的时候打 `hello` 出来的是「和来咯」。
+→ 工具默认（`ime="auto"`）在打字那一瞬间 `fcitx5-remote -c` 关掉输入法、打完
+`-o` 打开。`ime="keep"` 可以不管它。
+
+**模块怎么回传图片**：MCP 的 tools/call 结果可以有 image block，a2 那头已经支持
+（`src/mcp.cpp` 收 image、`src/tools.cpp` 的 `tool_mcp` 把它存进工作区并附到对话）。
+所以扩展层加了一条约定：模块返回 `{"text": "...", "image": "<路径>"}` →
+服务器发一个文本块**加一个图片块**（`loader.py` 的 `call()`、`mcp_server.py` 的
+`module_result()`）。模型于是**直接看见屏幕**，不用再 `toolkit_load_image`。
+
+**Linux 后端放在扩展层里**（`sched/a2_ext_py/desktop_linux.py`），不在 examples 里：
+uinput 那套（ioctl + struct uinput_user_dev + input_event）有三个文件都要用，
+抄三遍不合适。模块用 `from a2_ext_py import desktop_linux` 拿它——扩展服务器启动
+时把 `<repo>/sched` 放进了 `sys.path`，所以模块找得到。
+
+**坑**：
+
+- `ctypes.c_uchar` **不存在**（是 `c_ubyte`）——XGetKeyboardMapping 的第一个
+  keycode 参数用它。
+- `png_size()` 别用整张解码去拿尺寸：1920×1080 的 PNG 在纯 Python 里 unfilter
+  要 3.4 s。只读 IHDR（`png_dimensions()`）是 0.03 s。
+- ImageMagick 的 `convert` 在这台机器上是有的（`import` 反而报
+  「missing an image filename」，别用 `import`）。
+- `struct.input_event` 是 `qqHHi`（timeval 两个 long + u16 + u16 + s32 = 24 字节）。
+- uinput 设备**用完就销毁**（`UI_DEV_DESTROY`）：每次调用建一个、0.2 s 后销毁，
+  合成器认得新设备。建完要 `sleep` 一下，不然第一个事件没人接。
+- 键码：X 的 keycode 比 evdev 的**大 8**；布局从 X 服务器读（Xwayland 的键盘布局
+  是合成器给的），读不到就用内置的 US 表。
+- `fcntl.ioctl` 的常量自己算：`_IOW('U', 100, int) = 0x40045564`（SET_EVBIT）、
+  `UI_DEV_SETUP = 0x405c5503`；用旧的 `uinput_user_dev` 写法更省事。
+- `/dev/uinput` 本机有 ACL（`user:sunkw:rw`），不需要 root；换机器可能要
+  `usermod -aG input`。
+- 测「打字」要小心：按键进的是**当前焦点窗口**。测试里先起一个 `xev` 当证人
+  （它会打印每个键），或者拿 `kdialog --inputbox` 当靶子（它把输入打到 stdout，
+  答案不是猜的）。别在用户正在用的窗口上试。
+
+**测试**：`tests/smoke_ext_desktop.py`（23 项 + `--live` 3 项）。
+**装法**：`~/.tea_agent/ext/` 放三个模块 + `~/.tea_agent/mcp.yaml` 注册 a2ext
+（`--agent-url http://127.0.0.1:8383`，端口按机器实际的来）。

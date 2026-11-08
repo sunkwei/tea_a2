@@ -1,4 +1,4 @@
-# a2_ext_py：a2 的扩展层（机制层可以长出新的能力）
+# a2_ext_py：a2 的扩展层（机制层可以长出新能力）
 
 三层，各管各的：
 
@@ -47,6 +47,10 @@ def meta_toolkit_hello():
 
 **用户模块不在发版包里**（发版会覆盖它），也**不在工作区里**（模型的
 `toolkit_file` 够不着它——工作区的围栏到工作区为止）。
+
+**工具也可以回传一张图**：函数返回 `{"text": "...", "image": "/path/pic.png"}`
+就行——服务器把它变成一个文本块**加一个图片块**，a2 把图片存进工作区、附到对话里，
+**模型是真的看见了**（不是只拿到一个路径）。
 
 ### 二、接上 a2
 
@@ -147,20 +151,51 @@ for event in queue.events():
 
 旧的 import 名还认（`from tea_api import Tea, Queue`），但那是过时的写法。
 
-## 现成的例子
+## 现成的例子：桌面三件套（截图 / 鼠标 / 键盘）
 
-`sched/a2_ext_py/examples/` 里有两个可以直接用的模块（Windows 上的 GUI 测试常用）：
+`sched/a2_ext_py/examples/` 里有三个可以直接用的模块，**Windows 和 Linux 都能用**
+（GUI 测试常用）：
 
 | 文件 | 工具 | 干什么 |
 | --- | --- | --- |
-| `toolkit_screenshot.py` | `toolkit_screenshot` | 抓屏存成 PNG（工作区里），配合 `toolkit_load_image` 给模型看 |
+| `toolkit_screenshot.py` | `toolkit_screenshot` | 抓屏存成 PNG，**并把图回传给模型** |
 | `toolkit_mouse.py` | `toolkit_mouse` | 鼠标：移动/单击/双击/右键/拖拽/滚轮 |
-| `toolkit_keyboard.py` | `toolkit_keyboard` | 键盘：打字（中文也行）/单键/组合键 |
+| `toolkit_keyboard.py` | `toolkit_keyboard` | 键盘：打字（中文也行）/单键/组合键/剪贴板 |
 
-只用标准库（Win32 走 ctypes，PNG 容器自己写），不用 pip 装东西。装法见那个目录里的
-README。
+只用标准库，不用 pip 装东西。装法见那个目录里的 README。
 
-两个坑：
+两个平台走的是**不同的后端**，这是有原因的：
+
+| | Windows | Linux |
+| --- | --- | --- |
+| 键鼠 | `SendInput`（Win32） | **uinput**（内核里的虚拟设备） |
+| 截图 | GDI（Win32） | 合成器自己的截图程序（spectacle / grim / gnome-screenshot / maim），没有就用 X11 |
+
+**Linux 上为什么是 uinput**：Wayland 桌面（KDE/GNOME）上，X11 的 XTest 事件**到不了
+原生 Wayland 程序**——它只走 XWayland 那一层。uinput 是内核里的虚拟输入设备，
+合成器把它当成真的键盘鼠标，于是**每个程序都能收到**（Wayland 的也收）。
+副作用：按键进的是**当前焦点窗口**，所以先 `toolkit_mouse` 把目标窗口点到前台，
+再打字。
+
+**Linux 上截图为什么问合成器要**：XWayland 是 rootless 的，它的根窗口**不是屏幕**
+（只有 X11 程序那点内容），所以抓屏只能问合成器要（`spectacle -b -n -f -o`，
+约 0.7 秒）。
+
+**坐标是一个空间**：鼠标的坐标就是**截图的像素**（屏幕的物理像素）。截图缩小过
+（`max_width`）的时候，把图片的宽度告诉鼠标（`image_width`），它会把坐标换算回去。
+
+**Linux 上的三个前提**：
+
+1. `/dev/uinput` 要能写（虚拟输入设备）：`ls -l /dev/uinput`，没有权限就
+   `sudo usermod -aG input $USER`（重新登录才生效）；
+2. 桌面得有一个截图程序：`spectacle`（KDE）/ `grim` / `gnome-screenshot` / `maim`；
+3. 中文这类**不在键盘上的字符**走剪贴板（KDE 的 Klipper over DBus，没有就用
+   `wl-copy`/`xclip`）：文本进剪贴板，再按 `shift+insert` 粘贴。
+
+**输入法（fcitx5）会翻译**：开着的时候打 "hello" 可能出来的是中文。工具默认
+（`ime="auto"`）在打字的那一瞬间把输入法关掉、打完再打开——打出来的就是字面意思。
+
+几个坑：
 
 - **模块可以自己 import**：加载器用同一个字典当 globals 和 locals，模块级的
   `import os` 在函数和类体里都看得见（早先用两个字典，模块级 import 落在 locals，
@@ -168,9 +203,11 @@ README。
 - **`mcp.yaml` 里的 Windows 路径要用单引号**：YAML 的双引号标量会处理反斜杠转义，
   `command: "C:\Users\..."` 里的 `\U` 不是合法转义 → yaml-cpp 拒绝整个文件 → MCP
   配置被**静默丢掉**（表现是「文件不存在、服务器一个都没起来」，日志里一行都没有）。
-- **打字之前先确认焦点**：`SendInput` 的按键进的是当前焦点窗口。先把目标窗口请到前台
-  （`AttachThreadInput` + `SetForegroundWindow`），**再读一次 `GetForegroundWindow()` 核对**，
-  然后才按键盘——否则那条消息会打进你当时正在看的浏览器或终端里。
+- **打字之前先确认焦点**：`SendInput`（Windows）和 uinput（Linux）的按键进的都是
+  当前焦点窗口。先把目标窗口请到前台，**再核对一次**，然后才按键盘——否则那条消息
+  会打进你当时正在看的浏览器或终端里。
+
+测试：`tests/smoke_ext_desktop.py`（23 项；`--live` 再加 3 项真家伙）。
 
 ---
 

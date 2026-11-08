@@ -86,6 +86,8 @@ python3 tests/smoke_queue_spec.py                          # 需求书剩下的�
                                                           # / 检查点 / 异步导出 + 生成物按 id 下载 / 交互 id 与超时
                                                           # / request_id 与 trace_id + 限流 + 保留策略 / 租户与身份
 python3 tests/smoke_ext_toolkit.py                          # 扩展层：模型存一个工具 → reload → 同一轮里就用它 / 落在模块目录 / 有审计 / 进了 agent 的工具表
+python3 tests/smoke_ext_desktop.py                         # 桌面三件套（截图/鼠标/键盘）：三个模块加载 + schema / 模块回传图片 → 图片块
+                                                          # / 截图是 PNG 且有屏幕那么大 / 区域 / 缩放 / 键码（--live 再加真家伙）
 node tests/ui_task_form.mjs                                # 队列网页：排任务的表单（主题/工作区/定时/provider/模型/参数）+ 生成物下载（需 google-chrome）
 python3 tests/smoke_fleet.py                                 # 机群：台账 + 并发采集 + 批量作业（灰度/回滚/校验）
 python3 tests/smoke_watchdog.py                             # 看门狗：卡住的任务（默认只告警）/ --auto 才判死 / 队列暂停与恢复 / agent 不通

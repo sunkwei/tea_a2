@@ -29,6 +29,22 @@
 #       command: 'C:\Tools\uiautomation-mcp\uiautomation-mcp.exe'
 #       timeout_ms: 60000        # a screenshot may take a while
 #
+# The extension layer (a2_ext_py) is an MCP server of its own - it is the one
+# that needs no release at all: every .py file in the module directory is one
+# tool. The three desktop tools (screenshot, mouse, keyboard) live there:
+#
+#   servers:
+#     a2ext:
+#       command: "python3"
+#       args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
+#              "--modules", "/home/you/.tea_agent/ext",
+#              "--agent-url", "http://127.0.0.1:8282"]
+#       timeout_ms: 120000       # a screenshot may take a second
+#
+# --agent-url is the agent itself: after a reload the server asks it to
+# re-read the tool list, so a tool that appeared a moment ago is usable in the
+# next turn. See docs/a2_ext_py.md.
+#
 # Every field of a server:
 #
 #   command:             the program to run (PATH is searched when it has no
@@ -59,3 +75,10 @@ servers:
   #   command: 'C:\Tools\uiautomation-mcp\uiautomation-mcp.exe'
   #   args: []
   #   timeout_ms: 60000
+  #
+  # a2ext:
+  #   command: "python3"
+  #   args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
+  #          "--modules", "/home/you/.tea_agent/ext",
+  #          "--agent-url", "http://127.0.0.1:8282"]
+  #   timeout_ms: 120000
