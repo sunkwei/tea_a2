@@ -47,6 +47,11 @@ elseif(MINGW)
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
   # Reproducible builds: no timestamp in the PE header.
   add_link_options(-Wl,--no-insert-timestamp)
+  # wWinMain: the entry point is the *wide* one. Without -municode the mingw
+  # CRT looks for the ANSI WinMain, and the link fails with
+  # "undefined reference to `WinMain'" (MSVC is happy: it links the wide
+  # startup when UNICODE is defined).
+  add_link_options(-municode)
 endif()
 
 # The icon is a real resource (resources/appstub.ico): the shell draws
