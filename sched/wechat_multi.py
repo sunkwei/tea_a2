@@ -31,6 +31,21 @@ Usage:
   python3 sched/wechat_multi.py                     # every account in ~/.tea_agent/wechat
   python3 sched/wechat_multi.py --accounts alice,bob
   python3 sched/wechat_multi.py --accounts-dir ~/.tea_agent/wechat --scan-interval 5
+
+  python3 sched/wechat_multi.py --login alice       # one account: a link to scan
+
+The login of one account:
+
+  python3 sched/wechat_multi.py --login alice
+
+prints the link of a QR code (the page that shows the code and asks the phone
+to confirm it) and waits for the scan. The credentials land in that account's
+own directory (~/.tea_agent/wechat/alice/credentials.json), and from then on
+that account is one of the accounts this process serves: its messages become
+tasks in the queue, in its own workspace ("微信_alice").
+
+So the order is: log in as many accounts as you like, then start the service -
+it picks up every account that has been scanned.
 """
 
 import argparse
@@ -139,11 +154,10 @@ class Multi(object):
     def make_bot(self, name):
         """The bot of one account: its own state, its own workspace."""
         argv = self.base_argv() + ["--account", name]
-        if not self.args.accounts:
-            # The accounts live in this directory: the bot has to be told
-            # where its own directory is.
-            argv += ["--state-dir", self.state_dir(name),
-                     "--workspace-path", self.workspace_path(name)]
+        # The accounts live in this directory: the bot has to be told where
+        # its own directory is (otherwise it would look in the default one).
+        argv += ["--state-dir", self.state_dir(name),
+                 "--workspace-path", self.workspace_path(name)]
         args = wechat_bot.build_parser().parse_args(argv)
         return wechat_bot.WeChatBot(args)
 
@@ -228,6 +242,10 @@ def build_parser():
     parser.add_argument("--accounts", default="",
                         help="the accounts to serve (alice,bob); "
                              "default: every account in the directory")
+    parser.add_argument("--login", default="",
+                        help="log one account in: print the link of a QR code and "
+                             "wait for the scan (the credentials land in that "
+                             "account's own directory)")
     parser.add_argument("--accounts-dir", default=wechat_bot.DEFAULT_STATE_DIR,
                         help="where the accounts live (default: %s)"
                              % wechat_bot.DEFAULT_STATE_DIR)
@@ -264,10 +282,37 @@ def build_parser():
     return parser
 
 
+def login(multi, name):
+    """One account, one QR code, one scan.
+
+    The link is printed: the page it points at shows the code, and the phone
+    confirms it. When that happens the credentials are written into the
+    account's own directory - and the service picks the account up by itself.
+    """
+    bot = multi.make_bot(name)
+    print("")
+    print("账号：%s" % name)
+    print("凭证会存到：%s" % bot.state.path)
+    print("工作区：%s（%s）" % (bot.args.workspace_path, bot.args.workspace_name))
+    print("")
+    ok = bot.login()
+    print("")
+    if not ok:
+        print("没扫成功（超时了）——再跑一次这条命令就行。")
+        return 1
+    print("登录成功：%s" % bot.state.path)
+    print("这个账号现在会用 %s 排任务，工作区 %s。"
+          % (multi.args.tasks, bot.args.workspace_name))
+    print("服务在跑的话，它下一轮就会接上这个账号（不用重启）。")
+    return 0
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     multi = Multi(args)
     try:
+        if args.login:
+            return login(multi, args.login)
         return multi.run()
     except KeyboardInterrupt:
         log("stopped")

@@ -209,6 +209,7 @@ python3 sched/wechat_bot.py --login     # 扫码登录（一次就行）
 python3 sched/wechat_bot.py             # 跑起来（没凭证就自己出个码等着）
 python3 sched/wechat_pair.py            # 配对页面：http://127.0.0.1:8391/（扫码→起服务）
 python3 sched/wechat_multi.py           # 一个进程跑 ~/.tea_agent/wechat/ 里的每个账号
+python3 sched/wechat_multi.py --login alice   # 登录一个账号（打印二维码链接，手机扫）
 python3 sched/telegram_bot.py --token 123456:ABC --print-chat-id
 python3 sched/telegram_bot.py --token 123456:ABC --allow-chat 12345
 ```

@@ -1060,10 +1060,25 @@ python3 sched/wechat_multi.py            # 一个进程跑 ~/.tea_agent/wechat/ 
 
 | `wechat_multi.py` 的参数 | 作用 | 默认 |
 | --- | --- | --- |
+| `--login <账号名>` | 登录一个账号：打印二维码链接，等手机扫；凭证存进它自己的目录 | |
 | `--accounts <a,b>` | 只跑这几个账号 | 目录里的每个 |
 | `--accounts-dir <path>` | 账号目录 | `~/.tea_agent/wechat` |
+| `--workspaces-dir <path>` | 各账号工作区放哪 | `~/.tea_agent` |
 | `--scan-interval <s>` | 多久看一眼有没有新账号 | `10` |
 | `--no-skip-units` | 连已有自己单元的账号也一起跑（默认不碰） | 不碰 |
+
+登录一个账号：
+
+```bash
+python3 sched/wechat_multi.py --login alice
+# 账号：alice
+# 凭证会存到：~/.tea_agent/wechat/alice/credentials.json
+# 工作区：~/.tea_agent/wechat-alice-workspace（微信_alice）
+# 用微信扫这个码登录：https://liteapp.weixin.qq.com/q/...
+```
+
+扫完之后这个账号的消息进 `a2_task` 排队，工作区叫 **`微信_alice`**；多账号服务
+自己会接上它（下一轮扫描就看见凭证了）。
 
 单元：`a2_wechat.service`（默认账号）、`a2_wechat@<名字>.service`（一个账号一个单元）、
 `a2_wechat_mul.service`（一个进程所有账号）、`a2_wechat_pair.service`（配对页面）。

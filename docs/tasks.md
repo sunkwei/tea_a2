@@ -278,6 +278,23 @@ systemctl --user enable --now a2_wechat_pair
 `a2_wechat_mul` 自己盯着账号目录：谁扫过码，它就把谁接上（不用写单元、不用 start）。
 已经有自己单元的账号它不碰——两个 bot 用同一个游标轮询，会把彼此的消息吃掉。
 
+**一个账号一个账号地登录**（多账号服务自己带登录）：
+
+```bash
+python3 sched/wechat_multi.py --login alice      # 打印一个 http 链接，页面上就是二维码
+python3 sched/wechat_multi.py --login bob
+systemctl --user restart a2_wechat_mul            # 或者它本来就在跑，下一轮就接上
+```
+
+`--login <账号名>` 做三件事：出码并**打印那个链接**（在「手机能看见的屏幕」上打开它，
+页面上就是二维码，手机扫）、把凭证存进**这个账号自己的目录**
+（`~/.tea_agent/wechat/<账号名>/credentials.json`）、扫成功之后这个账号就归多账号服务管了：
+它的消息进 `a2_task` 排队，工作区是 **`微信_<账号名>`**（每个账号一个工作区，
+所以两个微信号的活儿不混；额度、排期、任务列表还是同一份）。
+
+风控要验证码的时候：手机上的数字写进 `~/.tea_agent/wechat/<账号名>/verify_code`，
+或者在配对页面上填——服务会捡起来。
+
 **开机自启（systemd user unit）**：`scripts/a2_wechat.service` 是一份**跟机器无关的模板**
 （路径写的是 `%h`，即运行单元的用户的主目录；仓库默认在 `~/work/git/tea_a2`）。装：
 

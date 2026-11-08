@@ -246,6 +246,12 @@ class ILink:
             raise ILinkError("HTTP %s: %s" % (exc.code, raw[:200]), status=exc.code) from None
         except urllib.error.URLError as exc:
             raise ILinkError("cannot reach %s: %s" % (url, exc.reason)) from None
+        except (TimeoutError, OSError) as exc:
+            # A read that times out is **not** a URLError (Python 3.10 made
+            # socket.timeout an alias of TimeoutError, an OSError) - urllib
+            # lets it through, and it used to kill the bot in the middle of
+            # the login instead of being one more failed poll.
+            raise ILinkError("timeout talking to %s: %s" % (url, exc)) from None
         try:
             payload = json.loads(raw) if raw else {}
         except ValueError:
@@ -270,7 +276,10 @@ class ILink:
         query = {"qrcode": qrcode}
         if verify_code:
             query["verify_code"] = verify_code
-        return self._request("GET", "/ilink/bot/get_qrcode_status", None, None, 20, query)
+        # The status endpoint is a **long poll**: the server holds the
+        # connection until the code changes (about 35 s) - so the client has
+        # to wait longer than that, or every poll would be a timeout.
+        return self._request("GET", "/ilink/bot/get_qrcode_status", None, None, 45, query)
 
     def updates(self, cursor, token, timeout=45):
         body = {"get_updates_buf": cursor or "", "base_info": self._base_info()}
@@ -1029,7 +1038,9 @@ def resolve_paths(args):
     if getattr(args, "workspace_path", None) is None:
         args.workspace_path = account_workspace(name)
     if getattr(args, "workspace_name", None) is None:
-        args.workspace_name = ("微信/%s" % name) if name else "微信"
+        # The name the agent shows for this account's workspace: one
+        # workspace per account, and the name says whose it is.
+        args.workspace_name = ("微信_%s" % name) if name else "微信"
     return args
 
 

@@ -93,6 +93,10 @@ class MockILink(BaseHTTPRequestHandler):
                     "baseurl": "http://127.0.0.1:%d" % self.server.server_address[1],
                 })
             return self._json(payload)
+        if self.path.startswith("/slow"):
+            time.sleep(3)              # longer than the client's timeout
+            self._json({"status": "wait"})
+            return
         if self.path.startswith("/qr"):
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
@@ -381,6 +385,47 @@ def main():
         check("the bot of an account that is gone stops",
               "bob" not in multi.bots, sorted(multi.bots))
         multi.stop.set()
+
+        # ---- a request that times out is an error, not a crash ---------
+        slow = wechat_bot.ILink(ilink_url)
+        try:
+            slow._request("GET", "/slow", None, None, 1)
+            check("a timeout is an ILinkError", False, "no error")
+        except wechat_bot.ILinkError as exc:
+            check("a timeout is an ILinkError", True, exc)
+        except Exception as exc:  # noqa: BLE001 - that is the point
+            check("a timeout is an ILinkError", False, "%s: %s" % (type(exc).__name__, exc))
+
+        # ---- one account logs in: a link to scan ------------------------
+        login_root = os.path.join(tmp, "login")
+        rc = wechat_multi.main([
+            "--login", "carol",
+            "--accounts-dir", login_root,
+            "--workspaces-dir", os.path.join(tmp, "ws2"),
+            "--base-url", ilink_url,
+            "--login-timeout", "15",
+        ])
+        check("the login of one account succeeds", rc == 0, rc)
+        cred_path = os.path.join(login_root, "carol", "credentials.json")
+        check("the credentials land in that account's own directory",
+              os.path.isfile(cred_path), os.listdir(login_root))
+        check("the token of that account is stored",
+              wechat_bot.read_credentials(cred_path).get("token") == MockILink.token,
+              wechat_bot.read_credentials(cred_path))
+        multi_args2 = wechat_multi.build_parser().parse_args([
+            "--accounts-dir", login_root,
+            "--workspaces-dir", os.path.join(tmp, "ws2"),
+            "--base-url", ilink_url,
+        ])
+        bot_carol = wechat_multi.Multi(multi_args2).make_bot("carol")
+        check("the workspace of an account is named after it",
+              bot_carol.args.workspace_name == "微信_carol", bot_carol.args.workspace_name)
+        check("the workspace of an account is its own directory",
+              bot_carol.args.workspace_path.endswith("wechat-carol-workspace"),
+              bot_carol.args.workspace_path)
+        check("the account is one of the accounts the service serves",
+              "carol" in wechat_multi.Multi(multi_args2).names(),
+              wechat_multi.Multi(multi_args2).names())
 
         # ---- the page over HTTP ---------------------------------------
         import urllib.request
