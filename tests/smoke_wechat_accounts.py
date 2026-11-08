@@ -396,6 +396,19 @@ def main():
         except Exception as exc:  # noqa: BLE001 - that is the point
             check("a timeout is an ILinkError", False, "%s: %s" % (type(exc).__name__, exc))
 
+        # ---- the Chinese goes out whatever the locale says --------------
+        import subprocess
+        env = dict(os.environ, LC_ALL="C", LANG="C")
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, %r); import wechat_bot; "
+             "wechat_bot.utf8_stdout(); wechat_bot.log('\u4e2d\u6587')"
+             % os.path.join(REPO_ROOT, "sched")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=REPO_ROOT)
+        check("the Chinese goes out even with an ASCII locale",
+              "\u4e2d\u6587" in proc.stdout.decode("utf-8", "replace"),
+              (proc.stdout, proc.stderr[-200:]))
+
         # ---- one account logs in: a link to scan ------------------------
         login_root = os.path.join(tmp, "login")
         rc = wechat_multi.main([

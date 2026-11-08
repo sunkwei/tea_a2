@@ -309,6 +309,7 @@ def login(multi, name):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    wechat_bot.utf8_stdout()
     multi = Multi(args)
     try:
         if args.login:

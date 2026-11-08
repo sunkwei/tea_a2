@@ -34,6 +34,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import io
 import json
 import os
 import re
@@ -430,6 +431,28 @@ class State:
     @property
     def cursor(self):
         return self.data.get("cursor", "")
+
+
+def utf8_stdout():
+    """Let stdout carry the Chinese - the locale is not always UTF-8.
+
+    A machine with the POSIX locale and no LANG in the environment gives a
+    stdout that can only write ASCII: printing the Chinese there raises
+    UnicodeEncodeError and kills the command that was about to work (the
+    devices run with LANG=zh_CN.UTF-8, but an SSH shell often has neither).
+    """
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:            # Python 3.7+
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+            return
+        except (ValueError, OSError):
+            pass
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
+                                      errors="replace", line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
 
 
 def safe_name(name):
@@ -1078,6 +1101,7 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    utf8_stdout()
 
     bot = WeChatBot(args)
     if args.login:
