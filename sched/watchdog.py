@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The watchdog: something outside the agent that watches the work.
 
 The agent is good at doing one thing well and it is bad at noticing that it

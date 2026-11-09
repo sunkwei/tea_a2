@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The planner: turn one complex job into a plan the queue can work.
 
 One model call, one plan. The plan is written to a file so that a human can

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The trigger entry: one door for every outside event.
 
 Everything that happens outside the agent - a webhook, a CI result, a mail,

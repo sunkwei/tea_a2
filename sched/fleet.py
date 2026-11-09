@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The fleet engine: one school server, forty devices, one a2 on each.
 
 The server holds the only copy of the device inventory (the ledger), runs the

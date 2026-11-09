@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The task order: a text file somebody fills in, the queue reads.
 
 A task order is a plain text file with "key: value" lines:

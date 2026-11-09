@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The plans: one complex job, split into steps that may wait for each other.
 
 A plan is two things:

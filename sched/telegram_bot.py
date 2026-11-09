@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The Telegram side of the task queue: talk to it from Telegram.
 
 The agent (tea_agent) is the workspace channel, the task server is the

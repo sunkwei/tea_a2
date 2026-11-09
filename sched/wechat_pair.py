@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The pairing page: a person scans a code, the WeChat side starts.
 
 The bot needs one thing from a human: the QR code that binds a WeChat
@@ -51,6 +52,14 @@ except ImportError:  # Python 3.6
         """The 3.6 spelling of http.server.ThreadingHTTPServer."""
         daemon_threads = True
 
+
+if sys.version_info[0] < 3:
+    # 这台机器的 `python` 是 2.7（`python3` 才是 3.6）。这个脚本是 Python 3 的，
+    # 在 2 里连解析都过不去 —— 与其让用户看 "Non-ASCII character"，
+    # 不如直接说该用哪个解释器。
+    sys.stderr.write("这个脚本要 Python 3：请用 python3 跑"
+                     "（这台机器的 python 是 2.7）。\n")
+    sys.exit(2)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import wechat_bot  # noqa: E402

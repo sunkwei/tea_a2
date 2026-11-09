@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """What every chat front end of the task queue does.
 
 The queue (sched/task_server.py) is the work; a chat front end is a way to

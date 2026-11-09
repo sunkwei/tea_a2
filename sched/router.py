@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The router: the one that remembers the conversation and speaks for the work.
 
 The queue runs the work; every task is its own session and knows nothing

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """The WeChat side of the task queue: talk to it from WeChat.
 
 The agent (tea_agent) is the workspace channel, the task server is the queue.
@@ -49,6 +50,15 @@ import urllib.request
 
 import channel
 import task_order
+
+
+if sys.version_info[0] < 3:
+    # 这台机器的 `python` 是 2.7（`python3` 才是 3.6）。这个脚本是 Python 3 的，
+    # 在 2 里连解析都过不去 —— 与其让用户看 "Non-ASCII character"，
+    # 不如直接说该用哪个解释器。
+    sys.stderr.write("这个脚本要 Python 3：请用 python3 跑"
+                     "（这台机器的 python 是 2.7）。\n")
+    sys.exit(2)
 
 # The queue and the agent are the ones every chat front end talks to; the
 # WeChat side only adds the protocol on top (sched/channel.py).
