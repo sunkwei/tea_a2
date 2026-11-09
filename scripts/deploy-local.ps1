@@ -1,8 +1,8 @@
 # scripts/deploy-local.ps1 -- publish a built binary to the launcher path.
 #
-#   pwsh -File scripts\deploy-local.ps1 -Exe build-msvc\bin\tea_agent.exe
+#   pwsh -File scripts\deploy-local.ps1 -Exe build-mingw\bin\tea_agent.exe
 #   pwsh -File scripts\deploy-local.ps1 -Exe build-mingw\bin\tea_agent.exe -Stop
-#   pwsh -File scripts\deploy-local.ps1 -Exe build-msvc\bin\tea_agent.exe -Target C:\tools\a2.exe
+#   pwsh -File scripts\deploy-local.ps1 -Exe build-mingw\bin\tea_agent.exe -Target C:\tools\a2.exe
 #
 # Why a script and not "Copy-Item": the target is usually *running* (an agent
 # cannot replace its own executable - Windows locks the image of a running
@@ -27,13 +27,13 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
 if (-not $Exe) {
-    foreach ($candidate in @('build-msvc\bin\tea_agent.exe', 'build-mingw\bin\tea_agent.exe',
+    foreach ($candidate in @('build-mingw\bin\tea_agent.exe',
             'build\bin\tea_agent.exe')) {
         if (Test-Path (Join-Path $root $candidate)) { $Exe = $candidate; break }
     }
 }
 if (-not $Exe -or -not (Test-Path (Join-Path $root $Exe))) {
-    Write-Host "no built binary found; build first (scripts\build.bat, scripts\build-mingw.bat)" -ForegroundColor Red
+    Write-Host "no built binary found; build first (scripts\build-mingw.bat)" -ForegroundColor Red
     exit 2
 }
 if (-not $Target) { $Target = Join-Path $env:USERPROFILE 'bin\a2.exe' }

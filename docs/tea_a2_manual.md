@@ -203,7 +203,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"1.1.0","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"1.1.1","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -1249,12 +1249,8 @@ scripts/build.sh build-debug        # → ./build-debug
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j8
 
-# Windows (MSVC)
-scripts\build.bat                   # → .\build-msvc (NMake)
-scripts\build.bat out ninja         # → .\out (Ninja)
-
-# Windows (MinGW)
-scripts\build-mingw.bat
+# Windows (MinGW，只有这一条路)
+scripts\build-mingw.bat              # → .\build-mingw
 ```
 
 交叉编译、产物校验、常见错误对照表见 [构建与跨平台编译](build.md)。

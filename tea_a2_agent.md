@@ -45,7 +45,7 @@
 8. **运行中的 exe 覆盖不了**（Windows）。`cmake/free-running-exe.cmake` 会在链接前把旧 exe 改名
    让位、链接后删掉，所以「程序开着也能构建」。
 9. **长构建要前台跑**。`start /b` / `start /min` 起的后台进程会随着命令结束被杀；用
-   `cmd /c scripts\build.bat > log 2>&1` 前台跑，再单独去看 log。
+   `cmd /c scripts\build-mingw.bat > log 2>&1` 前台跑，再单独去看 log。
 10. **浏览器测试需要 `CHROME_BIN`**。没装 Chrome 时 Edge 也是 Chromium：
     `set CHROME_BIN=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`；
     同时 `TMP/TEMP` 仍要指到仓库内。
@@ -58,8 +58,7 @@
 
 | 平台 | 命令 | 备注 |
 | --- | --- | --- |
-| Windows / MinGW | `scripts\build-mingw.bat` | 脚本自己设 PATH 与 TEMP，并显式 configure |
-| Windows / MSVC | `scripts\build.bat` | NMake（单线程，慢）；`vcenv.bat` 设 `VSLANG=1033` 让 cl.exe 用英文报 include |
+| Windows / MinGW | `scripts\build-mingw.bat` | **Windows 上只有这一条路**；脚本自己设 PATH 与 TEMP，并显式 configure |
 | Linux / macOS | `cmake --preset posix && cmake --build build` | |
 | 交叉（aarch64） | `cmake --preset arm64-linux` | 需要 aarch64-linux-gnu 工具链 |
 
@@ -68,9 +67,8 @@
   全量重编。用 `scripts\build-mingw.bat`。
 - 改版本号只会重编 `src/version.cpp` + 链接（版本串在 .cpp 里，不在头文件里）。
 - 编译中断留下的损坏 `.obj` 会报 **LNK1136 无效或损坏的 object 文件**：删掉对应的
-  `build-msvc\CMakeFiles\tea_agent.dir\src\*.obj` 重编即可。
-- 同一 commit 两次构建得到逐字节相同的二进制（MinGW `-Wl,--no-insert-timestamp` /
-  MSVC `/Brepro`）。
+  `build-mingw\CMakeFiles\tea_agent.dir\src\*.obj` 重编即可。
+- 同一 commit 两次构建得到逐字节相同的二进制（`-Wl,--no-insert-timestamp`）。
 
 ---
 

@@ -8,20 +8,6 @@
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     },
     {
-      "name": "msvc",
-      "displayName": "Windows x64 / MSVC (NMake Makefiles)",
-      "description": "Same as scripts\\build.bat, including VSLANG=1033 so cl.exe prints /showIncludes in English (see README: MSVC 的 /showIncludes 刷屏).",
-      "inherits": "base",
-      "generator": "NMake Makefiles",
-      "binaryDir": "${sourceDir}/build-msvc",
-      "environment": { "VSLANG": "1033" },
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      }
-    },
-    {
       "name": "mingw",
       "displayName": "Windows x64 / MinGW-w64",
       "inherits": "base",
@@ -68,14 +54,6 @@
     }
   ],
   "buildPresets": [
-    {
-      "name": "msvc",
-      "configurePreset": "msvc",
-      "description": "VSLANG is set here as well: the environment must be in place when cl.exe runs, not only while CMake configures.",
-      "environment": {
-        "VSLANG": "1033"
-      }
-    },
     {
       "name": "mingw",
       "configurePreset": "mingw"

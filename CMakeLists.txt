@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"1.1.0\"")
+    "  const char* const kVersionString = \"1.1.1\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -94,50 +94,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 # ---------------------------------------------------------------------------
-# MSVC: the /showIncludes prefix has to be ASCII, or nothing filters it
-# ---------------------------------------------------------------------------
-# cl.exe reports included files with a localized prefix (on a Chinese VS the
-# English "Note: including file:" becomes a Chinese phrase). CMake passes that
-# prefix to
-#     cmake -E cmake_cl_compile_depends --filter-prefix=<prefix>
-# inside the generated make rules; the command line does not survive the console
-# code page, so nothing matches and **every included-file line is echoed into the
-# build log** - hundreds of lines per translation unit - while the .obj.d files
-# stay empty (editing a header then silently fails to trigger a rebuild).
-#
-# scripts\vcenv.bat (used by scripts\build.bat) sets VSLANG=1033, which makes
-# cl.exe speak English and turns the prefix into the ASCII
-# "Note: including file: ". This block keeps that working:
-#   * a build directory configured while the compiler was still localized has the
-#     old prefix cached in CMakeFiles/<ver>/CMakeCXXCompiler.cmake - override it,
-#     so an existing directory is repaired instead of needing to be wiped;
-#   * without VSLANG, say what to do rather than leaving hundreds of lines of
-#     noise to puzzle over.
-# It has to run here, right after project(): subdirectories added later (the
-# vendored yaml-cpp) inherit the variable at the point they are added.
-if(MSVC AND CMAKE_CXX_CL_SHOWINCLUDES_PREFIX MATCHES "[^ -~]")
-  if("$ENV{VSLANG}" STREQUAL "1033")
-    # The cached prefix was detected while cl.exe still spoke the local language.
-    # cl.exe will print English now (VSLANG=1033), so make the generated filter
-    # agree with it. Doing it here repairs an existing build directory instead of
-    # forcing a from-scratch reconfigure.
-    set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
-    set(CMAKE_C_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
-    set(CMAKE_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
-    message(STATUS
-      "tea_agent: this build directory cached a localized /showIncludes prefix; using the "
-      "English one now (VSLANG=1033 is set).")
-  else()
-    message(STATUS
-      "tea_agent: this Visual Studio prints /showIncludes in a localized form "
-      "(\"${CMAKE_CXX_CL_SHOWINCLUDES_PREFIX}\"). CMake cannot filter those lines out of the "
-      "build log, so it will contain one line per included header. VSLANG=1033 must be set "
-      "both when configuring AND when building (cl.exe reads it, not CMake): use "
-      "scripts\\build.bat or `cmake --preset msvc` / `cmake --build --preset msvc`.")
-  endif()
-endif()
-
-# ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
 # The code is written so that it compiles in C++14 mode as well (GCC 6.5 is the
@@ -163,17 +119,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if(MSVC)
-  add_compile_options(/utf-8 /MP /W3 /bigobj /wd4996)
-  add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-else()
-  add_compile_options(-Wall -Wextra -Wno-unused-parameter)
-endif()
+# MinGW-w64 (gcc) is the only compiler this project is built with on Windows:
+# its dependency tracking works on its own, so none of the MSVC workarounds
+# are needed here.
+add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 if(WIN32)
   # MinGW defaults to a much older _WIN32_WINNT than MSVC, which makes
   # cpp-httplib refuse to build and hides CreateFile2(). Target Windows 10.
   add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000000)
+  # A smaller windows.h, and no MSVC-only macros.
+  add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -199,11 +155,7 @@ target_compile_definitions(tea_3rd_headers INTERFACE
 add_library(tea_miniz STATIC ${TEA_3RD}/miniz/miniz.c)
 target_include_directories(tea_miniz PUBLIC ${TEA_3RD}/miniz)
 set_target_properties(tea_miniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
-if(MSVC)
-  target_compile_options(tea_miniz PRIVATE /W0)
-else()
-  target_compile_options(tea_miniz PRIVATE -w)
-endif()
+target_compile_options(tea_miniz PRIVATE -w)
 
 # yaml-cpp is a real library; build it from source inside 3rd/.
 set(YAML_CPP_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
@@ -224,11 +176,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ${_tea_saved_cxx_required})
 # expects <cstdint> to be pulled in by <string>. Force the include instead of
 # patching the vendored sources, so 3rd/ stays byte-identical to upstream.
 if(TARGET yaml-cpp)
-  if(MSVC)
-    target_compile_options(yaml-cpp PRIVATE /FIcstdint)
-  else()
-    target_compile_options(yaml-cpp PRIVATE -include cstdint)
-  endif()
+  target_compile_options(yaml-cpp PRIVATE -include cstdint)
 endif()
 
 # mbedTLS provides the https:// backend for platforms without WinHTTP.
@@ -512,17 +460,6 @@ else()
   list(APPEND TEA_SOURCES src/shell_posix.cpp)
 endif()
 
-# Header dependencies are declared explicitly instead of relying on the
-# compiler-generated ones (see the /showIncludes note at the top of this file).
-# With ~10 TUs it only costs a full recompile of our sources when a header
-# actually changes, and it keeps incremental builds correct even on a machine
-# whose localized /showIncludes output CMake cannot parse.
-if(MSVC)
-  file(GLOB_RECURSE TEA_PROJECT_HEADERS CONFIGURE_DEPENDS
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
-  set_property(SOURCE ${TEA_SOURCES} APPEND PROPERTY OBJECT_DEPENDS ${TEA_PROJECT_HEADERS})
-endif()
-
 add_executable(tea_agent ${TEA_SOURCES})
 
 # NOTE: src/ is deliberately NOT on the include path. It would make the
@@ -548,10 +485,6 @@ if(MINGW)
   # compiled in any more (the commit lives in tea_agent.buildinfo next to the
   # binary), so with this flag two builds produce the very same bytes.
   target_link_options(tea_agent PRIVATE -Wl,--no-insert-timestamp)
-elseif(MSVC)
-  # The same for MSVC: /BREPRO makes the PE timestamp and the recorded PDB path
-  # deterministic, so the binary of a given commit is byte-for-byte stable.
-  target_link_options(tea_agent PRIVATE /Brepro)
 endif()
 
 find_package(Threads REQUIRED)

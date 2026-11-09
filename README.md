@@ -12,7 +12,7 @@
 <img alt="c++" src="https://img.shields.io/badge/C%2B%2B-17-00599C.svg">
 <img alt="build" src="https://img.shields.io/badge/build-CMake-064F8C.svg">
 <img alt="deps" src="https://img.shields.io/badge/dependencies-vendored%20in%203rd%2F-2ea44f.svg">
-<img alt="verified" src="https://img.shields.io/badge/verified-Windows%20x64%20%C2%B7%20GCC%20%2B%20MSVC-2ea44f.svg">
+<img alt="verified" src="https://img.shields.io/badge/verified-Windows%20x64%20%C2%B7%20GCC-2ea44f.svg">
 <img alt="runs" src="https://img.shields.io/badge/targets-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-6e7681.svg">
 
 </div>

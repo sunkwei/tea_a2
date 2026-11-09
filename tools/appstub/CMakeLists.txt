@@ -39,20 +39,23 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-if(MSVC)
-  # /utf-8: the sources are UTF-8 and the menu labels are Chinese.
-  add_compile_options(/utf-8 /W3 /EHsc /permissive- /D_CRT_SECURE_NO_WARNINGS)
-  add_link_options(/Brepro)
-elseif(MINGW)
-  add_compile_options(-Wall -Wextra -Wno-unused-parameter)
-  # Reproducible builds: no timestamp in the PE header.
-  add_link_options(-Wl,--no-insert-timestamp)
-  # wWinMain: the entry point is the *wide* one. Without -municode the mingw
-  # CRT looks for the ANSI WinMain, and the link fails with
-  # "undefined reference to `WinMain'" (MSVC is happy: it links the wide
-  # startup when UNICODE is defined).
-  add_link_options(-municode)
-endif()
+# MinGW-w64 is the only compiler this program is built with on Windows.
+# The sources are UTF-8 (gcc reads them as UTF-8 by default) and the menu
+# labels are Chinese.
+add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+# Reproducible builds: no timestamp in the PE header.
+add_link_options(-Wl,--no-insert-timestamp)
+# wWinMain: the entry point is the *wide* one. Without -municode the mingw
+# CRT looks for the ANSI WinMain, and the link fails with
+# "undefined reference to `WinMain'."
+add_link_options(-municode)
+# A self-contained .exe. The tray host is deployed by copying one file
+# (tools/appstub/scripts/deploy.ps1) onto the target machine, so it must not
+# need libstdc++-6.dll / libgcc_s_seh-1.dll / libwinpthread-1.dll there - the
+# agent and the tunnel binaries are linked statically for the same reason (a
+# Windows 10 box has no mingw runtime installed).
+add_link_options(-static-libgcc -static-libstdc++ -static)
+
 
 # The icon is a real resource (resources/appstub.ico): the shell draws
 # the notification-area icon itself, and a hand-drawn HICON is not the same

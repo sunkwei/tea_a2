@@ -1,7 +1,7 @@
 # deploy.ps1 -- publish appstub to the place it actually runs from.
 #
 #   pwsh -File tools\appstub\scripts\deploy.ps1
-#   pwsh -File tools\appstub\scripts\deploy.ps1 -Exe build-msvc\bin\appstub.exe
+#   pwsh -File tools\appstub\scripts\deploy.ps1 -Exe build-mingw\bin\appstub.exe
 #
 # Default target: %LOCALAPPDATA%\appstub (appstub.exe + config.json there).
 # That directory is also where appstub writes its log, and where the autostart
@@ -18,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 # The repository root: this script lives in <repo>\tools\appstub\scripts.
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
-if (-not $Exe) { $Exe = 'build-msvc\bin\appstub.exe' }
+if (-not $Exe) { $Exe = 'build-mingw\bin\appstub.exe' }
 if (-not $Config) { $Config = 'tools\appstub\config\appstub.json' }
 if (-not $TargetDir) { $TargetDir = Join-Path $env:LOCALAPPDATA 'appstub' }
 

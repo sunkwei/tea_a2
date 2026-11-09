@@ -49,7 +49,7 @@ tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/
                             merge_work_area.py（把一份 .tea_agent_run 合并进另一份）
 tests/mock_mcp_server.py    一个假的 MCP 服务器（stdio 上的 JSON-RPC），用来测 MCP 客户端
 tests/e2e.ps1              端到端测试（157 项）；tests/sse_probe.mjs 严格流客户端
-scripts/                    build.sh / build.bat / build-mingw.bat / vcenv.bat /
+scripts/                    build.sh / build-mingw.bat /
                             install-autostart.ps1（+ .bat）= Windows 登录自启动
 sched/task_server.py        任务服务（Python，可选）：任务队列 + 额度闸门 + 事件流
 sched/fleet.py               机群引擎（Python，可选）：设备台账 + 并发采集 + 批量作业
@@ -69,7 +69,7 @@ sched/pan_sync.py           百度网盘同步配置（Python，可选）：加�
 sched/pan-sync.template     pan_sync.py 的配置模板（应用凭证 + 加密口令 + 同步范围）
 sched/wechat_bot.py          微信那一端：iLink 协议（扫码登录、长轮询、CDN 媒体）
 sched/telegram_bot.py        Telegram 那一端：Bot API（长轮询、getFile/sendDocument、chat 白名单）
-CMakePresets.json           msvc / mingw / posix / arm64-linux / win64-mingw-cross 预设
+CMakePresets.json           mingw / posix / arm64-linux / win64-mingw-cross 预设
 cmake/toolchains/           aarch64-linux-gnu.cmake / mingw-w64-x86_64.cmake（交叉编译入口）
 cmake/version_git_hash.cmake 生成 tea_agent.buildinfo（写在二进制旁边，不动源码树）
 cmake/free-running-exe.cmake   运行中也能链接：先把旧 exe 改名让位
@@ -89,7 +89,7 @@ commit 则是**构建期元数据**，它既不在源码里、也不在二进制
 
 ```
 # tea_agent.buildinfo（与二进制放在一起）
-version=1.1.0
+version=1.1.1
 commit=678cd2c1f014        # 工作区有未提交改动时是 <hash>-dirty
 ```
 
@@ -100,7 +100,7 @@ commit=678cd2c1f014        # 工作区有未提交改动时是 <hash>-dirty
   旧脚本只好特判自己写的那个文件；native 与交叉两个构建目录还会抢同一个文件。
 - **二进制可复现**。既然编译进去的构建数据已经没有了，再让链接器别把构建时间戳进 PE 头，
   同一个 commit 两次构建就得到**逐字节相同**的二进制（MinGW 用
-  `-Wl,--no-insert-timestamp`，MSVC 用 `/Brepro`）。要核对发布件是不是某个 commit 构建的，
+  `-Wl,--no-insert-timestamp`）。要核对发布件是不是某个 commit 构建的，
   比对 `tea_agent.buildinfo` 即可。
 - **单文件部署不撒谎**。只把 `tea_agent.exe` 拷到设备上的话，旁边没有 buildinfo，于是没有
   provenance 可显示——横幅就只印版本号，而不是假装自己来自某个 commit。
@@ -131,7 +131,7 @@ commit=678cd2c1f014        # 工作区有未提交改动时是 <hash>-dirty
 
 miniz 只取上游 release 里的**合并版两个文件**（`miniz.c` + `miniz.h`，逐字节未改），作为独立的
 静态库目标 `tea_miniz` 编译：它是 C，所以顶层 `project()` 声明了 `LANGUAGES C CXX`；它的告警
-不是我们的，所以只对这个目标关掉（MSVC `/W0`，其它 `-w`）。
+不是我们的，所以只对这个目标关掉（`-w`）。
 
 ---
 

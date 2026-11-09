@@ -6,9 +6,9 @@
 | 角色 | 要求 |
 | --- | --- |
 | 构建系统 | CMake ≥ 3.20（3.x / 4.x 均可） |
-| C++ 编译器 | 支持 C++17（已验证 GCC 6.5 / MinGW GCC 16.2 / MSVC 19.51） |
+| C++ 编译器 | 支持 C++17（已验证 GCC 6.5 / MinGW GCC 16.2；Windows 上只用 MinGW-w64） |
 | C 编译器 | C99，仅用于编译 mbedTLS |
-| 生成器 | Ninja / Unix Makefiles / NMake / Xcode |
+| 生成器 | Ninja / Unix Makefiles / MinGW Makefiles / Xcode |
 | 链接库 | 系统自带：Windows `winhttp` `ws2_32` `advapi32`；POSIX `pthread` |
 
 不需要 OpenSSL、zlib、vcpkg、conan、Python、Perl。
@@ -21,7 +21,6 @@
 Windows 不允许链接器写一个正在运行的 `.exe`：
 
 ```
-LINK : fatal error LNK1104: 无法打开文件"bin\tea_agent.exe"      (MSVC)
 cannot open output file bin\tea_agent.exe: Permission denied     (MinGW)
 ```
 
@@ -55,7 +54,7 @@ Freeing tea_agent.exe for relinking
 
 回归测试：`pwsh -File tests/relink-while-running.ps1 -Exe build-gcc\bin\tea_agent.exe`
 （会真的起一个隐藏实例、构建一次、验证新二进制就位且旧实例仍在服务，再验证 leftovers 清理；
-MinGW 与 MSVC 各 12 项）。它先断言「运行中的镜像确实打不开写权限」这个前提，前提不成立就说明
+MinGW 12 项）。它先断言「运行中的镜像确实打不开写权限」这个前提，前提不成立就说明
 这套机制已经没必要了，而不是静悄悄地通过。
 
 ## 构建
@@ -70,50 +69,13 @@ cmake --build build -j"$(nproc)"
 ```
 
 ```bat
-:: Windows + MinGW-w64
+:: Windows + MinGW-w64（Windows 上只有这一条路）
 scripts\build-mingw.bat
-
-:: Windows + MSVC（Ninja 在部分环境会卡死，默认走 NMake）
-scripts\build.bat
 ```
 
-产物：`build/bin/tea_agent`（Windows 为 `build-msvc\bin\tea_agent.exe` 等）。
+产物：`build/bin/tea_agent`（Windows 为 `build-mingw\bin\tea_agent.exe`）。
 本机编译只有这几条命令；**交叉编译（Linux → Windows / Linux aarch64）见下面的
 [跨平台编译](#跨平台编译) 一节**，那里有编译矩阵、toolchain 文件、产物校验与错误对照。
-
-**MSVC 的 `/showIncludes` 刷屏**：本地化的 Visual Studio 会把「包含文件」用本地语言输出，
-CMake 拿到这个前缀后要传给 `cmake -E cmake_cl_compile_depends --filter-prefix=…`，而命令行在
-控制台代码页里存不住非 ASCII 字节，于是过滤一条也匹配不上——日志里每个编译单元都会多出
-上百行 `注意: 包含文件: …`（副作用是 `.obj.d` 为空，改头文件不会触发重编）。修法只有一个：
-让 cl.exe 说英文。`scripts\build.bat` 通过 `scripts\vcenv.bat` 设置 `VSLANG=1033`，前缀变成
-ASCII 的 `Note: including file: `，问题消失，顺带让诊断信息可搜索。
-
-**关键点：`VSLANG` 必须同时存在于「构建」进程的环境里**，不只是配置时——`cl.exe` 自己读它，
-CMake 不读。只在配置时设过、后来在别的窗口里跑 `cmake --build`，日志照样是本地化的。
-
-三种方式任选（都不需要改 IDE 设置）：
-
-```bat
-:: 1) 仓库自带脚本（vcenv.bat 里设 VSLANG，构建进程继承）
-scripts\build.bat
-
-:: 2) CMake presets（configure/build 两个 preset 都带 VSLANG）
-cmake --preset msvc
-cmake --build --preset msvc
-
-:: 3) 手敲：同一个窗口里设好再 configure/build
-set VSLANG=1033
-cmake -S . -B build-msvc -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
-cmake --build build-msvc
-```
-
-已经配置过的构建目录会把旧前缀缓存在 `CMakeFiles\<ver>\CMakeCXXCompiler.cmake` 里；
-CMakeLists 在检测到「本地化前缀 + `VSLANG=1033`」时会自动换成英文前缀并打印一行说明，所以
-多数情况下重跑即可，实在顽固就 `cmake --fresh`（或删掉 `CMakeCache.txt`）重配一次。
-
-`scripts\build.bat` 在编译前还会真的跑一次 `cl /showIncludes` 探测：如果这台机器上的 `cl.exe`
-无视 `VSLANG`（极少数本地化安装会这样），它会直接打印一条明确的 WARNING，而不是让你对着
-几百行 `包含文件` 猜。
 
 
 ## 跨平台编译
@@ -128,7 +90,6 @@ CMakeLists 在检测到「本地化前缀 + `VSLANG=1033`」时会自动换成�
 | Linux x86_64 → 本机 | `./scripts/build.sh` 或 `cmake --preset posix && cmake --build --preset posix -j"$(nproc)"` | `build/bin/tea_agent` | ✅ 实测 |
 | macOS → 本机 | 同上（`Xcode`/`Unix Makefiles`） | `build/bin/tea_agent` | ✅ 实测（10.6+） |
 | Windows → 本机（MinGW-w64） | `scripts\build-mingw.bat` 或 `cmake --preset mingw` | `build-mingw\bin\tea_agent.exe` | ✅ 实测 |
-| Windows → 本机（MSVC） | `scripts\build.bat` 或 `cmake --preset msvc` | `build-msvc\bin\tea_agent.exe` | ✅ 实测 |
 | Linux / macOS → **Windows x64** | `cmake --preset win64-mingw-cross && cmake --build --preset win64-mingw-cross -j"$(nproc)"` | `build-win64/bin/tea_agent.exe`（PE32+，CA 已内嵌） | ✅ 产出；运行需 Windows |
 | Linux x86_64 → **Linux aarch64** | `cmake --preset arm64-linux && cmake --build --preset arm64-linux -j"$(nproc)"` | `build-arm64/bin/tea_agent`（静态） | ✅ 真机运行 |
 
@@ -162,9 +123,8 @@ brew install cmake
 brew install mingw-w64      # 只有要交叉出 Windows 版时才需要
 ```
 
-Windows 本机：装 Visual Studio Build Tools（MSVC，配 `scripts\build.bat`）或 winlibs
-MinGW-w64（`scripts\build-mingw.bat` 会依次找 `%MINGW_HOME%`、`.toolchain\mingw64`、`PATH`）。
-两条路径都会设置 `VSLANG=1033`（MSVC）或 `TEMP`（MinGW）；构建的整体步骤见
+Windows 本机：装 winlibs MinGW-w64（`scripts\build-mingw.bat` 会依次找 `%MINGW_HOME%`、
+`.toolchain\mingw64`、`PATH`），并把 `TEMP` 指到仓库内；构建的整体步骤见
 [README 的「三分钟跑起来」](../README.md#三分钟跑起来)，本机编译的细节在下一节。
 
 ### 本机编译
@@ -181,9 +141,8 @@ cmake --build --preset posix -j"$(nproc)"
 ```
 
 ```bat
-:: Windows
+:: Windows（只有这一条路）
 scripts\build-mingw.bat            :: MinGW-w64
-scripts\build.bat                  :: MSVC（NMake，带 VSLANG=1033）
 ```
 
 ### 交叉编译：必须走 toolchain 文件
@@ -246,7 +205,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 1.1.0
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 1.1.1
 ```
 
 ### 常见错误的对照表

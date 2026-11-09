@@ -4,7 +4,7 @@
     {
       "id": "a2-agent",
       "name": "tea_a2 agent",
-      "command": "C:\\Users\\Hetin\\work\\git\\tea_a2\\build-msvc\\bin\\tea_agent.exe",
+      "command": "C:\\Users\\Hetin\\work\\git\\tea_a2\\build-mingw\\bin\\tea_agent.exe",
       "args": [
         "--port", "8383",
         "--log-file", "%USERPROFILE%\\.tea_agent\\logs\\tea_agent-stub.log"

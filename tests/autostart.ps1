@@ -28,7 +28,6 @@ if ([string]::IsNullOrEmpty($Exe)) {
     foreach ($candidate in @(
             (Join-Path $root 'build-gcc\bin\tea_agent.exe'),
             (Join-Path $root 'build-mingw\bin\tea_agent.exe'),
-            (Join-Path $root 'build-msvc\bin\tea_agent.exe'),
             (Join-Path $root 'build\bin\tea_agent.exe'))) {
         if (Test-Path $candidate) { $Exe = $candidate; break }
     }

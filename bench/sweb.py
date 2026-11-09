@@ -43,7 +43,7 @@ HOME = os.path.join(BENCH, "home")          # tea home of the bench agents
 GITCONFIG = os.path.join(BENCH, "gitconfig")
 LOGDIR = os.path.join(BENCH, "logs")
 
-DEFAULT_AGENT = os.path.join(ROOT, "build-msvc", "bin", "tea_agent.exe")
+DEFAULT_AGENT = os.path.join(ROOT, "build-mingw", "bin", "tea_agent.exe")
 DEFAULT_DATA = os.path.join(BENCH, "instances.jsonl")
 
 # ---------------------------------------------------------------- small helpers

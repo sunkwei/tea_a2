@@ -2,7 +2,7 @@
 #
 #   pwsh -File scripts\start-local.ps1
 #   pwsh -File scripts\start-local.ps1 -Port 8283
-#   pwsh -File scripts\start-local.ps1 -Exe build-msvc\bin\tea_agent.exe -Open
+#   pwsh -File scripts\start-local.ps1 -Exe build-mingw\bin\tea_agent.exe -Open
 #   pwsh -File scripts\start-local.ps1 -AllowOutsideWorkspace
 #
 # Why a script: the agent refuses to share a port (Windows lets a second
@@ -33,14 +33,14 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
 if (-not $Exe) {
-    foreach ($candidate in @('build-msvc\bin\tea_agent.exe', 'build-mingw\bin\tea_agent.exe',
+    foreach ($candidate in @('build-mingw\bin\tea_agent.exe',
             'build\bin\tea_agent.exe', "$env:USERPROFILE\bin\a2.exe")) {
         if (Test-Path (Join-Path $root $candidate)) { $Exe = $candidate; break }
     }
     if (-not $Exe -and (Test-Path "$env:USERPROFILE\bin\a2.exe")) { $Exe = "$env:USERPROFILE\bin\a2.exe" }
 }
 if (-not $Exe -or -not (Test-Path $Exe)) {
-    Write-Host "no binary found; build first (scripts\build.bat, scripts\build-mingw.bat)" -ForegroundColor Red
+    Write-Host "no binary found; build first (scripts\build-mingw.bat)" -ForegroundColor Red
     exit 2
 }
 $Exe = (Resolve-Path $Exe).Path

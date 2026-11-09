@@ -34,11 +34,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-if(MSVC)
-  add_compile_options(/utf-8 /MP /W3)
-else()
-  add_compile_options(-O2)
-endif()
+add_compile_options(-O2)
 
 find_package(Threads REQUIRED)
 

@@ -526,8 +526,8 @@ cmake --preset win64-mingw-cross && cmake --build build-win64 -j8
 | `a2_broker` | 公网 broker（STUN + TURN 中继 + 信令） | 静态（Linux/macOS） |
 | `a2_tunnel` | 侧载（agent / client 两种角色） | 静态（Linux/macOS） |
 
-- **Windows 的 .exe 是自包含的**：只依赖系统 DLL（KERNEL32 / WS2_32 / msvcrt /
-  advapi32 / bcrypt），和 a2 本体一个待遇——不需要在目标机器上装
+- **Windows 的 .exe 是自包含的**：只依赖系统 DLL（KERNEL32 / WS2_32 / BCRYPT /
+  IPHLPAPI + UCRT），和 a2 本体一个待遇——不需要在目标机器上装
   libstdc++-6.dll 那一套。
 - **信令的 TLS 客户端用的是 mbedTLS**（和仓库其它地方同一套栈），所以侧载
   **不需要 OpenSSL**，整个二进制只有 libc + pthread。

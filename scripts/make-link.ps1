@@ -1,7 +1,7 @@
 # scripts/make-link.ps1 -- create a symbolic link without administrator rights.
 #
 #   pwsh -File scripts\make-link.ps1 -Link C:\Users\Hetin\bin\a2.exe `
-#                                     -Target ..\..\work\git\tea_a2\build-msvc\bin\tea_agent.exe
+#                                     -Target ..\..\work\git\tea_a2\build-mingw\bin\tea_agent.exe
 #
 # Why not `New-Item -ItemType SymbolicLink`: Windows treats link creation as a
 # privilege (SeCreateSymbolicLinkPrivilege) because a link is a reparse point -

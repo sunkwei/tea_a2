@@ -1,7 +1,7 @@
 # tests/relink-while-running.ps1 -- the build must not require stopping the agent.
 #
 #   pwsh -File tests/relink-while-running.ps1
-#   pwsh -File tests/relink-while-running.ps1 -Exe build-msvc\bin\tea_agent.exe
+#   pwsh -File tests/relink-while-running.ps1 -Exe build-mingw\bin\tea_agent.exe
 #
 # Windows refuses to let the linker write over a running .exe (LNK1104 /
 # "Permission denied"), which used to mean "stop the agent, build, start the
@@ -18,7 +18,7 @@
 # The build directory is derived from -Exe (<build>/bin/tea_agent.exe), and the
 # toolchain must already be usable from the current environment: run this from the
 # same shell you normally build in (scripts\build-mingw.bat users need
-# .toolchain\mingw64\bin on PATH; MSVC users need scripts\vcenv.bat).
+# .toolchain\mingw64\bin on PATH).
 
 [CmdletBinding()]
 param(
@@ -32,7 +32,6 @@ if ([string]::IsNullOrEmpty($Exe)) {
     foreach ($candidate in @(
             (Join-Path $root 'build-gcc\bin\tea_agent.exe'),
             (Join-Path $root 'build-mingw\bin\tea_agent.exe'),
-            (Join-Path $root 'build-msvc\bin\tea_agent.exe'),
             (Join-Path $root 'build\bin\tea_agent.exe'))) {
         if (Test-Path $candidate) { $Exe = $candidate; break }
     }

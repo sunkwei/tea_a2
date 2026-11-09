@@ -94,7 +94,7 @@ if ($Uninstall) {
 
 if (-not (Test-Path $Exe)) {
     Write-Host "appstub.exe not found: $Exe" -ForegroundColor Red
-    Write-Host "build it first (scripts\build.bat) and deploy it (scripts\deploy.ps1)." -ForegroundColor Yellow
+    Write-Host "build it first (scripts\build-mingw.bat) and deploy it (scripts\deploy.ps1)." -ForegroundColor Yellow
     exit 1
 }
 

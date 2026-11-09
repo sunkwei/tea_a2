@@ -1,7 +1,7 @@
 # scripts/test-all.ps1 -- run the whole test suite with one command.
 #
 #   pwsh -File scripts\test-all.ps1
-#   pwsh -File scripts\test-all.ps1 -Exe build-msvc\bin\tea_agent.exe
+#   pwsh -File scripts\test-all.ps1 -Exe build-mingw\bin\tea_agent.exe
 #   pwsh -File scripts\test-all.ps1 -SkipUi
 #
 # Why a script instead of a long command line:
@@ -31,7 +31,6 @@ $root = Split-Path -Parent $PSScriptRoot
 if (-not $Exe) {
     foreach ($candidate in @(
             'build-mingw\bin\tea_agent.exe',
-            'build-msvc\bin\tea_agent.exe',
             'build-gcc\bin\tea_agent.exe',
             'build\bin\tea_agent.exe')) {
         if (Test-Path (Join-Path $root $candidate)) { $Exe = $candidate; break }

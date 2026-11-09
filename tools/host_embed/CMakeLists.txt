@@ -17,11 +17,7 @@ endif()
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(MSVC)
-  add_compile_options(/utf-8 /MP /W3)
-else()
-  add_compile_options(-O2)
-endif()
+add_compile_options(-O2)
 
 foreach(_tool embed_assets embed_ca_bundle)
   add_executable(tea_${_tool} ${CMAKE_CURRENT_SOURCE_DIR}/../${_tool}.cpp)

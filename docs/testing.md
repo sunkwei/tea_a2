@@ -26,7 +26,7 @@ Windows 上是 `pwsh -File scripts\test-all.ps1`（同样的思路，自己起�
 
 ```bash
 pwsh -File tests/e2e.ps1                                  # 默认构建产物
-pwsh -File tests/e2e.ps1 -Exe build-msvc/bin/tea_agent.exe
+pwsh -File tests/e2e.ps1 -Exe build-mingw/bin/tea_agent.exe
 pwsh -File tests/autostart.ps1                            # 登录自启动：launcher/任务 XML + 隐藏启动实测
 pwsh -File tests/relink-while-running.ps1 -Exe build-gcc/bin/tea_agent.exe  # 运行中也能构建（改名让位）
 
@@ -591,7 +591,6 @@ SSE 事件序列与 `metrics` 指标块、两个工具的落盘副作用、`.tea
 | 项 | 状态 |
 | --- | --- |
 | Windows x64 + MinGW-w64 GCC 16.2 | ✅ 构建 0 warning，E2E 157/157 |
-| Windows x64 + MSVC | ✅ 构建 0 error，E2E 157/157 |
 | C++14 语言模式（GCC 6.5 兼容性） | ✅ 全量编译通过 |
 | 真实 `api.deepseek.com` / `opencode.ai` | ✅ 含多轮工具调用 |
 | 真实 `www.minimax.cn` 额度接口 | ✅ M Plan 订阅 Key 实查：5 小时窗口与周窗口的剩余百分比、重置时间都对得上 |

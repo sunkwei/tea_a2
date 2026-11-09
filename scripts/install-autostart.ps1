@@ -52,7 +52,6 @@ function Resolve-AgentExe {
     foreach ($candidate in @(
             'build-mingw\bin\tea_agent.exe',
             'build-gcc\bin\tea_agent.exe',
-            'build-msvc\bin\tea_agent.exe',
             'build\bin\tea_agent.exe')) {
         $full = Join-Path $root $candidate
         if (Test-Path $full) { return (Resolve-Path $full).Path }

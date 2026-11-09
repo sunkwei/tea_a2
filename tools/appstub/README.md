@@ -70,19 +70,19 @@ appstub.exe [--config <文件>] [--no-autostart]
 
 ## 构建
 
-**只支持 Windows。** 需要 CMake ≥ 3.16 和一个 C++17 编译器（MSVC 或 MinGW-w64）。
+**只支持 Windows。** 需要 CMake ≥ 3.16 和一个 C++17 编译器（**MinGW-w64**）。
 
 跟着仓库一起编（Windows 上默认就会编它）：
 
 ```bat
-scripts\build.bat
-:: 输出：build-msvc\bin\appstub.exe
+scripts\build-mingw.bat
+:: 输出：build-mingw\bin\appstub.exe
 ```
 
 只编它一个：
 
 ```bat
-tools\appstub\scripts\build.bat
+cmake --build build-mingw --target appstub
 ```
 
 不要它：`-DTEA_BUILD_APPSTUB=OFF`。
