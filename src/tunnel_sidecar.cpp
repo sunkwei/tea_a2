@@ -49,7 +49,9 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <cstdarg>
 #include <cstdio>
+#include <ctime>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -64,6 +66,29 @@ using json = nlohmann::json;
 #include "tunnel_net.h"
 
 namespace {
+
+/// One log line, with the time: the negotiation between two machines is
+/// spread over several processes, and without a timestamp the order of the
+/// lines is guesswork.
+void log_line(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
+void log_line(const char* fmt, ...) {
+  char stamp[16];
+  const std::time_t now = std::time(nullptr);
+  std::tm tm_buf{};
+#ifdef _WIN32
+  localtime_s(&tm_buf, &now);
+#else
+  localtime_r(&now, &tm_buf);
+#endif
+  std::strftime(stamp, sizeof(stamp), "%H:%M:%S", &tm_buf);
+  std::fprintf(stderr, "[%s] ", stamp);
+  va_list args;
+  va_start(args, fmt);
+  std::vfprintf(stderr, fmt, args);
+  va_end(args);
+  std::fflush(stderr);
+}
 
 constexpr unsigned char kOpen = 1;
 constexpr unsigned char kData = 2;
@@ -232,7 +257,7 @@ class Signal {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-      std::fprintf(stderr, "sidecar: bad broker address %s\n", host.c_str());
+      log_line("sidecar: bad broker address %s\n", host.c_str());
       tea_net_close(fd);
       return false;
     }
@@ -241,12 +266,12 @@ class Signal {
       tea_net_close(fd);
       std::string err;
       if (!link_.connect_tls(host, port, ca_file, &err)) {
-        std::fprintf(stderr, "sidecar: %s\n", err.c_str());
+        log_line("sidecar: %s\n", err.c_str());
         return false;
       }
     } else {
       if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        std::fprintf(stderr, "sidecar: cannot reach the broker %s:%u\n", host.c_str(), port);
+        log_line("sidecar: cannot reach the broker %s:%u\n", host.c_str(), port);
         tea_net_close(fd);
         return false;
       }
@@ -292,7 +317,7 @@ class Signal {
       }
     }
     alive_ = false;
-    std::fprintf(stderr, "sidecar: the signalling link closed\n");
+    log_line("sidecar: the signalling link closed\n");
     if (on_closed_) on_closed_();
   }
 
@@ -382,7 +407,7 @@ int main(int argc, char** argv) {
     }
   }
   if (token.empty()) {
-    std::fprintf(stderr, "sidecar: --token is required\n");
+    log_line("sidecar: --token is required\n");
     return 2;
   }
   if (verbose) rtc::InitLogger(rtc::LogLevel::Debug);
@@ -407,6 +432,12 @@ int main(int argc, char** argv) {
   unsigned int next_conn = 1;
   std::atomic<bool> remote_ready{false};
   std::atomic<bool> tunnel_ready{false};   // the data channel is open
+  // When the wait for the peer started (steady_clock milliseconds). It is
+  // reset every time the tunnel opens or closes, so "five minutes without a
+  // peer" means five minutes *right now* - not five minutes since the process
+  // was started. Otherwise a tunnel that worked for an hour and then dropped
+  // would exit immediately instead of waiting for the peer to come back.
+  std::atomic<long long> waiting_since{0};
   std::vector<std::string> pending_candidates;
   std::vector<std::string> local_candidates;
   std::string local_description;
@@ -418,6 +449,12 @@ int main(int argc, char** argv) {
   // description we no longer have.
   int peer_epoch = 0;
   int offered_epoch = -1;
+  // Every new peer connection gets a number. The callbacks of an older
+  // connection are ignored: without this a replaced peer connection keeps
+  // living (the callbacks hold a shared_ptr) and can still send a stale
+  // answer into the new negotiation - which is how one side ends up
+  // answering a description the other side never asked for.
+  int pc_gen = 0;
   std::function<void()> start_listener;
 
   auto send_frame = [&](unsigned char type, const std::string& payload) {
@@ -429,7 +466,7 @@ int main(int argc, char** argv) {
     try {
       dc->send(out);
     } catch (const std::exception& e) {
-      std::fprintf(stderr, "sidecar: send failed: %s\n", e.what());
+      log_line("sidecar: send failed: %s\n", e.what());
     }
   };
 
@@ -451,11 +488,16 @@ int main(int argc, char** argv) {
 
   Signal signal;
 
-  auto attach_channel = [&](std::shared_ptr<rtc::DataChannel> channel) {
+  auto attach_channel = [&](std::shared_ptr<rtc::DataChannel> channel, int gen) {
+    if (gen != pc_gen) return;
     dc = channel;
-    channel->onOpen([&] {
+    channel->onOpen([&, gen] {
+      if (gen != pc_gen) return;
       tunnel_ready = true;
-      std::fprintf(stderr, "sidecar: the data channel is open (%s)\n", role.c_str());
+      waiting_since = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+      log_line("sidecar: the data channel is open (%s)\n", role.c_str());
       try {
         rtc::Candidate local, remote;
         if (pc && pc->getSelectedCandidatePair(&local, &remote)) {
@@ -473,21 +515,27 @@ int main(int argc, char** argv) {
           const bool via_broker =
               local.type() == rtc::Candidate::Type::Relayed ||
               remote.type() == rtc::Candidate::Type::Relayed;
-          std::fprintf(stderr, "sidecar:   path: local %s:%d (%s) <-> remote %s:%d (%s) - %s\n",
+          log_line("sidecar:   path: local %s:%d (%s) <-> remote %s:%d (%s) - %s\n",
                        la.c_str(), local.port(), kind(local.type()), ra.c_str(), remote.port(),
                        kind(remote.type()),
                        via_broker ? "through the broker" : "direct (no relay)");
         }
       } catch (const std::exception& e) {
-        std::fprintf(stderr, "sidecar:   (cannot read the selected pair: %s)\n", e.what());
+        log_line("sidecar:   (cannot read the selected pair: %s)\n", e.what());
       }
       if (!is_agent) start_listener();
     });
-    channel->onClosed([&] {
+    channel->onClosed([&, gen] {
+      if (gen != pc_gen) return;
       tunnel_ready = false;
-      std::fprintf(stderr, "sidecar: the data channel closed (%s)\n", role.c_str());
+      // The peer is gone: the countdown for giving up starts now.
+      waiting_since = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+      log_line("sidecar: the data channel closed (%s)\n", role.c_str());
     });
-    channel->onMessage([&](std::variant<rtc::binary, std::string> msg) {
+    channel->onMessage([&, gen](std::variant<rtc::binary, std::string> msg) {
+      if (gen != pc_gen) return;
       if (!std::holds_alternative<rtc::binary>(msg)) return;
       const rtc::binary& bytes = std::get<rtc::binary>(msg);
       if (bytes.size() < 5) return;
@@ -505,7 +553,7 @@ int main(int argc, char** argv) {
         split_hostport(target, thost, tport);
         int fd = dial_tcp(thost, tport);
         if (fd < 0) {
-          std::fprintf(stderr, "sidecar: cannot reach the target %s\n", target.c_str());
+          log_line("sidecar: cannot reach the target %s\n", target.c_str());
           return;
         }
         {
@@ -543,28 +591,33 @@ int main(int argc, char** argv) {
   // restarted peer survivable: the old ICE credentials are dead, so both sides
   // start a fresh negotiation instead of talking past each other.
   auto setup_pc = [&]() {
+    const int gen = ++pc_gen;
     remote_ready = false;
     pending_candidates.clear();
     local_candidates.clear();
     local_description.clear();
     pc = std::make_shared<rtc::PeerConnection>(cfg);
 
-    pc->onLocalDescription([&](rtc::Description d) {
+    pc->onLocalDescription([&, gen](rtc::Description d) {
+      if (gen != pc_gen) return;
       const bool offer = (d.type() == rtc::Description::Type::Offer);
       local_description = std::string(d);
       local_description_type = offer ? "offer" : "answer";
       signal.send_line({{"type", local_description_type}, {"sdp", local_description}});
     });
-    pc->onLocalCandidate([&](rtc::Candidate c) {
+    pc->onLocalCandidate([&, gen](rtc::Candidate c) {
+      if (gen != pc_gen) return;
       local_candidates.push_back(std::string(c));
       signal.send_line({{"type", "candidate"}, {"sdp", std::string(c)}});
     });
-    pc->onDataChannel([&](std::shared_ptr<rtc::DataChannel> channel) { attach_channel(channel); });
+    pc->onDataChannel([&, gen](std::shared_ptr<rtc::DataChannel> channel) {
+      attach_channel(channel, gen);
+    });
 
     if (is_agent) {
       // The agent creates the channel; creating it makes libdatachannel
       // produce the offer right away.
-      attach_channel(pc->createDataChannel("a2"));
+      attach_channel(pc->createDataChannel("a2"), gen);
     }
   };
 
@@ -575,12 +628,12 @@ int main(int argc, char** argv) {
       // libdatachannel refuse the description ("Incompatible roles"), so the
       // roles are checked here rather than hoped for.
       if (is_agent && type == "offer") {
-        std::fprintf(stderr, "sidecar: the peer offered (we are the offerer), offering again\n");
+        log_line("sidecar: the peer offered (we are the offerer), offering again\n");
         setup_pc();
         return;
       }
       if (!is_agent && type == "answer") {
-        std::fprintf(stderr, "sidecar: an answer arrived (we are the answerer), waiting for an offer\n");
+        log_line("sidecar: an answer arrived (we are the answerer), waiting for an offer\n");
         return;
       }
       try {
@@ -588,7 +641,7 @@ int main(int argc, char** argv) {
         // A fresh offer from a peer that (re)started: throw the old
         // negotiation away and start over with it.
         if (type == "offer" && remote_ready) {
-          std::fprintf(stderr, "sidecar: the peer offered again, renegotiating\n");
+          log_line("sidecar: the peer offered again, renegotiating\n");
           setup_pc();
         }
         rtc::Description desc(j.value("sdp", ""), type == "offer" ? rtc::Description::Type::Offer
@@ -604,9 +657,12 @@ int main(int argc, char** argv) {
         pending_candidates.clear();
         if (type == "offer") pc->setLocalDescription();  // -> answer
       } catch (const std::exception& e) {
-        std::fprintf(stderr, "sidecar: bad %s: %s\n", type.c_str(), e.what());
-        // An answer we cannot use: the peer is talking about an offer we
-        // already threw away. Offer again and let it answer the new one.
+        // A description we cannot use: the peer is talking about a
+        // negotiation we already threw away (it restarted, most likely).
+        // Offering again is safe now: the old peer connection is replaced
+        // wholesale and its callbacks are ignored, so its late answer
+        // cannot start a loop.
+        log_line("sidecar: cannot use that %s (%s), offering again\n", type.c_str(), e.what());
         if (is_agent) {
           offered_epoch = peer_epoch;
           setup_pc();
@@ -629,13 +685,13 @@ int main(int argc, char** argv) {
     }
     if (type == "joined") {
       const bool peer = j.value("peer", false);
-      std::fprintf(stderr, "sidecar: joined room %s (peer present: %s)\n", room.c_str(),
+      log_line("sidecar: joined room %s (peer present: %s)\n", room.c_str(),
                    peer ? "yes" : "no");
       if (peer) {
         peer_epoch++;
         if (is_agent) {
           // We are the offerer and the peer is already here: offer now.
-          std::fprintf(stderr, "sidecar: the peer is here, offering\n");
+          log_line("sidecar: the peer is here, offering\n");
           offered_epoch = peer_epoch;
           setup_pc();
         } else {
@@ -650,7 +706,7 @@ int main(int argc, char** argv) {
       // The other side arrived (or arrived again). Our offer may have been
       // sent into an empty room: offer again.
       peer_epoch++;
-      std::fprintf(stderr, "sidecar: the peer joined, offering again\n");
+      log_line("sidecar: the peer joined, offering again\n");
       if (is_agent) {
         offered_epoch = peer_epoch;
         setup_pc();
@@ -662,17 +718,17 @@ int main(int argc, char** argv) {
       // this is the same request arriving twice: ignore it.
       if (is_agent) {
         if (offered_epoch == peer_epoch) {
-          std::fprintf(stderr, "sidecar: need-offer, but we already offered\n");
+          log_line("sidecar: need-offer, but we already offered\n");
           return;
         }
-        std::fprintf(stderr, "sidecar: offering again\n");
+        log_line("sidecar: offering again\n");
         offered_epoch = peer_epoch;
         setup_pc();
       }
       return;
     }
     if (type == "error") {
-      std::fprintf(stderr, "sidecar: broker says: %s\n", j.value("message", "").c_str());
+      log_line("sidecar: broker says: %s\n", j.value("message", "").c_str());
     }
   });
 
@@ -693,12 +749,12 @@ int main(int argc, char** argv) {
     ::inet_pton(AF_INET, listen_host.c_str(), &addr.sin_addr);
     if (::bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         ::listen(lfd, 16) != 0) {
-      std::fprintf(stderr, "sidecar: cannot listen on %s\n", listen_addr.c_str());
+      log_line("sidecar: cannot listen on %s\n", listen_addr.c_str());
       tea_net_close(lfd);
       lfd = kTeaInvalidSocket;
       return;
     }
-    std::fprintf(stderr, "sidecar: listening on %s\n", listen_addr.c_str());
+    log_line("sidecar: listening on %s\n", listen_addr.c_str());
     std::thread([&]() {
       while (true) {
         tea_socket_t fd = ::accept(lfd, nullptr, nullptr);
@@ -708,7 +764,7 @@ int main(int argc, char** argv) {
         // until its own timeout expires.
         if (!tunnel_ready) {
           tea_net_close(fd);
-          std::fprintf(stderr, "sidecar: refusing a connection, the tunnel is not up yet\n");
+          log_line("sidecar: refusing a connection, the tunnel is not up yet\n");
           continue;
         }
         unsigned int id;
@@ -737,10 +793,10 @@ int main(int argc, char** argv) {
         backoff = 2;
         continue;
       }
-      std::fprintf(stderr, "sidecar: the signalling link is down, reconnecting...\n");
+      log_line("sidecar: the signalling link is down, reconnecting...\n");
       if (signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file)) {
         backoff = 2;
-        std::fprintf(stderr, "sidecar: reconnected to the broker\n");
+        log_line("sidecar: reconnected to the broker\n");
       } else {
         std::this_thread::sleep_for(std::chrono::seconds(backoff));
         backoff = backoff * 2 > 60 ? 60 : backoff * 2;
@@ -753,22 +809,27 @@ int main(int argc, char** argv) {
   // time, and giving up would leave a device with a dead tunnel and no
   // explanation. --wait-timeout makes it give up after N seconds (0 = never).
   std::thread([&]() {
-    const auto t0 = std::chrono::steady_clock::now();
+    // The countdown starts when the sidecar starts, and restarts every time
+    // the tunnel opens or closes.
+    waiting_since = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
     long long last_report = -60;
     while (true) {
       std::this_thread::sleep_for(std::chrono::seconds(5));
-      // Once a peer has been there, the tunnel is in use: the reconnect logic
-      // keeps it alive and the timeout no longer applies.
+      // While the tunnel is up the peer is there: nothing to wait for.
       if (!is_agent || tunnel_ready) continue;
-      const long long waited =
-          std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - t0).count();
+      const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+      const long long waited = (now - waiting_since.load()) / 1000;
       if (waited - last_report >= 60) {
         last_report = waited;
-        std::fprintf(stderr, "sidecar: still waiting for the peer in room \"%s\" (%llds)\n",
+        log_line("sidecar: still waiting for the peer in room \"%s\" (%llds)\n",
                      room.c_str(), waited);
       }
       if (wait_timeout > 0 && waited >= wait_timeout) {
-        std::fprintf(stderr, "sidecar: no peer after %llds, giving up\n",
+        log_line("sidecar: no peer after %llds, giving up\n",
                      static_cast<long long>(wait_timeout));
         std::fflush(stderr);
         // A clean exit: whoever started it (a systemd unit with
@@ -784,7 +845,7 @@ int main(int argc, char** argv) {
   if (!signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file)) return 1;
   setup_pc();
 
-  std::fprintf(stderr, "sidecar: %s side, room %s, broker %s:%u\n", role.c_str(), room.c_str(),
+  log_line("sidecar: %s side, room %s, broker %s:%u\n", role.c_str(), room.c_str(),
                broker_host.c_str(), broker_port);
 
   if (!is_agent) start_listener();  // the local proxy is up even before the tunnel
@@ -794,7 +855,7 @@ int main(int argc, char** argv) {
   // agent 侧打印房间和令牌（两边必须一致）。
   std::fprintf(stderr, "---------------------------------------------------------------\n");
   if (is_agent) {
-    std::fprintf(stderr, "sidecar: ready. Waiting in room \"%s\" for the other side.\n",
+    log_line("sidecar: ready. Waiting in room \"%s\" for the other side.\n",
                  room.c_str());
     std::fprintf(stderr, "  broker        : %s:%u\n", broker_host.c_str(), broker_port);
     std::fprintf(stderr, "  room token    : %s\n", token.c_str());
@@ -809,7 +870,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "  giving up in %d seconds if nobody connects.\n", wait_timeout);
     }
   } else {
-    std::fprintf(stderr, "sidecar: ready. To reach it from the outside:\n");
+    log_line("sidecar: ready. To reach it from the outside:\n");
     std::fprintf(stderr, "  add this to the settings.peers of the a2 that drives it:\n");
     std::fprintf(stderr, "      peers:\n");
     std::fprintf(stderr, "        %s:\n", room.c_str());
