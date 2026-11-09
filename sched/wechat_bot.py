@@ -93,6 +93,7 @@ MESSAGE_CHUNK = 1800
 MSG_TYPE_BOT = 2
 MSG_STATE_FINISH = 2
 ITEM_TEXT = 1
+ITEM_IMAGE = 2
 ITEM_FILE = 4
 # The media kinds. The item *number* is not documented on our side, so the
 # media of an incoming message is found by the key the item carries
@@ -102,6 +103,7 @@ MEDIA_ITEM_KEYS = ("file_item", "image_item", "video_item", "voice_item")
 # The magic bytes of the pictures we know.
 IMAGE_MAGIC = channel.IMAGE_MAGIC
 # The media_type the upload API wants for a plain file.
+MEDIA_IMAGE = 1
 MEDIA_FILE = 3
 # A file bigger than this is not worth sending (and WeChat may refuse it).
 MAX_FILE_BYTES = channel.MAX_FILE_BYTES
@@ -314,11 +316,11 @@ class ILink:
         return self._post("/ilink/bot/sendmessage", {"msg": msg, "base_info": self._base_info()}, token)
 
     # -- the media (the CDN) ----------------------------------------------
-    def get_upload_url(self, filekey, to_user_id, rawsize, rawfilemd5, filesize, aeskey, token):
+    def get_upload_url(self, filekey, to_user_id, rawsize, rawfilemd5, filesize, aeskey, token, media_type=MEDIA_FILE):
         """Ask the iLink server for a ticket to upload one file."""
         body = {
             "filekey": filekey,
-            "media_type": MEDIA_FILE,
+            "media_type": media_type,
             "to_user_id": to_user_id,
             "rawsize": rawsize,
             "rawfilemd5": rawfilemd5,
@@ -915,20 +917,29 @@ class WeChatBot(channel.TaskChannel):
             raise ILinkError("the file is too big to send (%d bytes)" % len(data))
         key = os.urandom(16)
         ciphertext = aes_encrypt(data, key)
+        picture = channel.looks_like_image(data)
         filekey = os.urandom(16).hex()
         info = self.ilink.get_upload_url(filekey, user_id, len(data),
                                          hashlib.md5(data).hexdigest(), len(ciphertext),
-                                         key.hex(), self.state.token)
+                                         key.hex(), self.state.token,
+                                         media_type=(MEDIA_IMAGE if picture else MEDIA_FILE))
         upload_param = (info or {}).get("upload_param")
         if not upload_param:
             raise ILinkError("getuploadurl did not return upload_param")
         param = self.ilink.upload_to_cdn(upload_param, filekey, ciphertext)
         media = {"encrypt_query_param": param, "aes_key": encode_aes_key(key),
                  "encrypt_type": 1}
-        item = {"type": ITEM_FILE,
-                "file_item": {"media": media,
-                              "file_name": name or os.path.basename(path),
-                              "len": str(len(data))}}
+        if picture:
+            item = {"type": ITEM_IMAGE,
+                    "image_item": {"media": media,
+                                  "file_name": name or os.path.basename(path),
+                                  "mid_size": len(ciphertext)}}
+        else:
+            item = {"type": ITEM_FILE,
+                    "file_item": {"media": media,
+                                  "file_name": name or os.path.basename(path),
+                                  "len": str(len(data))}}
+
         self.ilink.send_items(user_id, self.state.context_for(user_id), [item], self.state.token)
         return len(data)
 

@@ -345,6 +345,8 @@ tail -f ~/.tea_agent/logs/a2_wechat.log     # 这台机器 journald 是 Storage=
 | `/quota` | minimax 额度还剩多少 |
 | `/help` | 命令表 |
 
+**图片就是图片**（不是文件）：发出去的图片走 `type 2 / image_item`（上传时 `media_type=1`），对方手机上直接能看，不用下载再打开；收到的图片落在工作区的 `inbox/` 里，任务里用 `toolkit_load_image` 看。
+
 **文件能两个方向走。** 微信发的文件会落到工作区的 `inbox/` 里（`~/.tea_agent/wechat-workspace/inbox/`），
 随任务交给 agent；任务做完，产出的文件会作为**文件消息**发回微信（`/files <id>` 可以再要一次）。
 

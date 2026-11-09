@@ -557,6 +557,30 @@ def main():
                       (item.get("file_item") or {}).get("media", {}).get("aes_key", "")
                   ).hex() == key_hex, item)
 
+        # ---- a picture goes as a picture (item type 2) ------------------
+        picture = os.path.join(ws_path, "shot.png")
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+        with open(picture, "wb") as f:
+            f.write(png)
+        MockILink.sent = []
+        MockILink.upload_tickets = []
+        MockCDN.uploads = []
+        bot.send_file("u1", picture, "shot.png")
+        pic_msgs = [m for m in MockILink.sent
+                    if any(i.get("type") == 2 for i in (m["msg"].get("item_list") or []))]
+        check("a picture is sent as a picture", len(pic_msgs) == 1, MockILink.sent)
+        if pic_msgs:
+            pic_item = [i for i in pic_msgs[0]["msg"]["item_list"] if i.get("type") == 2][0]
+            info = pic_item.get("image_item") or {}
+            check("the picture carries an image_item", bool(info), pic_item)
+            check("the picture carries its size", bool(info.get("mid_size")), pic_item)
+        check("the picture upload asks for the image type",
+              bool(MockILink.upload_tickets)
+              and MockILink.upload_tickets[-1].get("media_type") == 1,
+              MockILink.upload_tickets)
+        check("the picture was uploaded to the CDN", len(MockCDN.uploads) == 1,
+              MockCDN.uploads)
+
         # ---- in: a file the user sends arrives in the workspace ---------
         incoming = "用户发来的内容\n".encode("utf-8")
         in_key = os.urandom(16)
@@ -589,6 +613,30 @@ def main():
             check("the task remembers the attachment",
                   (created[0][2].get("meta") or {}).get("attachments") == ["inbox/evil.sh"],
                   created[0][2].get("meta"))
+
+        # ---- in: a picture the user sends arrives as a picture -------------
+        pic_key = os.urandom(16)
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x11" * 30
+        MockCDN.files["download-pic"] = wechat_bot.aes_encrypt(png_bytes, pic_key)
+        raw_pic = {"message_type": 1, "from_user_id": "u1", "context_token": "ctx-1",
+                   "create_time_ms": int(time.time() * 1000),
+                   "item_list": [{"type": 2, "image_item": {
+                       "media": {"encrypt_query_param": "download-pic",
+                                 "aes_key": base64.b64encode(pic_key.hex().encode()).decode()},
+                       "len": str(len(png_bytes))}}]}
+        MockQueue.calls = []
+        answer = bot.handle_message(raw_pic, "", wechat_bot.media_of(raw_pic), "u1")
+        check("a picture the user sends is understood", "已收到文件" in answer, answer)
+        pics = [p for p in os.listdir(inbox) if p.lower().endswith(".png")]
+        check("the picture is on disk in the workspace", bool(pics), os.listdir(inbox))
+        if pics:
+            with open(os.path.join(inbox, pics[0]), "rb") as f:
+                check("the picture has the bytes the user sent", f.read() == png_bytes, pics[0])
+        created = [c for c in MockQueue.calls if c[0] == "POST" and c[1] == "/api/tasks"]
+        check("the picture becomes a task", len(created) == 1, MockQueue.calls)
+        if created:
+            prompt = created[0][2].get("prompt") or ""
+            check("the task is told to look at the picture", "图片" in prompt, prompt[:120])
 
         # ---- in: a task order the user sends ------------------------------
         order_text = ("title: 微信来的任务单\n"
