@@ -374,10 +374,11 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 
 **P1 的关键设计**（决定了 P2 不会推翻 P1）：
 
-- 隧道里跑的是**帧化的 HTTP**（`[u8 type][u32 len][payload]`），
-  外层是「数据通道」还是「broker 长连接」对上层透明。
-- 侧载在本机开一个 HTTP 代理口（`127.0.0.1:9931`），**a2 那边只当它是个普通 HTTP 服务器**——
-  和现在的 `peers:` 机制完全一致。
+- **隧道里跑的是原始 TCP 字节**（不是重新实现的 HTTP）：侧载在本机开一个代理口
+  （`127.0.0.1:9931`），外面进来的 TCP 连接被原样搬进隧道，内网侧再连到 a2 的 8383。
+  于是 **a2 那边只当它是个普通 HTTP 服务器**，`peers:` 机制零改动。
+  （数据通道内部是 `[u8 type][u32 len][payload]` 的分帧，用来区分
+  OPEN/DATA/CLOSE 和多条并发连接。）
 - **保活不能省**：ICE 的 keepalive 负责 NAT 映射，但**应用层的长空闲连接**（比如一次跑很久的 SSE）
   要自己决定超时策略，别默认 60 秒就断。
 
@@ -392,7 +393,42 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 
 ---
 
-## 十一、相关文档
+## 十一、已经跑通的（2026-11-09 实测）
+
+三个角色都写出来了，并在这三台真机上跑通：
+
+| 组件 | 源码 | 部署 |
+| --- | --- | --- |
+| **broker**（STUN + 信令 + TURN，一个进程） | `src/tunnel_broker.cpp` | VPS：`~/.tea_agent/tunnel/a2_broker`（用户级 systemd 单元 `a2_broker.service`） |
+| **侧载**（agent / client 两种角色） | `src/tunnel_sidecar.cpp` | 内网侧（zonekey）与外网侧各一份 |
+
+**实测路径**（客户侧是家用宽带出口 + 对称 NAT）：
+
+```
+外网侧载  39.65.223.83:127185  <->  VPS 103.232.92.54:114765   (RELAYED by the broker)
+内网侧载  36.112.70.164:80207  <->  VPS 103.232.92.54:114794   (RELAYED by the broker)
+```
+
+- 本机 `curl http://127.0.0.1:9931/api/health` → **拿到内网那台 a2 的健康**（经 VPS 中继）；
+- 2.7 MB 文件穿隧道传输正常（速度受**内网侧上行**限制，家用宽带约 38 KB/s）；
+- `peers:` 里加一条 `url: http://127.0.0.1:9931`，`toolkit_peer` 就能驱动内网那台 a2。
+
+**信令上有三个坑（都踩过）**：
+
+1. **offer 发出时对端还没进房** → broker 要么缓存，要么让新加入的一方主动
+   「要一个 offer」（`need-offer`），并且**每次对端到访只发一次 offer**（发两次，
+   对端的 answer 就对不上我们手里的描述了）。
+2. **answer 侧也会自动协商**：收到数据通道后客户端自己发 offer → 两边无限循环。
+   → answer 侧必须 `disableAutoNegotiation`。
+3. **offer/answer 的角色不能反**：a2 侧永远发 offer，客户端永远答；反了会报
+   `Incompatible roles with remote description`。
+
+**侧载必须静态链接**：zonekey 是 Ubuntu 20.04（glibc 2.31），动态链接的二进制根本起不来
+（`GLIBC_2.34 not found`）——和 a2 本体一样，**静态链接是硬要求**。
+
+---
+
+## 十二、相关文档
 
 | 文档 | 内容 |
 | --- | --- |
@@ -402,7 +438,7 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 
 ---
 
-## 十二、复现这次实测
+## 十三、复现这次实测
 
 ```bash
 # 下载依赖 → 静态构建 → 链接原型（不需要 root，不装任何东西）
