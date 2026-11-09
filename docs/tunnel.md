@@ -69,6 +69,22 @@
 | --- | --- | --- | --- |
 | **侧载 · 内网端**（`a2_tunnel --agent`） | 客户内网设备上，a2 旁边 | 主动外连；把内网 a2 的 HTTP 塞进隧道 | 不需要 |
 | **broker**（`a2_broker`） | 运维方或客户的公网机器（**VPS**） | **STUN 服务器 + 信令服务器 + TURN 中继**（一个进程） | 需要 |
+
+**broker 的端口怎么摆**：
+
+| 端口 | 协议 | 谁在用 | 说明 |
+| --- | --- | --- | --- |
+| **3478** | UDP | broker 自己 | STUN + TURN 中继。**必须是标准口**——ICE 就是靠它发现中继 |
+| **8382** | TCP | nginx stream | **信令的公网口（TLS）** |
+| 3479 | TCP | 仅本机 | broker 的明文信令口，**只绑 127.0.0.1**，外面碰不到 |
+
+信令里带着房间令牌，所以公网那一口**必须是 TLS**：nginx 的 stream 模块终结 TLS，
+后面转给 broker 的本机明文口（模板：`scripts/nginx-stream-tunnel.conf`）。
+
+> **端口号不是防线，TLS 才是。** 把 3479 换成 8382 确实避免了「和 STUN/TURN 的标准口
+> 挨太近、扫描器容易认出」这种噪音（3479 本来就是 TURN-over-TCP 的惯例口），
+> 但真正的防线是**令牌**：没有令牌，join 请求会被直接掐掉。
+> 而原方案真正的毛病是**信令走明文 TCP → 令牌在网上裸奔**——那个才是要修的。
 | **侧载 · 外网端**（`a2_tunnel --client`） | 运维同事的机器上 | 从隧道里取 HTTP，在本机开一个 `127.0.0.1:9931` 代理 | 不需要 |
 
 **broker 现在很轻**：P2P 打通时它只转发几百字节的 SDP/ICE 候选，
@@ -425,6 +441,20 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 
 **侧载必须静态链接**：zonekey 是 Ubuntu 20.04（glibc 2.31），动态链接的二进制根本起不来
 （`GLIBC_2.34 not found`）——和 a2 本体一样，**静态链接是硬要求**。
+
+**完整闭环（真机）**：外网的 a2 通过隧道驱动内网的 a2——
+
+```
+[chat zonekey @ http://127.0.0.1:9931] (3290ms, 0 tool call(s) on the peer)
+我运行在这台名为 zonekey 的 Ubuntu 20.04 机器上（主机名 zonekey，工作区根目录 /root）。
+```
+
+即：外网那台 a2 的 `peers:` 里写 `url: http://127.0.0.1:9931`，
+`toolkit_peer` 就把问题送进了内网那台 a2，它用**自己的**模型、**自己的**上下文回答。
+
+**信令走 TLS 之后还要注意**：OpenSSL 校验证书里的 **IP 地址**要用
+`X509_VERIFY_PARAM_set1_ip_asc()`，`set1_host()` 是给 DNS 名的——
+用错了会一直报 `certificate verify failed`。
 
 ---
 

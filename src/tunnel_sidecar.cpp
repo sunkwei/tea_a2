@@ -11,6 +11,11 @@
 //     a2_tunnel --role client --broker <host:port> --room <name> --token <secret> \
 //                --listen 127.0.0.1:9931
 //
+// The signalling carries the room token, so it should travel over TLS:
+//     --tls --ca-bundle <pem>      (the broker's certificate must be in it)
+// The usual arrangement is nginx terminating TLS on the public port and
+// proxying the plain stream to the broker on 127.0.0.1.
+//
 // What it does:
 //   * dials the broker over TCP and joins a room (the signalling);
 //   * negotiates a WebRTC data channel through the broker's STUN/TURN
@@ -33,6 +38,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <rtc/rtc.hpp>
 
 #include <nlohmann/json.hpp>
@@ -90,10 +97,78 @@ void split_hostport(const std::string& s, std::string& host, uint16_t& port) {
 }
 
 // ---- the signalling link to the broker -------------------------------------
+// A socket that may be wrapped in TLS. The token travels over this link, so
+// the TLS option is not decoration.
+class Link {
+ public:
+  ~Link() {
+    if (ssl_) {
+      SSL_shutdown(ssl_);
+      SSL_free(ssl_);
+    }
+    if (ctx_) SSL_CTX_free(ctx_);
+    if (fd_ >= 0) ::close(fd_);
+  }
+
+  bool wrap_tls(int fd, const std::string& host, const std::string& ca_file, std::string* err) {
+    fd_ = fd;
+    ctx_ = SSL_CTX_new(TLS_client_method());
+    if (!ctx_) {
+      *err = "cannot create the TLS context";
+      return false;
+    }
+    SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
+    SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
+    if (!ca_file.empty() && SSL_CTX_load_verify_locations(ctx_, ca_file.c_str(), nullptr) != 1) {
+      *err = "cannot read the CA bundle '" + ca_file + "'";
+      return false;
+    }
+    ssl_ = SSL_new(ctx_);
+    if (!ssl_) {
+      *err = "cannot create the TLS session";
+      return false;
+    }
+    SSL_set_fd(ssl_, fd_);
+    SSL_set_tlsext_host_name(ssl_, host.c_str());
+    X509_VERIFY_PARAM* param = SSL_get0_param(ssl_);
+    // An IP address has to be checked against the certificate's iPAddress
+    // SANs; set1_host() only looks at DNS names and would fail every time.
+    unsigned char ipbuf[16];
+    if (::inet_pton(AF_INET, host.c_str(), ipbuf) == 1) {
+      X509_VERIFY_PARAM_set1_ip_asc(param, host.c_str());
+    } else {
+      X509_VERIFY_PARAM_set1_host(param, host.c_str(), 0);
+    }
+    if (SSL_connect(ssl_) != 1) {
+      *err = "the TLS handshake failed: " + std::string(ERR_reason_error_string(ERR_get_error()));
+      return false;
+    }
+    return true;
+  }
+
+  void set_plain(int fd) { fd_ = fd; }
+
+  ssize_t read(char* buf, size_t len) {
+    if (ssl_) return SSL_read(ssl_, buf, static_cast<int>(len));
+    return ::recv(fd_, buf, len, 0);
+  }
+
+  ssize_t write(const char* buf, size_t len) {
+    if (ssl_) return SSL_write(ssl_, buf, static_cast<int>(len));
+    return ::send(fd_, buf, len, MSG_NOSIGNAL);
+  }
+
+ private:
+  int fd_ = -1;
+  SSL_CTX* ctx_ = nullptr;
+  SSL* ssl_ = nullptr;
+};
+
 class Signal {
  public:
   bool connect_to(const std::string& host, uint16_t port, const std::string& room,
-                   const std::string& token, const std::string& role) {
+                   const std::string& token, const std::string& role, bool use_tls,
+                   const std::string& ca_file) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
     sockaddr_in addr{};
@@ -109,7 +184,14 @@ class Signal {
       ::close(fd);
       return false;
     }
-    fd_ = fd;
+    link_.set_plain(fd);
+    if (use_tls) {
+      std::string err;
+      if (!link_.wrap_tls(fd, host, ca_file, &err)) {
+        std::fprintf(stderr, "sidecar: %s\n", err.c_str());
+        return false;
+      }
+    }
     json join;
     join["room"] = room;
     join["token"] = token;
@@ -122,7 +204,7 @@ class Signal {
   void send_line(const json& j) {
     std::string line = j.dump() + "\n";
     std::lock_guard<std::mutex> lock(out_);
-    if (fd_ >= 0) ::send(fd_, line.data(), line.size(), MSG_NOSIGNAL);
+    link_.write(line.data(), line.size());
   }
 
   void on_message(std::function<void(const json&)> cb) { on_message_ = std::move(cb); }
@@ -132,7 +214,7 @@ class Signal {
     std::string buf;
     char chunk[4096];
     while (true) {
-      ssize_t n = ::recv(fd_, chunk, sizeof(chunk), 0);
+      ssize_t n = link_.read(chunk, sizeof(chunk));
       if (n <= 0) break;
       buf.append(chunk, static_cast<size_t>(n));
       size_t pos;
@@ -149,7 +231,7 @@ class Signal {
     std::fprintf(stderr, "sidecar: the signalling link closed\n");
   }
 
-  int fd_ = -1;
+  Link link_;
   std::mutex out_;
   std::function<void(const json&)> on_message_;
 };
@@ -189,6 +271,8 @@ int main(int argc, char** argv) {
   uint16_t turn_port = 3478;
   std::string turn_user = "a2";
   std::string turn_pass;
+  std::string ca_file;
+  bool use_tls = false;
   bool verbose = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -210,12 +294,15 @@ int main(int argc, char** argv) {
       split_hostport(hp, turn_host, turn_port);
     } else if (a == "--turn-user") turn_user = next();
     else if (a == "--turn-pass") turn_pass = next();
+    else if (a == "--ca-bundle") ca_file = next();
+    else if (a == "--tls") use_tls = true;
     else if (a == "--verbose") verbose = true;
     else if (a == "--help" || a == "-h") {
       std::printf(
           "a2_tunnel --role agent|client --broker <host:port> --room <name> --token <secret>\n"
           "          [--listen 127.0.0.1:9931] [--target 127.0.0.1:8383]\n"
-          "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n");
+          "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
+          "          [--tls --ca-bundle <pem>]\n");
       return 0;
     }
   }
@@ -541,7 +628,7 @@ int main(int argc, char** argv) {
   // The peer connection is built **after** the signalling link is up: the
   // offer is produced the moment the channel is created, and an offer
   // produced before the link exists is a message nobody receives.
-  if (!signal.connect_to(broker_host, broker_port, room, token, role)) return 1;
+  if (!signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file)) return 1;
   setup_pc();
   std::fprintf(stderr, "sidecar: %s side, room %s, broker %s:%u\n", role.c_str(), room.c_str(),
                broker_host.c_str(), broker_port);

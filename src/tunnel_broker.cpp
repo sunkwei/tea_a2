@@ -187,15 +187,21 @@ bool start_stun_turn(uint16_t port, const std::string& realm, const std::string&
 }
 
 // ---- the signalling server -------------------------------------------------
-int listen_tcp(uint16_t port) {
+int listen_tcp(uint16_t port, const std::string& bind_addr) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) return -1;
   int one = 1;
   ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
   addr.sin_port = htons(port);
+  if (bind_addr.empty() || bind_addr == "0.0.0.0") {
+    addr.sin_addr.s_addr = INADDR_ANY;
+  } else if (::inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
+    std::fprintf(stderr, "broker: bad bind address %s\n", bind_addr.c_str());
+    ::close(fd);
+    return -1;
+  }
   if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
     ::close(fd);
     return -1;
@@ -211,7 +217,8 @@ int listen_tcp(uint16_t port) {
 
 int main(int argc, char** argv) {
   uint16_t stun_port = 3478;
-  uint16_t signal_port = 3479;
+  uint16_t signal_port = 3479;   // internal; nginx fronts it on the public port
+  std::string signal_bind = "127.0.0.1";
   uint16_t relay_begin = 49160;
   uint16_t relay_end = 49260;
   std::string realm = "a2";
@@ -224,6 +231,7 @@ int main(int argc, char** argv) {
     auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string(); };
     if (a == "--stun-port") stun_port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--signal-port") signal_port = static_cast<uint16_t>(std::stoi(next()));
+    else if (a == "--signal-bind") signal_bind = next();
     else if (a == "--relay-begin") relay_begin = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--relay-end") relay_end = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--realm") realm = next();
@@ -232,8 +240,8 @@ int main(int argc, char** argv) {
     else if (a == "--token") token = next();
     else if (a == "--help" || a == "-h") {
       std::printf(
-          "a2_broker --stun-port 3478 --signal-port 3479 --realm a2 \\\n"
-          "          --turn-user a2 --turn-pass <secret> --token <secret>\n");
+          "a2_broker --stun-port 3478 --signal-port 8382 --signal-bind 127.0.0.1 \\\n"
+          "          --realm a2 --turn-user a2 --turn-pass <secret> --token <secret>\n");
       return 0;
     }
   }
@@ -245,12 +253,12 @@ int main(int argc, char** argv) {
 
   if (!start_stun_turn(stun_port, realm, turn_user, turn_pass, relay_begin, relay_end)) return 1;
 
-  int lfd = listen_tcp(signal_port);
+  int lfd = listen_tcp(signal_port, signal_bind);
   if (lfd < 0) {
     std::fprintf(stderr, "broker: cannot listen on tcp/%u\n", signal_port);
     return 1;
   }
-  std::printf("broker: signalling on tcp/%u\n", signal_port);
+  std::printf("broker: signalling on tcp/%u (bound to %s)\n", signal_port, signal_bind.c_str());
   std::fflush(stdout);
 
   while (true) {
