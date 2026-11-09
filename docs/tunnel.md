@@ -405,6 +405,8 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 - **SSE 长连接穿过隧道**：a2 的对话是 SSE（chunked）。隧道必须**按字节流转发、不要缓冲**——
   数据通道天然是消息边界，仍然按 HTTP 的分块语义处理。
 - **macOS**：没交叉编译（本机没有 macOS 工具链）。libdatachannel 支持 macOS，但 a2 的 macOS 构建线本来也不是重点。
+- **Windows 侧载的真机实跑**：Windows 版**已经能编出来**（`a2_tunnel.exe`，自包含、只依赖系统
+  DLL），但还没在 Windows 机器上真的连过一次隧道——这是下一步。
 - **同一台 a2 同时被多个侧载连**：连接复用、并发、限流，都还没设计。
 
 ---
@@ -456,9 +458,87 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 `X509_VERIFY_PARAM_set1_ip_asc()`，`set1_host()` 是给 DNS 名的——
 用错了会一直报 `certificate verify failed`。
 
+### 按需启动：现场人员配合的流程
+
+内网设备上**不需要常驻**一个侧载。默认 `--wait-timeout 300`（**5 分钟**）：
+侧载起来后如果 5 分钟内没有对端连进来，就自己干净退出（退出码 0，
+所以 `Restart=on-failure` 的单元不会把它当成崩溃而反复重启）。
+
+于是流程是：
+
+1. 运维那边需要访问内网设备 → **通过别的渠道（电话/微信）通知现场人员**；
+2. 现场人员启动侧载 → 它打印「怎么连」的**完整命令**，转给运维；
+3. 运维那边启动 client 侧（或者把它贴进自己 a2 的 `settings.peers`）→ 隧道建立；
+4. 用完各自断开即可。
+
+agent 侧启动后打印的东西（可以直接转给运维）：
+
+```
+sidecar: ready. Waiting in room "plant-a" for the other side.
+  broker        : 103.232.92.54:8382
+  room token    : BsF3kkRMK8DoRpj7WCqFkRH2XYHa3r
+  target        : 127.0.0.1:8383
+  give this to whoever connects from the outside:
+      a2_tunnel --role client --broker 103.232.92.54:8382 --tls --ca-bundle <the broker's ca.pem> --room plant-a --token BsF3kkRMK8DoRpj7WCqFkRH2XYHa3r
+  (it will listen locally and be reachable through the tunnel)
+  giving up in 300 seconds if nobody connects.
+```
+
+### 空闲的连接不会被自己掐掉
+
+「浏览器开着、连接建好了、很久没有数据」——这种连接**必须一直活着**，
+只有两侧有一方明确断开才算结束。隧道这一侧的三重保活：
+
+| 层 | 谁在管 | 多久一次 |
+| --- | --- | --- |
+| ICE（consent freshness） | libjuice | 几秒一次探测，路径不通才断 |
+| TURN 租期与权限 | libjuice 自动续 | 租期 10 分钟、权限 5 分钟，都按一半时间提前续 |
+| SCTP 关联心跳 | usrsctp | 双方互相应答，关联不会自己老死 |
+
+所以**空闲不会导致断开**；断开只来自：对方进程退出、隧道两端有一方主动关、
+或者链路真的断了（ICE 探测不到对端——那是真断了，该断）。
+
+> ⚠️ 反过来要注意的是**a2 自己那侧的超时**：`toolkit_peer` 的连接超时是 10 秒、
+  读超时 60 秒（聊天按工具的超时算）。隧道再稳，a2 也不会拿着一条连接永远不放——
+> 那是 a2 的预算，不是隧道断链。
+
 ---
 
-## 十二、相关文档
+## 十二、怎么编
+
+隧道那两个二进制用**自己的一套 CMake 工程**（`tunnel/`）编，原因是 libdatachannel
+要 mbedTLS 3.x，而 a2 本体用的是 vendored 的 2.28 LTS——两份 mbedtls 的 target
+同名（`mbedtls` / `mbedx509` / `mbedcrypto`），放进一个工程里 CMake 会直接报错。
+细节见 [`3rd/README.md`](../3rd/README.md)。
+
+主工程会顺带把它编出来（用的是**目标**工具链，交叉编译同理）：
+
+```bash
+cmake --preset posix && cmake --build build -j8
+#   → build/bin/a2_broker  build/bin/a2_tunnel
+
+cmake --preset win64-mingw-cross && cmake --build build-win64 -j8
+#   → build-win64/bin/a2_broker.exe  build-win64/bin/a2_tunnel.exe
+```
+
+| 二进制 | 作用 | 链接 |
+| --- | --- | --- |
+| `a2_broker` | 公网 broker（STUN + TURN 中继 + 信令） | 静态（Linux/macOS） |
+| `a2_tunnel` | 侧载（agent / client 两种角色） | 静态（Linux/macOS） |
+
+- **Windows 的 .exe 是自包含的**：只依赖系统 DLL（KERNEL32 / WS2_32 / msvcrt /
+  advapi32 / bcrypt），和 a2 本体一个待遇——不需要在目标机器上装
+  libstdc++-6.dll 那一套。
+- **信令的 TLS 客户端用的是 mbedTLS**（和仓库其它地方同一套栈），所以侧载
+  **不需要 OpenSSL**，整个二进制只有 libc + pthread。
+- ⚠️ **Linux 的静态版不做 DNS 解析**：glibc 的 NSS 在动态库里，`-static` 的
+  程序调不了 `getaddrinfo`。侧载只用 IP，所以不影响；但静态版也会丢掉
+  **host 候选**（srflx 和中继候选还在）。需要域名或 host 候选就
+  `-DTEA_TUNNEL_STATIC_LIBC=OFF`。
+
+---
+
+## 十三、相关文档
 
 | 文档 | 内容 |
 | --- | --- |
@@ -468,7 +548,7 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 
 ---
 
-## 十三、复现这次实测
+## 十四、复现这次实测
 
 ```bash
 # 下载依赖 → 静态构建 → 链接原型（不需要 root，不装任何东西）

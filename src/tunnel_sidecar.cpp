@@ -16,14 +16,20 @@
 // The usual arrangement is nginx terminating TLS on the public port and
 // proxying the plain stream to the broker on 127.0.0.1.
 //
-// What it does:
-//   * dials the broker over TCP and joins a room (the signalling);
-//   * negotiates a WebRTC data channel through the broker's STUN/TURN
-//     (ICE picks the direct path when it can punch, the relay otherwise);
-//   * the client side listens on --listen and forwards every accepted TCP
-//     connection into the tunnel; the agent side dials --target and pipes.
+// ## Waiting and timeouts
 //
-// The bytes inside the tunnel are raw TCP: the client side is a plain TCP
+//   * The agent side waits for the other side **forever** (--wait-timeout 0,
+//     the default): the peer may show up at any time, and giving up would
+//     leave a device with a dead tunnel and no explanation. It says so every
+//     minute, and reconnects to the broker by itself if the link drops.
+//   * The client side opens its local port right away, but **refuses**
+//     connections while the tunnel is not up (a caller gets an immediate
+//     error instead of hanging until its own timeout).
+//   * The a2 on the other end has its own budget: the peer tool connects with
+//     a 10s timeout and reads with 60s, so a dead tunnel shows up as an error
+//     there, not as a hang.
+//
+// What is inside the tunnel: raw TCP bytes. The client side is a plain TCP
 // proxy, so an existing `peers:` entry (url: http://127.0.0.1:9931) works
 // against it without changing anything.
 //
@@ -32,20 +38,19 @@
 //   2 DATA  payload: u32 connection id + bytes
 //   3 CLOSE payload: u32 connection id
 //
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-#include <openssl/err.h>
-#include <openssl/ssl.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/error.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
 #include <rtc/rtc.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -55,6 +60,8 @@
 #include <vector>
 
 using json = nlohmann::json;
+
+#include "tunnel_net.h"
 
 namespace {
 
@@ -99,69 +106,118 @@ void split_hostport(const std::string& s, std::string& host, uint16_t& port) {
 // ---- the signalling link to the broker -------------------------------------
 // A socket that may be wrapped in TLS. The token travels over this link, so
 // the TLS option is not decoration.
+//
+// The TLS client is mbedTLS (the same stack the rest of the project uses), so
+// the sidecar needs nothing from the system: one file, no OpenSSL, no runtime
+// dependency - it can be dropped onto a device that has nothing but libc.
 class Link {
  public:
   ~Link() {
-    if (ssl_) {
-      SSL_shutdown(ssl_);
-      SSL_free(ssl_);
+    if (tls_) {
+      mbedtls_ssl_free(&ssl_);
+      mbedtls_ssl_config_free(&conf_);
+      mbedtls_x509_crt_free(&ca_);
+      mbedtls_ctr_drbg_free(&drbg_);
+      mbedtls_entropy_free(&entropy_);
     }
-    if (ctx_) SSL_CTX_free(ctx_);
-    if (fd_ >= 0) ::close(fd_);
+    if (use_net_) {
+      mbedtls_net_free(&net_);
+    } else if (fd_ != kTeaInvalidSocket) {
+      tea_net_close(fd_);
+    }
   }
 
-  bool wrap_tls(int fd, const std::string& host, const std::string& ca_file, std::string* err) {
-    fd_ = fd;
-    ctx_ = SSL_CTX_new(TLS_client_method());
-    if (!ctx_) {
-      *err = "cannot create the TLS context";
+  /// Plain TCP: the socket is already connected.
+  void set_plain(tea_socket_t fd) { fd_ = fd; }
+
+  /// TLS: mbedTLS does the connecting (it owns the socket afterwards).
+  bool connect_tls(const std::string& host, uint16_t port, const std::string& ca_file,
+                    std::string* err) {
+    mbedtls_ssl_init(&ssl_);
+    mbedtls_ssl_config_init(&conf_);
+    mbedtls_x509_crt_init(&ca_);
+    if (!ca_file.empty()) {
+      if (mbedtls_x509_crt_parse_file(&ca_, ca_file.c_str()) != 0) {
+        *err = "cannot read the CA bundle '" + ca_file + "'";
+        return false;
+      }
+      mbedtls_ssl_conf_ca_chain(&conf_, &ca_, nullptr);
+    }
+    mbedtls_ssl_config_defaults(&conf_, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+                                MBEDTLS_SSL_PRESET_DEFAULT);
+    // mbedTLS 3.x has no implicit RNG: the entropy source and the DRBG have
+    // to be handed to the configuration explicitly.
+    mbedtls_entropy_init(&entropy_);
+    mbedtls_ctr_drbg_init(&drbg_);
+    mbedtls_ctr_drbg_seed(&drbg_, mbedtls_entropy_func, &entropy_, nullptr, 0);
+    mbedtls_ssl_conf_rng(&conf_, mbedtls_ctr_drbg_random, &drbg_);
+    // mbedTLS 3.x: the verification callback comes second, and "required" is
+    // a separate call (mbedtls_ssl_conf_authmode).
+    mbedtls_ssl_conf_verify(&conf_, nullptr, nullptr);
+    mbedtls_ssl_conf_authmode(&conf_, ca_file.empty() ? MBEDTLS_SSL_VERIFY_NONE
+                                                       : MBEDTLS_SSL_VERIFY_REQUIRED);
+
+    mbedtls_net_init(&net_);
+    char port_str[16];
+    std::snprintf(port_str, sizeof(port_str), "%u", static_cast<unsigned>(port));
+    const int rc = mbedtls_net_connect(&net_, host.c_str(), port_str, IPPROTO_TCP);
+    if (rc < 0) {
+      char buf[160];
+      mbedtls_strerror(rc, buf, sizeof(buf));
+      *err = "cannot connect to " + host + ":" + port_str + ": " + buf;
+      mbedtls_net_free(&net_);
       return false;
     }
-    SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
-    SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
-    if (!ca_file.empty() && SSL_CTX_load_verify_locations(ctx_, ca_file.c_str(), nullptr) != 1) {
-      *err = "cannot read the CA bundle '" + ca_file + "'";
+    use_net_ = true;
+    // set_hostname is both the SNI and the name the certificate is checked
+    // against. mbedTLS compares an IP literal against the certificate's
+    // iPAddress SANs, so the same call works for "broker.example" and
+    // "203.0.113.7".
+    // mbedTLS 3.x needs the configuration applied before the handshake.
+    const int setup = mbedtls_ssl_setup(&ssl_, &conf_);
+    if (setup != 0) {
+      char buf[160];
+      mbedtls_strerror(setup, buf, sizeof(buf));
+      *err = "cannot set up the TLS session: " + std::string(buf);
       return false;
     }
-    ssl_ = SSL_new(ctx_);
-    if (!ssl_) {
-      *err = "cannot create the TLS session";
+    mbedtls_ssl_set_hostname(&ssl_, host.c_str());
+    mbedtls_ssl_set_bio(&ssl_, &net_, mbedtls_net_send, mbedtls_net_recv, mbedtls_net_recv_timeout);
+
+    const int hs = mbedtls_ssl_handshake(&ssl_);
+    if (hs != 0) {
+      char buf[160];
+      mbedtls_strerror(hs, buf, sizeof(buf));
+      *err = "the TLS handshake failed: " + std::string(buf);
       return false;
     }
-    SSL_set_fd(ssl_, fd_);
-    SSL_set_tlsext_host_name(ssl_, host.c_str());
-    X509_VERIFY_PARAM* param = SSL_get0_param(ssl_);
-    // An IP address has to be checked against the certificate's iPAddress
-    // SANs; set1_host() only looks at DNS names and would fail every time.
-    unsigned char ipbuf[16];
-    if (::inet_pton(AF_INET, host.c_str(), ipbuf) == 1) {
-      X509_VERIFY_PARAM_set1_ip_asc(param, host.c_str());
-    } else {
-      X509_VERIFY_PARAM_set1_host(param, host.c_str(), 0);
-    }
-    if (SSL_connect(ssl_) != 1) {
-      *err = "the TLS handshake failed: " + std::string(ERR_reason_error_string(ERR_get_error()));
-      return false;
-    }
+    tls_ = true;
     return true;
   }
 
-  void set_plain(int fd) { fd_ = fd; }
-
   ssize_t read(char* buf, size_t len) {
-    if (ssl_) return SSL_read(ssl_, buf, static_cast<int>(len));
-    return ::recv(fd_, buf, len, 0);
+    if (tls_) return mbedtls_ssl_read(&ssl_, reinterpret_cast<unsigned char*>(buf), len);
+    return ::recv(fd_, buf, static_cast<int>(len), 0);
   }
 
   ssize_t write(const char* buf, size_t len) {
-    if (ssl_) return SSL_write(ssl_, buf, static_cast<int>(len));
-    return ::send(fd_, buf, len, MSG_NOSIGNAL);
+    if (tls_) {
+      const int rc = mbedtls_ssl_write(&ssl_, reinterpret_cast<const unsigned char*>(buf), len);
+      return rc < 0 ? -1 : rc;
+    }
+    return ::send(fd_, buf, static_cast<int>(len), kTeaNoSignal);
   }
 
  private:
-  int fd_ = -1;
-  SSL_CTX* ctx_ = nullptr;
-  SSL* ssl_ = nullptr;
+  tea_socket_t fd_ = kTeaInvalidSocket;
+  bool tls_ = false;
+  bool use_net_ = false;
+  mbedtls_net_context net_{};
+  mbedtls_ssl_context ssl_{};
+  mbedtls_ssl_config conf_{};
+  mbedtls_x509_crt ca_{};
+  mbedtls_entropy_context entropy_{};
+  mbedtls_ctr_drbg_context drbg_{};
 };
 
 class Signal {
@@ -169,34 +225,39 @@ class Signal {
   bool connect_to(const std::string& host, uint16_t port, const std::string& room,
                    const std::string& token, const std::string& role, bool use_tls,
                    const std::string& ca_file) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return false;
+    tea_net_init();
+    tea_socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == kTeaInvalidSocket) return false;
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
       std::fprintf(stderr, "sidecar: bad broker address %s\n", host.c_str());
-      ::close(fd);
+      tea_net_close(fd);
       return false;
     }
-    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-      std::fprintf(stderr, "sidecar: cannot reach the broker %s:%u\n", host.c_str(), port);
-      ::close(fd);
-      return false;
-    }
-    link_.set_plain(fd);
     if (use_tls) {
+      // mbedTLS does the connecting itself (it owns the socket afterwards).
+      tea_net_close(fd);
       std::string err;
-      if (!link_.wrap_tls(fd, host, ca_file, &err)) {
+      if (!link_.connect_tls(host, port, ca_file, &err)) {
         std::fprintf(stderr, "sidecar: %s\n", err.c_str());
         return false;
       }
+    } else {
+      if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        std::fprintf(stderr, "sidecar: cannot reach the broker %s:%u\n", host.c_str(), port);
+        tea_net_close(fd);
+        return false;
+      }
+      link_.set_plain(fd);
     }
     json join;
     join["room"] = room;
     join["token"] = token;
     join["role"] = role;
     send_line(join);
+    alive_ = true;
     std::thread([this] { reader(); }).detach();
     return true;
   }
@@ -208,6 +269,8 @@ class Signal {
   }
 
   void on_message(std::function<void(const json&)> cb) { on_message_ = std::move(cb); }
+  void on_closed(std::function<void()> cb) { on_closed_ = std::move(cb); }
+  bool alive() const { return alive_; }
 
  private:
   void reader() {
@@ -228,30 +291,34 @@ class Signal {
         }
       }
     }
+    alive_ = false;
     std::fprintf(stderr, "sidecar: the signalling link closed\n");
+    if (on_closed_) on_closed_();
   }
 
   Link link_;
+  std::atomic<bool> alive_{false};
   std::mutex out_;
   std::function<void(const json&)> on_message_;
+  std::function<void()> on_closed_;
 };
 
 int dial_tcp(const std::string& host, uint16_t port) {
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
+  tea_net_init();
+  tea_socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd == kTeaInvalidSocket) return -1;
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
   if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-    ::close(fd);
+    tea_net_close(fd);
     return -1;
   }
   if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    ::close(fd);
+    tea_net_close(fd);
     return -1;
   }
-  int one = 1;
-  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  tea_net_set_nodelay(fd);
   return fd;
 }
 
@@ -274,6 +341,10 @@ int main(int argc, char** argv) {
   std::string ca_file;
   bool use_tls = false;
   bool verbose = false;
+  // How long to wait for the peer before giving up. The sidecar is meant to be
+  // started on demand (the field staff starts it when access is needed), so
+  // the default is five minutes, not "forever".
+  int wait_timeout = 300;  // seconds; 0 = wait forever
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -295,6 +366,7 @@ int main(int argc, char** argv) {
     } else if (a == "--turn-user") turn_user = next();
     else if (a == "--turn-pass") turn_pass = next();
     else if (a == "--ca-bundle") ca_file = next();
+    else if (a == "--wait-timeout") wait_timeout = std::atoi(next().c_str());
     else if (a == "--tls") use_tls = true;
     else if (a == "--verbose") verbose = true;
     else if (a == "--help" || a == "-h") {
@@ -302,7 +374,10 @@ int main(int argc, char** argv) {
           "a2_tunnel --role agent|client --broker <host:port> --room <name> --token <secret>\n"
           "          [--listen 127.0.0.1:9931] [--target 127.0.0.1:8383]\n"
           "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
-          "          [--tls --ca-bundle <pem>]\n");
+          "          [--tls --ca-bundle <pem>] [--wait-timeout <seconds>]\n"
+          "\n"
+          "  --wait-timeout  how long the agent side waits for the peer before giving\n"
+          "                  up (default 300 seconds; 0 = wait forever)\n");
       return 0;
     }
   }
@@ -331,6 +406,7 @@ int main(int argc, char** argv) {
   std::map<unsigned int, int> conns;   // connection id -> socket
   unsigned int next_conn = 1;
   std::atomic<bool> remote_ready{false};
+  std::atomic<bool> tunnel_ready{false};   // the data channel is open
   std::vector<std::string> pending_candidates;
   std::vector<std::string> local_candidates;
   std::string local_description;
@@ -378,22 +454,38 @@ int main(int argc, char** argv) {
   auto attach_channel = [&](std::shared_ptr<rtc::DataChannel> channel) {
     dc = channel;
     channel->onOpen([&] {
+      tunnel_ready = true;
       std::fprintf(stderr, "sidecar: the data channel is open (%s)\n", role.c_str());
       try {
         rtc::Candidate local, remote;
         if (pc && pc->getSelectedCandidatePair(&local, &remote)) {
           const std::string la = local.address().value_or("?");
           const std::string ra = remote.address().value_or("?");
-          std::fprintf(stderr, "sidecar:   path: local %s:%d <-> remote %s:%d (%s)\n", la.c_str(),
-                       local.port(), ra.c_str(), remote.port(),
-                       remote.type() == rtc::Candidate::Type::Relayed
-                           ? "RELAYED by the broker"
-                           : "direct");
+          auto kind = [](rtc::Candidate::Type t) {
+            switch (t) {
+            case rtc::Candidate::Type::Host: return "host";
+            case rtc::Candidate::Type::ServerReflexive: return "srflx";
+            case rtc::Candidate::Type::PeerReflexive: return "prflx";
+            case rtc::Candidate::Type::Relayed: return "relayed";
+            default: return "unknown";
+            }
+          };
+          const bool via_broker =
+              local.type() == rtc::Candidate::Type::Relayed ||
+              remote.type() == rtc::Candidate::Type::Relayed;
+          std::fprintf(stderr, "sidecar:   path: local %s:%d (%s) <-> remote %s:%d (%s) - %s\n",
+                       la.c_str(), local.port(), kind(local.type()), ra.c_str(), remote.port(),
+                       kind(remote.type()),
+                       via_broker ? "through the broker" : "direct (no relay)");
         }
       } catch (const std::exception& e) {
         std::fprintf(stderr, "sidecar:   (cannot read the selected pair: %s)\n", e.what());
       }
       if (!is_agent) start_listener();
+    });
+    channel->onClosed([&] {
+      tunnel_ready = false;
+      std::fprintf(stderr, "sidecar: the data channel closed (%s)\n", role.c_str());
     });
     channel->onMessage([&](std::variant<rtc::binary, std::string> msg) {
       if (!std::holds_alternative<rtc::binary>(msg)) return;
@@ -430,7 +522,7 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lock(mu);
         auto it = conns.find(id);
         if (it == conns.end()) return;
-        const ssize_t n = ::send(it->second, payload + 4, len - 4, MSG_NOSIGNAL);
+        const ssize_t n = ::send(it->second, payload + 4, static_cast<int>(len - 4), kTeaNoSignal);
         (void)n;
         return;
       }
@@ -441,7 +533,7 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lock(mu);
         auto it = conns.find(id);
         if (it == conns.end()) return;
-        ::close(it->second);
+        tea_net_close(it->second);
         conns.erase(it);
       }
     });
@@ -592,9 +684,9 @@ int main(int argc, char** argv) {
     if (lfd >= 0) return;
     split_hostport(listen_addr, listen_host, listen_port);
     lfd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) return;
+    if (lfd == kTeaInvalidSocket) return;
     int one = 1;
-    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(listen_port);
@@ -602,15 +694,23 @@ int main(int argc, char** argv) {
     if (::bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         ::listen(lfd, 16) != 0) {
       std::fprintf(stderr, "sidecar: cannot listen on %s\n", listen_addr.c_str());
-      ::close(lfd);
-      lfd = -1;
+      tea_net_close(lfd);
+      lfd = kTeaInvalidSocket;
       return;
     }
     std::fprintf(stderr, "sidecar: listening on %s\n", listen_addr.c_str());
     std::thread([&]() {
       while (true) {
-        int fd = ::accept(lfd, nullptr, nullptr);
-        if (fd < 0) continue;
+        tea_socket_t fd = ::accept(lfd, nullptr, nullptr);
+        if (fd == kTeaInvalidSocket) continue;
+        // Without a tunnel there is nothing to forward to. Refuse the
+        // connection instead of accepting it and letting the caller hang
+        // until its own timeout expires.
+        if (!tunnel_ready) {
+          tea_net_close(fd);
+          std::fprintf(stderr, "sidecar: refusing a connection, the tunnel is not up yet\n");
+          continue;
+        }
         unsigned int id;
         {
           std::lock_guard<std::mutex> lock(mu);
@@ -625,11 +725,65 @@ int main(int argc, char** argv) {
     }).detach();
   };
 
+  // ---- keep the signalling alive ------------------------------------------
+  // A dropped link (the broker restarted, the network blinked) must not leave
+  // the sidecar sitting there with a dead tunnel: reconnect, re-join the room
+  // and let the room logic renegotiate.
+  std::thread([&]() {
+    int backoff = 2;
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      if (signal.alive()) {
+        backoff = 2;
+        continue;
+      }
+      std::fprintf(stderr, "sidecar: the signalling link is down, reconnecting...\n");
+      if (signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file)) {
+        backoff = 2;
+        std::fprintf(stderr, "sidecar: reconnected to the broker\n");
+      } else {
+        std::this_thread::sleep_for(std::chrono::seconds(backoff));
+        backoff = backoff * 2 > 60 ? 60 : backoff * 2;
+      }
+    }
+  }).detach();
+
+  // ---- how long do we wait for the peer? ---------------------------------
+  // The agent side waits forever by default: the peer may show up at any
+  // time, and giving up would leave a device with a dead tunnel and no
+  // explanation. --wait-timeout makes it give up after N seconds (0 = never).
+  std::thread([&]() {
+    const auto t0 = std::chrono::steady_clock::now();
+    long long last_report = -60;
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+      // Once a peer has been there, the tunnel is in use: the reconnect logic
+      // keeps it alive and the timeout no longer applies.
+      if (!is_agent || tunnel_ready) continue;
+      const long long waited =
+          std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - t0).count();
+      if (waited - last_report >= 60) {
+        last_report = waited;
+        std::fprintf(stderr, "sidecar: still waiting for the peer in room \"%s\" (%llds)\n",
+                     room.c_str(), waited);
+      }
+      if (wait_timeout > 0 && waited >= wait_timeout) {
+        std::fprintf(stderr, "sidecar: no peer after %llds, giving up\n",
+                     static_cast<long long>(wait_timeout));
+        std::fflush(stderr);
+        // A clean exit: whoever started it (a systemd unit with
+        // Restart=on-failure) should not treat this as a crash.
+        std::_Exit(0);
+      }
+    }
+  }).detach();
+
   // The peer connection is built **after** the signalling link is up: the
   // offer is produced the moment the channel is created, and an offer
   // produced before the link exists is a message nobody receives.
   if (!signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file)) return 1;
   setup_pc();
+
   std::fprintf(stderr, "sidecar: %s side, room %s, broker %s:%u\n", role.c_str(), room.c_str(),
                broker_host.c_str(), broker_port);
 
@@ -645,7 +799,15 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "  broker        : %s:%u\n", broker_host.c_str(), broker_port);
     std::fprintf(stderr, "  room token    : %s\n", token.c_str());
     std::fprintf(stderr, "  target        : %s\n", target.c_str());
-    std::fprintf(stderr, "  The other sidecar must use the same room and the same token.\n");
+    std::fprintf(stderr, "  give this to whoever connects from the outside:\n");
+    std::fprintf(stderr,
+                 "      a2_tunnel --role client --broker %s:%u%s --room %s --token %s \\\n",
+                 broker_host.c_str(), broker_port, use_tls ? " --tls --ca-bundle <the broker's ca.pem>" : "",
+                 room.c_str(), token.c_str());
+    std::fprintf(stderr, "  (it will listen locally and be reachable through the tunnel)\n");
+    if (wait_timeout > 0) {
+      std::fprintf(stderr, "  giving up in %d seconds if nobody connects.\n", wait_timeout);
+    }
   } else {
     std::fprintf(stderr, "sidecar: ready. To reach it from the outside:\n");
     std::fprintf(stderr, "  add this to the settings.peers of the a2 that drives it:\n");

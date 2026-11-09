@@ -603,6 +603,55 @@ set_target_properties(tea_agent PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# ---------------------------------------------------------------------------
+# The tunnel binaries: a2_broker (the public rendezvous) and a2_tunnel (the
+# sidecar next to an a2).
+#
+# They are built by a **nested CMake project** (tunnel/): libdatachannel needs
+# mbedTLS 3.x while the agent uses the vendored mbedTLS 2.28 LTS, and both
+# define targets called "mbedtls" - one project cannot hold both. The nested
+# project gets the same toolchain, so the Windows cross build works the same
+# way as the agent's.
+# ---------------------------------------------------------------------------
+option(TEA_AGENT_BUILD_TUNNEL "Build the tunnel binaries (a2_broker, a2_tunnel)" ON)
+
+if(TEA_AGENT_BUILD_TUNNEL)
+  set(TEA_TUNNEL_DIR ${CMAKE_BINARY_DIR}/tunnel)
+  set(TEA_TUNNEL_SUFFIX "")
+  if(WIN32)
+    set(TEA_TUNNEL_SUFFIX ".exe")
+  endif()
+  set(TEA_TUNNEL_BINARIES
+      ${TEA_TUNNEL_DIR}/bin/a2_broker${TEA_TUNNEL_SUFFIX}
+      ${TEA_TUNNEL_DIR}/bin/a2_tunnel${TEA_TUNNEL_SUFFIX})
+  # The nested project has to be configured with the same toolchain file, or
+  # a cross build would silently produce host binaries.
+  set(TEA_TUNNEL_CMAKE_ARGS "")
+  if(CMAKE_TOOLCHAIN_FILE)
+    list(APPEND TEA_TUNNEL_CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE})
+  endif()
+  add_custom_command(
+    OUTPUT ${TEA_TUNNEL_BINARIES}
+    COMMAND ${CMAKE_COMMAND}
+            -S ${CMAKE_CURRENT_SOURCE_DIR}/tunnel
+            -B ${TEA_TUNNEL_DIR}
+            -DCMAKE_BUILD_TYPE=Release
+            ${TEA_TUNNEL_CMAKE_ARGS}
+    COMMAND ${CMAKE_COMMAND} --build ${TEA_TUNNEL_DIR} --config Release
+    DEPENDS tunnel/CMakeLists.txt
+            src/tunnel_broker.cpp src/tunnel_sidecar.cpp
+    COMMENT "Building the tunnel binaries (a2_broker, a2_tunnel)"
+    VERBATIM)
+  add_custom_target(tea_tunnel_binaries DEPENDS ${TEA_TUNNEL_BINARIES})
+  # Put them next to the agent so the release package picks them up.
+  add_custom_command(TARGET tea_tunnel_binaries POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${TEA_TUNNEL_DIR}/bin/a2_broker${TEA_TUNNEL_SUFFIX} ${CMAKE_BINARY_DIR}/bin/
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${TEA_TUNNEL_DIR}/bin/a2_tunnel${TEA_TUNNEL_SUFFIX} ${CMAKE_BINARY_DIR}/bin/
+    VERBATIM)
+endif()
+
 # --- the Windows tray companion (Windows only) --------------------------------
 # appstub puts an icon into the notification area and keeps the agent and the
 # task queue running. It is a Windows-only program: on Linux the same job is

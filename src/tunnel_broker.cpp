@@ -22,17 +22,12 @@
 //   <- {"type":"joined","peer":true|false}
 //   -> {"type":"offer"|"answer"|"candidate","sdp":"..."}   (relayed to the peer)
 //
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <juice/juice.h>
 #include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <cstdio>
+#include <string>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -43,11 +38,13 @@
 
 using json = nlohmann::json;
 
+#include "tunnel_net.h"
+
 namespace {
 
 // ---- one connected signalling client ---------------------------------------
 struct Peer {
-  int fd = -1;
+  tea_socket_t fd = kTeaInvalidSocket;
   std::string role;
   std::string room;
   std::mutex out;        // serialises writes to fd
@@ -63,8 +60,8 @@ void send_line(const std::shared_ptr<Peer>& p, const json& j) {
   if (!p || !p->alive) return;
   std::string line = j.dump() + "\n";
   std::lock_guard<std::mutex> lock(p->out);
-  ssize_t n = ::send(p->fd, line.data(), line.size(), MSG_NOSIGNAL);
-  if (n != static_cast<ssize_t>(line.size())) p->alive = false;
+  const int n = ::send(p->fd, line.data(), static_cast<int>(line.size()), kTeaNoSignal);
+  if (n != static_cast<int>(line.size())) p->alive = false;
 }
 
 std::vector<std::shared_ptr<Peer>> room_peers(const std::string& room) {
@@ -152,7 +149,7 @@ void peer_loop(std::shared_ptr<Peer> p) {
     }
   }
   drop_peer(p);
-  ::close(p->fd);
+  tea_net_close(p->fd);
 }
 
 // ---- the TURN/STUN server (libjuice) ---------------------------------------
@@ -188,10 +185,11 @@ bool start_stun_turn(uint16_t port, const std::string& realm, const std::string&
 
 // ---- the signalling server -------------------------------------------------
 int listen_tcp(uint16_t port, const std::string& bind_addr) {
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
+  tea_net_init();
+  tea_socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd == kTeaInvalidSocket) return -1;
   int one = 1;
-  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
@@ -199,15 +197,15 @@ int listen_tcp(uint16_t port, const std::string& bind_addr) {
     addr.sin_addr.s_addr = INADDR_ANY;
   } else if (::inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
     std::fprintf(stderr, "broker: bad bind address %s\n", bind_addr.c_str());
-    ::close(fd);
+    tea_net_close(fd);
     return -1;
   }
   if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    ::close(fd);
+    tea_net_close(fd);
     return -1;
   }
   if (::listen(fd, 16) != 0) {
-    ::close(fd);
+    tea_net_close(fd);
     return -1;
   }
   return fd;
@@ -262,10 +260,9 @@ int main(int argc, char** argv) {
   std::fflush(stdout);
 
   while (true) {
-    int fd = ::accept(lfd, nullptr, nullptr);
-    if (fd < 0) continue;
-    int one = 1;
-    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    tea_socket_t fd = ::accept(lfd, nullptr, nullptr);
+    if (fd == kTeaInvalidSocket) continue;
+    tea_net_set_nodelay(fd);
     auto p = std::make_shared<Peer>();
     p->fd = fd;
     std::thread(peer_loop, p).detach();

@@ -88,7 +88,8 @@ build/bin/tea_agent --workspace . --open
 
 - **单二进制**：Web UI 在构建期被嵌入二进制，没有静态资源目录、没有前端构建链、没有 CDN。
 - **零外部库**：nlohmann/json、cpp-httplib、yaml-cpp、mbedTLS 全部 vendored 在 `3rd/`，不依赖
-  vcpkg / conan / 系统开发包。
+  vcpkg / conan / 系统开发包。隧道那套（libdatachannel / libjuice / usrsctp）也在 `3rd/`，
+  见 [`3rd/README.md`](3rd/README.md)。
 - **跨平台同一套代码**：路径、文件 I/O、进程、SIGPIPE 都按平台封装，没有 `std::filesystem`。
 - **内置网页终端**：这台机器上的**真实 shell**（Linux 上是 bash、Windows 上是 PowerShell），跑在
   pty / ConPTY 上；浏览器里直接敲命令，**不经过模型**，也不经过 agent 的工具边界。
