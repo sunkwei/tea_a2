@@ -2064,3 +2064,311 @@ uinput 那套（ioctl + struct uinput_user_dev + input_event）有三个文件�
 **测试**：`tests/smoke_ext_desktop.py`（23 项 + `--live` 3 项）。
 **装法**：`~/.tea_agent/ext/` 放三个模块 + `~/.tea_agent/mcp.yaml` 注册 a2ext
 （`--agent-url http://127.0.0.1:8383`，端口按机器实际的来）。
+
+---
+
+## 隧道（侧载）：让外网访问内网的 tea_a2（2026-11-09 评估）
+
+**问题**：客户设备在内网，运维只能远程桌面（ToDesk/RustDesk）进去再点内网的 a2。
+**设想**：单二进制走 WebRTC 数据通道 + STUN 打洞，代理 a2 的 HTTP 传输。
+
+**结论：可行**（已实测，见下）。设计细节在 [docs/tunnel.md](docs/tunnel.md)。
+
+**第一原则（用户定的）：a2 不依赖隧道。** 隧道是**侧载（sidecar）**，不是 a2 的模块：
+
+- 内网那台：侧载连 `http://127.0.0.1:8383`，**a2 一行代码都不用改**。
+- 外网那台：侧载在本机开 `127.0.0.1:9931`，运维的 a2 只多一条
+  `settings.peers: {url: http://127.0.0.1:9931, token: <内网的 --api-token>}`——
+  `toolkit_peer` 本来就只会说 HTTP，零改动。
+- 三个角色：内网侧载 / 公网 broker（信令 + 中继兜底）/ 外网侧载。
+- 两种模式：**中继**（永远可用）+ **P2P**（打洞成功时直连）；隧道里跑同一套
+  帧化 HTTP，外层换「字节从哪来」，回退逻辑只有一处。
+
+**为什么必须是侧载（不只是风格问题）**：
+
+- libdatachannel 0.19+ 要 **mbedtls ≥ 3**（`find_package(MbedTLS 3 REQUIRED)`），
+  a2 自带的是 **2.28.9 LTS**。两份 mbedtls **不能链进同一个二进制**（符号同名、
+  结构体不同）。塞进 a2 就得先把 a2 的 mbedtls 升到 3.6 LTS；做成侧载就各带各的。
+- 顺带查过：`src/tls.cpp` + `src/http.cpp` 用 mbedtls 3.5 的头文件**原样编译通过**
+  （只用到 25 个标准 API）。所以真要升级 a2 的 mbedtls，移植量不大——但那是另一件事。
+- 体积：侧载 strip 后约 2.4 MB；**a2 本体不变**（4.89 MB strip 后）。
+
+**实测（2026-11-09，本机）**：
+
+| 平台 | 静态构建 | 链接 | 体积 |
+| --- | --- | --- | --- |
+| Linux x86_64 | ✅ | ✅ | 2.38 MB (strip) |
+| Windows x64 (mingw 交叉) | ✅ | ✅ | 3.91 MB |
+| Linux aarch64 (Arm GNU 11.3 交叉) | ✅ | ✅ | 2.80 MB |
+
+HTTP 真的跑在数据通道上：`GET /api/health` → `HTTP/1.1 200 OK`。
+原型 + 一键构建脚本：`tools/tunnel_probe/`（见那目录的 README）。
+
+**STUN 探测**（手写 30 行 RFC 5389 binding 请求）：打 `stun.l.google.com` 拿到
+reflexive 地址 `39.65.223.83:60567` → 本机 UDP 出站正常、是 cone 类 NAT。
+**但企业内网大概率是对称 NAT，STUN 单打洞会失败** → TURN/中继兜底是必需品。
+
+**坑**：
+
+- `MBEDTLS_SSL_DTLS_SRTP` 默认关，而 libdatachannel 的 DTLS 要
+  `mbedtls_ssl_conf_dtls_srtp_protection_profiles()` → 编译报
+  `'srtpSupportedProtectionProfiles' was not declared`。打开它。
+- Windows 静态链接：消费者要 `-DRTC_STATIC`（否则一堆 `__imp_` 未定义），
+  usrsctp 还要 `-liphlpapi`（`GetAdaptersAddresses`）；**没有 `-ldl`**（Linux 才有）。
+- ICE 候选早于 `setRemoteDescription` 会被丢（`Got a remote candidate without
+  remote description`）→ 先缓存，等描述到了再补。
+- libdatachannel **建数据通道时会自动产生 offer**：`onLocalDescription` 必须在
+  `createDataChannel` **之前**注册，否则 offer 丢了；之后再
+  `setLocalDescription(Offer)` 会报 `Unexpected local description in signaling
+  state have-local-offer`；服务端那边 answer 也会自动产生（状态已是 stable 时
+  再手动 answer 会报 `Unexpected local desciption type answer`——libdatachannel
+  的拼写错误照抄）。
+- libdatachannel 的 tarball 里 **子模块是空的**（plog/usrsctp/libjuice），要手动塞。
+- mbedtls **3.6 LTS 的源码树拆成了 `framework/` 子模块**（tarball 里空的），
+  3.5.x 没这个问题——vendor 时注意版本。
+- 这台机器上 `git clone` GitHub 会被 reset 掉，**用 codeload 的 tar.gz**。
+
+**还没验证**：真实对称 NAT 的打洞、TURN、macOS、SSE 长连接穿隧道不被缓冲、
+同一台 a2 被多个侧载并发连。
+
+**要不要自研**：先用 frp 的 `xtcp`（自带 STUN 打洞 + 中继回退）在 1 个真实客户
+环境验证「外网能不能稳定访问内网 a2」+ 量打洞失败率，再决定要不要自研 P2P 段。
+
+---
+
+## 隧道：客户已确认支持 NAT 打洞（2026-11-09 追加）
+
+**新信息**：客户那面**确认支持 NAT 打洞**。于是 P2P 从「第二阶段优化」变成**主路径**，
+broker 的角色也变轻了：**STUN 服务器 + 信令服务器**（几百字节，**看不到内容**），
+中继只是兜底。阶段计划相应调整：
+
+| 阶段 | 内容 | 验收 |
+| --- | --- | --- |
+| P0 | 现场跑 `nat_probe.py`（真客户那台 + 运维那台） | 两边都打印「P2P 打洞成立」 |
+| P1 | 侧载 + broker + libdatachannel/ICE（**P2P 主路径**） | `peers:` 指向 `127.0.0.1:9931` 就能 `toolkit_peer` 到内网 a2；日志显示走 P2P |
+| P2 | 中继兜底（自动切换）+ 多设备台账 + 令牌吊销 | 打洞条件没了时**用户无感**切中继 |
+| P3 | TURN（coturn）——给「外网侧也是对称 NAT」的运维同事兜底 | — |
+
+**打洞要满足三个条件**（客户的确认只覆盖第一个）：
+① 内网侧 NAT 是 cone 类（对称 NAT 基本没戏）；② **外网侧**（运维同事的机器）
+也要能被 ICE 发现（有公网 IP 或 cone 类 NAT）；③ 两边能 UDP 到 broker
+（ICE 第一步就是问 STUN；公共 STUN 在企业网里常被屏蔽/劫持 → **STUN 放 broker 上**）。
+
+**`tools/tunnel_probe/nat_probe.py`**（新，纯标准库，Python 3.6+）：两台机器各跑一条，
+人肉复制一行 token，判定「srflx ↔ srflx 打洞成没成」+ **NAT 类型**（问几个 STUN 服务器，
+看映射端口是否一致）+ 往返延迟。那两行输出就是验收依据。
+自检：`nat_probe.py agent --port 45999 &` + `nat_probe.py client --direct 127.0.0.1:45999`。
+
+**坑**：
+
+- NAT 判定要问**几个不同的 STUN 服务器**才准（只问一个，端口一样可能只是碰巧）；
+  所以第一个 STUN 有回应就先印 token（别让人等），再继续问后面的。
+- 打洞包 **5 个/秒**就够（写成洪水会被网关丢，还不礼貌）。
+- 本机自测（回环）会打出「P2P 打洞成立」，但那**只证明脚本逻辑对**，不证明 NAT 能被打洞
+  ——本机自测走的是 `--direct 127.0.0.1`，跟 NAT 无关。
+
+---
+
+## 隧道：客户网络画像 = 家用路由器出口（2026-11-09 追加）
+
+**新信息**：客户侧的网络出口就是**一台家用路由器**；外网侧条件、到 broker 的 UDP 路径
+都确认可用 → **打洞的三个条件全满足，P2P 直连是主路径，可以直接进 P1**。
+
+**但「家用路由器」≠「没有运营商 NAT」**：家用宽带常有 CGNAT（100.64/10），
+那从公网看就是**对称 NAT**，打洞必败。**唯一的判据是实测**：
+`nat_probe.py` 问几个不同的 STUN 服务器看映射端口是否一致（cone / symmetric）。
+客户口头说「支持」不算数，跑一次 5 分钟的脚本才算数（见 `docs/tunnel_ops.md`）。
+
+**源码核实（libjuice 0.x，deps/libjuice/src/）**：
+
+- **ICE 自带 NAT 保活**：`agent.c` 的 `STUN_KEEPALIVE_PERIOD` + consent freshness
+  → 家用路由 30~120 秒的 UDP 空闲超时不用自己写心跳。但**侧载别在没请求时主动关连接**，
+  保活就白搭了。
+- **libjuice 自带 server 模式**：`juice_server_create`（`juice.h`）→ 同一个库能当
+  **STUN 服务器**；给了 credentials 就能开 **TURN 中继**（`max_allocations` /
+  `relay_port_range` / `realm` 都现成）→ **broker 一个进程搞定 STUN+信令+TURN，
+  不用装 coturn**（P3 从「引入 coturn」变成「broker 开个开关」，0.5 天）。
+- libjuice 的 `juice_config_t` **没有 keepalive 字段**（保活是内部实现的）；
+  `rtc::Configuration`（libdatachannel 0.22）也没有 ICE keepalive 选项——
+  要调只能改 libjuice 或自己在应用层做。
+
+**broker 端口建议**：信令走 **TCP 443**（一定通），STUN 同时监听 **UDP 3478 + UDP 443**
+（有些网络只放行 443）。
+
+**家用宽带双栈**：设备和运维侧都有公网 IPv6 的话，ICE 会直接拿到 IPv6 host candidate，
+**连打洞都不用**，NAT 那层的问题直接消失（不用专门做，ICE 自己会选）。
+
+**新增文件**：`docs/tunnel_ops.md`（一页纸现场指引：两台机器各一条命令 + 验收标准 +
+打不通怎么办），`tools/tunnel_probe/nat_probe.py`（现场验证脚本）。
+
+---
+
+## 隧道：第一次现场实测 + 判据踩坑（2026-11-09）
+
+在 36.112.70.164 那台（家用路由器出口）跑了 `nat_probe.py agent`：
+
+```
+[agent] STUN stun.l.google.com:19302 -> 反射地址 36.112.70.164:41904
+[agent] NAT 判定：symmetric（映射端口 stun.l.google.com:19302:41904,
+                              stun1.l.google.com:19302:41904,
+                              stun.cloudflare.com:3478:44839）
+```
+
+**这个「symmetric」是我工具下早了结论。** `stun.l.google.com` 与
+`stun1.l.google.com` **是同一个 IP**（74.125.250.129，Google anycast，
+本机 getent 验证过），它们映射端口一样是必然的，什么也证明不了。
+有信息量的只有「换 IP 就换端口」→ 正确分类是 **address-dependent**
+（映射依赖目标地址），不是 symmetric（连目标端口都依赖）。
+**教训**：判 NAT 类型必须用「**同一个 IP 的不同端口**」做对照才算数；
+不同 IP 端口不同只能说明「映射依赖目标地址」。
+
+**工具已改**（`nat_probe.py`）：
+
+- 默认 STUN 列表换成 `stun.l.google.com:19302` / `stun.cloudflare.com:3478` /
+  **`stun.nextcloud.com:3478` 与 `:443`（同一个 IP 46.225.95.169 的两个端口，
+  专门用来测 symmetric）** / `stun.miwifi.com:3478`（国内的，省得出不去 google）。
+- 每条记录打印**服务器的 IP + 映射端口**（原来只打印端口，看不出是不是同一个 IP）。
+- 三分类 + 直接给「含义」：`cone`（基本必成）/ `address-dep`（不一定成，看过滤规则，
+  必须实测）/ `symmetric`（大概率失败 → 必须有 TURN）。四种合成数据都验过。
+
+**由此带来的架构简化（重要）**：**「打不通就回退」不用我们手写 if/else——ICE 自己会做。**
+ICE 的候选类型里本来就有 relay（TURN）候选：侧载 ICE 配置里给一个
+`turn:broker(带凭据)`，ICE 打洞失败时会自己选中继。
+所以 broker = **STUN + 信令 + TURN 中继一个进程**（libjuice server 模式，给凭据就开 TURN），
+侧载只管配两个 iceServers。**TURN 从 P3 提前到 P1.5**（0.5~1 天），
+把「打不通」从事故降级成降速。
+
+**顺带**：broker 侧 TURN 走的是标准协议 → **broker 作为中继方看得到明文**
+（token/prompt/文件内容），这是 TURN 的固有属性，安全边界那节要写清楚。
+
+---
+
+## 隧道：zonekey 第二次实测 + 两个补丁（2026-11-09 晚）
+
+36.112.70.164 那台第二次跑（`--wait 1200`），输出仍是**旧版脚本**的格式
+（没有打印服务器 IP）——说明 zonekey 上那份是旧拷贝，要更新。
+数据形态与第一次一致：Google 两个域名同一端口、Cloudflare 另一个端口
+→ 仍是 **address-dependent**（换 IP 就换端口），映射端口每次不同是正常的。
+
+**补丁一：NAT 过滤才是打不通的常见原因（比映射更隐蔽）。**
+NAT 有「映射」和「过滤」两件事，上面测的是映射。家用路由的过滤规则通常是
+**「只放行我主动联系过的地址」**（address-dependent filtering）→ 死锁：
+
+```
+客户端 ──(打洞包)──▶ 内网公网地址:端口   ✗ 被内网 NAT 丢了
+内网侧收不到 → 不知道客户端在哪 → 不回包 → 死锁
+```
+
+**解法：broker 兼「打洞引导器」（几十行，不是 TURN）**：
+broker 自己就是 STUN 服务器 → 天然知道双方 srflx 地址 → 它给内网侧发一个带
+「对端在 X:Y」的包（来源是 broker 自己，而内网侧刚向 broker 问过 STUN →
+broker 地址在放行名单里 → **收得到**）→ 内网侧主动打过去 → 它的 NAT 放行对端 →
+对端打回来的包就进得来了。
+
+**补丁二：回退不用手写。** ICE 候选本来就有 relay(TURN)：侧载 ICE 配置里给
+`turn:broker(凭据)`，ICE 打不通时自己选中继 → broker = STUN+信令+TURN 一个进程
+（libjuice server 模式，给凭据即开 TURN）→ **TURN 从 P3 提前到 P1.5**（1 天）。
+⚠️ TURN 中继时 broker 看得到明文（token/prompt/文件）——TURN 的固有属性。
+
+---
+
+## 隧道：打洞实测失败 → 主路径改成中继（2026-11-09 晚，zonekey）
+
+把新版 `nat_probe.py` 复制到 `root@192.168.12.12:/opt/zonekey/`（md5 一致）并启动：
+
+```
+[agent] NAT 判定：symmetric
+[agent]   依据：同一个 IP(46.225.95.169) 换个端口，映射端口就变（27889, 46693）
+[agent]   stun.l.google.com:19302    ip=74.125.250.129  端口 19302 -> 映射端口 32940
+[agent]   stun.cloudflare.com:3478   ip=162.159.207.0   端口 3478  -> 映射端口 50917
+[agent]   stun.nextcloud.com:3478    ip=46.225.95.169   端口 3478  -> 映射端口 27889
+[agent]   stun.nextcloud.com:443     ip=46.225.95.169   端口 443   -> 映射端口 46693
+[agent]   stun.miwifi.com:3478       ip=111.206.174.2   端口 3478  -> 映射端口 26208
+```
+
+**打洞实测（外网那台 = 本机，NAT 是 cone，路由确认不经 VPN 直出公网）：**
+
+```
+[client] NAT 判定：cone（所有服务器映射端口都一样 50906）
+[client] 目标 36.112.70.164:32940，开始打洞…
+[client] 发了 23 个包，收到 0 个回包 → 打不通
+```
+
+对端 agent 也是 0 个包。**结论：教科书式 STUN 打洞在这个网络上失败。**
+家用宽带 + 家用路由器 → 运营商侧大概率还有一层 CGNAT → 对外就是对称 NAT。
+**「客户支持打洞」只答了「UDP 出站通」这半句。**
+
+**计划改（这是实测带来的最大变化）**：
+
+- **中继（TURN）从 P1.5 提前到 P1，成为主路径**；直连降级为 P2 的优化。
+- 侧载 ICE 候选同时给 `stun:broker` 和 `turn:broker(凭据)` → **切换由 ICE 做，不用手写**。
+- broker = **STUN + 信令 + TURN 一个进程**（libjuice server 模式，给凭据即开 TURN，不用 coturn）。
+- 「打洞引导器」（broker 主动把对端 srflx 推给对方，绕过入站过滤）仍然值得做，放 P2。
+
+**修正一个之前说错的地方**：~~TURN 中继时 broker 看得到明文~~ → **不对**。
+WebRTC 的 **DTLS 在两个端点之间终结**，TURN 只转发 **DTLS 密文**，
+broker 看得到包的大小和节奏，看不到 token/prompt/文件。
+反过来，**自己写「HTTP 式中继」才会让 broker 看到明文** → 选 TURN 多一个隐私理由。
+
+**本机（sunkw-legion）自测**：NAT 判定 address-dep（换 IP 换端口，同 IP 换端口不变）
+→ 不是最坏的对称 NAT；STUN 反射地址 39.65.223.83。**到 36.112.70.164 的路由经 172.16.1.1
+正常出网，不走 VPN** → 本机可以充当外网侧的测试机。
+
+---
+
+## 隧道：反向测 + 改成忠实 ICE 的两阶段协议（2026-11-09 晚）
+
+**第一轮测试协议本身有缺陷**：那时内网侧是「被动等回包」，它不知道外网在哪，
+所以没有主动打洞；而**真实 ICE 是双方都知道对方地址、都主动打**
+（NAT 的入站放行规则要靠「双方都发过包」才打开）。已把 `nat_probe.py` 改成两阶段：
+
+```
+probe  → 打印 NAT 判定 + token（<ip>:<port>:<rand>）   两边各跑一次，token 互换
+punch  → --mine <自己的token> --peer <对方的token>     两边同时跑，互相主动打洞
+```
+
+⚠️ **两边必须用同一个 STUN 服务器**（脚本会打印「用的 STUN 服务器」）——
+对称 NAT 映射端口随目标变，只有「双方经同一个服务器看到的地址」才可比。
+
+**三种组合的实测结果（全部失败，两边都 0 收 0 发）**：
+
+| 组合 | 结果 |
+| --- | --- |
+| 内网 agent / 外网 client，单向打 | 23 包 0 回包 |
+| 外网 agent / 内网 client，单向打 | 25 包 0 回包 |
+| **两边同时主动打（真实 ICE）** | 各 100 包，0 回包 |
+
+→ 结论不变而且更硬：**这条网络（家用宽带 + 家用路由器，36.112.70.164）打洞不通**。
+且「内网侧收到 0 个包」说明**运营商 CGNAT 很可能直接丢弃外来 UDP**（不只是 NAT 类型问题）。
+
+**计划不变**：中继(TURN) 是 P1 主路径，直连是 P2 优化；
+**broker 的「打洞引导器」仍然值得做**（在允许打洞的网络上能把直连救回来）。
+
+**本机（sunkw-legion / 172.16.1.219）**：NAT 是 cone（映射端口恒定），
+但**入站过滤是端口级的**（收到 zonekey 的包时源端口已变 → 被丢）。
+到 36.112.70.164 的路由经 172.16.1.1 正常出网、不走 VPN → 可充当外网侧测试机。
+
+---
+
+## 隧道：broker 落到 VPS 上（2026-11-09 定）
+
+用户决定**建一台 VPS 跑 broker**（STUN + 信令 + TURN 一个进程）——
+这是唯一必须站在公网上的东西（自己家/办公室的机器没公网 IP 或 IP 不固定）。
+
+**VPS 准备清单**（详见 `docs/tunnel_broker.md`）：
+
+| 项 | 值 |
+| --- | --- |
+| 规格 | 1 核 / 1 GB / 20 GB 起步（broker 闲着，中继转发是 IO） |
+| 地区 | **香港/新加坡**（免 ICP 备案；大陆要备案要几周，省下的时间比 20 ms 值钱） |
+| 端口 | **443/TCP 信令**、**3478/UDP STUN**、**443/UDP STUN 备用**、**5349/TCP TURN over TLS**（UDP 全封时的救命通道）、**49160-49260/UDP TURN 中继池** |
+| 成本 | 轻量机 ¥30~60/月；**带宽另算**（中继模式下所有会话流量过 VPS，DTLS 密文） |
+
+**两条容易被忽略的**：
+① 云厂商**安全组 + 机器内 firewall 是两层**，只开一层不通；
+② **TURN over TLS（5349/TCP）是保险**：客户网络 UDP 全封时，整条隧道退化成
+一条普通 TLS over TCP 也能通（libjuice 支持 `TurnTls`）——**这条不能省**。
+
+**带宽是真正的成本**：流量小的场景（远程问几句、看看状态）一个月几十 MB 几乎不花钱；
+经常传文件/看视频就明显上去 → 要么加带宽包，**要么把 broker 放到客户自己的公网机器上**
+（协议一样，流量不出客户网络，也没有我们的带宽账单）。
