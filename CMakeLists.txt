@@ -575,7 +575,9 @@ if(TEA_AGENT_BUILD_TUNNEL)
             src/tunnel_broker.cpp src/tunnel_sidecar.cpp
     COMMENT "Building the tunnel binaries (a2_broker, a2_tunnel)"
     VERBATIM)
-  add_custom_target(tea_tunnel_binaries DEPENDS ${TEA_TUNNEL_BINARIES})
+  # ALL: a plain `cmake --build build` has to produce the tunnel binaries
+  # too, otherwise a release built with the default target ships without them.
+  add_custom_target(tea_tunnel_binaries ALL DEPENDS ${TEA_TUNNEL_BINARIES})
   # Put them next to the agent so the release package picks them up.
   add_custom_command(TARGET tea_tunnel_binaries POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
