@@ -635,5 +635,31 @@ int main(int argc, char** argv) {
 
   if (!is_agent) start_listener();  // the local proxy is up even before the tunnel
 
+  // 「就绪」要说人话：部署的人要知道**外面怎么连进来**。
+  // client 侧打印一段可以直接粘进对方 a2 的 settings.peers 的配置；
+  // agent 侧打印房间和令牌（两边必须一致）。
+  std::fprintf(stderr, "---------------------------------------------------------------\n");
+  if (is_agent) {
+    std::fprintf(stderr, "sidecar: ready. Waiting in room \"%s\" for the other side.\n",
+                 room.c_str());
+    std::fprintf(stderr, "  broker        : %s:%u\n", broker_host.c_str(), broker_port);
+    std::fprintf(stderr, "  room token    : %s\n", token.c_str());
+    std::fprintf(stderr, "  target        : %s\n", target.c_str());
+    std::fprintf(stderr, "  The other sidecar must use the same room and the same token.\n");
+  } else {
+    std::fprintf(stderr, "sidecar: ready. To reach it from the outside:\n");
+    std::fprintf(stderr, "  add this to the settings.peers of the a2 that drives it:\n");
+    std::fprintf(stderr, "      peers:\n");
+    std::fprintf(stderr, "        %s:\n", room.c_str());
+    std::fprintf(stderr, "          url: http://%s:%u\n", listen_host.c_str(), listen_port);
+    std::fprintf(stderr, "          token: %s\n", token.c_str());
+    std::fprintf(stderr, "          description: %s, reached through the tunnel\n", room.c_str());
+    std::fprintf(stderr, "  toolkit_peer can then talk to it (it answers with its own model).\n");
+    std::fprintf(stderr, "  The browser on this machine can open http://%s:%u/ for its web UI.\n",
+                 listen_host.c_str(), listen_port);
+  }
+  std::fprintf(stderr, "  ! the lines above contain the token - do not share this log.\n");
+  std::fprintf(stderr, "---------------------------------------------------------------\n");
+
   while (true) std::this_thread::sleep_for(std::chrono::seconds(3600));
 }
