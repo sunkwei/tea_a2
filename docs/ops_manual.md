@@ -18,10 +18,10 @@
 
 ```sh
 # a2 本体（普通 a2，不需要令牌）
-/opt/zonekey/a2 --port 8383 &
+a2 --port 8383 &
 
 # 侧载（就这一行，别名和令牌它自己会生成）
-exec /opt/zonekey/a2_tunnel --role agent
+exec a2_tunnel --role agent
 ```
 
 侧载启动后会打印一段东西，**里面有给外面那位用的命令**：
@@ -57,7 +57,7 @@ sidecar:   path: local 103.232.92.54:114786 (relayed) <-> remote 36.112.70.164:1
 ```
 
 看到 `the data channel is open` 就是通了。本机多了一个 **9931** 端口，
-它后面就是设备上那台 a2。
+它后面就是设备上那台 a2，此时可以使用浏览器打开 http://localhost:9931 即可访问内网中的 a2
 
 ---
 
@@ -100,27 +100,6 @@ curl -s -X POST http://127.0.0.1:9931/api/chat \
   -d "{\"workspace_id\":\"$WS\",\"message\":\"...\",\"async\":true}"
 # → {"ok":true,"turn_id":"t_…","session_id":"s_…","events_url":"/api/turns/t_…/events"}
 ```
-
-### 让外网的 a2 驱动内网的 a2
-
-在外网那台 a2 的配置里加一个 peer（**只在这台机器上改**，不用动设备）：
-
-```yaml
-peers:
-  zonekey:
-    url: http://127.0.0.1:9931
-    token: <设备侧载的 session 码>
-```
-
-然后就能用 `toolkit_peer` 问它：
-
-```
-> toolkit_peer(peer="zonekey", action="chat", prompt="看看磁盘满了没有")
-```
-
-被问的那台会**用它自己的模型、自己的上下文**回答，回答里还带它在那边做了什么。
-
----
 
 ### agent 侧什么时候会退出（重要）
 
@@ -227,10 +206,10 @@ peers:
 
 ```sh
 # 换二进制（正在运行的要先停；正在运行的二进制不能直接覆盖，要先 mv）
-cp a2.new /opt/zonekey/a2.new && chmod 755 /opt/zonekey/a2.new
-kill <a2 的 pid>
-mv /opt/zonekey/a2.new /opt/zonekey/a2
-/opt/zonekey/run_a2.sh &          # 重启
+cp a2.new ./a2.new && chmod 755 ./a2.new
+kill <a2 的 pid>                  # 正在运行的二进制不能直接覆盖，所以先停
+mv ./a2.new ./a2
+./run_a2.sh &                    # 重启
 ```
 
 - 换完**必须重启侧载**（换的是另一个进程），并且**要把新的 session 码转给外面那位**。
@@ -257,7 +236,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root
-ExecStart=/opt/zonekey/a2 --port 8383
+ExecStart=a2 --port 8383
 Restart=always
 RestartSec=3
 
@@ -273,19 +252,19 @@ journalctl -u tea-a2 -f
 
 **侧载不要做成 systemd 常驻服务**——它 5 分钟没人连就自己退，
 用 `Restart=always` 会和这个设计打架（起来→退出→再起来，死循环）。
-现场按需启动就行（`/opt/zonekey/run_agent.sh`）。
+现场按需启动就行（`run_agent.sh`）。
 
-### 设备上（以 zonekey 为例）
+### 设备上（路径按你自己的部署定，下面是一套示例）
 
 | 路径 | 是什么 |
 | --- | --- |
-| `/opt/zonekey/a2` | a2 本体（静态链接） |
-| `/opt/zonekey/a2_tunnel` | 侧载（静态链接） |
-| `/opt/zonekey/run_a2.sh` | 起 a2 的脚本 |
-| `/opt/zonekey/run_agent.sh` | 起侧载的脚本（只有一行） |
-| `/opt/zonekey/ca-bundle.pem` | broker 的证书（也可放 `~/.tea_agent/ca-bundle/cacert.pem`） |
-| `/opt/zonekey/a2.log` / `tunnel_agent.log` | 日志 |
-| `/root/.tea_agent/` | a2 自己的家目录（provider 配置、工作区、历史） |
+| `a2` | a2 本体（静态链接） |
+| `a2_tunnel` | 侧载（静态链接） |
+| `run_a2.sh` | 起 a2 的脚本 |
+| `run_agent.sh` | 起侧载的脚本（只有一行） |
+| `ca-bundle.pem` | broker 的证书（也可放 `~/.tea_agent/ca-bundle/cacert.pem`） |
+| `a2.log` / `tunnel_agent.log` | 日志 |
+| `~/.tea_agent/` | a2 自己的家目录（provider 配置、工作区、历史） |
 
 ### broker 那边（VPS）
 
