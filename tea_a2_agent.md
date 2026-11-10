@@ -2434,7 +2434,7 @@ punch  → --mine <自己的token> --peer <对方的token>     两边同时跑�
 **现在的规矩**（用户定的）：**一个 zip 全齐**，平台分目录：
 
 ```
-tea_a2-1.2.2.zip
+tea_a2-1.2.3.zip
   linux_aarch64/tea_a2     linux_aarch64/a2_tunnel
   linux_x86_64/tea_a2      linux_x86_64/a2_tunnel
   win_x86_64/tea_a2.exe    win_x86_64/a2_tunnel.exe
@@ -2456,7 +2456,7 @@ tea_a2-1.2.2.zip
 **发版顺序**（别搞反）：
 
 ```
-bump_version.py 1.2.1 1.2.2   →   提交（工作区必须干净！）   →   三个平台都构建
+bump_version.py 1.2.2 1.2.3   →   提交（工作区必须干净！）   →   三个平台都构建
    →   rm -rf release/tmp   →   pack_release.sh <版本>   →   pan_publish.py 传网盘
    →   提交 + push
 ```
