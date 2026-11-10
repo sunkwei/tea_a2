@@ -10,6 +10,7 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <ws2tcpip.h>
 
 #include <cstring>
 
@@ -37,6 +38,7 @@ inline int tea_net_set_nodelay(tea_socket_t s) {
 #else
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>

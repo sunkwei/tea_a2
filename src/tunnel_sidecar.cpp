@@ -53,6 +53,7 @@
 #include <cstdio>
 #include <ctime>
 #include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -350,9 +351,18 @@ class Signal {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-      log_line("sidecar: bad broker address %s\n", host.c_str());
-      tea_net_close(fd);
-      return false;
+      addrinfo hints{};
+      hints.ai_family = AF_INET;
+      hints.ai_socktype = SOCK_STREAM;
+      const std::string port_str = std::to_string(port);
+      addrinfo* resolved = nullptr;
+      if (::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &resolved) != 0 || !resolved) {
+        log_line("sidecar: cannot resolve the broker address %s\n", host.c_str());
+        tea_net_close(fd);
+        return false;
+      }
+      addr = *reinterpret_cast<sockaddr_in*>(resolved->ai_addr);
+      ::freeaddrinfo(resolved);
     }
     if (use_tls) {
       // mbedTLS does the connecting itself (it owns the socket afterwards).
@@ -424,17 +434,48 @@ class Signal {
   std::function<void()> on_closed_;
 };
 
+/// Connect to host:port. The host may be a name ("localhost") or an address.
+///
+/// The name matters: `inet_pton` only understands numbers, and a sidecar
+/// pointed at "--target localhost:8383" would silently fail to reach its own
+/// a2 (the tunnel would come up and then carry nothing).
+///
+/// `getaddrinfo` is the way - but a statically linked Linux binary has no NSS
+/// (glibc keeps it in shared libraries), so "localhost" is answered from a
+/// built-in table before we try the resolver.
 int dial_tcp(const std::string& host, uint16_t port) {
   tea_net_init();
-  tea_socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (fd == kTeaInvalidSocket) return -1;
+  const std::string port_str = std::to_string(port);
+
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-    tea_net_close(fd);
-    return -1;
+  bool have_addr = (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) == 1);
+
+  if (!have_addr) {
+    std::string lowered = host;
+    for (char& c : lowered) c = static_cast<char>(::tolower(c));
+    if (lowered == "localhost" || lowered == "localhost.localdomain" ||
+        lowered == "ip6-localhost" || lowered == "ip6-loopback") {
+      addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      have_addr = true;
+    }
   }
+
+  if (!have_addr) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* resolved = nullptr;
+    if (::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &resolved) != 0 || !resolved) {
+      return -1;
+    }
+    addr = *reinterpret_cast<sockaddr_in*>(resolved->ai_addr);
+    ::freeaddrinfo(resolved);
+  }
+
+  tea_socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd == kTeaInvalidSocket) return -1;
   if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
     tea_net_close(fd);
     return -1;
@@ -730,6 +771,11 @@ int main(int argc, char** argv) {
         int fd = dial_tcp(thost, tport);
         if (fd < 0) {
           log_line("sidecar: cannot reach the target %s\n", target.c_str());
+          // Tell the other side right away: otherwise the caller waits for a
+          // timeout on a connection that can never carry anything.
+          std::string payload;
+          put_u32(payload, id);
+          send_frame(kClose, payload);
           return;
         }
         {
