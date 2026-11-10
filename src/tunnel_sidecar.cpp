@@ -57,6 +57,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -66,6 +67,67 @@ using json = nlohmann::json;
 #include "tunnel_net.h"
 
 namespace {
+
+// ---- the built-in TURN credentials -----------------------------------------
+// The TURN relay is the broker's bandwidth, not a secret worth hiding: the
+// credentials only decide who may push traffic through it. They are built in
+// so that no configuration file has to be copied to every machine (the sidecar
+// next to the a2, the operator's machine, the broker) - the CLI flags still
+// override them.
+constexpr const char* kDefaultTurnUser = "1hblsqt.";
+constexpr const char* kDefaultTurnPass = "2ghlmcl,";
+
+/// Where the room token lives when it is not given on the command line.
+/// The room token is a real secret: it is the key to the room, so it is NOT
+/// built in like the TURN credentials.
+std::string token_file_path() {
+  const char* env = std::getenv("TEA_AGENT_HOME");
+  std::string home;
+  if (env && *env) {
+    home = env;
+  } else {
+#ifdef _WIN32
+    const char* up = std::getenv("USERPROFILE");
+    home = (up && *up) ? up : ".";
+#else
+    const char* h = std::getenv("HOME");
+    home = (h && *h) ? h : ".";
+#endif
+  }
+  std::string path = home;
+  if (!path.empty() && path.back() != '/' && path.back() != '\\') path += '/';
+  path += ".tea_agent/tunnel/token";
+  return path;
+}
+
+/// A fresh room token: the agent side makes one on every start, so nothing
+/// has to be configured on the machine and the operator gets it in the
+/// connection details.
+std::string generate_token() {
+  std::random_device rd;
+  static const char* hex = "0123456789abcdef";
+  std::string out;
+  out.reserve(32);
+  for (int i = 0; i < 32; ++i) out.push_back(hex[rd() & 0xF]);
+  return out;
+}
+
+/// Read the room token from the conventional file (first line, trimmed).
+bool read_token_file(std::string* out) {
+  std::FILE* f = std::fopen(token_file_path().c_str(), "rb");
+  if (!f) return false;
+  char buf[512] = {0};
+  size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+  std::fclose(f);
+  if (n == 0) return false;
+  std::string s(buf, n);
+  size_t nl = s.find('\n');
+  if (nl != std::string::npos) s = s.substr(0, nl);
+  while (!s.empty() && (s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+  if (s.empty()) return false;
+  *out = s;
+  return true;
+}
 
 /// One log line, with the time: the negotiation between two machines is
 /// spread over several processes, and without a timestamp the order of the
@@ -249,7 +311,7 @@ class Signal {
  public:
   bool connect_to(const std::string& host, uint16_t port, const std::string& room,
                    const std::string& token, const std::string& role, bool use_tls,
-                   const std::string& ca_file) {
+                   const std::string& ca_file, bool registering) {
     tea_net_init();
     tea_socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd == kTeaInvalidSocket) return false;
@@ -281,6 +343,9 @@ class Signal {
     join["room"] = room;
     join["token"] = token;
     join["role"] = role;
+    // The agent side registers the room's token (it just made a fresh one);
+    // the client side has to present the very same token.
+    join["register"] = registering;
     send_line(join);
     alive_ = true;
     std::thread([this] { reader(); }).detach();
@@ -361,8 +426,8 @@ int main(int argc, char** argv) {
   uint16_t stun_port = 3478;
   std::string turn_host;
   uint16_t turn_port = 3478;
-  std::string turn_user = "a2";
-  std::string turn_pass;
+  std::string turn_user = kDefaultTurnUser;
+  std::string turn_pass = kDefaultTurnPass;
   std::string ca_file;
   bool use_tls = false;
   bool verbose = false;
@@ -371,10 +436,18 @@ int main(int argc, char** argv) {
   // the default is five minutes, not "forever".
   int wait_timeout = 300;  // seconds; 0 = wait forever
 
+  // The role decides who does what: the agent side sits next to the a2 and
+  // registers the room, the client side is the one that connects from the
+  // outside.
+  bool is_agent = (role == "agent");
+
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string(); };
-    if (a == "--role") role = next();
+    if (a == "--role") {
+      role = next();
+      is_agent = (role == "agent");
+    }
     else if (a == "--broker") {
       std::string hp = next();
       split_hostport(hp, broker_host, broker_port);
@@ -406,14 +479,26 @@ int main(int argc, char** argv) {
       return 0;
     }
   }
+  // The room token: the agent side makes a fresh one on every start (nothing
+  // to configure on the machine - the operator gets it in the connection
+  // details), the client side has to be given the same one.
+  if (token.empty() && is_agent) {
+    token = generate_token();
+    log_line("sidecar: generated a room token for this run\n");
+  }
   if (token.empty()) {
-    log_line("sidecar: --token is required\n");
-    return 2;
+    std::string from_file;
+    if (read_token_file(&from_file)) {
+      token = from_file;
+    } else {
+      log_line("sidecar: no room token. Use the command the other side printed "
+               "(or put it in %s)\n",
+               token_file_path().c_str());
+      return 2;
+    }
   }
   if (verbose) rtc::InitLogger(rtc::LogLevel::Debug);
   else rtc::InitLogger(rtc::LogLevel::Warning);
-
-  const bool is_agent = (role == "agent");
 
   rtc::Configuration cfg;
   // Only the agent offers. The client answers; if it were allowed to
@@ -728,7 +813,17 @@ int main(int argc, char** argv) {
       return;
     }
     if (type == "error") {
-      log_line("sidecar: broker says: %s\n", j.value("message", "").c_str());
+      const std::string message = j.value("message", "");
+      log_line("sidecar: broker says: %s\n", message.c_str());
+      if (message == "bad token") {
+        // Retrying cannot help: the token is wrong, or the other side
+        // restarted and made a new one. Say so and stop - the operator has
+        // to run the command the other side printed.
+        log_line("sidecar: the broker rejected the room token. Use the command the "
+                 "other side printed (it makes a new token on every start).\n");
+        std::fflush(stderr);
+        std::_Exit(2);
+      }
     }
   });
 
@@ -794,7 +889,8 @@ int main(int argc, char** argv) {
         continue;
       }
       log_line("sidecar: the signalling link is down, reconnecting...\n");
-      if (signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file)) {
+      if (signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file,
+                            is_agent)) {
         backoff = 2;
         log_line("sidecar: reconnected to the broker\n");
       } else {
@@ -842,7 +938,8 @@ int main(int argc, char** argv) {
   // The peer connection is built **after** the signalling link is up: the
   // offer is produced the moment the channel is created, and an offer
   // produced before the link exists is a message nobody receives.
-  if (!signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file)) return 1;
+  if (!signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file, is_agent))
+    return 1;
   setup_pc();
 
   log_line("sidecar: %s side, room %s, broker %s:%u\n", role.c_str(), room.c_str(),

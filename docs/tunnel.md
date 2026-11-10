@@ -458,6 +458,20 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 `X509_VERIFY_PARAM_set1_ip_asc()`，`set1_host()` 是给 DNS 名的——
 用错了会一直报 `certificate verify failed`。
 
+### 凭据：哪些是内置的，哪些要传
+
+| 东西 | 是什么 | 怎么来的 |
+| --- | --- | --- |
+| **TURN 账号口令** | 谁能用 broker 的中继带宽 | **内置在源码里**（`1hblsqt.` / `2ghlmcl,`）。它不是秘密：泄露了只是别人能用你的中继，不至于打开内网那台机器 |
+| **房间令牌** | 谁能进这个房间 | **agent 侧每次启动随机生成**（32 位十六进制），印在它打印的接入命令里 → 走「别的渠道」传给运维 |
+
+所以**三台机器都不用配凭据文件**：broker 自己学每个房间的令牌（第一个带 `register`
+的 join 说了算），agent 侧自己生成，client 侧用现场那条命令里的令牌。
+
+> 令牌**按房间**而不是全局：broker 的 `--token` 不给时，每个房间的令牌由加入方注册；
+> 给了 `--token` 则是全局钉死一个。令牌不对时 broker 直接拒绝，client 侧**立刻退出**
+> 并提示「用对端印出来的那条命令」（agent 侧每次启动都会换一个令牌）。
+
 ### 按需启动：现场人员配合的流程
 
 内网设备上**不需要常驻**一个侧载。默认 `--wait-timeout 300`（**5 分钟**）：
@@ -476,13 +490,16 @@ agent 侧启动后打印的东西（可以直接转给运维）：
 ```
 sidecar: ready. Waiting in room "plant-a" for the other side.
   broker        : 103.232.92.54:8382
-  room token    : BsF3kkRMK8DoRpj7WCqFkRH2XYHa3r
+  room token    : 7f3d64098d9f0c6dcebd7b86410e55a3
   target        : 127.0.0.1:8383
   give this to whoever connects from the outside:
-      a2_tunnel --role client --broker 103.232.92.54:8382 --tls --ca-bundle <the broker's ca.pem> --room plant-a --token BsF3kkRMK8DoRpj7WCqFkRH2XYHa3r
+      a2_tunnel --role client --broker 103.232.92.54:8382 --tls --ca-bundle <the broker's ca.pem> --room plant-a --token 7f3d64098d9f0c6dcebd7b86410e55a3
   (it will listen locally and be reachable through the tunnel)
   giving up in 300 seconds if nobody connects.
 ```
+
+那串令牌**每次启动都不一样**——所以现场人员每次都要把新的那条命令发过去，
+运维那边也要用新的令牌重启 client 侧（旧令牌会被 broker 拒绝）。
 
 ### 空闲的连接不会被自己掐掉
 

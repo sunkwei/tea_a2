@@ -38,6 +38,56 @@
 
 using json = nlohmann::json;
 
+// ---- the built-in TURN credentials -----------------------------------------
+// The TURN relay is the broker's bandwidth, not a secret worth hiding: the
+// credentials only decide who may push traffic through it. They are built in
+// so that no configuration file has to be copied to every machine (the sidecar
+// next to the a2, the operator's machine, the broker) - the CLI flags still
+// override them.
+constexpr const char* kDefaultTurnUser = "1hblsqt.";
+constexpr const char* kDefaultTurnPass = "2ghlmcl,";
+
+/// Where the room token lives when it is not given on the command line.
+/// The room token is a real secret: it is the key to the room, so it is NOT
+/// built in like the TURN credentials.
+std::string token_file_path() {
+  const char* env = std::getenv("TEA_AGENT_HOME");
+  std::string home;
+  if (env && *env) {
+    home = env;
+  } else {
+#ifdef _WIN32
+    const char* up = std::getenv("USERPROFILE");
+    home = (up && *up) ? up : ".";
+#else
+    const char* h = std::getenv("HOME");
+    home = (h && *h) ? h : ".";
+#endif
+  }
+  std::string path = home;
+  if (!path.empty() && path.back() != '/' && path.back() != '\\') path += '/';
+  path += ".tea_agent/tunnel/token";
+  return path;
+}
+
+/// Read the room token from the conventional file (first line, trimmed).
+bool read_token_file(std::string* out) {
+  std::FILE* f = std::fopen(token_file_path().c_str(), "rb");
+  if (!f) return false;
+  char buf[512] = {0};
+  size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+  std::fclose(f);
+  if (n == 0) return false;
+  std::string s(buf, n);
+  size_t nl = s.find('\n');
+  if (nl != std::string::npos) s = s.substr(0, nl);
+  while (!s.empty() && (s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+  if (s.empty()) return false;
+  *out = s;
+  return true;
+}
+
+
 #include "tunnel_net.h"
 
 namespace {
@@ -55,6 +105,11 @@ std::mutex g_rooms_mu;
 std::map<std::string, std::vector<std::shared_ptr<Peer>>> g_rooms;
 
 std::string g_token;
+// The token of each room. A room learns its token from the side that
+// registers it (the agent side generates a fresh one on every start), so
+// nothing has to be configured on the machines: the token travels with the
+// connection details the agent side prints.
+std::map<std::string, std::string> g_room_tokens;
 
 void send_line(const std::shared_ptr<Peer>& p, const json& j) {
   if (!p || !p->alive) return;
@@ -90,12 +145,34 @@ void handle_line(const std::shared_ptr<Peer>& p, const json& j) {
   // The first line joins a room; everything after that is relayed.
   if (j.contains("room") && j.contains("token")) {
     const std::string token = j.value("token", "");
-    if (g_token.empty() || token != g_token) {
-      send_line(p, {{"type", "error"}, {"message", "bad token"}});
-      p->alive = false;
-      return;
-    }
+    const bool registering = j.value("register", false);
     p->room = j.value("room", "");
+    {
+      std::lock_guard<std::mutex> lock(g_rooms_mu);
+      std::string& current = g_room_tokens[p->room];
+      if (current.empty()) {
+        // First one in the room decides the token.
+        current = token;
+      } else if (registering) {
+        // The agent side registers on every start: it just generated a new
+        // token, so the room's old one is replaced.
+        if (current != token) {
+          std::fprintf(stderr, "broker: the token of room %s was replaced\n", p->room.c_str());
+        }
+        current = token;
+      }
+      if (!g_token.empty() && token != g_token) {
+        // A broker-wide token was configured: it wins over the room's own.
+        send_line(p, {{"type", "error"}, {"message", "bad token"}});
+        p->alive = false;
+        return;
+      }
+      if (token != current) {
+        send_line(p, {{"type", "error"}, {"message", "bad token"}});
+        p->alive = false;
+        return;
+      }
+    }
     p->role = j.value("role", "");
     bool peer_present = false;
     {
@@ -220,8 +297,8 @@ int main(int argc, char** argv) {
   uint16_t relay_begin = 49160;
   uint16_t relay_end = 49260;
   std::string realm = "a2";
-  std::string turn_user = "a2";
-  std::string turn_pass;
+  std::string turn_user = kDefaultTurnUser;
+  std::string turn_pass = kDefaultTurnPass;
   std::string token;
 
   for (int i = 1; i < argc; ++i) {
@@ -239,12 +316,22 @@ int main(int argc, char** argv) {
     else if (a == "--help" || a == "-h") {
       std::printf(
           "a2_broker --stun-port 3478 --signal-port 8382 --signal-bind 127.0.0.1 \\\n"
-          "          --realm a2 --turn-user a2 --turn-pass <secret> --token <secret>\n");
+          "          --realm a2\n"
+          "          (the TURN credentials are built in; the room token comes from\n"
+          "           --token or from ~/.tea_agent/tunnel/token)\n");
       return 0;
     }
   }
-  if (turn_pass.empty() || token.empty()) {
-    std::fprintf(stderr, "broker: --turn-pass and --token are required\n");
+  // The room token is optional on the broker: without one every room learns
+  // its token from the side that registers it (the agent side generates a
+  // fresh one on every start). With --token the broker pins one token for
+  // every room.
+  if (token.empty()) {
+    std::string from_file;
+    if (read_token_file(&from_file)) token = from_file;
+  }
+  if (turn_pass.empty()) {
+    std::fprintf(stderr, "broker: no TURN password\n");
     return 2;
   }
   g_token = token;
