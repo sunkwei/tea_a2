@@ -254,17 +254,30 @@ git add -A && git commit -m "release: 0.18.5"
 ### 包里有什么
 
 打包脚本（`.tea_agent_run/scripts/pack_release.sh`，**它不进 git**，每台机器各有一份）
-把下面这些放进 zip：
+把下面这些放进**一个** zip（2026-11-10 起 a2 本体与隧道侧载在同一个包里）：
 
 ```
-docs/tea_a2_manual.md          使用手册
+linux_aarch64/tea_a2           主程序（静态链接，aarch64）
+linux_aarch64/a2_tunnel        隧道侧载（aarch64）
+linux_x86_64/tea_a2            主程序（x86_64）
+linux_x86_64/a2_tunnel         隧道侧载（x86_64）
+win_x86_64/tea_a2.exe          主程序（Windows）
+win_x86_64/a2_tunnel.exe       隧道侧载（Windows）
+a2_broker-linux-x86_64-<版本>  broker（只跑在公网那台机器上，所以不进平台目录）
+docs/                          使用手册、运维手册、隧道说明
 sched/                         整个目录（Python 侧的全部模块 + 模板 + README）
 scripts/                       整个目录（systemd 单元模板、安装脚本、构建脚本）
-tea_a2-linux-x86_64-<版本>     主程序
-tea_a2-linux-aarch64-<版本>    主程序（静态链接，aarch64）
-tea_a2-win-x86_64-<版本>.exe   主程序（Windows）
+provider.yaml.sample           模型配置模板
+如何配置模型.txt                模型配置的大白话说明
+nginx-stream-tunnel.conf       broker 那侧的 nginx 模板
 tea_agent.buildinfo            这个二进制是从哪个 commit 编出来的
 ```
+
+**平台目录里的文件名不带版本号**：目录名已经说明了平台，版本在包名和 `buildinfo` 里，
+脚本取文件时不用猜名字。拿到包的人只要看自己是哪台机器，进对应目录拿 `tea_a2` 就走。
+
+打包脚本会在打完包之后**自己再查一遍**：三个平台的 `tea_a2` + `a2_tunnel` 一个都不能少，
+仓库里 `sched/`、`scripts/` 有的文件包里也必须都有，少一个就中止发版。
 
 **`sched/` 与 `scripts/` 是整个目录进去的，目录名跟仓库里一样。**
 

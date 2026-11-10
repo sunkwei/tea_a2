@@ -1921,6 +1921,8 @@ tea_a2-linux-x86_64-<版本> / -aarch64- / tea_a2-win-x86_64-<版本>.exe
 tea_agent.buildinfo
 ```
 
+（2026-11-10 起这个清单变了，见下面那节。）
+
 **目录名跟仓库里一样**，这一点比「文件全了」还重要：
 
 - systemd 单元（`scripts/a2_task.service`）里写的是 `<路径>/sched/task_server.py`。
@@ -2420,3 +2422,44 @@ punch  → --mine <自己的token> --peer <对方的token>     两边同时跑�
   `shellRender()` 每次按它重画高亮。
 - 测试要**重试**：shell 的输出是异步来的，画面可能在「量位置」和「拖」之间滚一行 →
   `tests/ui_shell.mjs` 里是「量 → 拖 → 看选中的对不对，不对就再来一次」。
+
+---
+
+## 发版包：一个 zip，三个平台目录（2026-11-10 改）
+
+**以前的规矩**：a2 本体一个包（`tea_a2-<版本>.zip`），隧道侧载另一个包
+（`tea_a2-tunnel-<版本>.zip`）。两个包要**一次传完**——`pan_publish.py` 每次运行都重写
+`release-manifest.json`（只列这一轮的文件），分两次传的话后传的会把先传的从清单上抹掉。
+
+**现在的规矩**（用户定的）：**一个 zip 全齐**，平台分目录：
+
+```
+tea_a2-1.2.2.zip
+  linux_aarch64/tea_a2     linux_aarch64/a2_tunnel
+  linux_x86_64/tea_a2      linux_x86_64/a2_tunnel
+  win_x86_64/tea_a2.exe    win_x86_64/a2_tunnel.exe
+  a2_broker-linux-x86_64-<版本>     broker（只在公网那台上跑，不进平台目录）
+  docs/ sched/ scripts/ provider.yaml.sample 如何配置模型.txt
+  nginx-stream-tunnel.conf tea_agent.buildinfo
+```
+
+- **平台目录里的文件名不带版本号**：目录名已经说明平台了，版本在包名和 `buildinfo` 里，
+  脚本取文件不用猜名字（用户拿到包：看自己是哪台机器 → 进目录 → 拿 `tea_a2`）。
+- `a2_broker` 只跑在公网那台机器（VPS）上，客户设备用不到 → 留在根目录，不进平台目录。
+- 隧道那三个平台都要（侧载要塞到客户设备旁边），所以进平台目录。
+- `docs/tunnel.md` 与 `nginx-stream-tunnel.conf` 跟着一起走：隧道二进制在包里，
+  说明不能不在。
+- 打包脚本打完包**自己再查一遍**：三个平台的 `tea_a2` + `a2_tunnel` 一个都不能少，
+  `sched/` 与 `scripts/` 的文件列表也一个都不能少 → 少一个就中止发版。
+- `pack_tunnel.sh` 这个脚本**删了**（隧道包没有了），`release.sh` 照旧传那一个 zip。
+
+**发版顺序**（别搞反）：
+
+```
+bump_version.py 1.2.1 1.2.2   →   提交（工作区必须干净！）   →   三个平台都构建
+   →   rm -rf release/tmp   →   pack_release.sh <版本>   →   pan_publish.py 传网盘
+   →   提交 + push
+```
+
+**为什么先提交再构建**：`tea_agent.buildinfo` 记的是 commit，工作区脏了它就写 `-dirty`，
+发出去的包说不清自己是从哪个提交来的（三个平台的 buildinfo 都是构建时现写的）。
