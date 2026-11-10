@@ -34,9 +34,11 @@
 #include "command.h"
 #include "env.h"
 #include "gzip.h"
+#include "gzip_stream.h"
 #include "errors.h"
 #include "html_export.h"
 #include "http.h"
+#include "http_gzip.h"
 #include "idempotency.h"
 #include "log.h"
 #include "model_discovery.h"
@@ -492,6 +494,138 @@ void send_error(httplib::Response& res, int status, const std::string& code,
   }
   body["error"] = error;
   send_json(res, body, status);
+}
+
+// ---------------------------------------------------------------------------
+// gzip answers
+// ---------------------------------------------------------------------------
+//
+// The tunnel (a2_tunnel) carries these very bytes over a link that is often a
+// phone or a VPN: the bytes that do not have to travel are the bytes that do
+// not have to be paid for. So an answer is compressed when - and only when -
+// the client says it can decompress it.
+
+/// Replace a header instead of adding a second line with the same name.
+///
+/// httplib's set_header() adds a line - it does not replace the old one -
+/// and two `Content-Length` lines are a broken answer: the client reads the
+/// first one and waits for bytes that never come (the browser then says the
+/// data is corrupt).
+void replace_header(httplib::Response& res, const std::string& key,
+                    const std::string& value) {
+  auto range = res.headers.equal_range(key);
+  res.headers.erase(range.first, range.second);
+  res.set_header(key, value);
+}
+
+/// Remember that the answer depends on the coding the client asked for.
+void add_vary(httplib::Response& res, const std::string& token) {
+  const std::string current = res.get_header_value("Vary");
+  if (current.empty()) {
+    replace_header(res, "Vary", token);
+    return;
+  }
+  std::size_t pos = 0;
+  while (pos < current.size()) {
+    std::size_t comma = current.find(',', pos);
+    if (comma == std::string::npos) comma = current.size();
+    if (trim(current.substr(pos, comma - pos)) == token) return;
+    pos = comma + 1;
+  }
+  replace_header(res, "Vary", current + ", " + token);
+}
+
+/// Compress the answer in place, when the client can take it back compressed.
+///
+/// This runs for every answer (the post-routing hook), so it has to leave
+/// the answer alone whenever it is not sure.
+void gzip_answer(const httplib::Request& req, httplib::Response& res) {
+  if (res.body.empty()) return;                      // nothing to compress
+  if (res.has_header("Content-Encoding")) return;   // it is coded already
+  if (res.has_header("Transfer-Encoding")) return;  // a streamed body
+  const std::string type = res.get_header_value("Content-Type");
+  if (!content_type_compressible(type)) return;
+  if (!accepts_gzip(req.get_header_value("Accept-Encoding"))) return;
+  // A body that is not the whole answer (something streams behind it) must
+  // not be compressed: the length in the header would not match the bytes.
+  const std::string length = res.get_header_value("Content-Length");
+  if (!length.empty() && length != std::to_string(res.body.size())) return;
+  std::string packed;
+  std::string err;
+  if (!gzip_compress(res.body, &packed, &err)) {
+    LOG_WARN("server: cannot compress the answer: ", err);
+    return;
+  }
+  if (packed.size() >= res.body.size()) return;   // no gain: keep it plain
+  res.set_content(std::move(packed), type);
+  res.set_header("Content-Encoding", "gzip");
+  replace_header(res, "Content-Length", std::to_string(res.body.size()));
+  add_vary(res, "Accept-Encoding");
+}
+
+/// The gzip side of a live stream: the compressor, and the flag that says the
+/// stream is over.
+struct GzipStreamState {
+  GzipStream stream;
+  bool closed = false;
+};
+
+/// A sink that compresses what is written into it.
+///
+/// The provider writes its frames into this sink; they leave as gzip, one
+/// frame at a time, so the stream stays live: a turn that is running is still
+/// watchable over a slow link.
+class GzipSink {
+ public:
+  GzipSink(httplib::DataSink& out, GzipStreamState& state) : out_(out), state_(state) {
+    sink_.write = [this](const char* data, std::size_t len) {
+      if (state_.closed) return false;
+      std::string packed;
+      if (!state_.stream.write(data, len, &packed)) return false;
+      if (packed.empty()) return true;
+      return out_.write(packed.data(), packed.size());
+    };
+    sink_.is_writable = [this] { return !state_.closed && out_.is_writable(); };
+    // The end of the body is the end of the gzip stream: the trailer has to
+    // go out before the body is closed, or the reader gets a broken file.
+    sink_.done = [this] {
+      if (!state_.closed) {
+        state_.closed = true;
+        std::string packed;
+        if (!state_.stream.finish(&packed) ||
+            (packed.size() > 0 && !out_.write(packed.data(), packed.size()))) {
+          LOG_WARN("server: the gzip stream did not end cleanly");
+        }
+      }
+      out_.done();
+    };
+  }
+
+  /// The sink the provider writes into.
+  httplib::DataSink& sink() { return sink_; }
+
+ private:
+  httplib::DataSink& out_;
+  httplib::DataSink sink_;
+  GzipStreamState& state_;
+};
+
+/// Hand the frames of a live stream through gzip - when the client can take
+/// them back compressed.
+///
+/// The provider that comes in writes into a sink of its own; the bytes that
+/// go out are the compressed ones.
+httplib::ContentProviderWithoutLength gzip_stream(
+    const httplib::Request& req, httplib::Response& res,
+    httplib::ContentProviderWithoutLength inner) {
+  if (!accepts_gzip(req.get_header_value("Accept-Encoding"))) return inner;
+  res.set_header("Content-Encoding", "gzip");
+  add_vary(res, "Accept-Encoding");
+  auto state = std::make_shared<GzipStreamState>();
+  return [inner, state](std::size_t offset, httplib::DataSink& sink) {
+    GzipSink gz(sink, *state);
+    return inner(offset, gz.sink());
+  };
 }
 
 class IdempotencyContext;
@@ -1272,8 +1406,9 @@ struct SubscriberSlot {
 /// that one). `replay_only` allows a turn that already finished: its frames
 /// are still in the buffer, and a caller that comes back later is exactly
 /// who should read them.
-bool follow_turn(httplib::Response& res, const std::shared_ptr<ChatTurn>& turn,
-                  long long since, bool replay_only) {
+bool follow_turn(const httplib::Request& req, httplib::Response& res,
+                  const std::shared_ptr<ChatTurn>& turn, long long since,
+                  bool replay_only) {
   if (!turn->add_subscriber(replay_only)) {
     send_error(res, 429, "too_many_subscribers",
                "already " + std::to_string(max_subscribers_per_turn()) +
@@ -1288,9 +1423,9 @@ bool follow_turn(httplib::Response& res, const std::shared_ptr<ChatTurn>& turn,
   res.set_header("Access-Control-Allow-Origin", "*");
   res.set_chunked_content_provider(
       "text/event-stream; charset=utf-8",
-      [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
+      gzip_stream(req, res, [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
         return turn->pump(sink, sub);
-      });
+      }));
   return true;
 }
 
@@ -2330,6 +2465,12 @@ void ApiServer::Impl::install_routes() {
   svr.set_idle_interval(0, 200000);
   svr.set_keep_alive_max_count(1024);
   svr.set_tcp_nodelay(true);
+  // Every answer goes through here on its way out: the bytes that do not
+  // have to travel (the tunnel pays for every one of them) are compressed
+  // when the client says it can take them back compressed.
+  svr.set_post_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+    gzip_answer(req, res);
+  });
   // Base threads stay around; extra ones are spawned on demand (an attached SSE
   // stream keeps one for its whole life) and retire after a few idle seconds, so
   // a handful of tabs costs a handful of threads. `TEA_AGENT_HTTP_THREADS_MAX`
@@ -3062,8 +3203,9 @@ void ApiServer::Impl::install_routes() {
     res.set_header("X-Accel-Buffering", "no");
     res.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
-        [this, request, provider, model_info, echo_reasoning, kMaxWebRounds, want_web_tools](
-            std::size_t, httplib::DataSink& sink) mutable {
+        gzip_stream(req, res,
+                    [this, request, provider, model_info, echo_reasoning, kMaxWebRounds,
+                     want_web_tools](std::size_t, httplib::DataSink& sink) mutable {
           ChatResult result;
           DeltaCallback on_delta = [&sink, &result](DeltaKind kind, const std::string& text) {
             nlohmann::json e = nlohmann::json::object();
@@ -3120,7 +3262,7 @@ void ApiServer::Impl::install_routes() {
           // as "Error in input stream".
           sink.done();
           return true;
-        });
+        }));
   });
 
   // ---- first-run quick setup: a key is the whole config -------------------
@@ -5305,7 +5447,7 @@ void ApiServer::Impl::install_routes() {
           }
           return;
         }
-        follow_turn(res, earlier, 0, true);
+        follow_turn(req, res, earlier, 0, true);
         return;
       }
       // The turn is gone (the server restarted): the work died with it, so
@@ -5768,9 +5910,9 @@ void ApiServer::Impl::install_routes() {
     }
     res.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
-        [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
+        gzip_stream(req, res, [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
           return turn->pump(sink, sub);
-        });
+        }));
   });
 
   // ---- the turn handle ---------------------------------------------------
@@ -5891,9 +6033,9 @@ void ApiServer::Impl::install_routes() {
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
-        [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
+        gzip_stream(req, res, [turn, sub, slot](std::size_t, httplib::DataSink& sink) {
           return turn->pump(sink, sub);
-        });
+        }));
   });
 
   // ---- re-attaching to a turn that is still running -----------------------
@@ -5994,7 +6136,7 @@ void ApiServer::Impl::install_routes() {
     }
     LOG_INFO("chat: re-attaching to the running turn of session ", session_id, " (replay from seq ",
              since + 1, ", ", turn->subscriber_count(), " subscriber(s))");
-    follow_turn(res, turn, since, false);
+    follow_turn(req, res, turn, since, false);
   });
 
   svr.Post("/api/chat/stop", [this](const httplib::Request& req, httplib::Response& res) {

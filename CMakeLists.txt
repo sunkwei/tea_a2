@@ -431,6 +431,8 @@ set(TEA_SOURCES
   src/command.cpp
   src/archive.cpp
   src/gzip.cpp
+  src/gzip_stream.cpp
+  src/http_gzip.cpp
   src/history_gc.cpp
   src/mcp.cpp
   src/tools.cpp

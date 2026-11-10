@@ -146,6 +146,27 @@ curl -s -X POST $B/api/chat -H 'Content-Type: application/json' \
 `tests/smoke_error_catalog.py` 读 `src/server.cpp`，确认**每一个能发出去的错误码都在
 目录里、状态也一样**，反过来目录里也不许有发不出去的条目。
 
+### 传输：答案可以压缩
+
+隧道（`a2_tunnel`）把这些字节原样搬到手机信号或 VPN 上，所以**能不搬的字节就不搬**：
+客户端说它能解压（`Accept-Encoding: gzip`），服务端就把答案压成 gzip 再发。
+
+- **客户端明确要才压**：`Accept-Encoding: gzip` 或 `*` 才压；`gzip;q=0`、
+  `identity`、或者干脆不带头 → 原样发。
+- **只压文本类**：JSON、HTML、JS/CSS、Markdown、XML、ndjson…… 图片、zip 这类
+  已经压过的不压（压了反而更大）。
+- **回答带 `Content-Encoding: gzip` 与 `Vary: Accept-Encoding`**：中间缓存要按
+  `Accept-Encoding` 分开存。
+- **SSE 流也压，而且压完还是流**：回合的事件流边跑边发，每一帧压完立刻 flush
+  出去，浏览器解压后看到的帧和没压时一模一样（`Transfer-Encoding: chunked` 不变）。
+- **压不划算就不压**：压完更大（小 JSON、随机二进制）就原样发。
+
+省了多少（首页与 app.js）：`/` 31 KB → 8.9 KB，`/app.js` 359 KB → 108 KB，
+大约**七成**。对面只有 4G 信号时，这就是「能用」和「不能用」的差别。
+
+> 这是**传输层**的事，和历史数据的 gzip（`POST /api/workspaces/{id}/gc` 把冷数据
+> 压成 `.json.gz` 存盘）是两回事。
+
 ### 回合句柄：提交完可以撒手
 
 `POST /api/chat` 默认是一条 SSE 流**撑到底**：客户端不 disconnect，连接就一直占着。

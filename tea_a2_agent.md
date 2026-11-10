@@ -2463,3 +2463,37 @@ bump_version.py 1.2.1 1.2.2   →   提交（工作区必须干净！）   →  
 
 **为什么先提交再构建**：`tea_agent.buildinfo` 记的是 commit，工作区脏了它就写 `-dirty`，
 发出去的包说不清自己是从哪个提交来的（三个平台的 buildinfo 都是构建时现写的）。
+
+---
+
+## 传输层压缩：答案可以 gzip（2026-11-10）
+
+**为什么做**：隧道（`a2_tunnel`）把这些字节原样搬到手机信号/VPN 上。隧道这一层
+（SCTP/DTLS）**不能压**——SCTP 没有压缩扩展，DTLS 的 TLS compression 早就被
+TLS 1.3 删了，libdatachannel 也没有压缩开关。所以省带宽只能**在 HTTP 里面做**：
+a2 收到 `Accept-Encoding: gzip` 就把答案压了再发。
+
+**做了什么**：
+
+- `src/http_gzip.{h,cpp}`：`accepts_gzip()`（认 `Accept-Encoding` 的 q 值与 `*`）+
+  `content_type_compressible()`（只压文本类；`text/event-stream` 不在这里）。
+- `src/gzip_stream.{h,cpp}`：miniz 上的**流式** gzip（`tdefl_compress_buffer` +
+  `TDEFL_SYNC_FLUSH`），一帧压完立刻 flush，所以 SSE 压完还是流。
+- `src/server.cpp`：`set_post_routing_handler` 里压普通回答（正文在内存里的那些）；
+  四条 SSE 路由（`/api/chat`、`/api/chat/attach`、`/api/turns/{id}/events`、
+  `/api/llm/chat` 的网页工具流）用 `gzip_stream()` 包一层 provider。
+- 回归：`tests/smoke_http_gzip.py`（35 项）。e2e 157 项照旧全过。
+
+**踩的坑（重要）**：**httplib 的 `set_header()` 是「加一行」，不是「换一行」**
+（`headers.emplace()`，Headers 是 multimap）。改 `Content-Length` 时如果直接
+`set_header`，回答里会有**两行 Content-Length**：第一行还是压缩前的老长度，
+客户端按它等后面的字节 → **永远等不到 → 浏览器报「数据错误」，页面打不开**
+（Firefox：「数据无效」；curl：`IncompleteRead`）。
+修法：先 `res.headers.equal_range(key)` 把旧的 erase 掉，再 `set_header`——
+本仓库的 `replace_header()` 就是干这个的。
+
+**另一个坑**：SSE 的 provider 会被 httplib **反复调用**（直到 `done()`），
+所以 gzip 的流状态不能放在 provider 的局部变量里 → 用 `shared_ptr<GzipStreamState>`
+跨调用共享。
+
+**效果**：首页 31 KB → 8.9 KB，`app.js` 359 KB → 108 KB（约七成）。
