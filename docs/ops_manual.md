@@ -270,5 +270,6 @@ broker 目前支持 STUN/TURN，使用 ICE 协商，以实现 a2_tunnel 功能�
 | 1.1.2 | 侧载默认值全指向公网 broker；`--session` 一个码搞定；加 `--port`；参数拼错会报错 |
 | 1.1.3 | README 加隧道索引 |
 | **1.2.0** | **mbedTLS 统一到 3.5.2**（2.28 的支持期到 2026-11）；隧道侧载自动重协商；**微信里发 `/tunnel` 就开隧道并回传 session 码** |
+| **1.2.1** | `--target` 支持域名；目标连不上就立刻断开；client 侧加 `--host`（多台机器的浏览器可以共用一个隧道） |
 
 更多设计细节见 [`tunnel.md`](tunnel.md)；a2 本身的命令清单见 [`tea_a2_manual.md`](tea_a2_manual.md)。

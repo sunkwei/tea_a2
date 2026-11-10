@@ -286,7 +286,7 @@ HTTP/1.1 200 OK
 Content-Type: application/json
 Content-Length: 27
 
-{"version":"1.2.0","ok":true}
+{"version":"1.2.1","ok":true}
 ```
 
 也就是说：**「HTTP over WebRTC 数据通道」这条路是通的**，不是纸上谈兵。
