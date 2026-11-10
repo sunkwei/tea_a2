@@ -124,6 +124,7 @@ build/bin/tea_agent --workspace . --open
 | [构建与跨平台编译](docs/build.md) | 依赖、本机构建、交叉编译（aarch64 / Windows）、产物校验 |
 | [部署](docs/deploy.md) | 嵌入式设备、静态单文件、TLS、systemd 单元、Windows 自启 |
 | [设备运维手册](docs/device_ops_manual.md) | 给运维/售后的图文手册：设备上的 a2（配 key → 建工作区 → 排错表） |
+| [运维手册：a2 + 隧道侧载](docs/ops_manual.md) | 给运维同事：设备上起 a2 与侧载、一条命令从外网连进去、排错表、安全须知 |
 | [多级协同与机群运维](docs/fleet.md) | 一台服务器管 40 台设备：台账、灰度升级、审计、让设备自己判断 |
 | [级联](docs/peer.md) | `peers:` 配置、`toolkit_peer`、`/api/peer/*`、安全边界 |
 | **接口与内部** | |
