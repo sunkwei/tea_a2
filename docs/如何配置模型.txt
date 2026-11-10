@@ -1,0 +1,76 @@
+如何配置模型
+============
+
+a2 要跟一个「模型端点」说话，配置写在：
+
+    ~/.tea_agent/provider.yaml
+
+这个包里有一份模板：provider.yaml.sample。先复制，再改：
+
+    cp provider.yaml.sample ~/.tea_agent/provider.yaml
+    vi  ~/.tea_agent/provider.yaml
+
+最少要填两样：地址和 key。
+
+    providers:
+      deepseek:
+        api_url: https://api.deepseek.com
+        api_key: sk-换成你的key
+        models:
+          deepseek-chat: {}
+
+只有这一段就能用：**第一个 provider 的第一个模型就是默认的**。
+
+改完重启 a2，然后确认它认了：
+
+    curl -s http://127.0.0.1:8383/api/config/status
+    # → 里面有 loaded、active、models 这些字段
+    #   active 就是它正在用的 provider + 模型
+
+如果 a2 跑在别的端口上，把 8383 换成它实际监听的端口。
+也可以直接问它：打开 http://127.0.0.1:8383/ 的界面 → 设置 → 模型，
+那里能看到每个 provider 的卡片，也能改采样参数。
+
+常见几种
+--------
+
+DeepSeek
+    api_url: https://api.deepseek.com
+    api_key: sk-…            （https://platform.deepseek.com/api_keys 拿）
+    models: deepseek-chat: {}
+
+MiniMax
+    api_url: https://api.minimax.cn/v1
+    api_key: sk-…
+    models: MiniMax-M3.1-Flash: {}
+
+任何 OpenAI 兼容的端点（自建网关、vLLM、硅基流动……）
+    api_url: https://你的地址/v1
+    api_key: sk-…
+    models: 你的模型名: {}
+
+    api_url 带不带 /v1 都认：带 /v1 就补 /chat/completions，
+    不带就补 /v1/chat/completions。
+
+几个容易踩的
+------------
+
+* 写错了不会静默：连不上时 a2 的日志里会写清楚原因
+  （~/.tea_agent/logs/tea_agent.log，或 journalctl -u a2 -f）。
+
+* api_key 里有特殊字符（#、:、引号）就用引号包起来。
+
+* 模型名要跟对方**完全一样**（大小写也算）；写错了会收到
+  「model not found」。
+
+* 这个文件只说「跟谁说话」。agent 自己的设置（一轮最多几次工具调用、
+  最多花多少 token、能不能碰工作区外面的目录）**不住这里**，
+  住在 ~/.tea_agent/tea_agent.yaml（机器级）
+  或 <工作区>/.tea_agent_run/settings.yaml（按工作区，优先级更高）。
+
+* 换了 key 不用重装：改完文件重启 a2 就行。
+
+* 文件权限建议 600（里面有 key）：
+      chmod 600 ~/.tea_agent/provider.yaml
+
+想了解更多字段，看 docs/config.md；命令清单在 docs/tea_a2_manual.md。

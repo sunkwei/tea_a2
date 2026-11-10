@@ -1,0 +1,74 @@
+# provider.yaml.sample —— 模型（provider）怎么配
+#
+# 复制这份到  ~/.tea_agent/provider.yaml  ，把 api_key 换成你自己的，然后重启 a2。
+#
+#     cp provider.yaml.sample ~/.tea_agent/provider.yaml
+#     vi  ~/.tea_agent/provider.yaml
+#
+# 这个文件只说「跟谁说话」：有哪些 provider、它们的地址和 key。
+# agent 自己的设置（预算、工具开关这些）不住这里，住在
+#     <tea_home>/tea_agent.yaml            （机器级）
+#     <工作区>/.tea_agent_run/settings.yaml （按工作区，优先级更高）
+#
+# ── 最小可用的一份 ────────────────────────────────────────────────────────
+# 只有一段也能用：第一个 provider 的第一个模型就是默认的。
+#
+#   providers:
+#     my-model:
+#       api_url: https://api.example.com/v1
+#       api_key: sk-你的key
+#       models:
+#         some-model: {}
+#
+# ── 常见的三种 ──────────────────────────────────────────────────────────────
+version: 1
+
+providers:
+  # 1) DeepSeek（官方）
+  deepseek:
+    api_url: https://api.deepseek.com      # 不带路径 → 自动补 /v1/chat/completions
+    api_key: sk-换成你的key
+    # 官方文档：https://platform.deepseek.com/api_keys
+    models:
+      deepseek-chat:
+        max_context_tokens: 128000        # 上下文窗口
+        max_output_tokens: 8192            # 单次输出上限
+        supports_tools: true               # 模型能不能调工具（agent 的命脉）
+        supports_reasoning: false         # 有没有「思考」过程
+        supports_vision: false            # 能不能看图
+
+  # 2) MiniMax（官方 / Token Plan 网关）
+  minimax:
+    api_url: https://api.minimax.cn/v1
+    api_key: sk-换成你的key
+    models:
+      MiniMax-M3.1-Flash:
+        max_context_tokens: 1000000
+        max_output_tokens: 128000
+        supports_tools: true
+        supports_reasoning: true
+        supports_vision: true
+        reasoning_effort: auto             # auto | low | medium | high
+
+  # 3) 任何 OpenAI 兼容的端点（自建网关、vLLM、Ollama、硅基流动……）
+  #    api_url 写成对方的 /v1 地址就行；带不带 /v1 都认。
+  my-gateway:
+    api_url: https://my-gateway.example.com/v1
+    api_key: sk-换成你的key
+    headers:                               # 可选：网关要的自定义头
+      x-some-header: value
+    models:
+      qwen-plus: {}
+      # 模型名右边可以留空 {}，也可以写全参数（见上面）。
+
+# 网页搜索与抓取用哪个 provider（可选；不写就用 provider 列表里带
+# supports_search 的那个）。deepseek-chat 支持搜索与抓取。
+search:
+  provider: deepseek
+
+# 排队任务（任务队列）用哪个 provider + 模型。格式：<provider>+<模型名>
+task_model: deepseek+deepseek-chat
+
+# 语音输入（可选）：装好 sched/asr_server.py 之后填上
+# asr:
+#   url: http://127.0.0.1:8284
