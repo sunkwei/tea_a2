@@ -496,6 +496,7 @@ int main(int argc, char** argv) {
   std::string token;
   std::string session;
   std::string listen_addr = "127.0.0.1:9931";
+  std::string listen_host_override;
   uint16_t listen_port_override = 0;
   std::string target = "127.0.0.1:8383";
   // The STUN and the TURN server of the public broker. The customer's
@@ -527,7 +528,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
           "a2_tunnel --role agent|client [--session <code>]\n"
           "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
-          "          [--listen <host:port>] [--port <n>] [--target <host:port>]\n"
+          "          [--listen <host:port>] [--host <addr>] [--port <n>] [--target <host:port>]\n"
           "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
           "          [--tls|--no-tls] [--ca-bundle <pem>] [--wait-timeout <seconds>]\n"
           "\n"
@@ -557,6 +558,11 @@ int main(int argc, char** argv) {
     else if (a == "--token") token = next();
     else if (a == "--session") session = next();
     else if (a == "--listen") listen_addr = next();
+    else if (a == "--host") {
+      // The address the local proxy listens on (client side). Same spelling
+      // as the agent's own --host.
+      listen_host_override = next();
+    }
     else if (a == "--port") {
       // The local port to listen on - the same spelling the a2 itself uses.
       listen_port_override = static_cast<uint16_t>(std::stoi(next()));
@@ -1074,12 +1080,14 @@ int main(int argc, char** argv) {
     }
   }).detach();
 
-  // --port wins over the port part of --listen, whatever the order was.
-  if (listen_port_override != 0) {
+  // --host and --port win over the parts of --listen, whatever the order was.
+  {
     std::string lhost;
     uint16_t lport = 0;
     split_hostport(listen_addr, lhost, lport);
-    listen_addr = lhost + ":" + std::to_string(listen_port_override);
+    if (!listen_host_override.empty()) lhost = listen_host_override;
+    if (listen_port_override != 0) lport = listen_port_override;
+    listen_addr = lhost + ":" + std::to_string(lport);
   }
 
   // The peer connection is built **after** the signalling link is up: the
@@ -1092,7 +1100,12 @@ int main(int argc, char** argv) {
   log_line("sidecar: %s side, room %s, broker %s:%u\n", role.c_str(), room.c_str(),
                broker_host.c_str(), broker_port);
 
-  if (!is_agent) start_listener();  // the local proxy is up even before the tunnel
+  if (!is_agent) {
+    start_listener();  // the local proxy is up even before the tunnel
+  } else if (!listen_host_override.empty()) {
+    log_line("sidecar: --host only matters on the client side (the agent side has no "
+             "local proxy)\n");
+  }
 
   // 「就绪」要说人话：部署的人要知道**外面怎么连进来**。
   // client 侧打印一段可以直接粘进对方 a2 的 settings.peers 的配置；
@@ -1117,14 +1130,25 @@ int main(int argc, char** argv) {
   } else {
     log_line("sidecar: ready. To reach it from the outside:\n");
     std::fprintf(stderr, "  add this to the settings.peers of the a2 that drives it:\n");
+    // 0.0.0.0 is where we listen, not an address to connect to: the peer
+    // entry needs the address of this machine.
+    const bool every_interface =
+        (listen_host == "0.0.0.0" || listen_host == "::");
+    const std::string shown_host = every_interface ? "<这台机器的地址>" : listen_host;
     std::fprintf(stderr, "      peers:\n");
     std::fprintf(stderr, "        %s:\n", room.c_str());
-    std::fprintf(stderr, "          url: http://%s:%u\n", listen_host.c_str(), listen_port);
+    std::fprintf(stderr, "          url: http://%s:%u\n", shown_host.c_str(), listen_port);
     std::fprintf(stderr, "          token: %s\n", token.c_str());
     std::fprintf(stderr, "          description: %s, reached through the tunnel\n", room.c_str());
     std::fprintf(stderr, "  toolkit_peer can then talk to it (it answers with its own model).\n");
-    std::fprintf(stderr, "  The browser on this machine can open http://%s:%u/ for its web UI.\n",
-                 listen_host.c_str(), listen_port);
+    if (listen_host == "0.0.0.0" || listen_host == "::") {
+      std::fprintf(stderr, "  It listens on every interface: any machine that can reach this one\n"
+                           "  can open http://<this machine>:%u/ for its web UI.\n",
+                   listen_port);
+    } else {
+      std::fprintf(stderr, "  The browser on this machine can open http://%s:%u/ for its web UI.\n",
+                   listen_host.c_str(), listen_port);
+    }
   }
   std::fprintf(stderr, "  ! the lines above contain the token - do not share this log.\n");
   std::fprintf(stderr, "---------------------------------------------------------------\n");
