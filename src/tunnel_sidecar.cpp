@@ -619,6 +619,9 @@ int main(int argc, char** argv) {
   // answering a description the other side never asked for.
   int pc_gen = 0;
   std::function<void()> start_listener;
+  // Set once setup_pc() exists: the channel's close handler needs to start
+  // a fresh negotiation, and setup_pc() is defined further down.
+  std::function<void()> rebuild_tunnel;
 
   auto send_frame = [&](unsigned char type, const std::string& payload) {
     if (!dc) return;
@@ -696,6 +699,16 @@ int main(int argc, char** argv) {
                          std::chrono::steady_clock::now().time_since_epoch())
                          .count();
       log_line("sidecar: the data channel closed (%s)\n", role.c_str());
+      // A closed channel has to be rebuilt, not just reported: the link can
+      // die without anybody hanging up (the broker restarted and took the
+      // TURN lease with it, the path changed, ...). The agent side offers,
+      // the client side asks for an offer - it is the answerer.
+      if (is_agent) {
+        offered_epoch = peer_epoch;
+        if (rebuild_tunnel) rebuild_tunnel();
+      } else {
+        signal.send_line({{"type", "need-offer"}});
+      }
     });
     channel->onMessage([&, gen](std::variant<rtc::binary, std::string> msg) {
       if (gen != pc_gen) return;
@@ -783,6 +796,7 @@ int main(int argc, char** argv) {
       attach_channel(pc->createDataChannel("a2"), gen);
     }
   };
+  rebuild_tunnel = [&]() { setup_pc(); };
 
   signal.on_message([&](const json& j) {
     const std::string type = j.value("type", "");
@@ -877,10 +891,11 @@ int main(int argc, char** argv) {
       return;
     }
     if (type == "need-offer") {
-      // The peer wants a fresh offer. If we already offered for this arrival,
-      // this is the same request arriving twice: ignore it.
+      // The peer wants a fresh offer. If we already offered for this arrival
+      // **and the tunnel is up**, this is the same request arriving twice:
+      // ignore it. If the tunnel is down, the peer needs a new one.
       if (is_agent) {
-        if (offered_epoch == peer_epoch) {
+        if (offered_epoch == peer_epoch && tunnel_ready) {
           log_line("sidecar: need-offer, but we already offered\n");
           return;
         }
