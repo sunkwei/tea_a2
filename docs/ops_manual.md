@@ -1,14 +1,15 @@
 # 运维手册：a2 + 隧道侧载
 
-给现场和远程的运维同事看。读完这一篇，你应该能：
+读完这一篇，你应该能：
 
 - 在一台设备上把 a2 跑起来，并用隧道从外网连进去；
 - 隧道断了知道怎么查；
 - 知道哪些东西不能外传。
 
-> 术语：**a2**（`tea_agent`）= 那台机器上的 agent；**侧载**（`a2_tunnel`）=
+> 术语：**a2**（`tea_agent`）= 那台机器上的 llm agent，支持 **web终端** ， 默认使用 http://localhost:8282 访问；**侧载**（`a2_tunnel`）=
 > 蹲在 a2 旁边的一个小进程，负责把外网的连接转到 a2 上。
 > 侧载**不是** a2 的一部分——a2 停了、侧载没起，a2 照常工作。
+
 
 ---
 
@@ -202,71 +203,14 @@ curl -s -X POST http://127.0.0.1:9931/api/chat \
 
 ---
 
-## 七、升级与回滚
+## 七、附录
 
-```sh
-# 换二进制（正在运行的要先停；正在运行的二进制不能直接覆盖，要先 mv）
-cp a2.new ./a2.new && chmod 755 ./a2.new
-kill <a2 的 pid>                  # 正在运行的二进制不能直接覆盖，所以先停
-mv ./a2.new ./a2
-./run_a2.sh &                    # 重启
-```
 
-- 换完**必须重启侧载**（换的是另一个进程），并且**要把新的 session 码转给外面那位**。
-- 回滚 = 把旧二进制换回去重启（版本号在 `a2 --version` 和 `tea_agent.buildinfo` 里）。
-- **老系统要用静态链接的 a2**：
+### broker
 
-  ```sh
-  cmake -S . -B build-static -DTEA_AGENT_STATIC_RUNTIME=ON -DTEA_AGENT_STATIC_LIBC=ON
-  cmake --build build-static -j8
-  ```
+目前 broker 是我部署的一个 VPS 主机，IP 为 103.232.92.54，如果有自己的公网服务器，可以在自己的服务器上部署 a2_broker。
+broker 目前支持 STUN/TURN，使用 ICE 协商，以实现 a2_tunnel 功能，如果支持 NAT 穿透，会优先使用 UDP 打洞，否则会作为终极代理；
 
----
-
-## 八、附录
-
-### a2 用 systemd 托管（推荐）
-
-```ini
-# /etc/systemd/system/tea-a2.service
-[Unit]
-Description=tea_agent (a2) on this device
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/root
-ExecStart=a2 --port 8383
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```sh
-systemctl enable --now tea-a2
-systemctl status tea-a2
-journalctl -u tea-a2 -f
-```
-
-**侧载不要做成 systemd 常驻服务**——它 5 分钟没人连就自己退，
-用 `Restart=always` 会和这个设计打架（起来→退出→再起来，死循环）。
-现场按需启动就行（`run_agent.sh`）。
-
-### 设备上（路径按你自己的部署定，下面是一套示例）
-
-| 路径 | 是什么 |
-| --- | --- |
-| `a2` | a2 本体（静态链接） |
-| `a2_tunnel` | 侧载（静态链接） |
-| `run_a2.sh` | 起 a2 的脚本 |
-| `run_agent.sh` | 起侧载的脚本（只有一行） |
-| `ca-bundle.pem` | broker 的证书（也可放 `~/.tea_agent/ca-bundle/cacert.pem`） |
-| `a2.log` / `tunnel_agent.log` | 日志 |
-| `~/.tea_agent/` | a2 自己的家目录（provider 配置、工作区、历史） |
-
-### broker 那边（VPS）
 
 | 路径 | 是什么 |
 | --- | --- |
