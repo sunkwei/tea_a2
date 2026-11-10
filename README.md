@@ -104,6 +104,7 @@ build/bin/tea_agent --workspace . --open
 | --- | --- |
 | **任务队列**（`sched/task_server.py`） | 排队、调度、交互挂起、导出、事件流；微信 / Telegram 前端。见 [任务队列](docs/tasks.md) |
 | **级联**（`toolkit_peer`） | 一台 tea_a2 直接控制另一台。见 [级联](docs/peer.md) |
+| **隧道侧载**（`a2_broker` + `a2_tunnel`） | **外网访问内网的 a2**：设备旁多一个侧载，把外网的连接转到 a2 上；a2 本体零改动，隧道断了也不影响它照常工作。见 [隧道](docs/tunnel.md) · [运维手册](docs/ops_manual.md) |
 | **机群**（`sched/fleet_server.py`） | 一台服务器管 40 台设备：台账、每日采集、灰度升级、审计。见 [机群运维](docs/fleet.md) |
 | **看门狗 / Router**（`sched/watchdog.py`、`sched/router.py`） | 在外面盯着卡住的任务与跑偏的 worker；把分开的工作区会话串成一条线索。见 [Router 与 Watchdog](docs/router-watchdog.md) |
 | **扩展层**（`sched/a2_ext_py/`） | 一个 .py 文件就是一件新工具，不用改 C++、不用发版，模型自己也能写。现成三件套：**截图 / 鼠标 / 键盘**（Windows 与 Linux 都能用）。见 [扩展层](docs/a2_ext_py.md) |
@@ -127,6 +128,9 @@ build/bin/tea_agent --workspace . --open
 | [运维手册：a2 + 隧道侧载](docs/ops_manual.md) | 给运维同事：设备上起 a2 与侧载、一条命令从外网连进去、排错表、安全须知 |
 | [多级协同与机群运维](docs/fleet.md) | 一台服务器管 40 台设备：台账、灰度升级、审计、让设备自己判断 |
 | [级联](docs/peer.md) | `peers:` 配置、`toolkit_peer`、`/api/peer/*`、安全边界 |
+| [隧道：外网访问内网](docs/tunnel.md) | 侧载方案、WebRTC 数据通道、STUN/TURN、端口与安全边界 |
+| [隧道现场指引](docs/tunnel_ops.md) | 现场怎么测、怎么用、nat_probe 怎么跑 |
+| [隧道 broker 清单](docs/tunnel_broker.md) | VPS 上要开哪些端口、装什么 |
 | **接口与内部** | |
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |
 | [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照（队列自己也在 `GET /api/doc` 上服务这一页） |
