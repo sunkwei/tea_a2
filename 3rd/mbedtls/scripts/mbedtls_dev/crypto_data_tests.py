@@ -1,10 +1,11 @@
 """Generate test data for cryptographic mechanisms.
+
 This module is a work in progress, only implementing a few cases for now.
 """
 
 # Copyright The Mbed TLS Contributors
 # SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
-
+#
 
 import hashlib
 from typing import Callable, Dict, Iterator, List, Optional #pylint: disable=unused-import
@@ -16,6 +17,7 @@ from . import test_case
 
 def psa_low_level_dependencies(*expressions: str) -> List[str]:
     """Infer dependencies of a PSA low-level test case by looking for PSA_xxx symbols.
+
     This function generates MBEDTLS_PSA_BUILTIN_xxx symbols.
     """
     high_level = psa_information.automatic_dependencies(*expressions)
@@ -46,8 +48,6 @@ class HashPSALowLevel:
     # are not available. On Ubuntu 22.04, md2, md4 and ripemd160 are not
     # available.
     CALCULATE = {
-        'PSA_ALG_MD2': None,
-        'PSA_ALG_MD4': None,
         'PSA_ALG_MD5': lambda data: hashlib.md5(data).hexdigest(),
         'PSA_ALG_RIPEMD160': None, #lambda data: hashlib.new('ripdemd160').hexdigest()
         'PSA_ALG_SHA_1': lambda data: hashlib.sha1(data).hexdigest(),

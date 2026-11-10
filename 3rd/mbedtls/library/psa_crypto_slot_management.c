@@ -13,7 +13,7 @@
 #include "psa/crypto.h"
 
 #include "psa_crypto_core.h"
-#include "psa_crypto_driver_wrappers.h"
+#include "psa_crypto_driver_wrappers_no_static.h"
 #include "psa_crypto_slot_management.h"
 #include "psa_crypto_storage.h"
 #if defined(MBEDTLS_PSA_CRYPTO_SE_C)
@@ -24,49 +24,12 @@
 #include <string.h>
 #include "mbedtls/platform.h"
 
-#define ARRAY_LENGTH(array) (sizeof(array) / sizeof(*(array)))
-
-
-
-/* Make sure we have distinct ranges of key identifiers for distinct
- * purposes. */
-MBEDTLS_STATIC_ASSERT(PSA_KEY_ID_USER_MIN < PSA_KEY_ID_USER_MAX,
-                      "Empty user key ID range");
-MBEDTLS_STATIC_ASSERT(PSA_KEY_ID_VENDOR_MIN < PSA_KEY_ID_VENDOR_MAX,
-                      "Empty vendor key ID range");
-MBEDTLS_STATIC_ASSERT(MBEDTLS_PSA_KEY_ID_BUILTIN_MIN < MBEDTLS_PSA_KEY_ID_BUILTIN_MAX,
-                      "Empty builtin key ID range");
-MBEDTLS_STATIC_ASSERT(PSA_KEY_ID_VOLATILE_MIN < PSA_KEY_ID_VOLATILE_MAX,
-                      "Empty volatile key ID range");
-
-MBEDTLS_STATIC_ASSERT(PSA_KEY_ID_USER_MAX < PSA_KEY_ID_VENDOR_MIN ||
-                      PSA_KEY_ID_VENDOR_MAX < PSA_KEY_ID_USER_MIN,
-                      "Overlap between user key IDs and vendor key IDs");
-
-MBEDTLS_STATIC_ASSERT(PSA_KEY_ID_VENDOR_MIN <= MBEDTLS_PSA_KEY_ID_BUILTIN_MIN &&
-                      MBEDTLS_PSA_KEY_ID_BUILTIN_MAX <= PSA_KEY_ID_VENDOR_MAX,
-                      "Builtin key identifiers are not in the vendor range");
-
-MBEDTLS_STATIC_ASSERT(PSA_KEY_ID_VENDOR_MIN <= PSA_KEY_ID_VOLATILE_MIN &&
-                      PSA_KEY_ID_VOLATILE_MAX <= PSA_KEY_ID_VENDOR_MAX,
-                      "Volatile key identifiers are not in the vendor range");
-
-MBEDTLS_STATIC_ASSERT(PSA_KEY_ID_VOLATILE_MAX < MBEDTLS_PSA_KEY_ID_BUILTIN_MIN ||
-                      MBEDTLS_PSA_KEY_ID_BUILTIN_MAX < PSA_KEY_ID_VOLATILE_MIN,
-                      "Overlap between builtin key IDs and volatile key IDs");
-
-
-
 typedef struct {
     psa_key_slot_t key_slots[MBEDTLS_PSA_KEY_SLOT_COUNT];
-    unsigned key_slots_initialized : 1;
+    uint8_t key_slots_initialized;
 } psa_global_data_t;
 
 static psa_global_data_t global_data;
-
-MBEDTLS_STATIC_ASSERT(ARRAY_LENGTH(global_data.key_slots) <=
-                      PSA_KEY_ID_VOLATILE_MAX - PSA_KEY_ID_VOLATILE_MIN + 1,
-                      "The key slot array is larger than the volatile key ID range");
 
 int psa_is_valid_key_id(mbedtls_svc_key_id_t key, int vendor_ok)
 {
@@ -434,15 +397,13 @@ psa_status_t psa_unlock_key_slot(psa_key_slot_t *slot)
 
     /*
      * As the return error code may not be handled in case of multiple errors,
-     * do our best to report if the lock counter is equal to zero: if
-     * available call MBEDTLS_PARAM_FAILED that may terminate execution (if
-     * called as part of the execution of a unit test suite this will stop the
-     * test suite execution).
+     * do our best to report if the lock counter is equal to zero. Assert with
+     * MBEDTLS_TEST_HOOK_TEST_ASSERT that the lock counter is strictly greater
+     * than zero: if the MBEDTLS_TEST_HOOKS configuration option is enabled and
+     * the function is called as part of the execution of a test suite, the
+     * execution of the test suite is stopped in error if the assertion fails.
      */
-#ifdef MBEDTLS_CHECK_PARAMS
-    MBEDTLS_PARAM_FAILED(slot->lock_count > 0);
-#endif
-
+    MBEDTLS_TEST_HOOK_TEST_ASSERT(slot->lock_count > 0);
     return PSA_ERROR_CORRUPTION_DETECTED;
 }
 
@@ -463,14 +424,8 @@ psa_status_t psa_validate_key_location(psa_key_lifetime_t lifetime,
         (void) p_drv;
 #endif /* MBEDTLS_PSA_CRYPTO_SE_C */
 
-#if defined(MBEDTLS_PSA_CRYPTO_DRIVERS)
         /* Key location for external keys gets checked by the wrapper */
         return PSA_SUCCESS;
-#else /* MBEDTLS_PSA_CRYPTO_DRIVERS */
-        /* No support for external lifetimes at all, or dynamic interface
-         * did not find driver for requested lifetime. */
-        return PSA_ERROR_INVALID_ARGUMENT;
-#endif /* MBEDTLS_PSA_CRYPTO_DRIVERS */
     } else {
         /* Local/internal keys are always valid */
         return PSA_SUCCESS;

@@ -26,7 +26,7 @@ const mbedtls_cipher_info_t *mbedtls_cipher_info_from_psa(
     mbedtls_cipher_id_t *cipher_id)
 {
     mbedtls_cipher_mode_t mode;
-    mbedtls_cipher_id_t cipher_id_tmp = MBEDTLS_CIPHER_ID_NONE;
+    mbedtls_cipher_id_t cipher_id_tmp;
 
     if (PSA_ALG_IS_AEAD(alg)) {
         alg = PSA_ALG_AEAD_WITH_SHORTENED_TAG(alg, 0);
@@ -67,6 +67,11 @@ const mbedtls_cipher_info_t *mbedtls_cipher_info_from_psa(
 #if defined(MBEDTLS_PSA_BUILTIN_ALG_CBC_PKCS7)
             case PSA_ALG_CBC_PKCS7:
                 mode = MBEDTLS_MODE_CBC;
+                break;
+#endif
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_CCM_STAR_NO_TAG)
+            case PSA_ALG_CCM_STAR_NO_TAG:
+                mode = MBEDTLS_MODE_CCM_STAR_NO_TAG;
                 break;
 #endif
 #if defined(MBEDTLS_PSA_BUILTIN_ALG_CCM)
@@ -124,11 +129,6 @@ const mbedtls_cipher_info_t *mbedtls_cipher_info_from_psa(
 #if defined(MBEDTLS_PSA_BUILTIN_KEY_TYPE_CAMELLIA)
         case PSA_KEY_TYPE_CAMELLIA:
             cipher_id_tmp = MBEDTLS_CIPHER_ID_CAMELLIA;
-            break;
-#endif
-#if defined(MBEDTLS_PSA_BUILTIN_KEY_TYPE_ARC4)
-        case PSA_KEY_TYPE_ARC4:
-            cipher_id_tmp = MBEDTLS_CIPHER_ID_ARC4;
             break;
 #endif
 #if defined(MBEDTLS_PSA_BUILTIN_KEY_TYPE_CHACHA20)
@@ -294,7 +294,7 @@ static psa_status_t psa_cipher_update_ecb(
     size_t *output_length)
 {
     psa_status_t status = PSA_ERROR_CORRUPTION_DETECTED;
-    size_t block_size = ctx->cipher_info->block_size;
+    size_t block_size = mbedtls_cipher_info_get_block_size(ctx->cipher_info);
     size_t internal_output_length = 0;
     *output_length = 0;
 
@@ -402,11 +402,7 @@ psa_status_t mbedtls_psa_cipher_update(
                                        output_length);
     } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_ECB_NO_PADDING */
-    if (input_length == 0) {
-        /* There is no input, nothing to be done */
-        *output_length = 0;
-        status = PSA_SUCCESS;
-    } else {
+    {
         status = mbedtls_to_psa_error(
             mbedtls_cipher_update(&operation->ctx.cipher, input,
                                   input_length, output, output_length));
@@ -471,17 +467,18 @@ psa_status_t mbedtls_psa_cipher_abort(
     return PSA_SUCCESS;
 }
 
-psa_status_t mbedtls_psa_cipher_encrypt(const psa_key_attributes_t *attributes,
-                                        const uint8_t *key_buffer,
-                                        size_t key_buffer_size,
-                                        psa_algorithm_t alg,
-                                        const uint8_t *iv,
-                                        size_t iv_length,
-                                        const uint8_t *input,
-                                        size_t input_length,
-                                        uint8_t *output,
-                                        size_t output_size,
-                                        size_t *output_length)
+psa_status_t mbedtls_psa_cipher_encrypt(
+    const psa_key_attributes_t *attributes,
+    const uint8_t *key_buffer,
+    size_t key_buffer_size,
+    psa_algorithm_t alg,
+    const uint8_t *iv,
+    size_t iv_length,
+    const uint8_t *input,
+    size_t input_length,
+    uint8_t *output,
+    size_t output_size,
+    size_t *output_length)
 {
     psa_status_t status = PSA_ERROR_CORRUPTION_DETECTED;
     mbedtls_psa_cipher_operation_t operation = MBEDTLS_PSA_CIPHER_OPERATION_INIT;
@@ -502,7 +499,8 @@ psa_status_t mbedtls_psa_cipher_encrypt(const psa_key_attributes_t *attributes,
     }
 
     status = mbedtls_psa_cipher_update(&operation, input, input_length,
-                                       output, output_size, &update_output_length);
+                                       output, output_size,
+                                       &update_output_length);
     if (status != PSA_SUCCESS) {
         goto exit;
     }

@@ -26,6 +26,8 @@
 
 #include "mbedtls/platform.h"
 
+
+
 /****************************************************************/
 /* Key storage */
 /****************************************************************/
@@ -340,18 +342,14 @@ psa_status_t psa_save_persistent_key(const psa_core_key_attributes_t *attr,
     status = psa_crypto_storage_store(attr->id,
                                       storage_data, storage_data_length);
 
-    mbedtls_platform_zeroize(storage_data, storage_data_length);
-    mbedtls_free(storage_data);
+    mbedtls_zeroize_and_free(storage_data, storage_data_length);
 
     return status;
 }
 
 void psa_free_persistent_key_data(uint8_t *key_data, size_t key_data_length)
 {
-    if (key_data != NULL) {
-        mbedtls_platform_zeroize(key_data, key_data_length);
-    }
-    mbedtls_free(key_data);
+    mbedtls_zeroize_and_free(key_data, key_data_length);
 }
 
 psa_status_t psa_load_persistent_key(psa_core_key_attributes_t *attr,
@@ -389,8 +387,7 @@ psa_status_t psa_load_persistent_key(psa_core_key_attributes_t *attr,
     }
 
 exit:
-    mbedtls_platform_zeroize(loaded_data, storage_data_length);
-    mbedtls_free(loaded_data);
+    mbedtls_zeroize_and_free(loaded_data, storage_data_length);
     return status;
 }
 

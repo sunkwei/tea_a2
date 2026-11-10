@@ -10,25 +10,28 @@ development packages. That is what makes "one file, drop it on a device" real.
 | `yaml-cpp` | YAML config | 0.8.0 | MIT |
 | `miniz` | zlib replacement (Web UI assets) | 3.0.2 | MIT |
 | `ca-bundle` | root certificates | Mozilla CA list | MPL-2.0 |
-| `mbedtls` | TLS/DTLS for the agent | 2.28 LTS | Apache-2.0 OR GPL-2.0 |
+| `mbedtls` | TLS/DTLS, for the agent **and** the tunnel | 3.5.2 | Apache-2.0 OR GPL-2.0 |
 | `libdatachannel` | WebRTC data channel (the tunnel) | 0.22.0 | MPL-2.0 |
-| `mbedtls3` | TLS/DTLS **for the tunnel only** | 3.5.2 | Apache-2.0 OR GPL-2.0 |
 
-## Why there are two mbedTLS versions
+## mbedTLS: one tree for everything
 
-The agent itself uses **mbedTLS 2.28 LTS** (`mbedtls/`). The tunnel binaries use
-**mbedTLS 3.5** (`mbedtls3/`), because libdatachannel 0.22 needs the 3.x API
-(`mbedtls_ssl_key_export_type` and friends do not exist in 2.x).
+The agent and the tunnel binaries both use **mbedTLS 3.5.2** (`mbedtls/`).
 
-The two never meet in one binary: the agent links the first, the tunnel
-binaries link the second. They also never meet in one CMake project - both
-define targets called `mbedtls`, `mbedx509` and `mbedcrypto`, and CMake refuses
-to create a target twice. That is why the tunnel is built by its own nested
-project (`tunnel/CMakeLists.txt`) instead of being added to the top-level one.
+It used to be two versions: the agent was on 2.28 LTS while the tunnel needed
+3.x (libdatachannel 0.22 uses `mbedtls_ssl_key_export_type` and friends, which
+do not exist in 2.x). 2.28 reaches end of life in November 2026, and the
+agent's TLS code turned out to compile against 3.x **unchanged** - the whole
+migration was swapping the tree.
 
-> Unifying them (agent -> mbedTLS 3.6 LTS) is worth doing on its own: 2.28
-> reaches end of life in November 2026. The agent's TLS code already compiles
-> unchanged against the 3.x headers; what it needs is a full test pass.
+> **Why the tunnel is still a separate CMake project**: libdatachannel brings
+> its own build system and defines targets called `mbedtls`, `mbedx509` and
+> `mbedcrypto` - the same names mbedTLS uses, and CMake refuses to create a
+> target twice. So the tunnel is built by a nested project
+> (`tunnel/CMakeLists.txt`) that points at the same `3rd/mbedtls` tree.
+
+> **Later**: mbedTLS 3.6 is the current LTS (supported until 2029). 3.6 split
+> the framework into a separate repository, so upgrading means vendoring that
+> too - a mechanical step, not a code change.
 
 ## Local changes to the vendored trees
 

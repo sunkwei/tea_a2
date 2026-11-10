@@ -48,11 +48,6 @@ class LostContent(Exception):
         message = ('Lost content from {}: "{}"'.format(filename, line))
         super().__init__(message)
 
-class FilePathError(Exception):
-    def __init__(self, filenames):
-        message = ('Changelog filenames do not end with .txt: {}'.format(", ".join(filenames)))
-        super().__init__(message)
-
 # The category names we use in the changelog.
 # If you edit this, update ChangeLog.d/README.md.
 STANDARD_CATEGORIES = (
@@ -400,17 +395,15 @@ def check_output(generated_output_file, main_input_file, merged_files):
     is also present in an output file. This is not perfect but good enough
     for now.
     """
-    with open(generated_output_file, 'r', encoding='utf-8') as out_fd:
-        generated_output = set(out_fd)
-        with open(main_input_file, 'r', encoding='utf-8') as in_fd:
-            for line in in_fd:
-                if line not in generated_output:
-                    raise LostContent('original file', line)
+    with open(generated_output_file, 'r', encoding='utf-8') as fd:
+        generated_output = set(fd)
+        for line in open(main_input_file, 'r', encoding='utf-8'):
+            if line not in generated_output:
+                raise LostContent('original file', line)
         for merged_file in merged_files:
-            with open(merged_file, 'r', encoding='utf-8') as in_fd:
-                for line in in_fd:
-                    if line not in generated_output:
-                        raise LostContent(merged_file, line)
+            for line in open(merged_file, 'r', encoding='utf-8'):
+                if line not in generated_output:
+                    raise LostContent(merged_file, line)
 
 def finish_output(changelog, output_file, input_file, merged_files):
     """Write the changelog to the output file.
@@ -438,21 +431,8 @@ def list_files_to_merge(options):
     """List the entry files to merge, oldest first.
 
     "Oldest" is defined by `EntryFileSortKey`.
-
-    Also check for required .txt extension
     """
-    files_to_merge = glob.glob(os.path.join(options.dir, '*'))
-
-    # Ignore 00README.md
-    readme = os.path.join(options.dir, "00README.md")
-    if readme in files_to_merge:
-        files_to_merge.remove(readme)
-
-    # Identify files without the required .txt extension
-    bad_files = [x for x in files_to_merge if not x.endswith(".txt")]
-    if bad_files:
-        raise FilePathError(bad_files)
-
+    files_to_merge = glob.glob(os.path.join(options.dir, '*.txt'))
     files_to_merge.sort(key=EntryFileSortKey)
     return files_to_merge
 
@@ -460,7 +440,6 @@ def merge_entries(options):
     """Merge changelog entries into the changelog file.
 
     Read the changelog file from options.input.
-    Check that all entries have a .txt extension
     Read entries to merge from the directory options.dir.
     Write the new changelog to options.output.
     Remove the merged entries if options.keep_entries is false.

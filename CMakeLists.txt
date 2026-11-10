@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"1.1.3\"")
+    "  const char* const kVersionString = \"1.1.4\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -195,7 +195,7 @@ if(TEA_AGENT_USE_MBEDTLS AND EXISTS ${TEA_3RD}/mbedtls/CMakeLists.txt)
   else()
     set(LINK_WITH_PTHREAD ON CACHE BOOL "" FORCE)
   endif()
-  # mbedTLS 2.28 is C99; recent GCC defaults to C23, which is stricter about
+  # mbedTLS 3.x is C99; recent GCC defaults to C23, which is stricter about
   # implicit declarations and K&R style definitions.
   set(CMAKE_C_STANDARD 99)
   set(CMAKE_C_EXTENSIONS ON)
@@ -540,11 +540,11 @@ set_target_properties(tea_agent PROPERTIES
 # The tunnel binaries: a2_broker (the public rendezvous) and a2_tunnel (the
 # sidecar next to an a2).
 #
-# They are built by a **nested CMake project** (tunnel/): libdatachannel needs
-# mbedTLS 3.x while the agent uses the vendored mbedTLS 2.28 LTS, and both
-# define targets called "mbedtls" - one project cannot hold both. The nested
+# They are built by a **nested CMake project** (tunnel/): libdatachannel brings
+# its own build system and would clash with the agent's mbedTLS targets (both
+# define targets called "mbedtls" - one project cannot hold both). The nested
 # project gets the same toolchain, so the Windows cross build works the same
-# way as the agent's.
+# way as the agent's, and it uses the same 3rd/mbedtls tree.
 # ---------------------------------------------------------------------------
 option(TEA_AGENT_BUILD_TUNNEL "Build the tunnel binaries (a2_broker, a2_tunnel)" ON)
 

@@ -20,26 +20,19 @@
 
 #ifndef PSA_CRYPTO_PLATFORM_H
 #define PSA_CRYPTO_PLATFORM_H
+#include "mbedtls/private_access.h"
 
-/* Include the Mbed TLS configuration file, the way Mbed TLS does it
- * in each of its header files. */
-#if !defined(MBEDTLS_CONFIG_FILE)
-#include "mbedtls/config.h"
-#else
-#include MBEDTLS_CONFIG_FILE
-#endif
-
-/* Translate between classic MBEDTLS_xxx feature symbols and PSA_xxx
- * feature symbols. */
-#include "mbedtls/config_psa.h"
+/*
+ * Include the build-time configuration information file. Here, we do not
+ * include `"mbedtls/build_info.h"` directly but `"psa/build_info.h"`, which
+ * is basically just an alias to it. This is to ease the maintenance of the
+ * PSA cryptography repository which has a different build system and
+ * configuration.
+ */
+#include "psa/build_info.h"
 
 /* PSA requires several types which C99 provides in stdint.h. */
 #include <stdint.h>
-
-#if (defined(__ARMCC_VERSION) || defined(_MSC_VER)) && \
-    !defined(inline) && !defined(__cplusplus)
-#define inline __inline
-#endif
 
 #if defined(MBEDTLS_PSA_CRYPTO_KEY_ID_ENCODES_OWNER)
 
@@ -92,7 +85,7 @@ static inline int mbedtls_key_owner_id_equal(mbedtls_key_owner_id_t id1,
  * are expected to replace it with a custom definition.
  */
 typedef struct {
-    uintptr_t opaque[2];
+    uintptr_t MBEDTLS_PRIVATE(opaque)[2];
 } mbedtls_psa_external_random_context_t;
 #endif /* MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG */
 

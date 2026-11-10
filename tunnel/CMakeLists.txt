@@ -38,14 +38,17 @@ add_compile_options(-O2)
 
 find_package(Threads REQUIRED)
 
-# --- mbedTLS 3.x (for libdatachannel's DTLS) --------------------------------
+# --- mbedTLS (the same tree the agent uses) ---------------------------------
+# The agent and the tunnel both need mbedTLS 3.x now, and they live in two
+# separate CMake projects (one project cannot hold two trees that define the
+# same targets), so both point at 3rd/mbedtls.
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
 set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
 set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
 set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(LINK_WITH_PTHREAD ON CACHE BOOL "" FORCE)
-add_subdirectory(${TEA_3RD}/mbedtls3 ${CMAKE_BINARY_DIR}/mbedtls3 EXCLUDE_FROM_ALL)
+add_subdirectory(${TEA_3RD}/mbedtls ${CMAKE_BINARY_DIR}/mbedtls EXCLUDE_FROM_ALL)
 
 # libdatachannel does `if(NOT TARGET MbedTLS::MbedTLS) find_package(MbedTLS 3)`,
 # so providing the target is enough - no patch to the vendored tree and no
