@@ -120,6 +120,31 @@ curl -s -X POST http://127.0.0.1:9931/api/chat \
 （隧道中途断掉——比如 broker 重启了——两侧会**自动重新协商**，
 不用手工重启侧载；日志里会出现 `the data channel closed` 然后 `offering again`。）
 
+### 另一种用法：从微信叫醒它（人在家里）
+
+设备上跑着微信 bot 的话，**不用 ssh**，直接给 bot 发一句 `/tunnel`：
+
+```text
+> /tunnel
+隧道已启动。家里那台机器上跑这条：
+
+    a2_tunnel --role client --session 488c9f7af34d9d2f40c92721e4b52536
+
+连上以后本机多一个端口 9931，浏览器打开 http://127.0.0.1:9931/ 就是这台设备的 a2。
+```
+
+机器人 1 秒多就把码回给你（这条是**死命令**，不走模型 → 可靠、也不烧模型调用）。
+
+然后在**家里那台机器**上跑那条命令，本机就有了一个通向设备的端口：
+
+```sh
+a2_tunnel --role client --session 488c9f7af34d9d2f40c92721e4b52536
+```
+
+- 侧载 5 分钟没人连就自己退出 → 拿到码要尽快连。
+- 想收紧谁能开：`~/.tea_agent/tunnel_allow.txt` 里写允许的 user_id（一行一个）。
+- 命令也可以在设备上直接跑：`python3 sched/tunnel_cmd.py start` / `stop`。
+
 ---
 
 ## 三、参数速查

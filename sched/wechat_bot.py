@@ -50,6 +50,7 @@ import urllib.request
 
 import channel
 import task_order
+import tunnel_cmd
 
 
 if sys.version_info[0] < 3:
@@ -903,7 +904,16 @@ class WeChatBot(channel.TaskChannel):
     def handle_message(self, raw, text, media, user_id):
         """A message that may carry files (or pictures) as well as text."""
         if not media:
-            return self.handle(text, user_id)
+            # 「开隧道」这类命令是死的：自己处理，不进模型
+            # （模型去跑命令不可靠，还要烧一次调用）。
+            reply = tunnel_cmd.maybe_handle(text, user_id)
+            if reply is not None:
+                return reply
+            reply = self.handle(text, user_id)
+            if (text or "").strip() in ("/help", "help", "帮助"):
+                # 隧道这条命令是 bot 自己加的，channel 的帮助里没有 → 补一行
+                reply = "%s\n%s" % (reply, tunnel_cmd.HELP_LINE)
+            return reply
         attachments = self.receive_files(raw)
         if not attachments:
             return "文件没能取下来，再发一次？"
