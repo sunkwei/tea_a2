@@ -265,6 +265,7 @@ win_x86_64/tea_a2.exe          主程序（Windows）
 win_x86_64/a2_tunnel.exe       隧道侧载（Windows）
 a2_broker-linux-x86_64-<版本>  broker（只跑在公网那台机器上，所以不进平台目录）
 docs/                          使用手册、运维手册、隧道说明
+                               （含运维同事那份《如何使用a2隧道》docx，带图）
 sched/                         整个目录（Python 侧的全部模块 + 模板 + README）
 scripts/                       整个目录（systemd 单元模板、安装脚本、构建脚本）
 provider.yaml.sample           模型配置模板
@@ -275,6 +276,10 @@ tea_agent.buildinfo            这个二进制是从哪个 commit 编出来的
 
 **平台目录里的文件名不带版本号**：目录名已经说明了平台，版本在包名和 `buildinfo` 里，
 脚本取文件时不用猜名字。拿到包的人只要看自己是哪台机器，进对应目录拿 `tea_a2` 就走。
+
+隧道的手册有两份：`docs/tunnel.md`（给开发看的设计）与 **`docs/如何使用a2隧道.docx`**
+（运维同事写的那份，带网络结构图，**隧道怎么用以它为准**）。docx 也在包里，
+少了它打包脚本会中止发版。
 
 打包脚本会在打完包之后**自己再查一遍**：三个平台的 `tea_a2` + `a2_tunnel` 一个都不能少，
 仓库里 `sched/`、`scripts/` 有的文件包里也必须都有，少一个就中止发版。
