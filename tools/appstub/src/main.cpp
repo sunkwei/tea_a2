@@ -594,6 +594,29 @@ void tray_add() {
   }
 }
 
+/// Put the tray icon back when the shell has lost it.
+///
+/// The shell drops notification icons without telling anybody: Explorer
+/// restarts, the notification area is reset, the icon is dragged away. The
+/// app keeps running, but the icon is gone - and nobody notices until
+/// somebody goes looking for it. Explorer's `TaskbarCreated` broadcast is
+/// the usual way to hear about it, but it does not always arrive.
+///
+/// So the icon is checked every now and then. NIM_MODIFY on an icon that is
+/// not there fails - that is the cheapest way to ask the shell.
+void tray_keepalive() {
+  static ULONGLONG next_check = 0;
+  const ULONGLONG now = GetTickCount64();
+  if (now < next_check) return;
+  next_check = now + 30000ULL;   // every half minute
+  if (!g_window) return;
+  NOTIFYICONDATAW probe = g_tray;
+  probe.uFlags = NIF_TIP;
+  if (Shell_NotifyIconW(NIM_MODIFY, &probe)) return;   // it is still there
+  logf("the tray icon was gone - putting it back");
+  tray_add();
+}
+
 void tray_balloon(const std::string& text) {
   NOTIFYICONDATAW data = g_tray;
   data.uFlags = NIF_INFO;
@@ -727,6 +750,7 @@ bool load_config(const std::string& path, std::string* error) {
 void tick() {
   const ULONGLONG now = GetTickCount64();
   const ULONGLONG wall = now_file_time();
+  tray_keepalive();
   for (Child& child : g_children) {
     // The program on disk is newer than the one we started: it was rebuilt.
     // Restart it, so the new code is what runs from now on.
