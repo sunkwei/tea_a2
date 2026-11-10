@@ -301,9 +301,25 @@ int main(int argc, char** argv) {
   std::string turn_pass = kDefaultTurnPass;
   std::string token;
 
+  auto usage = [&](const char* why) {
+    if (why) std::fprintf(stderr, "broker: %s\n", why);
+    std::fprintf(stderr,
+          "a2_broker --stun-port 3478 --signal-port 8382 --signal-bind 127.0.0.1 \\\n"
+          "          --realm a2 [--relay-begin 49160] [--relay-end 49260]\n"
+          "          [--token <secret>]\n"
+          "\n"
+          "  (the TURN credentials are built in; the room token comes from\n"
+          "   --token or from ~/.tea_agent/tunnel/token)\n");
+    std::exit(2);
+  };
+
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
-    auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string(); };
+    // A missing value is an error, not an empty string.
+    auto next = [&]() -> std::string {
+      if (i + 1 >= argc) usage((a + " needs a value").c_str());
+      return argv[++i];
+    };
     if (a == "--stun-port") stun_port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--signal-port") signal_port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--signal-bind") signal_bind = next();
@@ -313,14 +329,8 @@ int main(int argc, char** argv) {
     else if (a == "--turn-user") turn_user = next();
     else if (a == "--turn-pass") turn_pass = next();
     else if (a == "--token") token = next();
-    else if (a == "--help" || a == "-h") {
-      std::printf(
-          "a2_broker --stun-port 3478 --signal-port 8382 --signal-bind 127.0.0.1 \\\n"
-          "          --realm a2\n"
-          "          (the TURN credentials are built in; the room token comes from\n"
-          "           --token or from ~/.tea_agent/tunnel/token)\n");
-      return 0;
-    }
+    else if (a == "--help" || a == "-h") usage(nullptr);
+    else usage(("unknown option '" + a + "'").c_str());
   }
   // The room token is optional on the broker: without one every room learns
   // its token from the side that registers it (the agent side generates a

@@ -486,7 +486,7 @@ agent 侧每次启动换一个码，client 侧照抄即可。
 | `--broker` | `103.232.92.54:8382`（公网 broker，走 TLS） |
 | `--stun` / `--turn` | `103.232.92.54:3478` |
 | `--target` | `127.0.0.1:8383`（内网那台的 a2） |
-| `--listen` | `127.0.0.1:9931`（外网侧的本地代理） |
+| `--listen` | `127.0.0.1:9931`（外网侧的本地代理）；`--port <n>` 直接改端口（和 a2 本体一个写法） |
 | `--tls` | **开**（8382 就是 TLS 口）；`--no-tls` 给内网 broker 用 |
 | `--ca-bundle` | `~/.tea_agent/ca-bundle/cacert.pem`（找不到就**大声警告**并跳过校验） |
 | `--room` / `--token` | agent 侧自动生成；client 侧用 `--session` |

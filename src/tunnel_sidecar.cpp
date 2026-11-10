@@ -455,6 +455,7 @@ int main(int argc, char** argv) {
   std::string token;
   std::string session;
   std::string listen_addr = "127.0.0.1:9931";
+  uint16_t listen_port_override = 0;
   std::string target = "127.0.0.1:8383";
   // The STUN and the TURN server of the public broker. The customer's
   // network is usually a symmetric NAT, so the relay is the normal path -
@@ -480,21 +481,45 @@ int main(int argc, char** argv) {
   // outside.
   bool is_agent = (role == "agent");
 
+  auto usage = [&](const char* why) {
+    if (why) std::fprintf(stderr, "sidecar: %s\n", why);
+    std::fprintf(stderr,
+          "a2_tunnel --role agent|client [--session <code>]\n"
+          "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
+          "          [--listen <host:port>] [--port <n>] [--target <host:port>]\n"
+          "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
+          "          [--tls|--no-tls] [--ca-bundle <pem>] [--wait-timeout <seconds>]\n"
+          "\n"
+          "  --session <code>  the one string that travels between the two sides\n"
+          "                   (the room name and the token are derived from it)\n"
+          "  --port <n>        the local port to listen on (the default is 9931)\n"
+          "  --wait-timeout    how long the agent side waits for the peer before giving\n"
+          "                   up (default 300 seconds; 0 = wait forever)\n");
+    std::exit(2);
+  };
+
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
-    auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string(); };
+    // A missing value is an error, not an empty string: silently continuing
+    // with an empty value is how you end up listening on the wrong port.
+    auto next = [&]() -> std::string {
+      if (i + 1 >= argc) usage((a + " needs a value").c_str());
+      return argv[++i];
+    };
     if (a == "--role") {
       role = next();
       is_agent = (role == "agent");
-    }
-    else if (a == "--broker") {
+    } else if (a == "--broker") {
       std::string hp = next();
       split_hostport(hp, broker_host, broker_port);
     } else if (a == "--room") room = next();
     else if (a == "--token") token = next();
     else if (a == "--session") session = next();
     else if (a == "--listen") listen_addr = next();
-    else if (a == "--target") target = next();
+    else if (a == "--port") {
+      // The local port to listen on - the same spelling the a2 itself uses.
+      listen_port_override = static_cast<uint16_t>(std::stoi(next()));
+    } else if (a == "--target") target = next();
     else if (a == "--stun") {
       std::string hp = next();
       split_hostport(hp, stun_host, stun_port);
@@ -508,18 +533,8 @@ int main(int argc, char** argv) {
     else if (a == "--tls") use_tls = true;
     else if (a == "--no-tls") use_tls = false;
     else if (a == "--verbose") verbose = true;
-    else if (a == "--help" || a == "-h") {
-      std::printf(
-          "a2_tunnel --role agent|client [--session <code>]\n"
-          "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
-          "          [--listen 127.0.0.1:9931] [--target 127.0.0.1:8383]\n"
-          "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
-          "          [--tls|--no-tls] [--ca-bundle <pem>] [--wait-timeout <seconds>]\n"
-          "\n"
-          "  --wait-timeout  how long the agent side waits for the peer before giving\n"
-          "                  up (default 300 seconds; 0 = wait forever)\n");
-      return 0;
-    }
+    else if (a == "--help" || a == "-h") usage(nullptr);
+    else usage(("unknown option '" + a + "'").c_str());
   }
   // --session is the one string that travels between the two sides: the room
   // name and the token are derived from it.
@@ -997,6 +1012,14 @@ int main(int argc, char** argv) {
       }
     }
   }).detach();
+
+  // --port wins over the port part of --listen, whatever the order was.
+  if (listen_port_override != 0) {
+    std::string lhost;
+    uint16_t lport = 0;
+    split_hostport(listen_addr, lhost, lport);
+    listen_addr = lhost + ":" + std::to_string(listen_port_override);
+  }
 
   // The peer connection is built **after** the signalling link is up: the
   // offer is produced the moment the channel is created, and an offer
