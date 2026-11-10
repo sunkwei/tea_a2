@@ -1120,8 +1120,23 @@ button{font-family:inherit}
   background:#0b0e12;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);
   padding:10px 12px;
   font:12.5px/1.5 var(--ds-font-family-code);color:#d7dce3;
-  -webkit-user-select:text;user-select:text;
+  /* 选区是自己画的（浏览器那套会被每次输出的重建冲掉） */
+  -webkit-user-select:none;user-select:none;
 }
+/* 选中的文字：底色在行内样式里（要盖住终端自己的背景色） */
+.term-sel{cursor:text}
+/* 右键菜单 */
+.ctx-menu{
+  position:fixed;z-index:60;min-width:180px;padding:4px;
+  background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);
+  box-shadow:0 8px 28px #0008;border-radius:var(--dsw-radius-md);
+}
+.ctx-item{
+  display:block;width:100%;height:30px;padding:0 10px;border:0;background:transparent;
+  border-radius:var(--dsw-radius-sm);font-size:13px;
+  color:var(--dsw-alias-label-secondary);cursor:pointer;text-align:left;
+}
+.ctx-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .shell-rows{min-height:100%}
 /* 文件进出的一行：路径框 + 上传 / 下载 */
 .shell-bar{display:flex;align-items:center;gap:8px}

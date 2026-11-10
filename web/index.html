@@ -282,6 +282,8 @@
           <span class="page-actions">
             <button class="btn" id="shell-new" type="button"
                     title="关掉现在的 shell，开一个新的（旧的会话会结束）">新会话</button>
+            <button class="btn" id="shell-copy" type="button"
+                    title="复制选中的文字（没有选中就复制整个画面）">复制</button>
             <button class="btn" id="shell-clear" type="button" title="清屏：只清画面，不动 shell 里的东西">清屏</button>
             <button class="btn danger" id="shell-stop" type="button" title="结束这个 shell">结束</button>
           </span>
@@ -308,6 +310,8 @@
                     autocapitalize="off" spellcheck="false" aria-label="终端输入"></textarea>
         </div>
         <div class="shell-note" id="shell-note"></div>
+        <!-- 右键菜单：复制 / 粘贴 / 全选画面 -->
+        <div class="ctx-menu hidden" id="shell-menu"></div>
       </div>
     </section>
 

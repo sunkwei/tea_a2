@@ -127,6 +127,112 @@ const openTerminal = () => evalJs(`(function(){
   return true;
 })()`);
 
+// Where on the screen is this text? (the rectangle of the substring)
+const rectOfText = (needle) => evalJs(`(function(){
+  var rows = document.getElementById('shell-rows');
+  var needle = ${JSON.stringify(needle)};
+  if (!rows) return null;
+  for (var i = 0; i < rows.children.length; i++) {
+    var el = rows.children[i];
+    var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      var k = node.nodeValue.indexOf(needle);
+      if (k >= 0) {
+        var r = document.createRange();
+        r.setStart(node, k);
+        r.setEnd(node, k + needle.length);
+        var rect = r.getBoundingClientRect();
+        return { x: rect.left, y: rect.top, w: rect.width, h: rect.height, row: i };
+      }
+    }
+  }
+  return null;
+})()`);
+
+const clipboardText = () => evalJs(`(async function(){
+  try { return await navigator.clipboard.readText(); }
+  catch (e) { return 'ERR:' + (e && e.message ? e.message : e); }
+})()`);
+
+// A mouse drag (the buttons flag matters: without it the browser does not
+// treat the move as a drag).
+const dragMouse = async (from, to) => {
+  await send('Input.dispatchMouseEvent',
+    { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 });
+  await send('Input.dispatchMouseEvent',
+    { type: 'mouseMoved', x: to.x, y: to.y, button: 'left', buttons: 1 });
+  await send('Input.dispatchMouseEvent',
+    { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', buttons: 0, clickCount: 1 });
+};
+
+// The right mouse button (the browser turns it into a contextmenu event).
+const rightClick = async (x, y) => {
+  await send('Input.dispatchMouseEvent',
+    { type: 'mousePressed', x, y, button: 'right', buttons: 2, clickCount: 1 });
+  await send('Input.dispatchMouseEvent',
+    { type: 'mouseReleased', x, y, button: 'right', buttons: 0, clickCount: 1 });
+};
+
+const menuItems = () => evalJs(`(function(){
+  var m = document.getElementById('shell-menu');
+  if (!m || m.classList.contains('hidden')) return null;
+  var out = [];
+  for (var i = 0; i < m.children.length; i++) out.push(m.children[i].textContent);
+  return out;
+})()`);
+
+// One click (count = how many clicks: 2 = double click, 3 = triple click).
+const clickMouse = async (x, y, count = 1) => {
+  for (let i = 1; i <= count; i++) {
+    await send('Input.dispatchMouseEvent',
+      { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: i });
+    await send('Input.dispatchMouseEvent',
+      { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: i });
+  }
+};
+
+// Drag over a piece of text and wait until the selection really is that
+// text (the shell prints on its own, so the picture can move under the
+// pointer between measuring and dragging).
+const dragSelect = async (needle) => {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const r = await rectOfText(needle);
+    if (!r) { await sleep(300); continue; }
+    const y = Math.round(r.y + r.h / 2);
+    await dragMouse({ x: Math.round(r.x + 1), y }, { x: Math.round(r.x + r.w - 1), y });
+    await sleep(200);
+    const st = await selState();
+    if (st.text === needle) return st;
+    await sleep(400);
+  }
+  return await selState();
+};
+
+// The same, but with clicks (2 = double click, 3 = triple click).
+const clickSelect = async (needle, count) => {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const r = await rectOfText(needle);
+    if (!r) { await sleep(300); continue; }
+    const y = Math.round(r.y + r.h / 2);
+    await clickMouse(Math.round(r.x + r.w / 2), y, count);
+    await sleep(200);
+    const st = await selState();
+    if (st.text.indexOf(needle) >= 0) return st;
+    await sleep(400);
+  }
+  return await selState();
+};
+
+const selState = () => evalJs(`(function(){
+  var s = window.teaShell.sel;
+  var hl = document.querySelectorAll('#shell-rows .term-sel');
+  var marked = [];
+  for (var i = 0; i < hl.length; i++) marked.push(hl[i].textContent);
+  return { active: !!(s && s.active), marked: marked.join('|'),
+           text: window.teaShellSelText ? window.teaShellSelText() : '' };
+})()`);
+
 try {
   const started = await startAgent();
   agent = started.proc;
@@ -179,6 +285,112 @@ try {
   const printed = await waitFor(async () => (await countMarker()) >= 1, 30000, 400);
   check('the shell prints what was typed', printed,
     JSON.stringify((await screenText()).slice(-200)));
+
+  // ---- mouse selection and copy ----------------------------------------
+  // The terminal draws its own picture and rebuilds it on every bit of
+  // output, so the browser's own selection cannot be used (it is gone the
+  // moment the picture is rebuilt). The app draws the selection itself and
+  // copies what is selected when the mouse button is released.
+  await send('Browser.grantPermissions', {
+    origin: `http://127.0.0.1:${agentPort}`,
+    permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite']
+  });
+  const selMarker = 'tea-sel-marker';
+  await evalJs(`document.getElementById('shell-input').focus(); true`);
+  const selCmd = process.platform === 'win32'
+    ? "Write-Output ('tea' + '-sel-marker')"
+    : "echo tea'-'sel-marker";
+  await typeText(selCmd);
+  await pressKey('Enter', { code: 'Enter', vk: 13, text: '\r' });
+  const markerShown = await waitFor(async () => !!(await rectOfText(selMarker)), 30000, 400);
+  check('the text to select is on the screen', markerShown);
+
+  const mrect = markerShown ? await rectOfText(selMarker) : null;
+  if (mrect) {
+    const st = await dragSelect(selMarker);
+    check('dragging over the text makes a selection', st.active === true, JSON.stringify(st));
+    check('the selection holds exactly the dragged text', st.text === selMarker,
+      JSON.stringify(st.text));
+    check('the selected text is highlighted on the screen',
+      st.marked.indexOf(selMarker) >= 0, JSON.stringify(st.marked));
+
+    const copied = await waitFor(async () => {
+      const t = await clipboardText();
+      return t === selMarker;
+    }, 6000, 200);
+    check('releasing the mouse copies the selection', copied === true,
+      JSON.stringify(await clipboardText()));
+
+    // A double click takes the word under the pointer.
+    const word = await clickSelect(selMarker, 2);
+    check('a double click selects the word under the pointer', word.text === selMarker,
+      JSON.stringify(word.text));
+
+    // A triple click takes the whole line.
+    const line = await clickSelect(selMarker, 3);
+    check('a triple click selects the whole line',
+      line.text.indexOf(selMarker) >= 0 && line.text.length >= selMarker.length,
+      JSON.stringify(line.text));
+
+    // The selection survives new output (the picture is rebuilt all the time).
+    await typeText('echo tea-after-selection');
+    await pressKey('Enter', { code: 'Enter', vk: 13, text: '\r' });
+    await sleep(1200);
+    const after = await selState();
+    check('the selection survives new output', after.text === selMarker,
+      JSON.stringify(after.text));
+
+    // The right-click menu: with a selection it offers to copy that.
+    const menuRect = await rectOfText(selMarker);
+    const menuAt = { x: Math.round(menuRect.x + menuRect.w / 2),
+                     y: Math.round(menuRect.y + menuRect.h / 2) };
+    await rightClick(menuAt.x, menuAt.y);
+    await sleep(250);
+    const menu = await menuItems();
+    check('the right-click menu opens', !!menu, JSON.stringify(menu));
+    check('it offers to copy the selection',
+      menu && menu.length === 3 && menu[0] === '复制', JSON.stringify(menu));
+
+    // Escape throws the selection away.
+    await pressKey('Escape', { code: 'Escape', vk: 27 });
+    await sleep(250);
+    const gone = await selState();
+    check('Escape clears the selection', gone.active === false && !gone.text,
+      JSON.stringify(gone));
+  }
+
+  // Without a selection the menu copies the whole picture.
+  const menuRect2 = await rectOfText(selMarker);
+  await rightClick(Math.round(menuRect2.x + menuRect2.w / 2),
+                   Math.round(menuRect2.y + menuRect2.h / 2));
+  await sleep(250);
+  const menu2 = await menuItems();
+  check('without a selection the menu offers to copy the picture',
+    menu2 && menu2.length === 3 && menu2[0] === '复制整个画面', JSON.stringify(menu2));
+  const itemBox = await evalJs(`(function(){
+    var b = document.getElementById('shell-menu').children[0];
+    var r = b.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })()`);
+  await clickMouse(itemBox.x, itemBox.y, 1);
+  await sleep(500);
+  const menuClip = await clipboardText();
+  check('the menu copies the picture',
+    menuClip.indexOf(selMarker) >= 0 && menuClip.length > selMarker.length,
+    JSON.stringify(menuClip.slice(0, 160)));
+
+  // The copy button: with a selection it copies that, without one the whole
+  // picture.
+  const copyBox = await evalJs(`(function(){
+    var r = document.getElementById('shell-copy').getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })()`);
+  await clickMouse(copyBox.x, copyBox.y, 1);
+  await sleep(500);
+  const screenClip = await clipboardText();
+  check('the copy button copies the picture when nothing is selected',
+    screenClip.indexOf(selMarker) >= 0 && screenClip.length > selMarker.length,
+    JSON.stringify(screenClip.slice(0, 160)));
 
   // ---- the keyboard stays with the terminal ---------------------------
   // A click in the screen used to take the focus away (the browser's default

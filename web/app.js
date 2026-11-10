@@ -6116,6 +6116,7 @@
     this.lines = [];
     for (var i = 0; i < this.rows; i++) this.lines.push(this.blank());
     this.back = [];             // 滚上去的行（可以往回翻）
+    this.dropped = 0;           // 回滚缓冲满了被丢掉的老行数（行号要补偿）
     this.cx = 0;
     this.cy = 0;
     this.top = 0;
@@ -6260,7 +6261,7 @@
     for (var i = 0; i < n; i++) {
       if (this.top === 0) {
         this.back.push(this.lines[this.top]);
-        if (this.back.length > 2000) this.back.shift();
+        if (this.back.length > 2000) { this.back.shift(); this.dropped++; }
       }
       this.lines.splice(this.top, 1);
       this.lines.splice(this.bot, 0, this.blank());
@@ -6467,7 +6468,7 @@
   };
 
   /* ---- 画出来 ---- */
-  function termSpan(style, text) {
+  function termSpan(style, text, sel) {
     var s = style || termDefaultStyle();
     var fg = s.fg;
     var bg = s.bg;
@@ -6485,24 +6486,45 @@
     if (s.dim) css += 'opacity:.7;';
     if (s.italic) css += 'font-style:italic;';
     if (s.underline) css += 'text-decoration:underline;';
+    // 选中的部分要有一层底色。行内样式里的 background-color 是终端自己写的，
+    // 所以这里用 !important 盖住它（字色不动，还是终端原来的颜色）。
+    var cls = sel ? ' class="term-sel"' : '';
+    if (sel) css += 'background-color:rgba(96,156,255,.42) !important;';
     if (!css) return esc(text);
-    return '<span style="' + css + '">' + esc(text) + '</span>';
+    return '<span' + cls + ' style="' + css + '">' + esc(text) + '</span>';
   }
 
-  function termLineHtml(line) {
-    var out = '';
+  // 一行画成 HTML。selFrom/selTo 是这一行里被选中的格子范围（半开区间，
+  // 没有选中就传 -1）：选中的部分单独包一层，选区边界正好落在样式段中间时
+  // 把那段切开。
+  function termLineHtml(line, selFrom, selTo) {
+    var hasSel = selFrom != null && selTo != null && selTo > selFrom;
+    var segs = [];
     var cur = null;
-    var buf = '';
+    var start = 0;
     for (var i = 0; i < line.length; i++) {
       var cell = line[i];
-      if (!cell) { buf += ' '; continue; }
-      if (cell.s !== cur) {
-        if (buf) { out += termSpan(cur, buf); buf = ''; }
-        cur = cell.s;
-      }
-      buf += cell.c;
+      var st = cell ? cell.s : cur;         // 没格子的地方算上一段的样子
+      if (cur === null && i === 0) { cur = st; start = 0; continue; }
+      if (st !== cur) { segs.push({ s: cur, from: start, to: i }); cur = st; start = i; }
     }
-    if (buf) out += termSpan(cur, buf);
+    if (cur !== null) segs.push({ s: cur, from: start, to: line.length });
+    var out = '';
+    for (var k = 0; k < segs.length; k++) {
+      var seg = segs[k];
+      var text = '';
+      for (var j = seg.from; j < seg.to; j++) {
+        var c = line[j];
+        text += (c && c.c != null) ? c.c : ' ';
+      }
+      if (!hasSel) { out += termSpan(seg.s, text, false); continue; }
+      var a = Math.max(seg.from, selFrom);
+      var b = Math.min(seg.to, selTo);
+      if (b <= a) { out += termSpan(seg.s, text, false); continue; }
+      if (a > seg.from) out += termSpan(seg.s, text.slice(0, a - seg.from), false);
+      out += termSpan(seg.s, text.slice(a - seg.from, b - seg.from), true);
+      if (b < seg.to) out += termSpan(seg.s, text.slice(b - seg.from), false);
+    }
     return out;
   }
 
@@ -6525,6 +6547,7 @@
     window.teaShell = shell;
     window.teaTermScreen = TermScreen;
     window.teaShellKeyBytes = shellKeyBytes;
+    window.teaShellSelText = shellSelectedText;   // 选区里的文字（测试要看）
   } catch (e) { /* ignore */ }
 
   function shellBytes(b64) {
@@ -6587,21 +6610,371 @@
     if (node) node.textContent = text || '';
   }
 
+  // 画面上显示的是哪一段：回滚缓冲 + 当前屏幕的最后几行（往前翻由 viewOffset 管）
+  function shellViewWindow() {
+    var t = shell.term;
+    if (!t) return { start: 0, end: 0 };
+    var total = t.back.length + t.lines.length;
+    var end = Math.max(0, total - t.viewOffset);
+    var start = Math.max(0, end - t.rows);
+    return { start: start, end: end };
+  }
+
   function shellRender() {
     if (!shell.term) return;
     var rows = $('shell-rows');
     if (!rows) return;
     var all = shell.term.back.concat(shell.term.lines);
-    var end = Math.max(0, all.length - shell.term.viewOffset);
-    var start = Math.max(0, end - shell.term.rows);
+    var win = shellViewWindow();
+    var start = win.start;
+    var end = win.end;
+    var cols = shell.term.cols;
+    var sel = (shell.sel && shell.sel.active) ? shell.sel : null;
     var html = [];
     for (var i = start; i < end; i++) {
-      html.push('<div class="term-row">' + termLineHtml(all[i]) + '</div>');
+      var from = -1, to = -1;
+      if (sel) {
+        // 选区记的是绝对位置（行号 * 列数 + 列号），这里换算成这一行里的格号
+        var rowFrom = (shell.term.dropped + i) * cols;
+        var a = Math.max(sel.from, rowFrom) - rowFrom;
+        var b = Math.min(sel.to, rowFrom + cols) - rowFrom;
+        if (b > a) { from = a; to = b; }
+      }
+      html.push('<div class="term-row">' + termLineHtml(all[i], from, to) + '</div>');
     }
     rows.innerHTML = html.join('');
     var screen = $('shell-screen');
     if (screen && shell.term.viewOffset === 0) screen.scrollTop = screen.scrollHeight;
     shellCursorUpdate();
+  }
+
+  /* ---- 选区：鼠标选文字 ------------------------------------------------
+     浏览器自己的选区在这里用不了：画面每次输出都会重建（innerHTML），原生
+     选区当场就没了。所以自己实现一套：
+       · 选区记「绝对位置」= 行号 * 列数 + 列号；
+       · 行号是稳的：内容滚进回滚缓冲时行号不变，只有回滚缓冲满了丢掉最老的
+         一行时才有 dropped 补偿，所以新输出不会把选区冲掉；
+       · 命中测试用 DOM 量宽度（中文在等宽字体里占两格，按格子数算会偏）；
+       · 高亮画在行里的 span 上（跟着文字流走，宽度自然对得上）。 */
+
+  // 选区状态放在 shell 上（不是 DOM 上）：画面重建以后还在。
+  // anchor/head 记的是「边界」：第几个字符之前（caret 从 0 到 cols）。
+  // 选中的格子是 [from, to) 这一段。
+  shell.sel = {
+    active: false,        // 有没有选区
+    dragging: false,      // 鼠标是不是还按着
+    anchor: { id: 0, caret: 0 },
+    head: { id: 0, caret: 0 },
+    from: 0, to: 0        // 绝对位置（半开区间）
+  };
+
+  function shellSelUpdate(anchor, head) {
+    var s = shell.sel;
+    var cols = shell.term.cols;
+    s.anchor = anchor;
+    s.head = head;
+    var p1 = anchor.id * cols + anchor.caret;
+    var p2 = head.id * cols + head.caret;
+    s.from = Math.min(p1, p2);
+    s.to = Math.max(p1, p2);
+    s.active = s.to > s.from;
+  }
+
+  // 边界不能超出这一行
+  function shellCaret(id, caret) {
+    var cols = shell.term.cols;
+    if (caret < 0) caret = 0;
+    if (caret > cols) caret = cols;
+    return { id: id, caret: caret };
+  }
+
+  function shellSelClear() {
+    var s = shell.sel;
+    if (!s) return;
+    var had = s.active;
+    s.active = false;
+    s.dragging = false;
+    s.from = 0;
+    s.to = 0;
+    if (had) shellRender();
+  }
+
+  // 选区里的文字。行尾的空格不要（复制命令时那些空格没用）。
+  function shellSelectedText() {
+    var t = shell.term;
+    var s = shell.sel;
+    if (!t || !s || !s.active || s.to <= s.from) return '';
+    var all = t.back.concat(t.lines);
+    var cols = t.cols;
+    var out = [];
+    var firstId = Math.floor(s.from / cols);
+    var lastId = Math.floor((s.to - 1) / cols);
+    for (var id = firstId; id <= lastId; id++) {
+      var k = id - t.dropped;
+      if (k < 0 || k >= all.length) continue;
+      var line = all[k] || [];
+      var rowFrom = id * cols;
+      var a = Math.max(s.from - rowFrom, 0);
+      var b = Math.min(s.to - rowFrom, cols);
+      var text = '';
+      for (var c = a; c < b; c++) {
+        var cell = line[c];
+        text += (cell && cell.c != null) ? cell.c : ' ';
+      }
+      out.push(text.replace(/[ \t]+$/, ''));
+    }
+    return out.join('\n');
+  }
+
+  // 指针落在画面上的第几行第几格
+  function shellCellAt(clientX, clientY) {
+    var rows = $('shell-rows');
+    if (!rows || !shell.term) return null;
+    var rowEls = rows.children;
+    if (!rowEls.length) return null;
+    var idx = -1;
+    var el = document.elementFromPoint(clientX, clientY);
+    while (el && el.parentNode && el.parentNode !== rows) el = el.parentNode;
+    if (el && el.parentNode === rows) {
+      for (var i = 0; i < rowEls.length; i++) {
+        if (rowEls[i] === el) { idx = i; break; }
+      }
+    }
+    if (idx < 0) {
+      // 落在行与行的缝里：按行高算
+      var rowsRect = rows.getBoundingClientRect();
+      var lineH = shell.lineH > 0 ? shell.lineH : 18;
+      idx = Math.floor((clientY - rowsRect.top) / lineH);
+    }
+    if (idx < 0) idx = 0;
+    if (idx >= rowEls.length) idx = rowEls.length - 1;
+    var cols = shell.term.cols;
+    var hit = shellColInRow(rowEls[idx], clientX);
+    var col = hit.col;
+    if (col > cols) col = cols;
+    if (col < 0) col = 0;
+    var win = shellViewWindow();
+    return { id: shell.term.dropped + win.start + idx, col: col, after: hit.after,
+             rowIndex: idx };
+  }
+
+  // 一行里指针落在第几个字符（行里一个格子正好一个字符，所以字符下标 = 格号）。
+  // 用 DOM 量宽度：中文在等宽字体里占两格，按格子数算会偏。
+  // 返回 {col, after}：col 是字符下标，after = 指针在这个字符的右半边。
+  function shellColInRow(el, clientX) {
+    var text = el.textContent || '';
+    if (!text.length) return { col: 0, after: false };
+    var parts = [];
+    var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    var node, base = 0;
+    while ((node = walker.nextNode())) {
+      parts.push({ node: node, base: base, len: node.nodeValue.length });
+      base += node.nodeValue.length;
+    }
+    for (var p = 0; p < parts.length; p++) {
+      var it = parts[p];
+      var range = document.createRange();
+      range.selectNodeContents(it.node);
+      var rect = range.getBoundingClientRect();
+      if (!rect.width && !rect.height) continue;
+      if (clientX < rect.left) return { col: it.base, after: false };
+      if (clientX <= rect.right) {
+        var lo = 0, hi = it.len;
+        while (lo < hi) {
+          var mid = (lo + hi + 1) >> 1;
+          range.setStart(it.node, 0);
+          range.setEnd(it.node, mid);
+          var r2 = range.getBoundingClientRect();
+          if (r2.right <= clientX) lo = mid; else hi = mid - 1;
+        }
+        var after = true;
+        if (lo < it.len) {
+          range.setStart(it.node, lo);
+          range.setEnd(it.node, lo + 1);
+          var cr = range.getBoundingClientRect();
+          after = clientX >= (cr.left + cr.right) / 2;
+        }
+        return { col: it.base + lo, after: after };
+      }
+    }
+    return { col: text.length, after: true };
+  }
+
+  // 单词：字母、数字、下划线、连字符、点（跟浏览器一样，"tea-sel-marker" 算一个词）
+  var SHELL_WORD_RE = /[A-Za-z0-9_.\-\u00c0-\uffff]/;
+
+  // 单词的范围（双击选词）
+  function shellWordRange(line, col) {
+    var len = line.length;
+    if (!len) return { from: 0, to: 0 };
+    if (col >= len) col = len - 1;
+    if (col < 0) col = 0;
+    var isWord = function (c) { return !!c && SHELL_WORD_RE.test(c); };
+    var head = line[col] ? line[col].c : ' ';
+    if (!isWord(head)) return { from: col, to: col + 1 };   // 不是单词就选这一个字符
+    var a = col, b = col;
+    while (a > 0 && isWord(line[a - 1] ? line[a - 1].c : '')) a--;
+    while (b < len - 1 && isWord(line[b + 1] ? line[b + 1].c : '')) b++;
+    return { from: a, to: b + 1 };
+  }
+
+  // 连点的次数（双击选词、三击选行）。浏览器给的 detail 不可靠，自己数。
+  var shellClick = { count: 0, time: 0, id: -1, col: -1 };
+
+  function shellMouseDown(e) {
+    if (e.button !== 0 || !shell.term) return;
+    e.preventDefault();          // 不要浏览器的原生选区；焦点我们自己给回去
+    shellFocus();
+    var cell = shellCellAt(e.clientX, e.clientY);
+    if (!cell) return;
+    var now = Date.now();
+    if (shellClick.id === cell.id && shellClick.col === cell.col && now - shellClick.time < 450) {
+      shellClick.count++;
+    } else {
+      shellClick.count = 1;
+    }
+    shellClick.time = now;
+    shellClick.id = cell.id;
+    shellClick.col = cell.col;
+    var t = shell.term;
+    if (shellClick.count >= 3) {
+      // 三击：整行
+      shellSelUpdate(shellCaret(cell.id, 0), shellCaret(cell.id, t.cols));
+    } else if (shellClick.count === 2) {
+      // 双击：一个词
+      var all = t.back.concat(t.lines);
+      var k = cell.id - t.dropped;
+      var wr = shellWordRange((k >= 0 && k < all.length) ? all[k] : [], cell.col);
+      shellSelUpdate(shellCaret(cell.id, wr.from), shellCaret(cell.id, wr.to));
+    } else {
+      // 单击：落一个边界（指针在字符的哪半边，边界就在哪边）
+      var at = cell.after ? cell.col + 1 : cell.col;
+      shellSelUpdate(shellCaret(cell.id, at), shellCaret(cell.id, at));
+    }
+    shell.sel.dragging = true;
+    shellRender();
+  }
+
+  function shellMouseMove(e) {
+    var s = shell.sel;
+    if (!s || !s.dragging) return;
+    shellAutoScroll(e.clientY);
+    var cell = shellCellAt(e.clientX, e.clientY);
+    if (!cell) return;
+    var cols = shell.term.cols;
+    // 往后拖：指针压着的那个字符要算进来；往前拖：算到那个字符之前。
+    var anchorRaw = s.anchor.id * cols + s.anchor.caret;
+    var headRaw = cell.id * cols + cell.col;
+    var caret = headRaw >= anchorRaw ? cell.col + 1 : cell.col;
+    if (s.head.id === cell.id && s.head.caret === caret) return;   // 没动就不重画
+    shellSelUpdate(s.anchor, shellCaret(cell.id, caret));
+    shellRender();
+  }
+
+  function shellMouseUp(e) {
+    var s = shell.sel;
+    if (!s || !s.dragging) return;
+    s.dragging = false;
+    var text = shellSelectedText();
+    if (text) shellCopy(text);       // 选完就复制（省一次 Ctrl+C）
+  }
+
+  // 拖到上下边缘时把画面挪一点（不然看不到的地方选不到）
+  function shellAutoScroll(clientY) {
+    var screen = $('shell-screen');
+    if (!screen) return;
+    var rect = screen.getBoundingClientRect();
+    var edge = 26;
+    if (clientY < rect.top + edge) screen.scrollTop -= 14;
+    else if (clientY > rect.bottom - edge) screen.scrollTop += 14;
+  }
+
+  // 复制到剪贴板。navigator.clipboard 只在安全上下文（https / localhost）里有，
+  // 所以还留一条老路（execCommand）。
+  function shellCopy(text) {
+    if (!text) { toast('没有选中文字'); return; }
+    var finish = function (ok) {
+      shellFocus();                 // 复制用的临时文本框会抢焦点，要还回来
+      if (ok) toast('已复制 ' + text.length + ' 个字符');
+      else toast('复制失败：浏览器不让写剪贴板', 3200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { finish(true); },
+        function () { finish(legacyCopy(text)); });
+    } else finish(legacyCopy(text));
+  }
+
+  // 选整个画面（工具栏的「复制」在没有选区时用它）
+  function shellSelectScreen() {
+    var t = shell.term;
+    if (!t) return '';
+    var win = shellViewWindow();
+    if (win.end <= win.start) return '';
+    var firstId = t.dropped + win.start;
+    var lastId = t.dropped + win.end - 1;
+    shellSelUpdate(shellCaret(firstId, 0), shellCaret(lastId, t.cols));
+    shellRender();
+    return shellSelectedText();
+  }
+
+  function shellCopyClick() {
+    var text = shellSelectedText();
+    if (!text) {
+      text = shellSelectScreen();
+      if (!text) { toast('画面是空的'); return; }
+    }
+    shellCopy(text);
+  }
+
+  // 粘贴（右键菜单用）
+  function shellPaste() {
+    if (!shell.id || shell.ended) { toast('没有 shell 会话'); return; }
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(function (text) {
+        if (!text) return;
+        shellSend(text.replace(/\r\n/g, '\r').replace(/\n/g, '\r'));
+      }, function () {
+        toast('浏览器不让读剪贴板：用 Ctrl+V 粘贴', 3000);
+      });
+    } else {
+      toast('浏览器不让读剪贴板：用 Ctrl+V 粘贴', 3000);
+    }
+  }
+
+  // ---- 右键菜单 --------------------------------------------------------
+  function shellMenuClose() {
+    var m = $('shell-menu');
+    if (m) m.classList.add('hidden');
+  }
+
+  function shellMenuOpen(x, y) {
+    var m = $('shell-menu');
+    if (!m) return;
+    var hasSel = !!shellSelectedText();
+    var items = [
+      { label: hasSel ? '复制' : '复制整个画面', action: function () {
+          var text = shellSelectedText();
+          if (!text) text = shellSelectScreen();
+          shellCopy(text);
+        } },
+      { label: '粘贴', action: shellPaste },
+      { label: '全选画面', action: function () { shellSelectScreen(); } }
+    ];
+    m.innerHTML = '';
+    items.forEach(function (it) {
+      var b = document.createElement('button');
+      b.className = 'ctx-item';
+      b.type = 'button';
+      b.textContent = it.label;
+      b.onclick = function (ev) { ev.stopPropagation(); shellMenuClose(); it.action(); };
+      m.appendChild(b);
+    });
+    m.classList.remove('hidden');
+    var rect = m.getBoundingClientRect();
+    var left = Math.min(x, window.innerWidth - rect.width - 8);
+    var top = Math.min(y, window.innerHeight - rect.height - 8);
+    m.style.left = Math.max(8, left) + 'px';
+    m.style.top = Math.max(8, top) + 'px';
   }
 
   // ---- 光标 ------------------------------------------------------------
@@ -6768,6 +7141,7 @@
     if (size.cols === shell.size.cols && size.rows === shell.size.rows) return;
     shell.size = size;
     if (shell.term) shell.term.resize(size.cols, size.rows);
+    shellSelClear();                 // 列数变了，旧的绝对位置就没意义了
     shellRender();
     api('api/shell/session/' + encodeURIComponent(shell.id) + '/resize', {
       method: 'POST',
@@ -6792,6 +7166,7 @@
     shell.cursor = 0;
     if (!shell.term) shell.term = new TermScreen(shell.size.cols, shell.size.rows);
     else shell.term.reset();
+    shellSelClear();
     shellRender();
     shellEnsureSession();
   }
@@ -6799,6 +7174,7 @@
   function shellClear() {
     if (!shell.term) return;
     shell.term.reset();
+    shellSelClear();
     shellRender();
   }
 
@@ -7064,6 +7440,7 @@
     };
     document.addEventListener('click', function (e) {
       if (!e.target.closest || !e.target.closest('.dd-wrap')) closeDropdowns();
+      if (!e.target.closest || !e.target.closest('#shell-menu')) shellMenuClose();
     });
     $('messages').addEventListener('click', function (e) {
       var copy = e.target.closest && e.target.closest('.code-copy');
@@ -7154,10 +7531,15 @@
     // preventDefault matters here: without it the browser moves the focus
     // to the body right after the click (the default action of a mousedown),
     // and every key typed afterwards goes nowhere.
-    $('shell-screen').addEventListener('mousedown', function (e) {
+    $('shell-screen').addEventListener('mousedown', shellMouseDown);
+    $('shell-screen').addEventListener('mousemove', shellMouseMove);
+    $('shell-screen').addEventListener('contextmenu', function (e) {
       e.preventDefault();
-      shellFocus();
+      shellFocus();                   // 右键也要把键盘留在终端里
+      shellMenuOpen(e.clientX, e.clientY);
     });
+    document.addEventListener('mouseup', shellMouseUp);
+    $('shell-copy').onclick = shellCopyClick;
     $('shell-input').addEventListener('keydown', function (e) {
       if (e.isComposing) return;
       var bytes = shellKeyBytes(e);
@@ -7261,6 +7643,9 @@
         function () { openSetupGate({}); });
     };
     document.addEventListener('keydown', function (e) {
+      // Esc 先把终端里的选区清掉：下面那条「键盘归终端」的分支会把 Esc 送进
+      // shell 然后就返回了（后面的 Esc 分支根本走不到）。
+      if (e.key === 'Escape' && shell.sel && shell.sel.active) shellSelClear();
       // 终端开着的时候键盘归它——哪怕焦点已经不在它的输入框上（点一下页面
       // 空白处就会把焦点带走）。应用自己的快捷键除外。
       if (state.view === 'shell' && shell.id && !shell.ended && !e.isComposing &&
