@@ -463,10 +463,34 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 | 东西 | 是什么 | 怎么来的 |
 | --- | --- | --- |
 | **TURN 账号口令** | 谁能用 broker 的中继带宽 | **内置在源码里**（`1hblsqt.` / `2ghlmcl,`）。它不是秘密：泄露了只是别人能用你的中继，不至于打开内网那台机器 |
-| **房间令牌** | 谁能进这个房间 | **agent 侧每次启动随机生成**（32 位十六进制），印在它打印的接入命令里 → 走「别的渠道」传给运维 |
+| **房间令牌** | 谁能进这个房间 | **agent 侧每次启动随机生成** |
 
-所以**三台机器都不用配凭据文件**：broker 自己学每个房间的令牌（第一个带 `register`
-的 join 说了算），agent 侧自己生成，client 侧用现场那条命令里的令牌。
+所以**三台机器都不用配凭据文件**，而且**现场人员和运维之间只需要传一个字符串**：
+
+```
+# 现场（内网那台）：a2_tunnel --role agent
+#   → 打印：a2_tunnel --role client --session 43910a0ab1600dc462b072114fe90132
+# 运维（外网那台）：a2_tunnel --role client --session 43910a0ab1600dc462b072114fe90132
+```
+
+那个 **session 码**里含着房间名和令牌：房间 = `s` + 码的前 8 位，令牌 = 整串。
+broker 自己学每个房间的令牌（第一个带 `register` 的 join 说了算），
+agent 侧每次启动换一个码，client 侧照抄即可。
+
+> 令牌不对时 broker 直接拒绝，client 侧**立刻退出**并提示「用对端印出来的那条命令」。
+
+### 默认值：几乎不用写参数
+
+| 参数 | 默认 |
+| --- | --- |
+| `--broker` | `103.232.92.54:8382`（公网 broker，走 TLS） |
+| `--stun` / `--turn` | `103.232.92.54:3478` |
+| `--target` | `127.0.0.1:8383`（内网那台的 a2） |
+| `--listen` | `127.0.0.1:9931`（外网侧的本地代理） |
+| `--tls` | **开**（8382 就是 TLS 口）；`--no-tls` 给内网 broker 用 |
+| `--ca-bundle` | `~/.tea_agent/ca-bundle/cacert.pem`（找不到就**大声警告**并跳过校验） |
+| `--room` / `--token` | agent 侧自动生成；client 侧用 `--session` |
+| `--wait-timeout` | 300 秒 |
 
 > 令牌**按房间**而不是全局：broker 的 `--token` 不给时，每个房间的令牌由加入方注册；
 > 给了 `--token` 则是全局钉死一个。令牌不对时 broker 直接拒绝，client 侧**立刻退出**
@@ -498,8 +522,8 @@ sidecar: ready. Waiting in room "plant-a" for the other side.
   giving up in 300 seconds if nobody connects.
 ```
 
-那串令牌**每次启动都不一样**——所以现场人员每次都要把新的那条命令发过去，
-运维那边也要用新的令牌重启 client 侧（旧令牌会被 broker 拒绝）。
+那串 session 码**每次启动都不一样**——所以现场人员每次都要把新的那条命令发过去，
+运维那边也要用新的码重启 client 侧（旧码会被 broker 拒绝）。
 
 ### 空闲的连接不会被自己掐掉
 

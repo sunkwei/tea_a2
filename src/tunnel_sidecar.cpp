@@ -100,6 +100,37 @@ std::string token_file_path() {
   return path;
 }
 
+/// The conventional CA bundle: the same file the a2 trusts (it holds the
+/// public roots plus the self-signed certificate of the broker).
+std::string default_ca_bundle() {
+  const char* env = std::getenv("TEA_AGENT_HOME");
+  std::string home;
+  if (env && *env) {
+    home = env;
+  } else {
+#ifdef _WIN32
+    const char* up = std::getenv("USERPROFILE");
+    home = (up && *up) ? up : ".";
+#else
+    const char* h = std::getenv("HOME");
+    home = (h && *h) ? h : ".";
+#endif
+  }
+  std::string path = home;
+  if (!path.empty() && path.back() != '/' && path.back() != '\\') path += '/';
+  path += ".tea_agent/ca-bundle/cacert.pem";
+  return path;
+}
+
+/// The session code is the one string that has to travel from the machine
+/// next to the a2 to the machine outside. The room name and the token are
+/// derived from it, so nobody has to remember or copy two things:
+///   room  = "s" + the first 8 characters
+///   token = the whole code
+std::string room_of_session(const std::string& session) {
+  return "s" + session.substr(0, 8);
+}
+
 /// A fresh room token: the agent side makes one on every start, so nothing
 /// has to be configured on the machine and the operator gets it in the
 /// connection details.
@@ -416,20 +447,28 @@ int dial_tcp(const std::string& host, uint16_t port) {
 
 int main(int argc, char** argv) {
   std::string role = "client";
-  std::string broker_host = "127.0.0.1";
-  uint16_t broker_port = 3479;
-  std::string room = "default";
+  // The default is the public broker: the sidecar should work with nothing
+  // but --room and --token.
+  std::string broker_host = "103.232.92.54";
+  uint16_t broker_port = 8382;
+  std::string room;
   std::string token;
+  std::string session;
   std::string listen_addr = "127.0.0.1:9931";
   std::string target = "127.0.0.1:8383";
-  std::string stun_host = "127.0.0.1";
+  // The STUN and the TURN server of the public broker. The customer's
+  // network is usually a symmetric NAT, so the relay is the normal path -
+  // ICE picks between direct and relayed on its own.
+  std::string stun_host = "103.232.92.54";
   uint16_t stun_port = 3478;
-  std::string turn_host;
+  std::string turn_host = "103.232.92.54";
   uint16_t turn_port = 3478;
   std::string turn_user = kDefaultTurnUser;
   std::string turn_pass = kDefaultTurnPass;
   std::string ca_file;
-  bool use_tls = false;
+  // The public broker port speaks TLS (the room token travels over it), so
+  // TLS is on by default; --no-tls is for a plain internal broker.
+  bool use_tls = true;
   bool verbose = false;
   // How long to wait for the peer before giving up. The sidecar is meant to be
   // started on demand (the field staff starts it when access is needed), so
@@ -453,6 +492,7 @@ int main(int argc, char** argv) {
       split_hostport(hp, broker_host, broker_port);
     } else if (a == "--room") room = next();
     else if (a == "--token") token = next();
+    else if (a == "--session") session = next();
     else if (a == "--listen") listen_addr = next();
     else if (a == "--target") target = next();
     else if (a == "--stun") {
@@ -466,35 +506,58 @@ int main(int argc, char** argv) {
     else if (a == "--ca-bundle") ca_file = next();
     else if (a == "--wait-timeout") wait_timeout = std::atoi(next().c_str());
     else if (a == "--tls") use_tls = true;
+    else if (a == "--no-tls") use_tls = false;
     else if (a == "--verbose") verbose = true;
     else if (a == "--help" || a == "-h") {
       std::printf(
-          "a2_tunnel --role agent|client --broker <host:port> --room <name> --token <secret>\n"
+          "a2_tunnel --role agent|client [--session <code>]\n"
+          "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
           "          [--listen 127.0.0.1:9931] [--target 127.0.0.1:8383]\n"
           "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
-          "          [--tls --ca-bundle <pem>] [--wait-timeout <seconds>]\n"
+          "          [--tls|--no-tls] [--ca-bundle <pem>] [--wait-timeout <seconds>]\n"
           "\n"
           "  --wait-timeout  how long the agent side waits for the peer before giving\n"
           "                  up (default 300 seconds; 0 = wait forever)\n");
       return 0;
     }
   }
-  // The room token: the agent side makes a fresh one on every start (nothing
-  // to configure on the machine - the operator gets it in the connection
-  // details), the client side has to be given the same one.
-  if (token.empty() && is_agent) {
-    token = generate_token();
-    log_line("sidecar: generated a room token for this run\n");
+  // --session is the one string that travels between the two sides: the room
+  // name and the token are derived from it.
+  if (!session.empty()) {
+    if (room.empty()) room = room_of_session(session);
+    if (token.empty()) token = session;
   }
+  if (room.empty() && is_agent) {
+    // The agent side invents the session on every start: nobody has to
+    // configure anything, the operator just runs the command it prints.
+    session = generate_token();
+    room = room_of_session(session);
+    token = session;
+    log_line("sidecar: made a new session for this run\n");
+  }
+  if (room.empty()) room = "default";
   if (token.empty()) {
     std::string from_file;
     if (read_token_file(&from_file)) {
       token = from_file;
     } else {
       log_line("sidecar: no room token. Use the command the other side printed "
-               "(or put it in %s)\n",
+               "(--session <code>), or put it in %s\n",
                token_file_path().c_str());
       return 2;
+    }
+  }
+  // The CA bundle: the conventional one when it is not given explicitly.
+  if (use_tls && ca_file.empty()) {
+    const std::string conventional = default_ca_bundle();
+    std::FILE* probe = std::fopen(conventional.c_str(), "rb");
+    if (probe) {
+      std::fclose(probe);
+      ca_file = conventional;
+    } else {
+      log_line("sidecar: no CA bundle at %s - the broker's certificate will NOT be "
+               "verified. Give --ca-bundle <pem> for a proper check.\n",
+               conventional.c_str());
     }
   }
   if (verbose) rtc::InitLogger(rtc::LogLevel::Debug);
@@ -958,10 +1021,11 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "  room token    : %s\n", token.c_str());
     std::fprintf(stderr, "  target        : %s\n", target.c_str());
     std::fprintf(stderr, "  give this to whoever connects from the outside:\n");
-    std::fprintf(stderr,
-                 "      a2_tunnel --role client --broker %s:%u%s --room %s --token %s \\\n",
-                 broker_host.c_str(), broker_port, use_tls ? " --tls --ca-bundle <the broker's ca.pem>" : "",
-                 room.c_str(), token.c_str());
+    std::fprintf(stderr, "      a2_tunnel --role client --session %s\n",
+                 session.empty() ? token.c_str() : session.c_str());
+    std::fprintf(stderr, "  (the broker, TLS, the CA bundle and the STUN/TURN servers are\n"
+                         "   the defaults; add --ca-bundle <pem> if that machine has no\n"
+                         "   ~/.tea_agent/ca-bundle/cacert.pem)\n");
     std::fprintf(stderr, "  (it will listen locally and be reachable through the tunnel)\n");
     if (wait_timeout > 0) {
       std::fprintf(stderr, "  giving up in %d seconds if nobody connects.\n", wait_timeout);
