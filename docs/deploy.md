@@ -172,6 +172,21 @@ systemctl --user enable --now a2.service a2_task.service
 | `scripts/deploy-local.ps1` | 把构建好的二进制发布到启动路径（默认 `%USERPROFILE%\bin\a2.exe`）。目标通常**正在运行**——运行中的镜像换不掉（Windows 锁着），所以脚本会说明白，`-Stop` 会先把那个实例停掉 |
 | `scripts/make-link.ps1` | 不用管理员权限建符号链接（`CreateSymbolicLinkW` 带 `ALLOW_UNPRIVILEGED_CREATE`）。`New-Item -ItemType SymbolicLink` 和 `mklink` 都不传这个标志，所以开着 Developer Mode 也要管理员 |
 
+### 把二进制挂到 `~/bin`（敲名字就能起）
+
+`%USERPROFILE%\bin` 已经在 PATH 里，所以挂上软连接之后，`tea_agent`、`a2_tunnel`、
+`a2_broker` 就能直接敲名字起。**是软连接，不是复制**：复制的那份是旧的，重编之后
+不会跟着变；软连接指的是**路径**，重编完还是新的那个。
+
+```powershell
+pwsh -File scripts\make-link.ps1 -Link "$env:USERPROFILE\bin\tea_agent.exe" `
+      -Target "$PWD\build-mingw\bin\tea_agent.exe" -Force
+```
+
+> ⚠️ **PATH 顺序**：`...\Python314\Scripts` 里可能装着**另一个**同名命令
+> （比如 pip 装的另一个 `tea_agent`），它在 PATH 里更靠前，敲名字就轮到它了。
+> 把自己那个目录挪到 PATH 前面，或者用全路径。
+
 ## Windows 登录自启动（相当于 `systemctl --user enable`）
 
 Windows 没有用户级 systemd。最接近的三种做法，差别在于「跟不跟人走」：
