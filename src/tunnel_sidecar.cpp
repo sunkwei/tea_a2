@@ -343,6 +343,18 @@ class Link {
       char buf[160];
       mbedtls_strerror(hs, buf, sizeof(buf));
       *err = "the TLS handshake failed: " + std::string(buf);
+      // The broker signs its own certificate: a CA bundle cannot check it,
+      // only the fingerprint can. Say what to do, the error above does not.
+      const bool pinned = !tea_tunnel::normalize_fingerprint(pin).empty();
+      const bool about_the_certificate = hs == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+      if (!pinned && about_the_certificate) {
+        *err +=
+            "\n  the broker's certificate is self-signed, so a CA bundle cannot check it."
+            "\n  the fingerprint can: put it in <home>/.tea_agent/tunnel/broker.txt as"
+            "\n      pin=<fingerprint>"
+            "\n  (the broker prints it when it starts), or give it on the command line:"
+            "\n      --tls-pin <fingerprint>";
+      }
       return false;
     }
     tls_ = true;
@@ -1269,9 +1281,10 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, " --tls-pin %s", tea_tunnel::normalize_fingerprint(tls_pin).c_str());
     }
     std::fprintf(stderr, "\n");
-    std::fprintf(stderr, "  (the broker, TLS, the CA bundle and the STUN/TURN servers are\n"
-                         "   the defaults; add --ca-bundle <pem> if that machine has no\n"
-                         "   ~/.tea_agent/ca-bundle/cacert.pem)\n");
+    std::fprintf(stderr, "  (the broker, TLS and the STUN/TURN servers are the defaults; the\n"
+                         "   broker's certificate is self-signed, so its fingerprint has to be\n"
+                         "   trusted - put it in <home>/.tea_agent/tunnel/broker.txt as pin=<hex>,\n"
+                         "   the broker prints it when it starts)\n");
     std::fprintf(stderr, "  (it will listen locally and be reachable through the tunnel)\n");
     if (wait_timeout > 0) {
       std::fprintf(stderr, "  giving up in %d seconds if nobody connects.\n", wait_timeout);

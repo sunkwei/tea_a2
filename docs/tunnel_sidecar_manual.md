@@ -153,6 +153,22 @@ pin=3f9a1c...
 a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c...
 ```
 
+> ⚠️ **broker 的证书是自签的**（它自己造的，没有 CA 签）。
+> 所以**证书库里找不到它**——`--ca-bundle` 对它没用。
+> **要认它，只有指纹一条路**：写 `broker.txt` 的 `pin=`，或者命令行 `--tls-pin`。
+> 忘了写就会看到：
+>
+> ```
+> sidecar: the TLS handshake failed: X509 - Certificate verification failed, ...
+>   the broker's certificate is self-signed, so a CA bundle cannot check it.
+>   the fingerprint can: put it in <home>/.tea_agent/tunnel/broker.txt as
+>       pin=<fingerprint>
+> ```
+>
+> **Windows 上的路径**是 `%USERPROFILE%\.tea_agent\tunnel\broker.txt`
+> （比如 `C:\Users\<用户名>\.tea_agent\tunnel\broker.txt`）——
+> 文件夹还没有就自己建一个。
+
 ---
 
 ## 六、参数
@@ -239,6 +255,7 @@ curl -s http://127.0.0.1:9931/api/health
 | --- | --- | --- |
 | `broker says: bad token` | 码是旧的 | 让设备侧**重新起**侧载，拿新的码 |
 | `not the one that was pinned` | broker 换了证书 | 把 broker 打印的新指纹配给客户端 |
+| `X509 - Certificate verification failed` | 没配指纹，证书库又不认自签的证书 | 写 `broker.txt` 的 `pin=<指纹>`，或命令行 `--tls-pin` |
 | `cannot reach the broker` | 地址错 / broker 没起 | 查 `broker.txt` 里的 address |
 | 隧道通了但网页打不开 | `--target` 指错了 | 查 agent 侧的 `--target` |
 | 端口起来了但连不上 | 隧道还没建好 | 等 `the data channel is open` |
