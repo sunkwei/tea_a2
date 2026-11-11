@@ -139,7 +139,9 @@ systemctl --user status a2_broker
 | `--token <secret>` | 无 | 给所有房间定一个令牌（不设就每房间自己定） |
 | `--turn-user <name>` | 内置 | TURN 账号 |
 | `--turn-pass <secret>` | 内置 | TURN 口令 |
-| `--turn-db <file>` | a2_broker.db（当前目录） | 账号簿（sqlite 文件） |
+| `--turn-db <file>` | a2_broker.db（当前目录） | 账号簿（sqlite 文件，用量也记在这里） |
+| `--usage` | 关 | 打印中继的用量报表然后退出 |
+| `--usage-days <n>` | 15 | 明细保留几天（0 = 一直留） |
 | `--cert-name <name>` | a2-broker | 自签证书里的名字（可给多个） |
 | `--no-tls` | 关 | 信令走明文（只在内网用） |
 
@@ -244,7 +246,84 @@ broker: the TURN accounts come from the command line (1)
 
 ---
 
-## 八、broker 的地址变了怎么办
+## 八、TURN 中继的用量记账
+
+谁用了这台机器的中继、用了多少，都记在**同一个 `a2_broker.db`** 里。
+
+### 两张表
+
+| 表 | 是什么 | 留多久 |
+| --- | --- | --- |
+| `turn_usage` | **明细**：一次中继会话一行（谁、什么时候、多久、多少字节） | **默认 15 天**（`--usage-days` 可改），过了就自动删 |
+| `turn_usage_daily` | **汇总**：按天按账号（会话数、总时长、总字节） | 一直留着（一天一个账号一行，很小） |
+
+明细表的每一行：
+
+| 列 | 是什么 |
+| --- | --- |
+| `account` | 用的哪套 TURN 凭据（就是 `turn_accounts` 里的 `user`） |
+| `client` | 客户端地址（`ip:端口`） |
+| `relayed` | 中继地址（`ip:端口`，在 broker 这台机器上） |
+| `started_at` / `ended_at` | 开始和结束（unix 秒）。**还在跑的行 `ended_at` 是空的** |
+| `seconds` | 用了多久 |
+| `bytes_in` / `bytes_out` | 客户端收到 / 发出去了多少字节 |
+| `packets_in` / `packets_out` | 收发的包数 |
+
+### 怎么看
+
+**用 broker 自己打印**（不用记 sqlite 的语法）：
+
+```bash
+a2_broker --usage --turn-db a2_broker.db
+```
+
+```
+TURN usage in a2_broker.db (the last 15 days)
+
+day         account         sessions   duration      bytes in   bytes out
+2026-11-11  1hblsqt.               3     12m30s       12.3 MB       4.5 MB
+2026-11-10  1hblsqt.               1      3m01s        1.2 MB       0.4 MB
+
+15 days in total: 4 sessions, 15m31s, 13.5 MB in, 4.9 MB out
+1 session running right now
+```
+
+看多少天：`--usage-days 30`。
+
+**或者直接问 sqlite**：
+
+```bash
+# 明细
+sqlite3 a2_broker.db "SELECT account, client, seconds, bytes_in, bytes_out FROM turn_usage ORDER BY started_at DESC LIMIT 10;"
+
+# 某个账号一共用了多少
+sqlite3 a2_broker.db "SELECT account, COUNT(*), SUM(bytes_in + bytes_out) FROM turn_usage GROUP BY account;"
+
+# 按天的汇总
+sqlite3 a2_broker.db "SELECT * FROM turn_usage_daily ORDER BY day DESC;"
+```
+
+### 保留多久
+
+- **明细留 15 天**（`--usage-days 15`，改成 0 就是一直留）；
+  超过期限的行在 broker 启动时和**每小时**清一次。
+- **汇总一直留着**（`turn_usage_daily`），所以「这个月用了多少」永远查得到。
+
+### 有几件事要说清楚
+
+- **字节是 broker 数的**：只有走过中继的流量才算（直连的不算，
+  因为直连根本不经过 broker）。
+- **一次会话 = 一次中继分配**：客户端开着隧道就是一个会话，
+  隧道断了、或者客户端没了，这个会话就结束。
+- **客户端突然消失的会话**：中继那边要等到**租期到期**（最多 10 分钟）
+  才会发现，所以那一行的数字会晚一点才写全；
+  broker 自己重启时，也会把还开着的会话结掉。
+- **明细的字节数是最后写进去的**：broker 中途挂掉的那一次会话，
+  字节数会停在最后一次写下的地方（不会丢账号和次数）。
+
+---
+
+## 九、broker 的地址变了怎么办
 
 （IP 换了、机器换了、域名换了。）
 
@@ -267,7 +346,7 @@ a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c
 
 ---
 
-## 九、怎么确认起来了
+## 十、怎么确认起来了
 
 ```bash
 # 1) 端口通不通
@@ -286,7 +365,7 @@ a2_broker --help
 
 ---
 
-## 十、常见问题
+## 十一、常见问题
 
 | 现象 | 大概率原因 | 怎么办 |
 | --- | --- | --- |

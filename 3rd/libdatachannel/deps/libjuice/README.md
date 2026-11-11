@@ -1,5 +1,29 @@
 # libjuice - UDP Interactive Connectivity Establishment
 
+> ## ⚠️ 这里有 tea_a2 自己的改动（升级 libjuice 时要重做）
+>
+> 这个目录**不是原版的 libjuice**：tea_a2 给它打了一个补丁，
+> 好让 broker 知道**谁用了 TURN 中继、用了多少字节**。
+> libjuice 原版没有这个接口（它只管转发，不管记账）。
+>
+> 改了三个文件（每一处都有 `tea_a2:` 的标记，用
+> `grep -rn "tea_a2:" 3rd/libdatachannel/deps/libjuice/` 就能全部找到）：
+>
+> | 文件 | 改了什么 |
+> | --- | --- |
+> | `include/juice/juice.h` | 新增 `juice_turn_usage_t`（事件、账号、客户端地址、中继地址、字节数）和 `juice_cb_turn_usage_t` 回调；`juice_server_config_t` 多了 `cb_turn_usage` 和 `turn_usage_user_ptr` |
+> | `src/server.h` | `server_turn_alloc_t` 多了 `bytes_in` / `bytes_out` / `packets_in` / `packets_out` / `relayed_record` |
+> | `src/server.c` | 数字节（对端→客户端、客户端→对端），分配建立/结束时回调，`server_create()` 里把回调拷进 server 的配置 |
+>
+> ⚠️ **`server_create()` 是逐个字段拷配置的** —— 忘了拷新加的回调，
+> 回调就永远是 NULL（这个坑踩过一次）。
+>
+> 升级 libjuice 时：先看 `git log -p -- 3rd/libdatachannel/deps/libjuice`
+> 把这些改动重新做一遍（或者先在新版上重新实现），
+> 再跑 `tests/smoke_tunnel.py`。
+>
+> 用到它的地方：`src/tunnel_usage.h`（记录器）和 `src/tunnel_broker.cpp`（回调）。
+
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-blue.svg)](https://www.mozilla.org/en-US/MPL/2.0/)
 [![Build and test](https://github.com/paullouisageneau/libjuice/actions/workflows/build.yml/badge.svg)](https://github.com/paullouisageneau/libjuice/actions/workflows/build.yml)
 [![Packaging status](https://repology.org/badge/tiny-repos/libjuice.svg)](https://repology.org/project/libjuice/versions)

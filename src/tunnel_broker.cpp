@@ -34,6 +34,8 @@
 //   -> {"type":"offer"|"answer"|"candidate","sdp":"..."}   (relayed to the peer)
 //
 #include <juice/juice.h>
+#include <cstdlib>
+#include <ctime>
 #include <nlohmann/json.hpp>
 
 #include <mbedtls/ctr_drbg.h>
@@ -61,6 +63,7 @@ using json = nlohmann::json;
 #include "tunnel_paths.h"
 #include "tunnel_tls.h"
 #include "tunnel_turn_db.h"
+#include "tunnel_usage.h"
 
 // ---- the built-in TURN credentials -----------------------------------------
 // The TURN relay is the broker's bandwidth, not a secret worth hiding: the
@@ -267,6 +270,27 @@ void peer_loop(std::shared_ptr<Peer> p) {
 
 // ---- the TURN/STUN server (libjuice) ---------------------------------------
 //
+// The recorder: libjuice tells it when a relay session starts and ends.
+tea_tunnel::TurnUsageRecorder g_usage;
+
+void on_turn_usage(const juice_turn_usage_t* usage, void* user_ptr) {
+  tea_tunnel::TurnUsageRecorder* recorder =
+      static_cast<tea_tunnel::TurnUsageRecorder*>(user_ptr);
+  if (!recorder || !usage) return;
+  tea_tunnel::UsageEvent event;
+  event.released = usage->event == JUICE_TURN_USAGE_RELEASED;
+  event.username = usage->username ? usage->username : "";
+  event.client = usage->client ? usage->client : "";
+  event.relayed = usage->relayed ? usage->relayed : "";
+  event.bytes_in = usage->bytes_in;
+  event.bytes_out = usage->bytes_out;
+  event.packets_in = usage->packets_in;
+  event.packets_out = usage->packets_out;
+  event.at = static_cast<long long>(std::time(nullptr));
+  recorder->on_event(event);
+}
+
+
 // The accounts it accepts come from two places: the built-in pair (so that
 // nothing has to be configured anywhere) and the account book (a sqlite file
 // a person edits by hand). libjuice takes a list, so both are simply put in
@@ -276,7 +300,8 @@ void peer_loop(std::shared_ptr<Peer> p) {
 // a vector that outlives it.
 bool start_stun_turn(uint16_t port, const std::string& realm,
                       const std::vector<tea_tunnel::TurnAccount>& accounts,
-                      uint16_t relay_begin, uint16_t relay_end) {
+                      uint16_t relay_begin, uint16_t relay_end,
+                      tea_tunnel::TurnUsageRecorder* recorder) {
   static std::vector<std::string> usernames;
   static std::vector<std::string> passwords;
   usernames.clear();
@@ -305,6 +330,9 @@ bool start_stun_turn(uint16_t port, const std::string& realm,
   config.relay_port_range_begin = relay_begin;
   config.relay_port_range_end = relay_end;
   config.realm = realm.c_str();
+  // tea_a2: the usage of the relay is written into the account book
+  config.cb_turn_usage = on_turn_usage;
+  config.turn_usage_user_ptr = recorder;
 
   juice_server_t* server = juice_server_create(&config);
   if (!server) {
@@ -512,6 +540,11 @@ int main(int argc, char** argv) {
   // a2_broker.db in the current directory, created on the first start with
   // the default account in it.
   std::string turn_db = tea_tunnel::turn_db_path();
+  // How long the details of a relay session are kept. The totals (per day and
+  // per account) are kept for good.
+  int usage_days = 15;
+  bool usage_only = false;
+  std::string usage_error;
   std::string token;
   // The names in the broker's own certificate. A client that checks a name
   // needs one; a client that pins the fingerprint does not care.
@@ -524,7 +557,7 @@ int main(int argc, char** argv) {
           "a2_broker [--stun-port 3478] [--signal-port 8382] [--signal-bind 0.0.0.0]\n"
           "          [--realm a2] [--relay-begin 49160] [--relay-end 49260]\n"
           "          [--token <secret>] [--turn-user <user>] [--turn-pass <pass>]\n"
-          "          [--turn-db <file>]\n"
+          "          [--turn-db <file>] [--usage] [--usage-days <n>]\n"
           "          [--cert-name <name>]... [--no-tls]\n"
           "\n"
           "  One process, one file: STUN + TURN + the signalling (with TLS).\n"
@@ -558,6 +591,8 @@ int main(int argc, char** argv) {
     else if (a == "--turn-user") { turn_user = next(); turn_user_given = true; }
     else if (a == "--turn-pass") { turn_pass = next(); turn_pass_given = true; }
     else if (a == "--turn-db") turn_db = next();
+    else if (a == "--usage") usage_only = true;
+    else if (a == "--usage-days") usage_days = std::atoi(next().c_str());
     else if (a == "--token") token = next();
     else if (a == "--cert-name") cert_names.push_back(next());
     else if (a == "--no-tls") use_tls = false;
@@ -565,6 +600,49 @@ int main(int argc, char** argv) {
     else if (a == "--help" || a == "-h") usage(nullptr);
     else usage(("unknown option '" + a + "'").c_str());
   }
+  // ---- the report -------------------------------------------------------
+  // --usage only reads the account book and prints what the relay was used
+  // for. It does not start anything.
+  if (usage_only) {
+    std::vector<tea_tunnel::TurnUsageRecorder::DayTotal> totals;
+    long long sessions = 0;
+    long long seconds = 0;
+    uint64_t bytes_in = 0;
+    uint64_t bytes_out = 0;
+    size_t open_now = 0;
+    std::string error;
+    if (!tea_tunnel::TurnUsageRecorder::read_report(turn_db, usage_days, &totals, &sessions,
+                                                    &seconds, &bytes_in, &bytes_out, &open_now,
+                                                    &error)) {
+      std::fprintf(stderr, "broker: %s\n", error.c_str());
+      return 2;
+    }
+    std::printf("TURN usage in %s (the last %d day%s)\n\n", turn_db.c_str(), usage_days,
+                usage_days == 1 ? "" : "s");
+    if (totals.empty()) {
+      std::printf("  nothing yet\n");
+    } else {
+      std::printf("%-12s %-16s %8s %10s %12s %12s\n", "day", "account", "sessions", "duration",
+                  "bytes in", "bytes out");
+      for (const tea_tunnel::TurnUsageRecorder::DayTotal& total : totals) {
+        std::printf("%-12s %-16s %8lld %10s %12s %12s\n", total.day.c_str(),
+                    total.account.c_str(), total.sessions,
+                    tea_tunnel::usage_duration(total.seconds).c_str(),
+                    tea_tunnel::usage_bytes(total.bytes_in).c_str(),
+                    tea_tunnel::usage_bytes(total.bytes_out).c_str());
+      }
+      std::printf("\n%d day%s in total: %lld session%s, %s, %s in, %s out\n", usage_days,
+                  usage_days == 1 ? "" : "s", sessions, sessions == 1 ? "" : "s",
+                  tea_tunnel::usage_duration(seconds).c_str(),
+                  tea_tunnel::usage_bytes(bytes_in).c_str(),
+                  tea_tunnel::usage_bytes(bytes_out).c_str());
+    }
+    if (open_now > 0) {
+      std::printf("%zu session%s running right now\n", open_now, open_now == 1 ? "" : "s");
+    }
+    return 0;
+  }
+
   // The room token is optional on the broker: without one every room learns
   // its token from the side that registers it (the agent side generates a
   // fresh one on every start). With --token the broker pins one token for
@@ -633,7 +711,19 @@ int main(int argc, char** argv) {
   std::printf("broker: TURN accounts accepted: %zu\n", accounts.size());
   std::fflush(stdout);
 
-  if (!start_stun_turn(stun_port, realm, accounts, relay_begin, relay_end)) return 1;
+  // ---- the usage recorder ------------------------------------------------
+  // It writes into the same file as the accounts: a2_broker.db.
+  if (!g_usage.start(turn_db, usage_days, &usage_error)) {
+    std::fprintf(stderr, "broker: %s\n", usage_error.c_str());
+    std::fprintf(stderr, "broker: the TURN usage is not recorded\n");
+  } else {
+    std::printf("broker: the TURN usage goes into %s (the details for %d day%s, "
+                "the totals for good)\n",
+                turn_db.c_str(), usage_days, usage_days == 1 ? "" : "s");
+    std::fflush(stdout);
+  }
+
+  if (!start_stun_turn(stun_port, realm, accounts, relay_begin, relay_end, &g_usage)) return 1;
 
   TlsMaterial material;
   std::shared_ptr<TlsServer> tls_server;

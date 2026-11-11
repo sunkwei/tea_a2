@@ -281,6 +281,23 @@ def main():
         check("an account given on the command line wins over the book",
               "using the TURN account" not in text, text[-300:])
 
+        # ---- TURN 用量记账 ------------------------------------------------
+        # broker 把中继的用量写进同一个 db（a2_broker.db），有明细表和按天的汇总表。
+        import sqlite3
+        db = sqlite3.connect(book)
+        tables = [row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        db.close()
+        check("the account book has the usage tables",
+              "turn_usage" in tables and "turn_usage_daily" in tables, str(tables))
+
+        result = subprocess.run([broker, "--usage", "--turn-db", book],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                cwd=work, timeout=20)
+        text = result.stdout.decode("utf-8", "replace")
+        check("the usage report can be printed",
+              "TURN usage in" in text, text[-200:])
+
         # ---- 配置文件里的地址 -------------------------------------------
         conf_dir = os.path.join(home, ".tea_agent", "tunnel")
         os.makedirs(conf_dir, exist_ok=True)

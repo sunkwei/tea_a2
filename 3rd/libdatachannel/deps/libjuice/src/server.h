@@ -46,6 +46,13 @@ typedef struct server_turn_alloc {
 	timestamp_t timestamp;
 	socket_t sock;
 	turn_map_t map;
+	// tea_a2: how much went through the relay for this allocation
+	uint64_t bytes_in;
+	uint64_t bytes_out;
+	uint64_t packets_in;
+	uint64_t packets_out;
+	// tea_a2: the address the peer is reachable at (for the usage report)
+	addr_record_t relayed_record;
 } server_turn_alloc_t;
 
 typedef struct juice_credentials_list {

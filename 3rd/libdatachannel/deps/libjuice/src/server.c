@@ -75,11 +75,44 @@ static server_turn_alloc_t *find_allocation(server_turn_alloc_t allocs[], int si
 	return allocs + pos;
 }
 
-static void delete_allocation(server_turn_alloc_t *alloc) {
+// tea_a2: tell the owner that an allocation is over, and how much it used.
+static void server_report_usage(juice_server_t *server, juice_turn_usage_event_t event,
+                                 server_turn_alloc_t *alloc) {
+	if (!server->config.cb_turn_usage)
+		return;
+
+	char username[128] = {0};
+	char client[128] = {0};
+	char relayed[128] = {0};
+
+	if (alloc->credentials)
+		snprintf(username, sizeof(username), "%s", alloc->credentials->username);
+	addr_record_to_string(&alloc->record, client, sizeof(client));
+	if (alloc->relayed_record.len > 0)
+		addr_record_to_string(&alloc->relayed_record, relayed, sizeof(relayed));
+
+	juice_turn_usage_t usage;
+	memset(&usage, 0, sizeof(usage));
+	usage.event = event;
+	usage.username = username;
+	usage.client = client;
+	usage.relayed = relayed;
+	usage.bytes_in = alloc->bytes_in;
+	usage.bytes_out = alloc->bytes_out;
+	usage.packets_in = alloc->packets_in;
+	usage.packets_out = alloc->packets_out;
+
+	server->config.cb_turn_usage(&usage, server->config.turn_usage_user_ptr);
+}
+
+static void delete_allocation(juice_server_t *server, server_turn_alloc_t *alloc) {
 	if (alloc->state != SERVER_TURN_ALLOC_FULL)
 		return;
 
 	++alloc->credentials->allocations_quota;
+
+	// tea_a2: report before the credentials are dropped
+	server_report_usage(server, JUICE_TURN_USAGE_RELEASED, alloc);
 
 	alloc->state = SERVER_TURN_ALLOC_DELETED;
 	turn_destroy_map(&alloc->map);
@@ -138,6 +171,9 @@ juice_server_t *server_create(const juice_server_config_t *config) {
 	server->config.realm = alloc_string_copy(
 	    config->realm && *config->realm != '\0' ? config->realm : SERVER_DEFAULT_REALM,
 	    &alloc_failed);
+	// tea_a2: the usage callback (the config is copied field by field here)
+	server->config.cb_turn_usage = config->cb_turn_usage;
+	server->config.turn_usage_user_ptr = config->turn_usage_user_ptr;
 	if (alloc_failed) {
 		JLOG_FATAL("Memory allocation for server configuration failed");
 		goto error;
@@ -213,7 +249,7 @@ void server_do_destroy(juice_server_t *server) {
 
 	server_turn_alloc_t *end = server->allocs + server->allocs_count;
 	for (server_turn_alloc_t *alloc = server->allocs; alloc < end; ++alloc) {
-		delete_allocation(alloc);
+		delete_allocation(server, alloc);
 	}
 	free((void *)server->allocs);
 
@@ -478,6 +514,10 @@ int server_forward(juice_server_t *server, server_turn_alloc_t *alloc) {
 		}
 		addr_unmap_inet6_v4mapped((struct sockaddr *)&record.addr, &record.len);
 
+		// tea_a2: count what the peer sent to the client
+		++alloc->packets_in;
+		alloc->bytes_in += (uint64_t)len;
+
 		// RFC 5766 8. Permissions:
 		// When a UDP datagram arrives at the relayed transport address for the allocation, the
 		// server extracts the source IP address from the IP header. The server then compares this
@@ -598,7 +638,7 @@ int server_bookkeeping(juice_server_t *server, timestamp_t *next_timestamp) {
 
 		if (alloc->timestamp <= now) {
 			JLOG_DEBUG("Allocation timed out");
-			delete_allocation(alloc);
+			delete_allocation(server, alloc);
 			continue;
 		}
 
@@ -847,6 +887,8 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 
 	JLOG_DEBUG("Processing TURN Allocate request");
 
+	bool created = false; // tea_a2: only a new allocation is a new session
+
 	server_turn_alloc_t *alloc = find_allocation(server->allocs, server->allocs_count, src, true);
 	if (!alloc) {
 		return server_answer_stun_error(server, msg->transaction_id, src, msg->msg_method,
@@ -870,6 +912,7 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 		}
 	} else {
 		// Allocation does not exist
+		created = true; // tea_a2: a new relay session starts here
 		if (msg->msg_method == STUN_METHOD_REFRESH) {
 			return server_answer_stun_error(server, msg->transaction_id, src, msg->msg_method,
 			                                437, // Allocation mismatch
@@ -918,7 +961,7 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 	addr_record_t records[MAX_RELAYED_RECORDS_COUNT];
 	const addr_record_t *relayed = NULL;
 	if (lifetime == 0) {
-		delete_allocation(alloc);
+		delete_allocation(server, alloc);
 
 	} else {
 		int count = 0;
@@ -956,6 +999,9 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 			goto error;
 		}
 
+		// tea_a2: remember it, so the usage report can name it
+		alloc->relayed_record = *relayed;
+
 		if (JLOG_INFO_ENABLED) {
 			char src_str[ADDR_MAX_STRING_LEN];
 			addr_record_to_string(src, src_str, ADDR_MAX_STRING_LEN);
@@ -964,6 +1010,10 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 			JLOG_INFO("Allocated TURN relayed address %s for client %s", relayed_str, src_str);
 		}
 	}
+
+	// tea_a2: tell the owner that a relay session started
+	if (created && relayed && alloc->state == SERVER_TURN_ALLOC_FULL)
+		server_report_usage(server, JUICE_TURN_USAGE_ALLOCATED, alloc);
 
 	stun_message_t ans;
 	memset(&ans, 0, sizeof(ans));
@@ -981,7 +1031,7 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 	return server_stun_send(server, src, &ans, credentials->password);
 
 error:
-	delete_allocation(alloc);
+	delete_allocation(server, alloc);
 	server_answer_stun_error(server, msg->transaction_id, src, msg->msg_method, 500, credentials);
 	return -1;
 }
@@ -1139,6 +1189,10 @@ int server_process_turn_send(juice_server_t *server, const stun_message_t *msg,
 
 	JLOG_VERBOSE("Forwarding datagram to peer, size=%zu", msg->data_size);
 
+	// tea_a2: count what the client sent to the peer
+	++alloc->packets_out;
+	alloc->bytes_out += (uint64_t)msg->data_size;
+
 	int ret = udp_sendto(alloc->sock, msg->data, msg->data_size, peer);
 	if (ret < 0 && sockerrno != SEAGAIN && sockerrno != SEWOULDBLOCK)
 		JLOG_WARN("Forwarding failed, errno=%d", sockerrno);
@@ -1178,6 +1232,10 @@ int server_process_channel_data(juice_server_t *server, char *buf, size_t len,
 	}
 
 	JLOG_VERBOSE("Forwarding datagram to peer, size=%zu", len);
+
+	// tea_a2: count what the client sent to the peer
+	++alloc->packets_out;
+	alloc->bytes_out += (uint64_t)len;
 
 	int ret = udp_sendto(alloc->sock, buf, len, &record);
 	if (ret < 0 && sockerrno != SEAGAIN && sockerrno != SEWOULDBLOCK)

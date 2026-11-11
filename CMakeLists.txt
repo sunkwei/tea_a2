@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"1.2.5\"")
+    "  const char* const kVersionString = \"1.2.6\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -565,6 +565,18 @@ if(TEA_AGENT_BUILD_TUNNEL)
   if(CMAKE_TOOLCHAIN_FILE)
     list(APPEND TEA_TUNNEL_CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE})
   endif()
+  # Everything the tunnel is made of has to be listed here. A header that is
+  # missing from this list means "I changed it and the binary did not change"
+  # - which is exactly what happened with the tea_a2 patch in libjuice.
+  file(GLOB TEA_TUNNEL_SOURCES CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/tunnel_*.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/tunnel_*.h)
+  # libjuice is patched by us (the TURN usage callback), so its sources are
+  # dependencies too.
+  file(GLOB TEA_TUNNEL_LIBMJUICE_SOURCES CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/3rd/libdatachannel/deps/libjuice/src/*.c
+       ${CMAKE_CURRENT_SOURCE_DIR}/3rd/libdatachannel/deps/libjuice/src/*.h
+       ${CMAKE_CURRENT_SOURCE_DIR}/3rd/libdatachannel/deps/libjuice/include/juice/*.h)
   add_custom_command(
     OUTPUT ${TEA_TUNNEL_BINARIES}
     COMMAND ${CMAKE_COMMAND}
@@ -574,7 +586,8 @@ if(TEA_AGENT_BUILD_TUNNEL)
             ${TEA_TUNNEL_CMAKE_ARGS}
     COMMAND ${CMAKE_COMMAND} --build ${TEA_TUNNEL_DIR} --config Release
     DEPENDS tunnel/CMakeLists.txt
-            src/tunnel_broker.cpp src/tunnel_sidecar.cpp
+            ${TEA_TUNNEL_SOURCES}
+            ${TEA_TUNNEL_LIBMJUICE_SOURCES}
     COMMENT "Building the tunnel binaries (a2_broker, a2_tunnel)"
     VERBATIM)
   # ALL: a plain `cmake --build build` has to produce the tunnel binaries

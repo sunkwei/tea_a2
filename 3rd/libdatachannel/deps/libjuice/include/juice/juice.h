@@ -149,6 +149,33 @@ typedef struct juice_server_credentials {
 	int allocations_quota;
 } juice_server_credentials_t;
 
+// --- tea_a2: TURN usage accounting ---------------------------------------
+// The server tells its owner when a TURN allocation starts and when it ends,
+// and how many bytes went through the relay. It is the only place where the
+// traffic of a relayed session is visible, so it is the only place the usage
+// can be counted.
+//
+// The strings are only valid during the call: copy them if you need them
+// later. The callback is called from the server's own thread, so it must
+// not block (the tea_a2 broker puts the event on a queue).
+typedef enum juice_turn_usage_event {
+	JUICE_TURN_USAGE_ALLOCATED = 0,
+	JUICE_TURN_USAGE_RELEASED = 1
+} juice_turn_usage_event_t;
+
+typedef struct juice_turn_usage {
+	juice_turn_usage_event_t event;
+	const char *username; // the account that was used
+	const char *client;   // the client address, "ip:port"
+	const char *relayed;  // the relayed address, "ip:port"
+	uint64_t bytes_in;    // bytes the peer sent to the client
+	uint64_t bytes_out;   // bytes the client sent to the peer
+	uint64_t packets_in;
+	uint64_t packets_out;
+} juice_turn_usage_t;
+
+typedef void (*juice_cb_turn_usage_t)(const juice_turn_usage_t *usage, void *user_ptr);
+
 typedef struct juice_server_config {
 	juice_server_credentials_t *credentials;
 	int credentials_count;
@@ -164,6 +191,10 @@ typedef struct juice_server_config {
 	uint16_t relay_port_range_end;
 
 	const char *realm;
+
+	// tea_a2: the usage callback (may be NULL)
+	juice_cb_turn_usage_t cb_turn_usage;
+	void *turn_usage_user_ptr;
 
 } juice_server_config_t;
 

@@ -466,6 +466,12 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 `X509_VERIFY_PARAM_set1_ip_asc()`，`set1_host()` 是给 DNS 名的——
 用错了会一直报 `certificate verify failed`。
 
+### 中继用了多少：broker 记着
+
+broker 把**谁用了中继、用了多少**记在 `a2_broker.db` 里（跟 TURN 账号同一本簿）：
+明细表 `turn_usage`（默认留 15 天）+ 按天的汇总表 `turn_usage_daily`（一直留）。
+`a2_broker --usage` 直接把报表打出来。细节见《a2_broker 配置手册》。
+
 ### 凭据：哪些是内置的，哪些要传
 
 | 东西 | 是什么 | 怎么来的 |
