@@ -12,7 +12,9 @@
 //                --listen 127.0.0.1:9931
 //
 // The signalling carries the room token, so it should travel over TLS:
-//     --tls --ca-bundle <pem>      (the broker's certificate must be in it)
+//     --tls                          (the broker's certificate is self-signed:
+//                                     the TLS is for the encryption, the room
+//                                     token is what gates the room)
 // The usual arrangement is nginx terminating TLS on the public port and
 // proxying the plain stream to the broker on 127.0.0.1.
 //
@@ -280,26 +282,26 @@ class Link {
 
   /// TLS: mbedTLS does the connecting (it owns the socket afterwards).
   ///
-  /// `pin` is the SHA-256 fingerprint of the broker's certificate. When it is
-  /// given the certificate is checked against it instead of against a name:
-  /// the fingerprint says "this is the broker I was told about", and it does
-  /// not stop being true when the broker moves to another address.
+  /// The broker's certificate is **self-signed**: the broker makes it itself
+  /// and nobody signs it. So there is no chain to walk and no name to check
+  /// (the address may have changed) - the TLS here is for the encryption,
+  /// and **the room token is what actually gates the room**.
+  ///
+  /// A fingerprint is therefore **watched, never a gate**: when the broker's
+  /// certificate is not the one that was pinned, the operator is told, but
+  /// the tunnel is not broken over it. A fingerprint is one edit away from
+  /// being stale (the broker was rebuilt, the certificate was replaced), and
+  /// a broken tunnel is worse than a certificate nobody checked.
+  ///
+  /// The CA bundle is not used for the broker either - a public root store
+  /// cannot contain a certificate that the broker signed itself. It is only
+  /// kept so that an old command line does not fail.
   bool connect_tls(tea_socket_t fd, const std::string& host, const std::string& ca_file,
                     const std::string& pin, std::string* err) {
     mbedtls_ssl_init(&ssl_);
     mbedtls_ssl_config_init(&conf_);
     mbedtls_x509_crt_init(&ca_);
-    // The CA bundle is only loaded when there is no fingerprint to check
-    // against: a fingerprint names one exact certificate, a CA bundle only
-    // says "signed by somebody in this file".
-    const bool want_ca = !ca_file.empty() && tea_tunnel::normalize_fingerprint(pin).empty();
-    if (want_ca) {
-      if (mbedtls_x509_crt_parse_file(&ca_, ca_file.c_str()) != 0) {
-        *err = "cannot read the CA bundle '" + ca_file + "'";
-        return false;
-      }
-      mbedtls_ssl_conf_ca_chain(&conf_, &ca_, nullptr);
-    }
+    (void)ca_file;
     mbedtls_ssl_config_defaults(&conf_, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
                                 MBEDTLS_SSL_PRESET_DEFAULT);
     // mbedTLS 3.x has no implicit RNG: the entropy source and the DRBG have
@@ -311,13 +313,10 @@ class Link {
     // mbedTLS 3.x: the verification callback comes second, and "required" is
     // a separate call (mbedtls_ssl_conf_authmode).
     mbedtls_ssl_conf_verify(&conf_, nullptr, nullptr);
-    // With a fingerprint the certificate is checked by the pin below, not by
-    // the chain: the broker's certificate is self-signed, so there is no
-    // chain to walk. The name check is skipped as well - the address may
-    // have changed, and the fingerprint is what identifies the broker.
+    // The broker's certificate is self-signed: there is nothing to verify it
+    // against, so the chain is not required.
     const bool pinned = !tea_tunnel::normalize_fingerprint(pin).empty();
-    mbedtls_ssl_conf_authmode(&conf_, want_ca ? MBEDTLS_SSL_VERIFY_REQUIRED
-                                              : MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_authmode(&conf_, MBEDTLS_SSL_VERIFY_NONE);
 
     // The socket is ours, not mbedTLS': a Windows socket handle does not fit
     // in the int that mbedTLS' own socket helpers use, so the connection is
@@ -343,35 +342,21 @@ class Link {
       char buf[160];
       mbedtls_strerror(hs, buf, sizeof(buf));
       *err = "the TLS handshake failed: " + std::string(buf);
-      // The broker signs its own certificate: a CA bundle cannot check it,
-      // only the fingerprint can. Say what to do, the error above does not.
-      const bool pinned = !tea_tunnel::normalize_fingerprint(pin).empty();
-      const bool about_the_certificate = hs == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
-      if (!pinned && about_the_certificate) {
-        *err +=
-            "\n  the broker's certificate is self-signed, so a CA bundle cannot check it."
-            "\n  the fingerprint can: put it in <home>/.tea_agent/tunnel/broker.txt as"
-            "\n      pin=<fingerprint>"
-            "\n  (the broker prints it when it starts), or give it on the command line:"
-            "\n      --tls-pin <fingerprint>";
-      }
       return false;
     }
     tls_ = true;
 
     if (pinned) {
-      // The fingerprint of the certificate the broker just presented. This
-      // is the check that says "this is the broker I was told about".
+      // The fingerprint of the certificate the broker just presented. It is
+      // only watched: a different certificate is worth knowing about, but it
+      // does not break the tunnel (the room token is the gate).
       const mbedtls_x509_crt* peer = mbedtls_ssl_get_peer_cert(&ssl_);
       if (peer == nullptr) {
-        *err = "the broker did not present a certificate";
-        return false;
-      }
-      if (!tea_tunnel::fingerprint_matches(peer->raw.p, peer->raw.len, pin)) {
-        char buf[160];
-        mbedtls_strerror(MBEDTLS_ERR_X509_CERT_VERIFY_FAILED, buf, sizeof(buf));
-        *err = "the broker's certificate is not the one that was pinned (--tls-pin)";
-        return false;
+        log_line("sidecar: the broker did not present a certificate\n");
+      } else if (!tea_tunnel::fingerprint_matches(peer->raw.p, peer->raw.len, pin)) {
+        log_line("sidecar: the broker's certificate is not the one that was pinned (%s)\n"
+                 "sidecar:   continuing anyway - the room token is what gates the room\n",
+                 tea_tunnel::normalize_fingerprint(pin).c_str());
       }
     }
     return true;
@@ -643,14 +628,18 @@ int main(int argc, char** argv) {
           "                   file the broker reads). When it has accounts and\n"
           "                   --turn-user/--turn-pass were not given, the first\n"
           "                   account is used.\n"
-          "  --tls-pin <hex>   the fingerprint of the broker's certificate. The\n"
-          "                   certificate is then checked against it instead of\n"
-          "                   against a name, so it stays good when the broker's\n"
-          "                   address changes.\n"
+          "  --tls-pin <hex>   the fingerprint of the broker's certificate. It is\n"
+          "                   only watched: if the broker presents another one,\n"
+          "                   the sidecar says so and carries on (the room token\n"
+          "                   is what gates the room).\n"
+          "  --ca-bundle <pem> not used for the broker: its certificate is\n"
+          "                   self-signed, so no root store can check it. The\n"
+          "                   option is kept so old command lines still work.\n"
           "  --wait-timeout    how long the agent side waits for the peer before giving\n"
           "                   up (default 300 seconds; 0 = wait forever)\n"
           "\n"
-          "  The broker's address and fingerprint can also be put in %s:\n"
+          "  The broker's address (and its fingerprint, if you want to watch it)\n"
+          "  can also be put in %s:\n"
           "      address=<host:port>\n"
           "      pin=<sha256>\n",
           broker_config_path().c_str());
@@ -729,26 +718,11 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  // The CA bundle: the conventional one when it is not given explicitly.
-  //
-  // With a pinned fingerprint the CA bundle is not needed: the certificate
-  // is checked against the fingerprint instead, which is a stronger check
-  // (it says "this exact certificate" rather than "signed by somebody in
-  // this file").
+  // The broker's certificate is self-signed, so it is not checked against a
+  // root store and the CA bundle is not needed. The option is still
+  // accepted (an old command line should not fail), it just does not
+  // change anything.
   const bool pinned = !tea_tunnel::normalize_fingerprint(tls_pin).empty();
-  if (use_tls && ca_file.empty() && !pinned) {
-    const std::string conventional = default_ca_bundle();
-    std::FILE* probe = std::fopen(conventional.c_str(), "rb");
-    if (probe) {
-      std::fclose(probe);
-      ca_file = conventional;
-    } else {
-      log_line("sidecar: no CA bundle at %s and no --tls-pin - the broker's certificate "
-               "will NOT be verified. Give --ca-bundle <pem> or --tls-pin <sha256> for a "
-               "proper check.\n",
-               conventional.c_str());
-    }
-  }
   if (verbose) rtc::InitLogger(rtc::LogLevel::Debug);
   else rtc::InitLogger(rtc::LogLevel::Warning);
 

@@ -57,7 +57,9 @@ broker: the client can pin it with --tls-pin 3f9a1c...
 broker: the certificate itself is in /root/.tea_agent/tunnel/broker.crt
 ```
 
-**把那串指纹（fingerprint）抄下来** —— 客户端要用它来确认自己连的是这个 broker。
+**把那串指纹（fingerprint）抄下来** —— 想看着它的人可以把它写进客户端的
+`broker.txt`（`pin=`）。**它不是门槛**：指纹对不上，客户端会说一声但照常连
+（真正把门守住的是**房间令牌**）。所以**客户端什么都不配也能用**。
 
 ### 第一次启动会自己造一张证书
 
@@ -68,7 +70,7 @@ broker 第一次启动时自己生成一张证书，存在：
 ~/.tea_agent/tunnel/broker.key     私钥（只有 broker 自己看）
 ```
 
-**重启不会换证书**，所以指纹一直不变，客户端配一次就行。
+**重启不会换证书**，所以指纹一直不变。
 
 ### 想用自己买的证书
 
@@ -374,5 +376,5 @@ a2_broker --help
 | 客户端连不上 8382 | 端口没开 / 云安全组没开 | 8382/TCP 放开 |
 | 中继不工作 | 3478/UDP 或端口池没开 | 三个端口都放开 |
 | `bad token` | 客户端的码是旧的 | 让设备侧重新起侧载，拿新的码 |
-| 客户端说 `not the one that was pinned` | broker 换了证书 | 把 broker 打印的新指纹给客户端 |
+| 客户端说 `not the one that was pinned` | broker 换了证书 | **只是提醒**，隧道照用（1.2.10 起不再拦） |
 | 打洞一直失败 | 客户那边是对称 NAT | **正常**，走中继（这是主路径） |

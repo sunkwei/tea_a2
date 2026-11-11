@@ -215,16 +215,18 @@ def main():
 
         # ---- 指纹不对的进不来 -------------------------------------------
         bad_log = os.path.join(work, "badpin.log")
+        # A fingerprint that does not match is reported, but it does not
+        # break the tunnel: the room token is what gates the room.
         bad_pin = "a" * 64
-        result = subprocess.run(
-            [sidecar, "--role", "client", "--session", session,
-             "--broker", "127.0.0.1:%d" % signal_port, "--tls-pin", bad_pin,
-             "--port", str(free_port()), "--wait-timeout", "5"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=work, timeout=60)
-        output = result.stdout.decode("utf-8", "replace")
-        check("a client with the wrong fingerprint is refused",
-              "not the one that was pinned" in output and
-              "the data channel is open" not in output, output[-300:])
+        _, bad_log = spawn([sidecar, "--role", "client", "--session", session,
+                            "--broker", "127.0.0.1:%d" % signal_port, "--tls-pin", bad_pin,
+                            "--port", str(free_port()), "--wait-timeout", "5"], "badpin.log")
+        text = wait_for_log(bad_log, r"not the one that was pinned", seconds=20)
+        check("a wrong fingerprint is reported",
+              "not the one that was pinned" in text, text[-300:])
+        text = wait_for_log(bad_log, r"the data channel is open", seconds=20)
+        check("a wrong fingerprint does not break the tunnel",
+              "the data channel is open" in text, text[-300:])
 
         # ---- 指纹在重启之后不变 -----------------------------------------
         broker_procs = [p for p, path in procs if "a2_broker" in " ".join(p.args)]

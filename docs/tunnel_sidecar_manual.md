@@ -144,8 +144,23 @@ pin=3f9a1c...
 ```
 
 `pin` 是 broker 的证书指纹（broker 启动时打印）。
-**有 pin 就用它来确认对端**：证书对不上就断，比「证书里的名字对得上」更靠得住，
-因为 broker 换地址之后名字还是那个名字，但证书是同一张。
+
+> ⚠️ **指纹只是「看着」，不是「拦着」。**
+> broker 的证书是**自签的**（它自己造的，没有 CA 签），所以：
+>
+> - **证书不验**（没有链可走，证书库里也永远找不到它）→ **`--ca-bundle` 对 broker 没用**
+>   （这个参数留着只是为了老的命令行不报错）；
+> - 配了指纹，broker 递上别的证书时，**侧载会说一声，但继续用**：
+>
+>   ```
+>   sidecar: the broker's certificate is not the one that was pinned (3f9a1c...)
+>   sidecar:   continuing anyway - the room token is what gates the room
+>   ```
+>
+>   **不断隧道**：指纹这东西，离「过期」只有一次编辑的距离（broker 重装、
+>   证书换了），断了隧道比没验证书更糟。
+>
+> **真正把门守住的是房间令牌**：令牌不对，broker 直接不理 join。
 
 也可以命令行覆盖：
 
@@ -153,21 +168,9 @@ pin=3f9a1c...
 a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c...
 ```
 
-> ⚠️ **broker 的证书是自签的**（它自己造的，没有 CA 签）。
-> 所以**证书库里找不到它**——`--ca-bundle` 对它没用。
-> **要认它，只有指纹一条路**：写 `broker.txt` 的 `pin=`，或者命令行 `--tls-pin`。
-> 忘了写就会看到：
->
-> ```
-> sidecar: the TLS handshake failed: X509 - Certificate verification failed, ...
->   the broker's certificate is self-signed, so a CA bundle cannot check it.
->   the fingerprint can: put it in <home>/.tea_agent/tunnel/broker.txt as
->       pin=<fingerprint>
-> ```
->
-> **Windows 上的路径**是 `%USERPROFILE%\.tea_agent\tunnel\broker.txt`
-> （比如 `C:\Users\<用户名>\.tea_agent\tunnel\broker.txt`）——
-> 文件夹还没有就自己建一个。
+**Windows 上的路径**是 `%USERPROFILE%\.tea_agent\tunnel\broker.txt`
+（比如 `C:\Users\<用户名>\.tea_agent\tunnel\broker.txt`）——
+文件夹还没有就自己建一个。
 
 ---
 
@@ -191,8 +194,8 @@ a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c
 | `--turn-db <file>` | a2_broker.db（当前目录） | 账号簿（跟 broker 同一个 sqlite 文件） |
 | `--ice-relay-only` | 关 | 只走中继（测 TURN 账号时用） |
 | `--tls` / `--no-tls` | 开 | 信令要不要 TLS |
-| `--ca-bundle <pem>` | 无 | 用这个证书文件验证 broker |
-| `--tls-pin <sha256>` | 无 | 用指纹验证 broker（**推荐**） |
+| `--ca-bundle <pem>` | 无 | **对 broker 没用**（它的证书是自签的）——留着只是为了老的命令行不报错 |
+| `--tls-pin <sha256>` | 无 | broker 证书的指纹，**只看不拦**：对不上会说一声，但不断隧道 |
 | `--wait-timeout <秒>` | 300 | agent 侧等多久没人连就退出（0 = 一直等） |
 | `--verbose` | 关 | 打印 ICE 的详细日志 |
 
@@ -254,8 +257,8 @@ curl -s http://127.0.0.1:9931/api/health
 | 现象 | 大概率原因 | 怎么办 |
 | --- | --- | --- |
 | `broker says: bad token` | 码是旧的 | 让设备侧**重新起**侧载，拿新的码 |
-| `not the one that was pinned` | broker 换了证书 | 把 broker 打印的新指纹配给客户端 |
-| `X509 - Certificate verification failed` | 没配指纹，证书库又不认自签的证书 | 写 `broker.txt` 的 `pin=<指纹>`，或命令行 `--tls-pin` |
+| `not the one that was pinned` | broker 换了证书 | **只是提醒**，隧道照用；想安静就把 `broker.txt` 里的 `pin=` 删掉 |
+| `X509 - Certificate verification failed` | 老版本的侧载（1.2.9 及以前） | 升级到 1.2.10 以后：证书不再验，这种错不会再有 |
 | `cannot reach the broker` | 地址错 / broker 没起 | 查 `broker.txt` 里的 address |
 | 隧道通了但网页打不开 | `--target` 指错了 | 查 agent 侧的 `--target` |
 | 端口起来了但连不上 | 隧道还没建好 | 等 `the data channel is open` |
