@@ -68,6 +68,7 @@ using json = nlohmann::json;
 #include "tunnel_net.h"
 #include "tunnel_paths.h"
 #include "tunnel_tls.h"
+#include "tunnel_turn_db.h"
 
 namespace {
 
@@ -584,6 +585,12 @@ int main(int argc, char** argv) {
   uint16_t turn_port = 3478;
   std::string turn_user = kDefaultTurnUser;
   std::string turn_pass = kDefaultTurnPass;
+  // The account book: the same file the broker reads. It holds the TURN
+  // accounts a person can add by hand. When it has accounts and the command
+  // line did not name one, the first account is used.
+  std::string turn_db = tea_tunnel::turn_db_path();
+  bool turn_user_given = false;
+  bool turn_pass_given = false;
   std::string ca_file;
   // The fingerprint of the broker's certificate. When it is set, the
   // certificate is checked against it - the address of the broker may
@@ -593,6 +600,10 @@ int main(int argc, char** argv) {
   // TLS is on by default; --no-tls is for a plain internal broker.
   bool use_tls = true;
   bool verbose = false;
+  // Only use the relay, never a direct connection. It is how the TURN
+  // credentials get tested: a direct connection would not ask the broker
+  // for anything.
+  bool relay_only = false;
   // How long to wait for the peer before giving up. The sidecar is meant to be
   // started on demand (the field staff starts it when access is needed), so
   // the default is five minutes, not "forever".
@@ -610,11 +621,16 @@ int main(int argc, char** argv) {
           "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
           "          [--listen <host:port>] [--host <addr>] [--port <n>] [--target <host:port>]\n"
           "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
+          "          [--turn-db <file>] [--ice-relay-only]\n"
           "          [--tls|--no-tls] [--ca-bundle <pem>] [--tls-pin <sha256>]\n"
           "\n"
           "  --session <code>  the one string that travels between the two sides\n"
           "                   (the room name and the token are derived from it)\n"
           "  --port <n>        the local port to listen on (the default is 9931)\n"
+          "  --turn-db <file>  the account book with the TURN accounts (the same\n"
+          "                   file the broker reads). When it has accounts and\n"
+          "                   --turn-user/--turn-pass were not given, the first\n"
+          "                   account is used.\n"
           "  --tls-pin <hex>   the fingerprint of the broker's certificate. The\n"
           "                   certificate is then checked against it instead of\n"
           "                   against a name, so it stays good when the broker's\n"
@@ -662,10 +678,12 @@ int main(int argc, char** argv) {
     } else if (a == "--turn") {
       std::string hp = next();
       split_hostport(hp, turn_host, turn_port);
-    } else if (a == "--turn-user") turn_user = next();
-    else if (a == "--turn-pass") turn_pass = next();
+    } else if (a == "--turn-user") { turn_user = next(); turn_user_given = true; }
+    else if (a == "--turn-pass") { turn_pass = next(); turn_pass_given = true; }
+    else if (a == "--turn-db") turn_db = next();
     else if (a == "--ca-bundle") ca_file = next();
     else if (a == "--tls-pin") tls_pin = next();
+    else if (a == "--ice-relay-only") relay_only = true;
     else if (a == "--wait-timeout") wait_timeout = std::atoi(next().c_str());
     else if (a == "--tls") use_tls = true;
     else if (a == "--no-tls") use_tls = false;
@@ -728,7 +746,28 @@ int main(int argc, char** argv) {
   if (stun_host.empty()) stun_host = broker_host;
   if (turn_host.empty()) turn_host = broker_host;
 
+  // The TURN account: the command line first, then the account book (the
+  // same file the broker reads), and the built-in pair as the last resort.
+  // The file is only read, never written: the book belongs to the broker.
+  if (!turn_user_given || !turn_pass_given) {
+    std::vector<tea_tunnel::TurnAccount> accounts;
+    std::string db_error;
+    if (tea_tunnel::read_turn_accounts(turn_db, &accounts, &db_error) && !accounts.empty()) {
+      if (!turn_user_given) turn_user = accounts.front().user;
+      if (!turn_pass_given) turn_pass = accounts.front().pass;
+      log_line("sidecar: using the TURN account \"%s\" from %s\n", turn_user.c_str(),
+               turn_db.c_str());
+    } else if (!db_error.empty()) {
+      log_line("sidecar: %s\n", db_error.c_str());
+    }
+  }
+
   rtc::Configuration cfg;
+  if (relay_only) {
+    // Ask ICE for relay candidates only: the connection then has to go
+    // through the broker's TURN server, so the TURN account is really used.
+    cfg.iceTransportPolicy = rtc::TransportPolicy::Relay;
+  }
   // Only the agent offers. The client answers; if it were allowed to
   // auto-negotiate, receiving the data channel would make it offer too, and
   // the two sides would keep offering at each other forever.

@@ -172,6 +172,8 @@ a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c
 | `--turn <host:port>` | 跟 broker 走 | TURN 服务器 |
 | `--turn-user <名>` | 内置 | TURN 账号 |
 | `--turn-pass <密>` | 内置 | TURN 口令 |
+| `--turn-db <file>` | a2_broker.db（当前目录） | 账号簿（跟 broker 同一个 sqlite 文件） |
+| `--ice-relay-only` | 关 | 只走中继（测 TURN 账号时用） |
 | `--tls` / `--no-tls` | 开 | 信令要不要 TLS |
 | `--ca-bundle <pem>` | 无 | 用这个证书文件验证 broker |
 | `--tls-pin <sha256>` | 无 | 用指纹验证 broker（**推荐**） |
@@ -180,7 +182,36 @@ a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c
 
 ---
 
-## 七、怎么确认通了
+## 七、TURN 账号从哪来
+
+侧载用哪套 TURN 账号，**按这个顺序**：
+
+1. 命令行给了 `--turn-user` / `--turn-pass` → **用它**；
+2. 否则，账号簿（`--turn-db`，默认 `a2_broker.db`，当前目录）里有账号 →
+   **用第一个**，并且会打印一行告诉你用的是哪个；
+3. 都没有 → 用**内置**的那套。
+
+账号簿是 broker 的那个 sqlite 文件（见《a2_broker 配置手册》）——
+`a2_broker.db`，里面有一张表 `turn_accounts(user, pass)`，
+一行一个账号，**明文存**，方便手改。
+
+broker 那边改完账号簿，**把同一个文件拷到这台机器上**（或者放在同一个目录里），
+侧载就会用里面的账号：
+
+```bash
+# 侧载跟 broker 用同一个账号簿
+a2_tunnel --role client --session <码> --turn-db /etc/a2/a2_broker.db
+```
+
+日志里会有这样一行（说明用的是哪个账号）：
+
+```
+sidecar: using the TURN account "alice" from /etc/a2/a2_broker.db
+```
+
+---
+
+## 八、怎么确认通了
 
 **客户端那边**：
 
@@ -202,7 +233,7 @@ curl -s http://127.0.0.1:9931/api/health
 
 ---
 
-## 八、常见问题
+## 九、常见问题
 
 | 现象 | 大概率原因 | 怎么办 |
 | --- | --- | --- |

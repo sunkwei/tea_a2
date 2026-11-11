@@ -13,7 +13,8 @@
   2. 证书和指纹在重启之后不变（客户端配一次就够）；
   3. 隧道真的通：客户端能拿到假 a2 的回答；
   4. 指纹不对的客户端**进不来**（这是 pin 的意义）；
-  5. broker 的地址写在配置文件里时，客户端会照着走。
+  5. broker 的地址写在配置文件里时，客户端会照着走；
+  6. TURN 账号可以放在一个**人手改的 sqlite 文件**里，broker 和侧载都读它。
 
 二进制不在就跳过（不是每个环境都编了隧道）。
 """
@@ -161,6 +162,18 @@ def main():
         check("the certificate is kept on disk",
               os.path.exists(os.path.join(home, ".tea_agent", "tunnel", "broker.crt")))
 
+        # The TURN account book: a2_broker.db in the current directory. The
+        # first start makes it and writes the default account into it.
+        book = os.path.join(work, "a2_broker.db")
+        check("the broker makes the account book on the first start",
+              os.path.exists(book) and "created now" in text, text[-300:])
+        import sqlite3
+        db = sqlite3.connect(book)
+        rows = list(db.execute("SELECT user, pass FROM turn_accounts"))
+        db.close()
+        check("the default account is written into it",
+              rows == [("1hblsqt.", "2ghlmcl,")], str(rows))
+
         # ---- agent 侧载 -------------------------------------------------
         agent_log = os.path.join(work, "agent.log")
         spawn([sidecar, "--role", "agent", "--broker", "127.0.0.1:%d" % signal_port,
@@ -230,6 +243,43 @@ def main():
         check("the fingerprint is the same after a restart",
               bool(match) and match.group(1) == pin,
               "old %s new %s" % (pin, match.group(1) if match else "?"))
+
+        # ---- TURN 账号簿（sqlite，人手改）--------------------------------
+        # 人手加一个账号，broker 重启后就要用它
+        db = sqlite3.connect(book)
+        db.execute("INSERT INTO turn_accounts (user, pass) VALUES ('alice', 's3cret')")
+        db.commit()
+        db.close()
+
+        book2_log = os.path.join(work, "bookbroker2.log")
+        book2_signal = free_port()
+        book2_stun = free_port()
+        spawn([broker, "--stun-port", str(book2_stun), "--signal-port", str(book2_signal),
+               "--signal-bind", "127.0.0.1", "--turn-db", book], "bookbroker2.log")
+        text = wait_for_log(book2_log, r"TURN accounts accepted", seconds=20)
+        check("the broker takes the accounts from the book",
+              "(2 accounts)" in text and "TURN accounts accepted: 2" in text, text[-300:])
+        check("the book is not seeded again",
+              "created now" not in text, text[-300:])
+
+        # 侧载从同一本账号簿里挑一个账号用
+        book_client_log = os.path.join(work, "bookclient.log")
+        spawn([sidecar, "--role", "client", "--session", session,
+               "--broker", "127.0.0.1:%d" % book2_signal, "--turn-db", book,
+               "--port", str(free_port()), "--wait-timeout", "5"], "bookclient.log")
+        text = wait_for_log(book_client_log, r"using the TURN account", seconds=20)
+        check("the sidecar takes its TURN account from the same book",
+              'using the TURN account "' in text, text[-300:])
+
+        # 命令行给的账号比账号簿里的优先
+        flag_client_log = os.path.join(work, "flagclient.log")
+        spawn([sidecar, "--role", "client", "--session", session,
+               "--broker", "127.0.0.1:%d" % book2_signal, "--turn-db", book,
+               "--turn-user", "bob", "--turn-pass", "x",
+               "--port", str(free_port()), "--wait-timeout", "5"], "flagclient.log")
+        text = wait_for_log(flag_client_log, r"client side, room", seconds=20)
+        check("an account given on the command line wins over the book",
+              "using the TURN account" not in text, text[-300:])
 
         # ---- 配置文件里的地址 -------------------------------------------
         conf_dir = os.path.join(home, ".tea_agent", "tunnel")

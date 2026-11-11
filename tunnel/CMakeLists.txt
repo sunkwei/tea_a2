@@ -69,6 +69,36 @@ set(NO_TESTS ON CACHE BOOL "" FORCE)
 set(WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${TEA_3RD}/libdatachannel ${CMAKE_BINARY_DIR}/libdatachannel EXCLUDE_FROM_ALL)
 
+# --- SQLite (the TURN account book) ------------------------------------------
+# The official amalgamation: one .c, one .h. Built as a static library so the
+# broker stays a single file that needs nothing installed on the machine.
+#
+# The switches: no extension loading (an attack surface we do not need), no
+# deprecated API, no double-quoted strings as identifiers, and thread safe
+# (the broker's signalling and its TURN server are separate threads).
+add_library(tea_sqlite3 STATIC ${TEA_3RD}/sqlite3/sqlite3.c)
+target_include_directories(tea_sqlite3 PUBLIC ${TEA_3RD}/sqlite3)
+# The account book only needs "open a file, create a table, read a table",
+# so everything else is left out: the tunnel binaries go onto devices with
+# little free space and every kilobyte counts.
+target_compile_definitions(tea_sqlite3 PRIVATE
+  SQLITE_OMIT_LOAD_EXTENSION=1
+  SQLITE_OMIT_DEPRECATED=1
+  SQLITE_DQS=0
+  SQLITE_THREADSAFE=1
+  SQLITE_DEFAULT_MEMSTATUS=0
+  SQLITE_OMIT_SHARED_CACHE=1
+  SQLITE_OMIT_TRACE=1
+  SQLITE_OMIT_PROGRESS_CALLBACK=1
+  SQLITE_OMIT_TCL_VARIABLE=1
+  SQLITE_OMIT_INCRBLOB=1)
+target_link_libraries(tea_sqlite3 PUBLIC Threads::Threads)
+if(NOT WIN32 AND NOT APPLE AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  # The C file is compiled by the C compiler, so the static-libc flags have to
+  # be repeated here (the loop at the bottom only sets them on the binaries).
+  target_compile_options(tea_sqlite3 PRIVATE -fno-pie)
+endif()
+
 # --- the two binaries --------------------------------------------------------
 add_executable(a2_broker ${TEA_ROOT}/src/tunnel_broker.cpp)
 target_include_directories(a2_broker PRIVATE ${TEA_3RD}/nlohmann_json ${TEA_3RD}/libdatachannel/deps/libjuice/include)
@@ -77,10 +107,15 @@ target_link_libraries(a2_broker PRIVATE juice Threads::Threads)
 # integrity: mbedTLS is already in the tree, so use it instead of OpenSSL
 # (which would be a new system dependency on Windows).
 target_link_libraries(a2_broker PRIVATE mbedtls mbedx509 mbedcrypto)
+# The TURN accounts can be kept in a sqlite file that a person edits by hand.
+target_link_libraries(a2_broker PRIVATE tea_sqlite3)
 
 add_executable(a2_tunnel ${TEA_ROOT}/src/tunnel_sidecar.cpp)
 target_include_directories(a2_tunnel PRIVATE ${TEA_3RD}/nlohmann_json)
 target_link_libraries(a2_tunnel PRIVATE datachannel-static MbedTLS::MbedTLS Threads::Threads)
+# The sidecar reads the same account book: it has to use one of the accounts
+# the broker accepts.
+target_link_libraries(a2_tunnel PRIVATE tea_sqlite3)
 
 foreach(_bin a2_broker a2_tunnel)
   set_target_properties(${_bin} PROPERTIES

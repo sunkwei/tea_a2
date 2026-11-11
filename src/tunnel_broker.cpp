@@ -60,6 +60,7 @@ using json = nlohmann::json;
 #include "tunnel_net.h"
 #include "tunnel_paths.h"
 #include "tunnel_tls.h"
+#include "tunnel_turn_db.h"
 
 // ---- the built-in TURN credentials -----------------------------------------
 // The TURN relay is the broker's bandwidth, not a secret worth hiding: the
@@ -265,16 +266,37 @@ void peer_loop(std::shared_ptr<Peer> p) {
 }
 
 // ---- the TURN/STUN server (libjuice) ---------------------------------------
-bool start_stun_turn(uint16_t port, const std::string& realm, const std::string& user,
-                      const std::string& pass, uint16_t relay_begin, uint16_t relay_end) {
-  juice_server_credentials_t creds;
-  creds.username = user.c_str();
-  creds.password = pass.c_str();
-  creds.allocations_quota = 64;
+//
+// The accounts it accepts come from two places: the built-in pair (so that
+// nothing has to be configured anywhere) and the account book (a sqlite file
+// a person edits by hand). libjuice takes a list, so both are simply put in
+// one list.
+//
+// The strings have to stay alive as long as the server runs, so they live in
+// a vector that outlives it.
+bool start_stun_turn(uint16_t port, const std::string& realm,
+                      const std::vector<tea_tunnel::TurnAccount>& accounts,
+                      uint16_t relay_begin, uint16_t relay_end) {
+  static std::vector<std::string> usernames;
+  static std::vector<std::string> passwords;
+  usernames.clear();
+  passwords.clear();
+  for (const tea_tunnel::TurnAccount& account : accounts) {
+    usernames.push_back(account.user);
+    passwords.push_back(account.pass);
+  }
+  std::vector<juice_server_credentials_t> creds;
+  for (std::size_t i = 0; i < usernames.size(); ++i) {
+    juice_server_credentials_t entry;
+    entry.username = usernames[i].c_str();
+    entry.password = passwords[i].c_str();
+    entry.allocations_quota = 64;
+    creds.push_back(entry);
+  }
 
   juice_server_config_t config;
-  config.credentials = &creds;
-  config.credentials_count = 1;
+  config.credentials = creds.empty() ? nullptr : &creds[0];
+  config.credentials_count = static_cast<int>(creds.size());
   config.max_allocations = 64;
   config.max_peers = 16;
   config.bind_address = nullptr;
@@ -484,6 +506,12 @@ int main(int argc, char** argv) {
   std::string realm = "a2";
   std::string turn_user = kDefaultTurnUser;
   std::string turn_pass = kDefaultTurnPass;
+  bool turn_user_given = false;
+  bool turn_pass_given = false;
+  // The account book: a sqlite file with the TURN accounts in it. It is
+  // a2_broker.db in the current directory, created on the first start with
+  // the default account in it.
+  std::string turn_db = tea_tunnel::turn_db_path();
   std::string token;
   // The names in the broker's own certificate. A client that checks a name
   // needs one; a client that pins the fingerprint does not care.
@@ -496,15 +524,21 @@ int main(int argc, char** argv) {
           "a2_broker [--stun-port 3478] [--signal-port 8382] [--signal-bind 0.0.0.0]\n"
           "          [--realm a2] [--relay-begin 49160] [--relay-end 49260]\n"
           "          [--token <secret>] [--turn-user <user>] [--turn-pass <pass>]\n"
+          "          [--turn-db <file>]\n"
           "          [--cert-name <name>]... [--no-tls]\n"
           "\n"
           "  One process, one file: STUN + TURN + the signalling (with TLS).\n"
           "  The signalling port speaks TLS by default; the certificate is made\n"
           "  on the first start and kept in %s.\n"
           "\n"
-          "  (the TURN credentials are built in; the room token comes from\n"
-          "   --token or from %s)\n",
-          tea_tunnel::tunnel_dir().c_str(), token_file_path().c_str());
+          "  The TURN accounts: the rows of the account book (a sqlite file,\n"
+          "  %s by default; the table is %s with the columns user and pass).\n"
+          "  The book is created on the first start, with the default account\n"
+          "  in it. --turn-user/--turn-pass replace the book for this run.\n"
+          "\n"
+          "  (the room token comes from --token or from %s)\n",
+          tea_tunnel::turn_db_path().c_str(), tea_tunnel::turn_table_name(),
+          token_file_path().c_str());
     std::exit(2);
   };
 
@@ -521,8 +555,9 @@ int main(int argc, char** argv) {
     else if (a == "--relay-begin") relay_begin = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--relay-end") relay_end = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--realm") realm = next();
-    else if (a == "--turn-user") turn_user = next();
-    else if (a == "--turn-pass") turn_pass = next();
+    else if (a == "--turn-user") { turn_user = next(); turn_user_given = true; }
+    else if (a == "--turn-pass") { turn_pass = next(); turn_pass_given = true; }
+    else if (a == "--turn-db") turn_db = next();
     else if (a == "--token") token = next();
     else if (a == "--cert-name") cert_names.push_back(next());
     else if (a == "--no-tls") use_tls = false;
@@ -538,13 +573,67 @@ int main(int argc, char** argv) {
     std::string from_file;
     if (read_token_file(&from_file)) token = from_file;
   }
-  if (turn_pass.empty()) {
-    std::fprintf(stderr, "broker: no TURN password\n");
-    return 2;
-  }
   g_token = token;
 
-  if (!start_stun_turn(stun_port, realm, turn_user, turn_pass, relay_begin, relay_end)) return 1;
+  // ---- the TURN accounts -------------------------------------------------
+  // They live in the account book: a sqlite file (a2_broker.db in the
+  // current directory) whose rows are the accounts. On the first start the
+  // file is created with the default account in it, so the broker has
+  // something to accept right away - and from then on a person can add,
+  // change or remove a row and restart.
+  //
+  // --turn-user/--turn-pass replace the book for this run (they are what a
+  // brand new book starts with, and what a book that already exists is
+  // ignored for).
+  std::vector<tea_tunnel::TurnAccount> accounts;
+  if (turn_user_given || turn_pass_given) {
+    if (turn_pass.empty()) {
+      std::fprintf(stderr, "broker: no TURN password\n");
+      return 2;
+    }
+    tea_tunnel::TurnAccount given;
+    given.user = turn_user;
+    given.pass = turn_pass;
+    accounts.push_back(given);
+    std::printf("broker: the TURN accounts come from the command line (%zu)\n", accounts.size());
+  } else {
+    // What a brand new book starts with.
+    std::vector<tea_tunnel::TurnAccount> seed;
+    tea_tunnel::TurnAccount builtin;
+    builtin.user = turn_user;
+    builtin.pass = turn_pass;
+    seed.push_back(builtin);
+
+    std::vector<tea_tunnel::TurnAccount> from_db;
+    std::string db_error;
+    bool created = false;
+    if (!tea_tunnel::load_turn_accounts(turn_db, seed, &from_db, &db_error, &created)) {
+      std::fprintf(stderr, "broker: %s\n", db_error.c_str());
+      std::fprintf(stderr, "broker: the TURN accounts in it are ignored\n");
+    } else {
+      accounts = from_db;
+      std::printf("broker: the TURN account book is %s (%zu account%s%s)\n", turn_db.c_str(),
+                  from_db.size(), from_db.size() == 1 ? "" : "s",
+                  created ? ", created now" : "");
+      if (created) {
+        std::printf("broker:   the default account is in it; change it with:\n"
+                    "           sqlite3 %s \"UPDATE %s SET user='name', pass='secret';\"\n",
+                    turn_db.c_str(), tea_tunnel::turn_table_name());
+      } else if (from_db.empty()) {
+        std::printf("broker:   add one with: INSERT INTO %s (user, pass) VALUES ('name', 'secret');\n",
+                    tea_tunnel::turn_table_name());
+      }
+    }
+  }
+
+  if (accounts.empty()) {
+    std::fprintf(stderr, "broker: no TURN account at all - nobody could use the relay\n");
+    return 2;
+  }
+  std::printf("broker: TURN accounts accepted: %zu\n", accounts.size());
+  std::fflush(stdout);
+
+  if (!start_stun_turn(stun_port, realm, accounts, relay_begin, relay_end)) return 1;
 
   TlsMaterial material;
   std::shared_ptr<TlsServer> tls_server;

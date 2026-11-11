@@ -139,12 +139,18 @@ systemctl --user status a2_broker
 | `--token <secret>` | 无 | 给所有房间定一个令牌（不设就每房间自己定） |
 | `--turn-user <name>` | 内置 | TURN 账号 |
 | `--turn-pass <secret>` | 内置 | TURN 口令 |
+| `--turn-db <file>` | a2_broker.db（当前目录） | 账号簿（sqlite 文件） |
 | `--cert-name <name>` | a2-broker | 自签证书里的名字（可给多个） |
 | `--no-tls` | 关 | 信令走明文（只在内网用） |
 
 ---
 
-## 七、TURN 凭据
+## 七、TURN 账号
+
+账号簿（`a2_broker.db`）**就是** broker 收的账号清单：
+第一次启动时它被建好、里面写着默认的那一套；之后改这个文件、重启，就换账号了。
+
+### 内置的那一套（账号簿的初始内容）
 
 账号口令**内置在二进制里**，两边（broker 和侧载）用的是同一套，
 所以**不用配置、不用拷文件**：
@@ -163,8 +169,78 @@ systemctl --user status a2_broker
 a2_broker --turn-user myuser --turn-pass mypass
 ```
 
-> 📌 **将来**会支持用 sqlite3 存多套手动配置的账号（一张表，一行一个账号）。
-> 现在还没做，先用内置的这套或者命令行覆盖。
+### 账号簿（sqlite 文件，人手改）
+
+账号放在一个 sqlite 文件里：**加一行、改一列、删一行**，不用重编任何东西。
+
+文件叫 **`a2_broker.db`，就在 broker 启动的那个目录里**。
+**第一次启动时 broker 会自己建好它，并把默认账号写进去**：
+
+```
+broker: the TURN account book is a2_broker.db (1 account, created now)
+broker:   the default account is in it; change it with:
+           sqlite3 a2_broker.db "UPDATE turn_accounts SET user='name', pass='secret';"
+broker: TURN accounts accepted: 1
+```
+
+里面有一张表：
+
+```sql
+CREATE TABLE turn_accounts (
+  user TEXT NOT NULL,
+  pass TEXT NOT NULL
+);
+```
+
+**一行就是一个账号**（明文存，就是为了让改动一眼看懂）：
+
+```sql
+INSERT INTO turn_accounts (user, pass) VALUES ('alice', 's3cret');
+```
+
+怎么改？用**任何** sqlite 工具都行（broker 就在旁边，路径是相对的）：
+
+```bash
+# 看现在有哪些
+sqlite3 a2_broker.db "SELECT user, pass FROM turn_accounts;"
+
+# 加一个
+sqlite3 a2_broker.db \
+  "INSERT INTO turn_accounts (user, pass) VALUES ('bob', 'hunter2');"
+
+# 改一个
+sqlite3 a2_broker.db \
+  "UPDATE turn_accounts SET pass = 'newpass' WHERE user = 'bob';"
+
+# 删一个
+sqlite3 a2_broker.db \
+  "DELETE FROM turn_accounts WHERE user = 'bob';"
+```
+
+**改完要重启 broker**（它启动时读一次）。
+
+账号簿在别处也行（`--turn-db <file>`）：
+
+```bash
+a2_broker --turn-db /etc/a2/turn.db
+```
+
+### 想临时换一套
+
+`--turn-user` / `--turn-pass` **这一轮**直接用它们，**账号簿就不看了**：
+
+```bash
+a2_broker --turn-user bob --turn-pass hunter2
+```
+
+启动时会说清楚用的是哪一套：
+
+```
+broker: the TURN accounts come from the command line (1)
+```
+
+> 账号簿里的账号**明文存**在这个文件里，所以文件权限是 0600（只有本人能读）。
+> 侧载也可以读同一个文件（`--turn-db`），这样它挑的账号一定是 broker 收的。
 
 ---
 

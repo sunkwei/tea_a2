@@ -53,4 +53,8 @@ tests/.real/
 # copy here for one build cycle (see cmake/free-running-exe.cmake)
 *.prev-*
 
+# The TURN account book the broker makes on its first start (it lives in the
+# directory the broker is started from, which can be the repository)
+a2_broker.db
+
 clean/
