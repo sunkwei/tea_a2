@@ -77,6 +77,31 @@ sidecar: ready. Waiting in room "s43910a0a" for the other side.
 a2_tunnel --role agent --target 127.0.0.1:8282
 ```
 
+### 要一个终端（不是 a2 的网页）
+
+设备上**没有 a2 也行**：侧载自己能开一个真的 shell（Linux 上是 pty，
+Windows 上是 ConPTY），隧道把它带到外面。
+
+```bash
+a2_tunnel --role agent --target terminal
+```
+
+外面那个人照旧跑 client 侧，然后**浏览器打开 http://127.0.0.1:9931/** ——
+打开的就是设备上那个终端（不是 a2 的界面）。
+
+client 侧会自己说一声：
+
+```
+sidecar: the other end is a terminal
+  The far end is a terminal: open http://127.0.0.1:9931/ in the browser.
+```
+
+终端里能干什么：敲命令、往回翻、鼠标选字复制、上传下载文件。
+
+> ⚠️ **这个 shell 是那台机器上侧载的权限**（设备上通常是 root）。
+> **拿到 session 码的人，就能在那台机器上敲命令。**
+> 房间令牌是唯一的门，所以 session 码还是别乱发。
+
 ### 等多久
 
 默认等 **5 分钟**，没人连就自己退出（省得在设备上留个空进程）。
@@ -104,6 +129,7 @@ sidecar: the data channel is open (client)
 **本机多了一个 9931 端口**，它后面就是设备上那台 a2。
 
 用浏览器打开 **http://127.0.0.1:9931/** 就是那台设备上 a2 的界面。
+（对面跑的是 `--target terminal` 的话，打开的就是**那个终端**。）
 
 用命令行问它：
 
@@ -187,6 +213,7 @@ a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c
 | `--host <addr>` | 无 | 同上，分开写（跟 a2 的 --host 一个意思） |
 | `--port <n>` | 9931 | 同上，分开写 |
 | `--target <host:port>` | 127.0.0.1:8383 | agent 侧要连的 a2 |
+| `--target terminal` | — | agent 侧改成开一个真的 shell（pty / ConPTY），隧道把它带出去 |
 | `--stun <host:port>` | 跟 broker 走 | STUN 服务器 |
 | `--turn <host:port>` | 跟 broker 走 | TURN 服务器 |
 | `--turn-user <名>` | 内置 | TURN 账号 |
@@ -261,6 +288,7 @@ curl -s http://127.0.0.1:9931/api/health
 | `X509 - Certificate verification failed` | 老版本的侧载（1.2.9 及以前） | 升级到 1.2.10 以后：证书不再验，这种错不会再有 |
 | `cannot reach the broker` | 地址错 / broker 没起 | 查 `broker.txt` 里的 address |
 | 隧道通了但网页打不开 | `--target` 指错了 | 查 agent 侧的 `--target` |
+| 打开 9931 是终端不是 a2 | agent 侧用了 `--target terminal` | 想看 a2 就把它改回 `--target 127.0.0.1:8383` |
 | 端口起来了但连不上 | 隧道还没建好 | 等 `the data channel is open` |
 | 设备上侧载自己退出了 | 5 分钟没人连 | 正常；要一直等着加 `--wait-timeout 0` |
 | 中间断了 | broker 重启 / 网络抖 | **两边都会自己重连**，不用管 |

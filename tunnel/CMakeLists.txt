@@ -110,8 +110,44 @@ target_link_libraries(a2_broker PRIVATE mbedtls mbedx509 mbedcrypto)
 # The TURN accounts can be kept in a sqlite file that a person edits by hand.
 target_link_libraries(a2_broker PRIVATE tea_sqlite3)
 
-add_executable(a2_tunnel ${TEA_ROOT}/src/tunnel_sidecar.cpp)
-target_include_directories(a2_tunnel PRIVATE ${TEA_3RD}/nlohmann_json)
+# --- the terminal the sidecar can serve -------------------------------------
+# The sidecar can hand out a real shell on the machine it runs on (see
+# src/tunnel_term.cpp): the browser on the other side of the tunnel talks to
+# it through the very same tunnel, so no new transport is needed.
+#
+# That needs three things the sidecar did not have yet:
+#   * cpp-httplib - the HTTP server in front of the shell;
+#   * the shell code itself (src/shell*.cpp) and the small helpers it needs
+#     (src/util.cpp, src/platform_fs.cpp, src/log.cpp) - the same code the
+#     agent uses, so there is only one shell implementation in the project;
+#   * the terminal page, compiled into the binary (there is no file to read
+#     on a device): TEA_TUNNEL_ASSETS_DIR points at the generated table.
+set(TEA_TUNNEL_ASSETS_DIR "" CACHE PATH "The directory with the generated web assets")
+
+add_executable(a2_tunnel
+  ${TEA_ROOT}/src/tunnel_sidecar.cpp
+  ${TEA_ROOT}/src/tunnel_term.cpp
+  ${TEA_ROOT}/src/shell.cpp
+  ${TEA_ROOT}/src/util.cpp
+  ${TEA_ROOT}/src/platform_fs.cpp
+  ${TEA_ROOT}/src/log.cpp)
+if(WIN32)
+  # The shell runs on a ConPTY (a pseudo console) here ...
+  target_sources(a2_tunnel PRIVATE ${TEA_ROOT}/src/shell_win32.cpp)
+else()
+  # ... and on a pty everywhere else.
+  target_sources(a2_tunnel PRIVATE ${TEA_ROOT}/src/shell_posix.cpp)
+endif()
+if(TEA_TUNNEL_ASSETS_DIR)
+  target_sources(a2_tunnel PRIVATE ${TEA_TUNNEL_ASSETS_DIR}/web_assets.cpp)
+  target_include_directories(a2_tunnel PRIVATE ${TEA_TUNNEL_ASSETS_DIR})
+endif()
+target_include_directories(a2_tunnel PRIVATE
+  ${TEA_3RD}/nlohmann_json
+  ${TEA_3RD}/cpp-httplib)
+# The HTTP server runs its own threads; a small pool is enough (one browser
+# at a time is the normal case).
+target_compile_definitions(a2_tunnel PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=8)
 target_link_libraries(a2_tunnel PRIVATE datachannel-static MbedTLS::MbedTLS Threads::Threads)
 # The sidecar reads the same account book: it has to use one of the accounts
 # the broker accepts.

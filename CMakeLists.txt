@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"1.2.10\"")
+    "  const char* const kVersionString = \"1.2.11\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -248,6 +248,7 @@ set(TEA_ASSET_SPECS
     index.html=web/index.html
     tokens.css=web/tokens.css
     app.css=web/app.css
+    term.js=web/term.js
     app.js=web/app.js
     api.md=docs/api.md)
 set(TEA_ASSET_FILES "")
@@ -339,6 +340,36 @@ add_custom_command(
   COMMAND ${TEA_EMBED_EXE} ${TEA_GEN_DIR} ${TEA_ASSET_ROOT} ${TEA_ASSET_SPECS}
   DEPENDS ${TEA_EMBED_DEP} ${TEA_ASSET_FILES}
   COMMENT "Embedding web assets into web_assets.cpp"
+  VERBATIM
+)
+
+# ---------------------------------------------------------------------------
+# The sidecar's own web assets: the terminal page
+# ---------------------------------------------------------------------------
+# The tunnel can carry a terminal (src/tunnel_term.cpp). Its page is served by
+# the *sidecar*, not by the agent, so it cannot live in the agent's asset
+# table: that table also carries the whole chat UI, and the sidecar has no use
+# for megabytes of it. A second table, in a directory of its own, keeps the
+# sidecar small - and the two binaries never see the same web_assets.h.
+set(TEA_TUNNEL_GEN_DIR ${CMAKE_BINARY_DIR}/generated-tunnel)
+file(MAKE_DIRECTORY ${TEA_TUNNEL_GEN_DIR})
+set(TEA_TUNNEL_ASSET_SPECS
+    tunnel_terminal.html=web/tunnel_terminal.html
+    term.js=web/term.js
+    tunnel_terminal.js=web/tunnel_terminal.js)
+set(TEA_TUNNEL_ASSET_FILES "")
+foreach(_spec ${TEA_TUNNEL_ASSET_SPECS})
+  string(REPLACE "=" ";" _pair ${_spec})
+  list(GET _pair 1 _rel)
+  list(APPEND TEA_TUNNEL_ASSET_FILES ${TEA_ASSET_ROOT}/${_rel})
+endforeach()
+set(TEA_TUNNEL_ASSETS_CPP ${TEA_TUNNEL_GEN_DIR}/web_assets.cpp)
+set(TEA_TUNNEL_ASSETS_H ${TEA_TUNNEL_GEN_DIR}/web_assets.h)
+add_custom_command(
+  OUTPUT ${TEA_TUNNEL_ASSETS_CPP} ${TEA_TUNNEL_ASSETS_H}
+  COMMAND ${TEA_EMBED_EXE} ${TEA_TUNNEL_GEN_DIR} ${TEA_ASSET_ROOT} ${TEA_TUNNEL_ASSET_SPECS}
+  DEPENDS ${TEA_EMBED_DEP} ${TEA_TUNNEL_ASSET_FILES}
+  COMMENT "Embedding the tunnel terminal page into the sidecar"
   VERBATIM
 )
 
@@ -583,11 +614,14 @@ if(TEA_AGENT_BUILD_TUNNEL)
             -S ${CMAKE_CURRENT_SOURCE_DIR}/tunnel
             -B ${TEA_TUNNEL_DIR}
             -DCMAKE_BUILD_TYPE=Release
+            -DTEA_TUNNEL_ASSETS_DIR=${TEA_TUNNEL_GEN_DIR}
             ${TEA_TUNNEL_CMAKE_ARGS}
     COMMAND ${CMAKE_COMMAND} --build ${TEA_TUNNEL_DIR} --config Release
     DEPENDS tunnel/CMakeLists.txt
             ${TEA_TUNNEL_SOURCES}
             ${TEA_TUNNEL_LIBMJUICE_SOURCES}
+            ${TEA_TUNNEL_ASSETS_CPP}
+            ${TEA_TUNNEL_ASSETS_H}
     COMMENT "Building the tunnel binaries (a2_broker, a2_tunnel)"
     VERBATIM)
   # ALL: a plain `cmake --build build` has to produce the tunnel binaries

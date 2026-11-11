@@ -69,6 +69,7 @@ using json = nlohmann::json;
 
 #include "tunnel_net.h"
 #include "tunnel_paths.h"
+#include "tunnel_term.h"
 #include "tunnel_tls.h"
 #include "tunnel_turn_db.h"
 
@@ -572,6 +573,9 @@ int main(int argc, char** argv) {
   std::string listen_host_override;
   uint16_t listen_port_override = 0;
   std::string target = "127.0.0.1:8383";
+  // "--target terminal" is not an address: it means "hand out a real shell on
+  // this machine and let the tunnel carry it".
+  bool target_is_terminal = false;
   // The STUN and the TURN server of the broker. They follow the broker's
   // address unless they are named explicitly: the customer's network is
   // usually a symmetric NAT, so the relay is the normal path - ICE picks
@@ -624,6 +628,9 @@ int main(int argc, char** argv) {
           "  --session <code>  the one string that travels between the two sides\n"
           "                   (the room name and the token are derived from it)\n"
           "  --port <n>        the local port to listen on (the default is 9931)\n"
+          "  --target terminal serve a real shell on this machine and let the tunnel\n"
+          "                   carry it (the agent side only). The browser on the\n"
+          "                   other side opens http://127.0.0.1:<port>/\n"
           "  --turn-db <file>  the account book with the TURN accounts (the same\n"
           "                   file the broker reads). When it has accounts and\n"
           "                   --turn-user/--turn-pass were not given, the first\n"
@@ -672,7 +679,10 @@ int main(int argc, char** argv) {
     else if (a == "--port") {
       // The local port to listen on - the same spelling the a2 itself uses.
       listen_port_override = static_cast<uint16_t>(std::stoi(next()));
-    } else if (a == "--target") target = next();
+    } else if (a == "--target") {
+      target = next();
+      if (target == "terminal") target_is_terminal = true;
+    }
     else if (a == "--stun") {
       std::string hp = next();
       split_hostport(hp, stun_host, stun_port);
@@ -746,6 +756,27 @@ int main(int argc, char** argv) {
     } else if (!db_error.empty()) {
       log_line("sidecar: %s\n", db_error.c_str());
     }
+  }
+
+  // ---- a terminal instead of an address -----------------------------------
+  // "--target terminal" means: this machine hands out a real shell and the
+  // tunnel carries it. The service listens on the loopback only - the
+  // browser reaches it through the tunnel, like everything else. The wire
+  // protocol does not change: the tunnel still forwards plain bytes.
+  tea_tunnel::TerminalService terminal;
+  if (target_is_terminal) {
+    if (!is_agent) {
+      log_line("sidecar: --target terminal only works on the agent side (the one next "
+               "to the machine you want a shell on)\n");
+      return 1;
+    }
+    std::string term_err;
+    if (!terminal.start(&term_err)) {
+      log_line("sidecar: cannot start the terminal: %s\n", term_err.c_str());
+      return 1;
+    }
+    target = "127.0.0.1:" + std::to_string(terminal.port());
+    log_line("sidecar: the terminal is listening on 127.0.0.1:%u\n", terminal.port());
   }
 
   rtc::Configuration cfg;
@@ -829,6 +860,27 @@ int main(int argc, char** argv) {
 
   Signal signal;
 
+  // Where the client side listens. It is filled in when the listener starts,
+  // but it is read earlier (to tell the operator which address to open), so
+  // it lives here.
+  std::string listen_host;
+  uint16_t listen_port = 0;
+
+  // The other end may be a terminal instead of an agent. The agent says so
+  // when the tunnel opens (and again when the client asks), and the client
+  // tells the operator which address to open.
+  std::atomic<bool> peer_is_terminal{false};
+  std::atomic<bool> terminal_announced{false};
+  auto announce_terminal = [&]() {
+    if (!peer_is_terminal.load()) return;
+    if (terminal_announced.exchange(true)) return;
+    std::fprintf(stderr,
+                 "  The far end is a terminal: open http://%s:%u/ in the browser.\n",
+                 listen_host.empty() ? "127.0.0.1" : listen_host.c_str(),
+                 listen_port ? static_cast<unsigned>(listen_port) : 9931u);
+    std::fflush(stderr);
+  };
+
   auto attach_channel = [&](std::shared_ptr<rtc::DataChannel> channel, int gen) {
     if (gen != pc_gen) return;
     dc = channel;
@@ -865,6 +917,14 @@ int main(int argc, char** argv) {
         log_line("sidecar:   (cannot read the selected pair: %s)\n", e.what());
       }
       if (!is_agent) start_listener();
+      // Say what is on the other end: the client side asks (it may have
+      // arrived after the agent announced it), the agent side answers.
+      if (is_agent) {
+        if (target_is_terminal) signal.send_line({{"type", "target"}, {"kind", "terminal"}});
+      } else {
+        signal.send_line({{"type", "ask-target"}});
+      }
+      announce_terminal();
     });
     channel->onClosed([&, gen] {
       if (gen != pc_gen) return;
@@ -1085,6 +1145,22 @@ int main(int argc, char** argv) {
       }
       return;
     }
+    if (type == "ask-target") {
+      // The client wants to know what is on the other end.
+      if (target_is_terminal) {
+        signal.send_line({{"type", "target"}, {"kind", "terminal"}});
+      }
+      return;
+    }
+    if (type == "target") {
+      const std::string kind = j.value("kind", "");
+      if (kind == "terminal") {
+        peer_is_terminal.store(true);
+        log_line("sidecar: the other end is a terminal\n");
+        announce_terminal();
+      }
+      return;
+    }
     if (type == "error") {
       const std::string message = j.value("message", "");
       log_line("sidecar: broker says: %s\n", message.c_str());
@@ -1101,8 +1177,6 @@ int main(int argc, char** argv) {
   });
 
   // ---- the client side listens locally ------------------------------------
-  std::string listen_host;
-  uint16_t listen_port = 0;
   int lfd = -1;
   start_listener = [&]() {
     if (lfd >= 0) return;
@@ -1245,7 +1319,11 @@ int main(int argc, char** argv) {
                  room.c_str());
     std::fprintf(stderr, "  broker        : %s:%u\n", broker_host.c_str(), broker_port);
     std::fprintf(stderr, "  room token    : %s\n", token.c_str());
-    std::fprintf(stderr, "  target        : %s\n", target.c_str());
+    if (target_is_terminal) {
+      std::fprintf(stderr, "  target        : a real shell on this machine\n");
+    } else {
+      std::fprintf(stderr, "  target        : %s\n", target.c_str());
+    }
     std::fprintf(stderr, "  give this to whoever connects from the outside:\n");
     std::fprintf(stderr, "      a2_tunnel --role client --session %s",
                  session.empty() ? token.c_str() : session.c_str());
@@ -1259,7 +1337,12 @@ int main(int argc, char** argv) {
                          "   broker's certificate is self-signed, so its fingerprint has to be\n"
                          "   trusted - put it in <home>/.tea_agent/tunnel/broker.txt as pin=<hex>,\n"
                          "   the broker prints it when it starts)\n");
-    std::fprintf(stderr, "  (it will listen locally and be reachable through the tunnel)\n");
+    if (target_is_terminal) {
+      std::fprintf(stderr, "  (it is a terminal: whoever connects from the outside opens\n"
+                           "   http://127.0.0.1:<their port>/ in a browser)\n");
+    } else {
+      std::fprintf(stderr, "  (it will listen locally and be reachable through the tunnel)\n");
+    }
     if (wait_timeout > 0) {
       std::fprintf(stderr, "  giving up in %d seconds if nobody connects.\n", wait_timeout);
     }

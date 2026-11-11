@@ -1,0 +1,112 @@
+<!doctype html>
+<!-- The terminal that the tunnel carries.
+
+     This page is served by the *sidecar* (a2_tunnel), not by the agent: the
+     sidecar hands out a real shell on the machine it runs on, and the browser
+     reaches it through the very same tunnel the rest of the traffic uses.
+     Nothing about the wire protocol changes - the tunnel still forwards bytes.
+
+     The VT engine is shared with the agent's own terminal (web/term.js), so
+     the two screens behave the same. -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>隧道终端</title>
+<style>
+  :root {
+    --bg: #0b0e12;
+    --fg: #d7dce3;
+    --dim: #8b95a5;
+    --line: #232830;
+    --accent: #7aaaff;
+    --warn: #f7ad31;
+    --panel: #12161c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  .wrap { display: flex; flex-direction: column; height: 100%; padding: 10px; gap: 8px; }
+  .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .title { font-weight: 600; color: var(--accent); white-space: nowrap; }
+  .meta {
+    color: var(--dim); font-size: 11.5px; flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bar { display: flex; align-items: center; gap: 6px; }
+  button {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  button:hover { background: #1d222a; }
+  button:disabled { opacity: .5; cursor: default; }
+  .screen {
+    flex: 1 1 auto; min-height: 0; overflow: auto; position: relative;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; cursor: text;
+    /* The selection is drawn by hand: the browser's own one is gone the
+       moment the screen is rebuilt (which happens on every output). */
+    -webkit-user-select: none; user-select: none;
+  }
+  .rows { min-height: 100%; }
+  .term-row { white-space: pre; min-height: 1.5em; }
+  .term-row span { white-space: pre; }
+  .term-sel { cursor: text; }
+  .cursor {
+    position: absolute; line-height: 1.5em; white-space: pre; pointer-events: none;
+    color: #0b0e12; background: #d7dce3;
+    animation: term-blink 1.06s step-end infinite;
+  }
+  .cursor.hidden { display: none; }
+  @keyframes term-blink { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+  .foot { display: flex; align-items: center; gap: 8px; }
+  .path {
+    flex: 0 1 340px; min-width: 0; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+    font: inherit; font-size: 12px;
+  }
+  .note {
+    color: var(--dim); font-size: 11.5px; flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .note.warn { color: var(--warn); }
+  /* The input is invisible: it only exists to receive the keyboard (and the
+     IME needs a real input to compose into). */
+  .hidden-input {
+    position: absolute; left: 0; bottom: 0; width: 2px; height: 2px; padding: 0;
+    border: 0; opacity: 0; resize: none; overflow: hidden; outline: none;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="title">隧道终端</div>
+    <div class="meta" id="meta">正在连接…</div>
+    <div class="bar">
+      <button id="btn-new" type="button">新会话</button>
+      <button id="btn-copy" type="button">复制</button>
+      <button id="btn-upload" type="button">上传</button>
+      <button id="btn-download" type="button">下载</button>
+      <input type="file" id="file" hidden>
+    </div>
+  </div>
+  <div class="screen" id="screen">
+    <div class="rows" id="rows"></div>
+    <div class="cursor hidden" id="cursor"></div>
+  </div>
+  <div class="foot">
+    <input class="path" id="path" placeholder="文件名（上传/下载用，留空＝当前目录）">
+    <div class="note" id="note"></div>
+  </div>
+  <textarea class="hidden-input" id="input" autocomplete="off" autocorrect="off"
+            autocapitalize="off" spellcheck="false"></textarea>
+</div>
+<script src="./term.js"></script>
+<script src="./tunnel_terminal.js"></script>
+</body>
+</html>
