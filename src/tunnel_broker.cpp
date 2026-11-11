@@ -537,8 +537,8 @@ int main(int argc, char** argv) {
           "  in it. --turn-user/--turn-pass replace the book for this run.\n"
           "\n"
           "  (the room token comes from --token or from %s)\n",
-          tea_tunnel::turn_db_path().c_str(), tea_tunnel::turn_table_name(),
-          token_file_path().c_str());
+          certificate_path().c_str(), tea_tunnel::turn_db_path().c_str(),
+          tea_tunnel::turn_table_name(), token_file_path().c_str());
     std::exit(2);
   };
 
