@@ -157,12 +157,23 @@ error:
 	return NULL;
 }
 
+// tea_a2: defined further down, next to the other TURN requests
+static int agent_send_turn_deallocate(juice_agent_t *agent, const agent_stun_entry_t *entry);
+
 void agent_destroy(juice_agent_t *agent) {
 	JLOG_DEBUG("Destroying agent");
 
 	if (agent->resolver_thread_started) {
 		JLOG_VERBOSE("Waiting for resolver thread");
 		thread_join(agent->resolver_thread, NULL);
+	}
+
+	// tea_a2: release the TURN allocations before the connection goes away,
+	// so the server frees the relay port now and not in ten minutes.
+	for (int i = 0; i < agent->entries_count; ++i) {
+		agent_stun_entry_t *entry = agent->entries + i;
+		if (entry->type == AGENT_STUN_ENTRY_TYPE_RELAY && entry->turn)
+			agent_send_turn_deallocate(agent, entry);
 	}
 
 	if (agent->conn_impl) {
@@ -1970,6 +1981,40 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
 		          (unsigned int)msg->msg_class);
 		return -1;
 	}
+	}
+	return 0;
+}
+
+// tea_a2: tell the TURN server that the allocation is over, so it frees the
+// relay port right away. Without this the port is held until the lease
+// expires (10 minutes), and the relay range is only 100 ports.
+static int agent_send_turn_deallocate(juice_agent_t *agent, const agent_stun_entry_t *entry) {
+	if (entry->type != AGENT_STUN_ENTRY_TYPE_RELAY || !entry->turn)
+		return -1;
+
+	stun_message_t msg;
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_class = STUN_CLASS_REQUEST;
+	msg.msg_method = STUN_METHOD_REFRESH;
+	memcpy(msg.transaction_id, entry->transaction_id, STUN_TRANSACTION_ID_SIZE);
+	msg.lifetime = 0; // zero means "delete the allocation" (RFC 5766 9.3)
+	msg.lifetime_set = true; // without this the attribute is not written at all
+
+	const char *password = NULL;
+	if (*entry->turn->credentials.nonce != '\0') {
+		msg.credentials = entry->turn->credentials;
+		password = entry->turn->password;
+	}
+
+	char buffer[BUFFER_SIZE];
+	int size = stun_write(buffer, BUFFER_SIZE, &msg, password);
+	if (size <= 0) {
+		JLOG_ERROR("STUN message write failed");
+		return -1;
+	}
+	if (agent_direct_send(agent, &entry->record, buffer, size, 0) < 0) {
+		JLOG_WARN("STUN message send failed");
+		return -1;
 	}
 	return 0;
 }

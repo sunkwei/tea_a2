@@ -6,7 +6,7 @@
 > 好让 broker 知道**谁用了 TURN 中继、用了多少字节**。
 > libjuice 原版没有这个接口（它只管转发，不管记账）。
 >
-> 改了三个文件（每一处都有 `tea_a2:` 的标记，用
+> 改了四个文件（每一处都有 `tea_a2:` 的标记，用
 > `grep -rn "tea_a2:" 3rd/libdatachannel/deps/libjuice/` 就能全部找到）：
 >
 > | 文件 | 改了什么 |
@@ -14,6 +14,10 @@
 > | `include/juice/juice.h` | 新增 `juice_turn_usage_t`（事件、账号、客户端地址、中继地址、字节数）和 `juice_cb_turn_usage_t` 回调；`juice_server_config_t` 多了 `cb_turn_usage` 和 `turn_usage_user_ptr` |
 > | `src/server.h` | `server_turn_alloc_t` 多了 `bytes_in` / `bytes_out` / `packets_in` / `packets_out` / `relayed_record` |
 > | `src/server.c` | 数字节（对端→客户端、客户端→对端），分配建立/结束时回调，`server_create()` 里把回调拷进 server 的配置 |
+> | `src/agent.c` | **关掉 agent 时把 TURN 分配还掉**（发一个 lifetime=0 的 Refresh）：原来不还，中继端口要占满 10 分钟才释放，而中继端口池只有 100 个 |
+>
+> ⚠️ **Refresh 要写 LIFETIME 属性就得同时把 `lifetime_set` 置上**——
+> 只写 `lifetime = 0` 的话属性根本没进包，服务端当成了「续期」（这个坑也踩过一次）。
 >
 > ⚠️ **`server_create()` 是逐个字段拷配置的** —— 忘了拷新加的回调，
 > 回调就永远是 NULL（这个坑踩过一次）。
