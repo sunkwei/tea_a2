@@ -91,7 +91,8 @@ a2_broker            # STUN + 信令 + TURN，一个进程
 ```
 
 - 不需要 Python、不需要 Docker、不需要数据库；
-- 配置就一个文件：`~/.tea_agent/broker.yaml`（设备令牌表、端口、日志级别）；
+- **不用配置文件**（2026-11-11 起）：端口等都是命令行参数，
+  证书它自己造、自己留着（`~/.tea_agent/tunnel/broker.crt`）；
 - systemd 单元：`a2_broker.service`，`Restart=always`；
 - 日志：journald 或 `/var/log/a2_broker.log`（轮转）。
 
@@ -144,7 +145,14 @@ curl -s https://<vps-ip>:443/health
 
 ---
 
-## 七、接下来
+## 七、怎么装怎么起（细节）
+
+这一页是**采购/准备清单**。真正照着敲的命令、端口、参数、
+地址换了怎么办，在 **[a2_broker_manual.md](tunnel_broker_manual.md)**（配置手册）里。
+
+---
+
+## 八、接下来
 
 VPS 开好之后，顺序是：
 

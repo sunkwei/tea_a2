@@ -35,6 +35,21 @@ inline int tea_net_set_nodelay(tea_socket_t s) {
                        sizeof(one));
 }
 
+/// Would this error mean "try again later"?
+inline bool tea_net_would_block(int err) {
+  return err == WSAEWOULDBLOCK;
+}
+
+/// Send bytes. Returns the number sent or -1.
+inline int tea_net_send(tea_socket_t s, const void* data, std::size_t len) {
+  return ::send(s, static_cast<const char*>(data), static_cast<int>(len), 0);
+}
+
+/// Receive bytes. Returns the number read, 0 at end of stream, or -1.
+inline int tea_net_recv(tea_socket_t s, void* data, std::size_t len) {
+  return ::recv(s, static_cast<char*>(data), static_cast<int>(len), 0);
+}
+
 #else
 
 #include <arpa/inet.h>
@@ -60,6 +75,21 @@ inline int tea_net_errno() { return errno; }
 inline int tea_net_set_nodelay(tea_socket_t s) {
   int one = 1;
   return ::setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+
+/// Would this error mean "try again later"?
+inline bool tea_net_would_block(int err) {
+  return err == EAGAIN || err == EWOULDBLOCK || err == EINTR;
+}
+
+/// Send bytes. Returns the number sent or -1.
+inline int tea_net_send(tea_socket_t s, const void* data, std::size_t len) {
+  return static_cast<int>(::send(s, data, len, kTeaNoSignal));
+}
+
+/// Receive bytes. Returns the number read, 0 at end of stream, or -1.
+inline int tea_net_recv(tea_socket_t s, void* data, std::size_t len) {
+  return static_cast<int>(::recv(s, data, len, 0));
 }
 
 #endif

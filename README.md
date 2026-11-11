@@ -131,6 +131,8 @@ build/bin/tea_agent --workspace . --open
 | [隧道：外网访问内网](docs/tunnel.md) | 侧载方案、WebRTC 数据通道、STUN/TURN、端口与安全边界 |
 | [隧道现场指引](docs/tunnel_ops.md) | 现场怎么测、怎么用、nat_probe 怎么跑 |
 | [隧道 broker 清单](docs/tunnel_broker.md) | VPS 上要开哪些端口、装什么 |
+| [broker 配置手册](docs/tunnel_broker_manual.md) | broker 怎么装、怎么起、端口怎么开、地址变了怎么办 |
+| [侧载配置手册](docs/tunnel_sidecar_manual.md) | a2_tunnel 两种角色怎么用、参数、排查 |
 | **接口与内部** | |
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |
 | [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照（队列自己也在 `GET /api/doc` 上服务这一页） |

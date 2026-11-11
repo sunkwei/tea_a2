@@ -51,6 +51,10 @@ TIMEOUT = int(os.environ.get("TEA_TUNNEL_TIMEOUT", "300"))
 HELP_LINE = "· /tunnel 开隧道（回一条 session 码，家里那台机器用它连进来）"
 
 _TOKEN_RE = re.compile(r"room token\s*:\s*([0-9a-f]+)")
+# 侧载打印的那条「给外面的人用的命令」：a2_tunnel --role client --session <码>
+# 有时后面还跟着 --tls-pin <指纹>（broker 自签证书的指纹，客户端拿它认 broker）。
+_CLIENT_CMD_RE = re.compile(r"a2_tunnel --role client --session ([0-9a-f]+)"
+                            r"(?: --tls-pin ([0-9a-f]{64}))?")
 _TIME_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\]")
 
 
@@ -132,7 +136,15 @@ def read_session(offset=0):
         return "", None
     code = ""
     stamp = None
+    pin = ""
     for line in reversed(lines):
+        # 那条「给外面的人用的命令」里带着 session 码（和指纹），
+        # 从它这里取最准：它就是应该交给对方的那一行。
+        cmd_match = _CLIENT_CMD_RE.search(line)
+        if cmd_match:
+            code = cmd_match.group(1)
+            pin = cmd_match.group(2) or ""
+            break
         match = _TOKEN_RE.search(line)
         if match:
             code = match.group(1)
@@ -143,7 +155,7 @@ def read_session(offset=0):
                 stamp = time.mktime((today.tm_year, today.tm_mon, today.tm_mday,
                                      hour, minute, second, 0, 0, -1))
             break
-    return code, stamp
+    return code, stamp, pin
 
 
 def start_sidecar():
@@ -152,7 +164,7 @@ def start_sidecar():
     Returns (session_code, error_message).
     """
     if unit_active():
-        code, _ = read_session()
+        code, _, _ = read_session()
         if code:
             return code, ""
     # 从这里开始写的日志才是这一次的（旧的那几行不算）。
@@ -174,7 +186,7 @@ def start_sidecar():
             return "", "起不来：%s" % exc
     deadline = time.time() + WAIT_SECONDS
     while time.time() < deadline:
-        code, _ = read_session(offset)
+        code, _, _ = read_session(offset)
         if code:
             return code, ""
         time.sleep(POLL)
@@ -186,14 +198,19 @@ def stop_sidecar():
     return "隧道已停。"
 
 
-def reply_for(code):
+def reply_for(code, pin=""):
     """The answer that goes back through the chat channel."""
+    # 有指纹就带上：客户端靠它认出 broker（broker 是自签证书，
+    # 光看名字认不出来，broker 换地址也不影响）。
+    client_cmd = "a2_tunnel --role client --session %s" % code
+    if pin:
+        client_cmd += " --tls-pin %s" % pin
     lines = ["隧道已启动。家里那台机器上跑这条：", "",
-             "    a2_tunnel --role client --session %s" % code, "",
+             "    %s" % client_cmd, "",
              "连上以后本机多一个端口 %d，浏览器打开 http://127.0.0.1:%d/ 就是这台设备的 a2。"
              % (CLIENT_PORT, CLIENT_PORT),
              "（隧道里跑的是原始 TCP，端口后面就是它原本的 8383。）"]
-    _, stamp = read_session()
+    _, stamp, _ = read_session()
     if stamp:
         left = int(TIMEOUT - (time.time() - stamp))
         if left > 0:
@@ -218,7 +235,8 @@ def maybe_handle(text, user_id=""):
     code, error = start_sidecar()
     if error:
         return "隧道没起来：%s" % error
-    return reply_for(code)
+    _, _, pin = read_session()
+    return reply_for(code, pin)
 
 
 def main(argv=None):
@@ -231,7 +249,8 @@ def main(argv=None):
         if error:
             sys.stderr.write(error + "\n")
             return 1
-        sys.stdout.write(reply_for(code) + "\n")
+        _, _, pin = read_session()
+        sys.stdout.write(reply_for(code, pin) + "\n")
         return 0
     if argv[0] in ("stop", "关"):
         sys.stdout.write(stop_sidecar() + "\n")

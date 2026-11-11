@@ -13,8 +13,19 @@
 // Nothing about the session's content passes through here: the data channel
 // is end-to-end DTLS.
 //
-//   a2_broker --stun-port 3478 --signal-port 3479 \
+//   a2_broker --stun-port 3478 --signal-port 8382 \
 //              --realm a2 --turn-user a2 --turn-pass <secret> --token <secret>
+//
+// ## One file, no web server in front
+//
+// The signalling carries the room token, so the public port must be TLS.
+// It used to be nginx that terminated the TLS and passed a plain stream to
+// this process - that meant two configurations to keep in step (nginx's and
+// this one's) and a certificate to install by hand. Now the TLS is **here**:
+// the broker makes its own certificate on the first start and keeps it, and
+// prints its fingerprint. The client can then pin that fingerprint (see
+// a2_tunnel --tls-pin), which does not depend on the address the broker is
+// reached at - handy when the address changes.
 //
 // The signalling protocol (one JSON object per line, both ways):
 //
@@ -24,6 +35,14 @@
 //
 #include <juice/juice.h>
 #include <nlohmann/json.hpp>
+
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/error.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
 
 #include <atomic>
 #include <cstdio>
@@ -38,6 +57,10 @@
 
 using json = nlohmann::json;
 
+#include "tunnel_net.h"
+#include "tunnel_paths.h"
+#include "tunnel_tls.h"
+
 // ---- the built-in TURN credentials -----------------------------------------
 // The TURN relay is the broker's bandwidth, not a secret worth hiding: the
 // credentials only decide who may push traffic through it. They are built in
@@ -51,23 +74,7 @@ constexpr const char* kDefaultTurnPass = "2ghlmcl,";
 /// The room token is a real secret: it is the key to the room, so it is NOT
 /// built in like the TURN credentials.
 std::string token_file_path() {
-  const char* env = std::getenv("TEA_AGENT_HOME");
-  std::string home;
-  if (env && *env) {
-    home = env;
-  } else {
-#ifdef _WIN32
-    const char* up = std::getenv("USERPROFILE");
-    home = (up && *up) ? up : ".";
-#else
-    const char* h = std::getenv("HOME");
-    home = (h && *h) ? h : ".";
-#endif
-  }
-  std::string path = home;
-  if (!path.empty() && path.back() != '/' && path.back() != '\\') path += '/';
-  path += ".tea_agent/tunnel/token";
-  return path;
+  return tea_tunnel::tunnel_dir() + "/token";
 }
 
 /// Read the room token from the conventional file (first line, trimmed).
@@ -87,17 +94,34 @@ bool read_token_file(std::string* out) {
   return true;
 }
 
-
-#include "tunnel_net.h"
-
 namespace {
 
 // ---- one connected signalling client ---------------------------------------
-struct Peer {
+//
+// A connection is a socket, and sometimes a TLS session on top of it. The
+// two live together in one object: mbedTLS' socket helpers want a pointer to
+// the socket, so the socket has to outlive the TLS session, and the TLS
+// session has to outlive the handshake.
+struct Connection {
   tea_socket_t fd = kTeaInvalidSocket;
+  mbedtls_ssl_context ssl{};
+  bool tls = false;
+
+  ~Connection() {
+    if (tls) {
+      mbedtls_ssl_free(&ssl);
+      tea_net_close(fd);
+    } else if (fd != kTeaInvalidSocket) {
+      tea_net_close(fd);
+    }
+  }
+};
+
+struct Peer {
+  std::shared_ptr<Connection> conn;
   std::string role;
   std::string room;
-  std::mutex out;        // serialises writes to fd
+  std::mutex out;        // serialises writes to the socket
   std::atomic<bool> alive{true};
 };
 
@@ -115,7 +139,13 @@ void send_line(const std::shared_ptr<Peer>& p, const json& j) {
   if (!p || !p->alive) return;
   std::string line = j.dump() + "\n";
   std::lock_guard<std::mutex> lock(p->out);
-  const int n = ::send(p->fd, line.data(), static_cast<int>(line.size()), kTeaNoSignal);
+  int n = 0;
+  if (p->conn->tls) {
+    n = mbedtls_ssl_write(&p->conn->ssl, reinterpret_cast<const unsigned char*>(line.data()),
+                           line.size());
+  } else {
+    n = tea_net_send(p->conn->fd, line.data(), line.size());
+  }
   if (n != static_cast<int>(line.size())) p->alive = false;
 }
 
@@ -210,7 +240,12 @@ void peer_loop(std::shared_ptr<Peer> p) {
   std::string buf;
   char chunk[4096];
   while (p->alive) {
-    ssize_t n = ::recv(p->fd, chunk, sizeof(chunk), 0);
+    ssize_t n = 0;
+    if (p->conn->tls) {
+      n = mbedtls_ssl_read(&p->conn->ssl, reinterpret_cast<unsigned char*>(chunk), sizeof(chunk));
+    } else {
+      n = tea_net_recv(p->conn->fd, chunk, sizeof(chunk));
+    }
     if (n <= 0) break;
     buf.append(chunk, static_cast<size_t>(n));
     size_t pos;
@@ -226,7 +261,7 @@ void peer_loop(std::shared_ptr<Peer> p) {
     }
   }
   drop_peer(p);
-  tea_net_close(p->fd);
+  p->conn.reset();
 }
 
 // ---- the TURN/STUN server (libjuice) ---------------------------------------
@@ -260,6 +295,53 @@ bool start_stun_turn(uint16_t port, const std::string& realm, const std::string&
   return true;
 }
 
+// ---- the TLS material ------------------------------------------------------
+// The broker makes its own certificate and keeps it, so the fingerprint the
+// clients pin survives a restart. It lives next to the room token.
+struct TlsMaterial {
+  std::string cert_pem;
+  std::string key_pem;
+  std::string fingerprint;   // sha256 of the certificate, lower case hex
+  std::string cert_path;
+};
+
+std::string certificate_path() { return tea_tunnel::tunnel_dir() + "/broker.crt"; }
+std::string key_path() { return tea_tunnel::tunnel_dir() + "/broker.key"; }
+
+/// Load the certificate from disk, or make a new one and save it.
+///
+/// The names in the certificate are the ones the operator gave us (--cert-name).
+/// They are a convenience: a client that checks a *name* has something to
+/// check. A client that pins the fingerprint does not care about them at all,
+/// which is the point - the address of the broker may change.
+bool load_or_make_certificate(const std::vector<std::string>& names, TlsMaterial* out) {
+  out->cert_path = certificate_path();
+  std::string cert_pem;
+  std::string key_pem;
+  if (tea_tunnel::read_whole_file(out->cert_path, &cert_pem) && !cert_pem.empty()) {
+    std::string on_disk;
+    if (tea_tunnel::read_whole_file(key_path(), &on_disk) && !on_disk.empty()) {
+      out->cert_pem = cert_pem;
+      out->key_pem = on_disk;
+      return true;
+    }
+  }
+
+  const std::string common_name = names.empty() ? std::string("a2-broker") : names.front();
+  std::string err;
+  if (!tea_tunnel::make_self_signed(common_name, names, &out->cert_pem, &out->key_pem, &err)) {
+    std::fprintf(stderr, "broker: cannot make a certificate: %s\n", err.c_str());
+    return false;
+  }
+  tea_tunnel::ensure_directory(tea_tunnel::tunnel_dir());
+  if (!tea_tunnel::write_private_file(out->cert_path, out->cert_pem) ||
+      !tea_tunnel::write_private_file(key_path(), out->key_pem)) {
+    std::fprintf(stderr, "broker: cannot save the certificate to %s\n", out->cert_path.c_str());
+    return false;
+  }
+  return true;
+}
+
 // ---- the signalling server -------------------------------------------------
 int listen_tcp(uint16_t port, const std::string& bind_addr) {
   tea_net_init();
@@ -288,28 +370,141 @@ int listen_tcp(uint16_t port, const std::string& bind_addr) {
   return fd;
 }
 
+/// The TLS side of the signalling server: one configuration, many sessions.
+///
+/// The sessions are made on the accepted socket, one at a time, in the thread
+/// that serves the peer - the handshake is quick and doing it there keeps the
+/// accept loop free.
+class TlsServer {
+ public:
+  bool start(const TlsMaterial& material, std::string* err) {
+    mbedtls_ssl_config_init(&conf_);
+    mbedtls_x509_crt_init(&cert_);
+    mbedtls_pk_init(&key_);
+    mbedtls_entropy_init(&entropy_);
+    mbedtls_ctr_drbg_init(&drbg_);
+
+    const int seeded = mbedtls_ctr_drbg_seed(&drbg_, mbedtls_entropy_func, &entropy_,
+                                            reinterpret_cast<const unsigned char*>("a2-broker"),
+                                            std::strlen("a2-broker"));
+    if (seeded != 0) {
+      *err = "cannot seed the random generator";
+      return false;
+    }
+    int rc = mbedtls_ssl_config_defaults(&conf_, MBEDTLS_SSL_IS_SERVER,
+                                         MBEDTLS_SSL_TRANSPORT_STREAM,
+                                         MBEDTLS_SSL_PRESET_DEFAULT);
+    if (rc != 0) {
+      *err = "cannot set up the TLS configuration: " + tea_tunnel::tls_error_text(rc);
+      return false;
+    }
+    mbedtls_ssl_conf_rng(&conf_, mbedtls_ctr_drbg_random, &drbg_);
+    // The clients do not present a certificate: the room token is what says
+    // who may join, and it never leaves the TLS session.
+    mbedtls_ssl_conf_authmode(&conf_, MBEDTLS_SSL_VERIFY_NONE);
+
+    rc = mbedtls_x509_crt_parse(&cert_, reinterpret_cast<const unsigned char*>(material.cert_pem.data()),
+                                material.cert_pem.size() + 1);
+    if (rc != 0) {
+      *err = "cannot read the certificate: " + tea_tunnel::tls_error_text(rc);
+      return false;
+    }
+    rc = mbedtls_pk_parse_key(&key_, reinterpret_cast<const unsigned char*>(material.key_pem.data()),
+                              material.key_pem.size() + 1, nullptr, 0, mbedtls_ctr_drbg_random,
+                              &drbg_);
+    if (rc != 0) {
+      *err = "cannot read the private key: " + tea_tunnel::tls_error_text(rc);
+      return false;
+    }
+    rc = mbedtls_ssl_conf_own_cert(&conf_, &cert_, &key_);
+    if (rc != 0) {
+      *err = "cannot use the certificate: " + tea_tunnel::tls_error_text(rc);
+      return false;
+    }
+    return true;
+  }
+
+  /// Wrap an accepted socket in TLS. Returns null when the handshake failed.
+  ///
+  /// The socket lives in the Connection object, and the BIO helpers are given
+  /// its address: mbedTLS keeps that pointer for as long as the session
+  /// lives, so it must not be a local variable.
+  bool wrap(const std::shared_ptr<Connection>& conn, std::string* err) {
+    mbedtls_ssl_init(&conn->ssl);
+    int rc = mbedtls_ssl_setup(&conn->ssl, &conf_);
+    if (rc != 0) {
+      *err = "cannot set up the TLS session: " + tea_tunnel::tls_error_text(rc);
+      return false;
+    }
+    mbedtls_ssl_set_bio(&conn->ssl, &conn->fd, &TlsServer::bio_send, &TlsServer::bio_recv,
+                        nullptr);
+    rc = mbedtls_ssl_handshake(&conn->ssl);
+    if (rc != 0) {
+      *err = "the TLS handshake failed: " + tea_tunnel::tls_error_text(rc);
+      return false;
+    }
+    conn->tls = true;
+    return true;
+  }
+
+ private:
+  // mbedTLS' own socket helpers work on POSIX file descriptors; on Windows a
+  // socket is not one, so the two calls are done here instead.
+  static int bio_send(void* ctx, const unsigned char* buf, size_t len) {
+    tea_socket_t fd = *static_cast<tea_socket_t*>(ctx);
+    const int n = tea_net_send(fd, buf, len);
+    if (n >= 0) return n;
+    if (tea_net_would_block(tea_net_errno())) return MBEDTLS_ERR_SSL_WANT_WRITE;
+    return MBEDTLS_ERR_NET_SEND_FAILED;
+  }
+
+  static int bio_recv(void* ctx, unsigned char* buf, size_t len) {
+    tea_socket_t fd = *static_cast<tea_socket_t*>(ctx);
+    const int n = tea_net_recv(fd, buf, len);
+    if (n >= 0) return n;
+    if (tea_net_would_block(tea_net_errno())) return MBEDTLS_ERR_SSL_WANT_READ;
+    return MBEDTLS_ERR_NET_RECV_FAILED;
+  }
+
+  mbedtls_ssl_config conf_{};
+  mbedtls_x509_crt cert_{};
+  mbedtls_pk_context key_{};
+  mbedtls_entropy_context entropy_{};
+  mbedtls_ctr_drbg_context drbg_{};
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
   uint16_t stun_port = 3478;
-  uint16_t signal_port = 3479;   // internal; nginx fronts it on the public port
-  std::string signal_bind = "127.0.0.1";
+  uint16_t signal_port = 8382;
+  std::string signal_bind = "0.0.0.0";
   uint16_t relay_begin = 49160;
   uint16_t relay_end = 49260;
   std::string realm = "a2";
   std::string turn_user = kDefaultTurnUser;
   std::string turn_pass = kDefaultTurnPass;
   std::string token;
+  // The names in the broker's own certificate. A client that checks a name
+  // needs one; a client that pins the fingerprint does not care.
+  std::vector<std::string> cert_names;
+  bool use_tls = true;
 
   auto usage = [&](const char* why) {
     if (why) std::fprintf(stderr, "broker: %s\n", why);
     std::fprintf(stderr,
-          "a2_broker --stun-port 3478 --signal-port 8382 --signal-bind 127.0.0.1 \\\n"
-          "          --realm a2 [--relay-begin 49160] [--relay-end 49260]\n"
-          "          [--token <secret>]\n"
+          "a2_broker [--stun-port 3478] [--signal-port 8382] [--signal-bind 0.0.0.0]\n"
+          "          [--realm a2] [--relay-begin 49160] [--relay-end 49260]\n"
+          "          [--token <secret>] [--turn-user <user>] [--turn-pass <pass>]\n"
+          "          [--cert-name <name>]... [--no-tls]\n"
+          "\n"
+          "  One process, one file: STUN + TURN + the signalling (with TLS).\n"
+          "  The signalling port speaks TLS by default; the certificate is made\n"
+          "  on the first start and kept in %s.\n"
           "\n"
           "  (the TURN credentials are built in; the room token comes from\n"
-          "   --token or from ~/.tea_agent/tunnel/token)\n");
+          "   --token or from %s)\n",
+          tea_tunnel::tunnel_dir().c_str(), token_file_path().c_str());
     std::exit(2);
   };
 
@@ -329,6 +524,9 @@ int main(int argc, char** argv) {
     else if (a == "--turn-user") turn_user = next();
     else if (a == "--turn-pass") turn_pass = next();
     else if (a == "--token") token = next();
+    else if (a == "--cert-name") cert_names.push_back(next());
+    else if (a == "--no-tls") use_tls = false;
+    else if (a == "--tls") use_tls = true;
     else if (a == "--help" || a == "-h") usage(nullptr);
     else usage(("unknown option '" + a + "'").c_str());
   }
@@ -348,12 +546,38 @@ int main(int argc, char** argv) {
 
   if (!start_stun_turn(stun_port, realm, turn_user, turn_pass, relay_begin, relay_end)) return 1;
 
+  TlsMaterial material;
+  std::shared_ptr<TlsServer> tls_server;
+  if (use_tls) {
+    if (!load_or_make_certificate(cert_names, &material)) return 1;
+    std::string err;
+    if (!tea_tunnel::certificate_fingerprint(material.cert_pem, &material.fingerprint, &err)) {
+      std::fprintf(stderr, "broker: %s\n", err.c_str());
+      return 1;
+    }
+    tls_server = std::make_shared<TlsServer>();
+    if (!tls_server->start(material, &err)) {
+      std::fprintf(stderr, "broker: %s\n", err.c_str());
+      return 1;
+    }
+  }
+
   int lfd = listen_tcp(signal_port, signal_bind);
   if (lfd < 0) {
     std::fprintf(stderr, "broker: cannot listen on tcp/%u\n", signal_port);
     return 1;
   }
-  std::printf("broker: signalling on tcp/%u (bound to %s)\n", signal_port, signal_bind.c_str());
+  if (use_tls) {
+    std::printf("broker: signalling on tcp/%u (TLS, bound to %s)\n", signal_port,
+                signal_bind.c_str());
+    std::printf("broker: certificate fingerprint (sha256): %s\n", material.fingerprint.c_str());
+    std::printf("broker: the client can pin it with --tls-pin %s\n",
+                material.fingerprint.c_str());
+    std::printf("broker: the certificate itself is in %s\n", material.cert_path.c_str());
+  } else {
+    std::printf("broker: signalling on tcp/%u (plain, bound to %s)\n", signal_port,
+                signal_bind.c_str());
+  }
   std::fflush(stdout);
 
   while (true) {
@@ -361,7 +585,15 @@ int main(int argc, char** argv) {
     if (fd == kTeaInvalidSocket) continue;
     tea_net_set_nodelay(fd);
     auto p = std::make_shared<Peer>();
-    p->fd = fd;
+    p->conn = std::make_shared<Connection>();
+    p->conn->fd = fd;
+    if (tls_server) {
+      std::string err;
+      if (!tls_server->wrap(p->conn, &err)) {
+        std::fprintf(stderr, "broker: %s\n", err.c_str());
+        continue;
+      }
+    }
     std::thread(peer_loop, p).detach();
   }
 }

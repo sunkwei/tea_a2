@@ -263,14 +263,16 @@ linux_x86_64/tea_a2            主程序（x86_64）
 linux_x86_64/a2_tunnel         隧道侧载（x86_64）
 win_x86_64/tea_a2.exe          主程序（Windows）
 win_x86_64/a2_tunnel.exe       隧道侧载（Windows）
-a2_broker-linux-x86_64-<版本>  broker（只跑在公网那台机器上，所以不进平台目录）
+linux_x86_64/a2_broker         broker（公网上那台，一个进程 STUN+信令+TURN）
+linux_aarch64/a2_broker        broker（aarch64 版）
+win_x86_64/a2_broker.exe       broker（Windows 版）
 docs/                          使用手册、运维手册、隧道说明
-                               （含运维同事那份《如何使用a2隧道》docx，带图）
+                               （含运维同事那份《如何使用a2隧道》docx，带图，
+                                 以及 broker / 侧载两份配置手册）
 sched/                         整个目录（Python 侧的全部模块 + 模板 + README）
 scripts/                       整个目录（systemd 单元模板、安装脚本、构建脚本）
 provider.yaml.sample           模型配置模板
 如何配置模型.txt                模型配置的大白话说明
-nginx-stream-tunnel.conf       broker 那侧的 nginx 模板
 tea_agent.buildinfo            这个二进制是从哪个 commit 编出来的
 ```
 

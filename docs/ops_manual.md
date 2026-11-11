@@ -201,15 +201,17 @@ a2_tunnel --role client --session 488c9f7af34d9d2f40c92721e4b52536
 ```
 外网那台运维机                       公网 broker (VPS)              设备所在网络
 ┌──────────────────┐                ┌────────────────────┐        ┌──────────────────┐
-│ a2               │  8382/TLS ───▶│ nginx(stream,TLS)  │        │ a2  127.0.0.1:8383│
-│   ↳ 侧载 client  │◀─ 3478/UDP ──▶│ broker: STUN+TURN   │◀──────▶│  ↳ 侧载 agent    │
-│   ↳ 127.0.0.1:9931│  （中继）      │  127.0.0.1:3479 信令│        │                  │
+│ a2               │  8382/TLS ───▶│ broker: STUN+TURN   │        │ a2  127.0.0.1:8383│
+│   ↳ 侧载 client  │◀─ 3478/UDP ──▶│  8382/TCP 信令(TLS) │◀──────▶│  ↳ 侧载 agent    │
+│   ↳ 127.0.0.1:9931│  （中继）      │                    │        │                  │
 └──────────────────┘                └────────────────────┘        └──────────────────┘
 ```
 
-- **8382/TCP**：信令，走 TLS。**令牌走这条路，所以必须是 TLS**（nginx 终结）。
+- **8382/TCP**：信令，走 TLS。**令牌走这条路，所以必须是 TLS**（broker 自己终结）。
 - **3478/UDP**：STUN + TURN 中继。客户侧是对称 NAT，**中继是常态路径**，直连只是优化。
 - **9931**：外网那台机器上的本地端口（隧道入口）。**只绑 127.0.0.1**。
+- **broker 换了地址**：改 `~/.tea_agent/tunnel/broker.txt` 里的 `address=` 一处就行，
+  STUN/TURN 的地址会跟着走。证书指纹（`pin=`）不用改 —— 证书没换。
 
 ---
 
@@ -259,7 +261,12 @@ broker 目前支持 STUN/TURN，使用 ICE 协商，以实现 a2_tunnel 功能�
 | `~/.tea_agent/tunnel/a2_broker` | broker 二进制 |
 | `~/.config/systemd/user/a2_broker.service` | systemd 单元（`systemctl --user restart a2_broker`） |
 | `~/.tea_agent/logs/a2_broker.log` | 日志 |
-| `/etc/nginx/stream-a2.conf` | nginx 的 TLS 终结配置（公网 8382 → 本机 3479） |
+| `~/.tea_agent/tunnel/broker.crt` | broker 自己的证书（**broker 自己终结 TLS**，不用 nginx） |
+| `~/.tea_agent/tunnel/broker.key` | 它的私钥 |
+
+broker 侧怎么装怎么起、端口怎么开、地址变了怎么办：见
+[`tunnel_broker_manual.md`](tunnel_broker_manual.md)。
+侧载的参数和排查：见 [`tunnel_sidecar_manual.md`](tunnel_sidecar_manual.md)。
 
 ### 版本对照
 
@@ -271,5 +278,6 @@ broker 目前支持 STUN/TURN，使用 ICE 协商，以实现 a2_tunnel 功能�
 | 1.1.3 | README 加隧道索引 |
 | **1.2.0** | **mbedTLS 统一到 3.5.2**（2.28 的支持期到 2026-11）；隧道侧载自动重协商；**微信里发 `/tunnel` 就开隧道并回传 session 码** |
 | **1.2.1** | `--target` 支持域名；目标连不上就立刻断开；client 侧加 `--host`（多台机器的浏览器可以共用一个隧道） |
+| **1.2.4** | **broker 自己终结 TLS（不用 nginx 了）**；证书指纹校验（`--tls-pin`）；broker 地址写在 `broker.txt` 里，改一处就够 |
 
 更多设计细节见 [`tunnel.md`](tunnel.md)；a2 本身的命令清单见 [`tea_a2_manual.md`](tea_a2_manual.md)。

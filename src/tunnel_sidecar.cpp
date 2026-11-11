@@ -66,6 +66,8 @@
 using json = nlohmann::json;
 
 #include "tunnel_net.h"
+#include "tunnel_paths.h"
+#include "tunnel_tls.h"
 
 namespace {
 
@@ -82,45 +84,73 @@ constexpr const char* kDefaultTurnPass = "2ghlmcl,";
 /// The room token is a real secret: it is the key to the room, so it is NOT
 /// built in like the TURN credentials.
 std::string token_file_path() {
-  const char* env = std::getenv("TEA_AGENT_HOME");
-  std::string home;
-  if (env && *env) {
-    home = env;
-  } else {
-#ifdef _WIN32
-    const char* up = std::getenv("USERPROFILE");
-    home = (up && *up) ? up : ".";
-#else
-    const char* h = std::getenv("HOME");
-    home = (h && *h) ? h : ".";
-#endif
-  }
-  std::string path = home;
-  if (!path.empty() && path.back() != '/' && path.back() != '\\') path += '/';
-  path += ".tea_agent/tunnel/token";
-  return path;
+  return tea_tunnel::tunnel_dir() + "/token";
 }
 
 /// The conventional CA bundle: the same file the a2 trusts (it holds the
 /// public roots plus the self-signed certificate of the broker).
 std::string default_ca_bundle() {
-  const char* env = std::getenv("TEA_AGENT_HOME");
-  std::string home;
-  if (env && *env) {
-    home = env;
-  } else {
-#ifdef _WIN32
-    const char* up = std::getenv("USERPROFILE");
-    home = (up && *up) ? up : ".";
-#else
-    const char* h = std::getenv("HOME");
-    home = (h && *h) ? h : ".";
-#endif
-  }
-  std::string path = home;
+  std::string path = tea_tunnel::agent_home();
   if (!path.empty() && path.back() != '/' && path.back() != '\\') path += '/';
   path += ".tea_agent/ca-bundle/cacert.pem";
   return path;
+}
+
+/// The file that says where the broker is.
+///
+/// The address of the broker can change (a machine is replaced, an IP moves).
+/// Everything that has to follow it - the signalling address, the STUN and
+/// TURN addresses, the certificate fingerprint - is in this one file, so
+/// changing it is one edit and not three command lines.
+///
+///   address=203.0.113.5:8382
+///   pin=3f9a...            (the fingerprint the broker printed)
+///
+std::string broker_config_path() {
+  return tea_tunnel::tunnel_dir() + "/broker.txt";
+}
+
+struct BrokerConfig {
+  std::string address;
+  std::string pin;
+};
+
+/// Read the broker configuration file. A missing file is not an error: the
+/// defaults (and the command line) still apply.
+BrokerConfig read_broker_config() {
+  BrokerConfig config;
+  std::string text;
+  if (!tea_tunnel::read_whole_file(broker_config_path(), &text)) return config;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t eol = text.find('\n', pos);
+    if (eol == std::string::npos) eol = text.size();
+    std::string line = text.substr(pos, eol - pos);
+    pos = eol + 1;
+    size_t hash = line.find('#');
+    if (hash != std::string::npos) line = line.substr(0, hash);
+    while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) {
+      line.pop_back();
+    }
+    size_t start = 0;
+    while (start < line.size() && (line[start] == ' ' || line[start] == '\t')) ++start;
+    line = line.substr(start);
+    if (line.empty()) continue;
+    size_t eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    std::string key = line.substr(0, eq);
+    std::string value = line.substr(eq + 1);
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(0, 1);
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r')) {
+      value.pop_back();
+    }
+    if (key == "address") {
+      config.address = value;
+    } else if (key == "pin") {
+      config.pin = value;
+    }
+  }
+  return config;
 }
 
 /// The session code is the one string that has to travel from the machine
@@ -239,9 +269,7 @@ class Link {
       mbedtls_ctr_drbg_free(&drbg_);
       mbedtls_entropy_free(&entropy_);
     }
-    if (use_net_) {
-      mbedtls_net_free(&net_);
-    } else if (fd_ != kTeaInvalidSocket) {
+    if (fd_ != kTeaInvalidSocket) {
       tea_net_close(fd_);
     }
   }
@@ -250,12 +278,21 @@ class Link {
   void set_plain(tea_socket_t fd) { fd_ = fd; }
 
   /// TLS: mbedTLS does the connecting (it owns the socket afterwards).
-  bool connect_tls(const std::string& host, uint16_t port, const std::string& ca_file,
-                    std::string* err) {
+  ///
+  /// `pin` is the SHA-256 fingerprint of the broker's certificate. When it is
+  /// given the certificate is checked against it instead of against a name:
+  /// the fingerprint says "this is the broker I was told about", and it does
+  /// not stop being true when the broker moves to another address.
+  bool connect_tls(tea_socket_t fd, const std::string& host, const std::string& ca_file,
+                    const std::string& pin, std::string* err) {
     mbedtls_ssl_init(&ssl_);
     mbedtls_ssl_config_init(&conf_);
     mbedtls_x509_crt_init(&ca_);
-    if (!ca_file.empty()) {
+    // The CA bundle is only loaded when there is no fingerprint to check
+    // against: a fingerprint names one exact certificate, a CA bundle only
+    // says "signed by somebody in this file".
+    const bool want_ca = !ca_file.empty() && tea_tunnel::normalize_fingerprint(pin).empty();
+    if (want_ca) {
       if (mbedtls_x509_crt_parse_file(&ca_, ca_file.c_str()) != 0) {
         *err = "cannot read the CA bundle '" + ca_file + "'";
         return false;
@@ -273,21 +310,18 @@ class Link {
     // mbedTLS 3.x: the verification callback comes second, and "required" is
     // a separate call (mbedtls_ssl_conf_authmode).
     mbedtls_ssl_conf_verify(&conf_, nullptr, nullptr);
-    mbedtls_ssl_conf_authmode(&conf_, ca_file.empty() ? MBEDTLS_SSL_VERIFY_NONE
-                                                       : MBEDTLS_SSL_VERIFY_REQUIRED);
+    // With a fingerprint the certificate is checked by the pin below, not by
+    // the chain: the broker's certificate is self-signed, so there is no
+    // chain to walk. The name check is skipped as well - the address may
+    // have changed, and the fingerprint is what identifies the broker.
+    const bool pinned = !tea_tunnel::normalize_fingerprint(pin).empty();
+    mbedtls_ssl_conf_authmode(&conf_, want_ca ? MBEDTLS_SSL_VERIFY_REQUIRED
+                                              : MBEDTLS_SSL_VERIFY_NONE);
 
-    mbedtls_net_init(&net_);
-    char port_str[16];
-    std::snprintf(port_str, sizeof(port_str), "%u", static_cast<unsigned>(port));
-    const int rc = mbedtls_net_connect(&net_, host.c_str(), port_str, IPPROTO_TCP);
-    if (rc < 0) {
-      char buf[160];
-      mbedtls_strerror(rc, buf, sizeof(buf));
-      *err = "cannot connect to " + host + ":" + port_str + ": " + buf;
-      mbedtls_net_free(&net_);
-      return false;
-    }
-    use_net_ = true;
+    // The socket is ours, not mbedTLS': a Windows socket handle does not fit
+    // in the int that mbedTLS' own socket helpers use, so the connection is
+    // made here and mbedTLS is handed the socket that is already open.
+    fd_ = fd;
     // set_hostname is both the SNI and the name the certificate is checked
     // against. mbedTLS compares an IP literal against the certificate's
     // iPAddress SANs, so the same call works for "broker.example" and
@@ -301,7 +335,7 @@ class Link {
       return false;
     }
     mbedtls_ssl_set_hostname(&ssl_, host.c_str());
-    mbedtls_ssl_set_bio(&ssl_, &net_, mbedtls_net_send, mbedtls_net_recv, mbedtls_net_recv_timeout);
+    mbedtls_ssl_set_bio(&ssl_, &fd_, &Link::bio_send, &Link::bio_recv, nullptr);
 
     const int hs = mbedtls_ssl_handshake(&ssl_);
     if (hs != 0) {
@@ -311,12 +345,28 @@ class Link {
       return false;
     }
     tls_ = true;
+
+    if (pinned) {
+      // The fingerprint of the certificate the broker just presented. This
+      // is the check that says "this is the broker I was told about".
+      const mbedtls_x509_crt* peer = mbedtls_ssl_get_peer_cert(&ssl_);
+      if (peer == nullptr) {
+        *err = "the broker did not present a certificate";
+        return false;
+      }
+      if (!tea_tunnel::fingerprint_matches(peer->raw.p, peer->raw.len, pin)) {
+        char buf[160];
+        mbedtls_strerror(MBEDTLS_ERR_X509_CERT_VERIFY_FAILED, buf, sizeof(buf));
+        *err = "the broker's certificate is not the one that was pinned (--tls-pin)";
+        return false;
+      }
+    }
     return true;
   }
 
   ssize_t read(char* buf, size_t len) {
     if (tls_) return mbedtls_ssl_read(&ssl_, reinterpret_cast<unsigned char*>(buf), len);
-    return ::recv(fd_, buf, static_cast<int>(len), 0);
+    return tea_net_recv(fd_, buf, len);
   }
 
   ssize_t write(const char* buf, size_t len) {
@@ -324,14 +374,33 @@ class Link {
       const int rc = mbedtls_ssl_write(&ssl_, reinterpret_cast<const unsigned char*>(buf), len);
       return rc < 0 ? -1 : rc;
     }
-    return ::send(fd_, buf, static_cast<int>(len), kTeaNoSignal);
+    return tea_net_send(fd_, buf, len);
   }
+
+ private:
+  // The socket calls mbedTLS makes, done with our own socket type so that a
+  // Windows socket handle is not squeezed into an int.
+  static int bio_send(void* ctx, const unsigned char* buf, size_t len) {
+    tea_socket_t fd = *static_cast<tea_socket_t*>(ctx);
+    const int n = tea_net_send(fd, buf, len);
+    if (n >= 0) return n;
+    if (tea_net_would_block(tea_net_errno())) return MBEDTLS_ERR_SSL_WANT_WRITE;
+    return MBEDTLS_ERR_NET_SEND_FAILED;
+  }
+
+  static int bio_recv(void* ctx, unsigned char* buf, size_t len) {
+    tea_socket_t fd = *static_cast<tea_socket_t*>(ctx);
+    const int n = tea_net_recv(fd, buf, len);
+    if (n >= 0) return n;
+    if (tea_net_would_block(tea_net_errno())) return MBEDTLS_ERR_SSL_WANT_READ;
+    return MBEDTLS_ERR_NET_RECV_FAILED;
+  }
+
+ public:
 
  private:
   tea_socket_t fd_ = kTeaInvalidSocket;
   bool tls_ = false;
-  bool use_net_ = false;
-  mbedtls_net_context net_{};
   mbedtls_ssl_context ssl_{};
   mbedtls_ssl_config conf_{};
   mbedtls_x509_crt ca_{};
@@ -343,7 +412,7 @@ class Signal {
  public:
   bool connect_to(const std::string& host, uint16_t port, const std::string& room,
                    const std::string& token, const std::string& role, bool use_tls,
-                   const std::string& ca_file, bool registering) {
+                   const std::string& ca_file, const std::string& pin, bool registering) {
     tea_net_init();
     tea_socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd == kTeaInvalidSocket) return false;
@@ -364,20 +433,21 @@ class Signal {
       addr = *reinterpret_cast<sockaddr_in*>(resolved->ai_addr);
       ::freeaddrinfo(resolved);
     }
-    if (use_tls) {
-      // mbedTLS does the connecting itself (it owns the socket afterwards).
+    // The connection is made here, TLS or not: the socket type is ours
+    // (a Windows socket handle does not fit in mbedTLS' int).
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+      log_line("sidecar: cannot reach the broker %s:%u\n", host.c_str(), port);
       tea_net_close(fd);
+      return false;
+    }
+    if (use_tls) {
       std::string err;
-      if (!link_.connect_tls(host, port, ca_file, &err)) {
+      if (!link_.connect_tls(fd, host, ca_file, pin, &err)) {
         log_line("sidecar: %s\n", err.c_str());
-        return false;
-      }
-    } else {
-      if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        log_line("sidecar: cannot reach the broker %s:%u\n", host.c_str(), port);
         tea_net_close(fd);
         return false;
       }
+    } else {
       link_.set_plain(fd);
     }
     json join;
@@ -488,10 +558,15 @@ int dial_tcp(const std::string& host, uint16_t port) {
 
 int main(int argc, char** argv) {
   std::string role = "client";
-  // The default is the public broker: the sidecar should work with nothing
-  // but --room and --token.
+  // The broker's address. It can come from three places, in this order:
+  // the command line, the configuration file, and the built-in default. The
+  // file is the one to edit when the broker moves to another address.
+  const BrokerConfig config = read_broker_config();
   std::string broker_host = "103.232.92.54";
   uint16_t broker_port = 8382;
+  if (!config.address.empty()) {
+    split_hostport(config.address, broker_host, broker_port);
+  }
   std::string room;
   std::string token;
   std::string session;
@@ -499,16 +574,21 @@ int main(int argc, char** argv) {
   std::string listen_host_override;
   uint16_t listen_port_override = 0;
   std::string target = "127.0.0.1:8383";
-  // The STUN and the TURN server of the public broker. The customer's
-  // network is usually a symmetric NAT, so the relay is the normal path -
-  // ICE picks between direct and relayed on its own.
-  std::string stun_host = "103.232.92.54";
+  // The STUN and the TURN server of the broker. They follow the broker's
+  // address unless they are named explicitly: the customer's network is
+  // usually a symmetric NAT, so the relay is the normal path - ICE picks
+  // between direct and relayed on its own.
+  std::string stun_host;
   uint16_t stun_port = 3478;
-  std::string turn_host = "103.232.92.54";
+  std::string turn_host;
   uint16_t turn_port = 3478;
   std::string turn_user = kDefaultTurnUser;
   std::string turn_pass = kDefaultTurnPass;
   std::string ca_file;
+  // The fingerprint of the broker's certificate. When it is set, the
+  // certificate is checked against it - the address of the broker may
+  // change, the certificate stays the same.
+  std::string tls_pin = config.pin;
   // The public broker port speaks TLS (the room token travels over it), so
   // TLS is on by default; --no-tls is for a plain internal broker.
   bool use_tls = true;
@@ -530,13 +610,22 @@ int main(int argc, char** argv) {
           "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
           "          [--listen <host:port>] [--host <addr>] [--port <n>] [--target <host:port>]\n"
           "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
-          "          [--tls|--no-tls] [--ca-bundle <pem>] [--wait-timeout <seconds>]\n"
+          "          [--tls|--no-tls] [--ca-bundle <pem>] [--tls-pin <sha256>]\n"
           "\n"
           "  --session <code>  the one string that travels between the two sides\n"
           "                   (the room name and the token are derived from it)\n"
           "  --port <n>        the local port to listen on (the default is 9931)\n"
+          "  --tls-pin <hex>   the fingerprint of the broker's certificate. The\n"
+          "                   certificate is then checked against it instead of\n"
+          "                   against a name, so it stays good when the broker's\n"
+          "                   address changes.\n"
           "  --wait-timeout    how long the agent side waits for the peer before giving\n"
-          "                   up (default 300 seconds; 0 = wait forever)\n");
+          "                   up (default 300 seconds; 0 = wait forever)\n"
+          "\n"
+          "  The broker's address and fingerprint can also be put in %s:\n"
+          "      address=<host:port>\n"
+          "      pin=<sha256>\n",
+          broker_config_path().c_str());
     std::exit(2);
   };
 
@@ -576,6 +665,7 @@ int main(int argc, char** argv) {
     } else if (a == "--turn-user") turn_user = next();
     else if (a == "--turn-pass") turn_pass = next();
     else if (a == "--ca-bundle") ca_file = next();
+    else if (a == "--tls-pin") tls_pin = next();
     else if (a == "--wait-timeout") wait_timeout = std::atoi(next().c_str());
     else if (a == "--tls") use_tls = true;
     else if (a == "--no-tls") use_tls = false;
@@ -610,20 +700,33 @@ int main(int argc, char** argv) {
     }
   }
   // The CA bundle: the conventional one when it is not given explicitly.
-  if (use_tls && ca_file.empty()) {
+  //
+  // With a pinned fingerprint the CA bundle is not needed: the certificate
+  // is checked against the fingerprint instead, which is a stronger check
+  // (it says "this exact certificate" rather than "signed by somebody in
+  // this file").
+  const bool pinned = !tea_tunnel::normalize_fingerprint(tls_pin).empty();
+  if (use_tls && ca_file.empty() && !pinned) {
     const std::string conventional = default_ca_bundle();
     std::FILE* probe = std::fopen(conventional.c_str(), "rb");
     if (probe) {
       std::fclose(probe);
       ca_file = conventional;
     } else {
-      log_line("sidecar: no CA bundle at %s - the broker's certificate will NOT be "
-               "verified. Give --ca-bundle <pem> for a proper check.\n",
+      log_line("sidecar: no CA bundle at %s and no --tls-pin - the broker's certificate "
+               "will NOT be verified. Give --ca-bundle <pem> or --tls-pin <sha256> for a "
+               "proper check.\n",
                conventional.c_str());
     }
   }
   if (verbose) rtc::InitLogger(rtc::LogLevel::Debug);
   else rtc::InitLogger(rtc::LogLevel::Warning);
+
+  // The STUN and the TURN servers are the broker's, so they follow its
+  // address: when the broker moves, one address changes and everything
+  // else comes with it.
+  if (stun_host.empty()) stun_host = broker_host;
+  if (turn_host.empty()) turn_host = broker_host;
 
   rtc::Configuration cfg;
   // Only the agent offers. The client answers; if it were allowed to
@@ -1035,7 +1138,7 @@ int main(int argc, char** argv) {
       }
       log_line("sidecar: the signalling link is down, reconnecting...\n");
       if (signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file,
-                            is_agent)) {
+                            tls_pin, is_agent)) {
         backoff = 2;
         log_line("sidecar: reconnected to the broker\n");
       } else {
@@ -1093,7 +1196,8 @@ int main(int argc, char** argv) {
   // The peer connection is built **after** the signalling link is up: the
   // offer is produced the moment the channel is created, and an offer
   // produced before the link exists is a message nobody receives.
-  if (!signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file, is_agent))
+  if (!signal.connect_to(broker_host, broker_port, room, token, role, use_tls, ca_file, tls_pin,
+                         is_agent))
     return 1;
   setup_pc();
 
@@ -1118,8 +1222,14 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "  room token    : %s\n", token.c_str());
     std::fprintf(stderr, "  target        : %s\n", target.c_str());
     std::fprintf(stderr, "  give this to whoever connects from the outside:\n");
-    std::fprintf(stderr, "      a2_tunnel --role client --session %s\n",
+    std::fprintf(stderr, "      a2_tunnel --role client --session %s",
                  session.empty() ? token.c_str() : session.c_str());
+    // The fingerprint goes along: it is what lets the other side check that
+    // it is talking to the same broker, without a certificate to install.
+    if (!tea_tunnel::normalize_fingerprint(tls_pin).empty()) {
+      std::fprintf(stderr, " --tls-pin %s", tea_tunnel::normalize_fingerprint(tls_pin).c_str());
+    }
+    std::fprintf(stderr, "\n");
     std::fprintf(stderr, "  (the broker, TLS, the CA bundle and the STUN/TURN servers are\n"
                          "   the defaults; add --ca-bundle <pem> if that machine has no\n"
                          "   ~/.tea_agent/ca-bundle/cacert.pem)\n");
