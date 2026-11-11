@@ -291,6 +291,47 @@ def main():
         check("the account book has the usage tables",
               "turn_usage" in tables and "turn_usage_daily" in tables, str(tables))
 
+        # 保留期：超过期限的明细要清掉，汇总一直留着
+        stale = os.path.join(work, "stale.db")
+        import shutil as _shutil
+        _shutil.copyfile(book, stale)
+        db = sqlite3.connect(stale)
+        old = int(time.time()) - 40 * 86400
+        db.execute("INSERT INTO turn_usage (account, client, started_at, ended_at, seconds)"
+                   " VALUES ('old', '1.2.3.4:5', ?, ?, 10)", (old, old + 60))
+        db.execute("INSERT INTO turn_usage_daily (day, account, sessions, seconds)"
+                   " VALUES ('2020-01-01', 'old', 1, 10)")
+        db.commit()
+        db.close()
+        stale_log = os.path.join(work, "stale.log")
+        spawn([broker, "--stun-port", str(free_port()), "--signal-port", str(free_port()),
+               "--signal-bind", "127.0.0.1", "--turn-db", stale, "--no-tls"], "stale.log")
+        time.sleep(3)
+        db = sqlite3.connect(stale)
+        rows = list(db.execute("SELECT account FROM turn_usage WHERE account = 'old'"))
+        kept = list(db.execute("SELECT account FROM turn_usage_daily WHERE account = 'old'"))
+        db.close()
+        check("the details older than the retention window are dropped", not rows, str(rows))
+        check("the daily totals are kept for good", len(kept) == 1, str(kept))
+
+        # 一本没有账号表的旧簿：broker 要自己补上默认账号
+        old_book = os.path.join(work, "old.db")
+        db = sqlite3.connect(old_book)
+        db.execute("CREATE TABLE turn_usage (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                   " account TEXT NOT NULL, client TEXT NOT NULL, relayed TEXT,"
+                   " started_at INTEGER NOT NULL, ended_at INTEGER, seconds INTEGER NOT NULL"
+                   " DEFAULT 0, bytes_in INTEGER NOT NULL DEFAULT 0, bytes_out INTEGER NOT NULL"
+                   " DEFAULT 0, packets_in INTEGER NOT NULL DEFAULT 0, packets_out INTEGER"
+                   " NOT NULL DEFAULT 0)")
+        db.commit()
+        db.close()
+        old_log = os.path.join(work, "oldbook.log")
+        spawn([broker, "--stun-port", str(free_port()), "--signal-port", str(free_port()),
+               "--signal-bind", "127.0.0.1", "--turn-db", old_book, "--no-tls"], "oldbook.log")
+        text = wait_for_log(old_log, r"TURN accounts accepted", seconds=20)
+        check("an account book without the table gets the default account",
+              "TURN accounts accepted: 1" in text, text[-200:])
+
         result = subprocess.run([broker, "--usage", "--turn-db", book],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 cwd=work, timeout=20)

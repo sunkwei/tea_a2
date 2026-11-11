@@ -706,6 +706,9 @@ int main(int argc, char** argv) {
 
   if (accounts.empty()) {
     std::fprintf(stderr, "broker: no TURN account at all - nobody could use the relay\n");
+    std::fprintf(stderr, "broker:   add one with: INSERT INTO %s (user, pass) VALUES ('name', 'secret');\n",
+                 tea_tunnel::turn_table_name());
+    std::fprintf(stderr, "broker:   or give one on the command line: --turn-user <name> --turn-pass <secret>\n");
     return 2;
   }
   std::printf("broker: TURN accounts accepted: %zu\n", accounts.size());

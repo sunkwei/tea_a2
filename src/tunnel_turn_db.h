@@ -139,6 +139,22 @@ inline bool load_turn_accounts(const std::string& path, const std::vector<TurnAc
     if (created) *created = true;
   }
 
+  // Was the table there before? A file without it is a book that was never
+  // used - it gets the default account. A table that is there but empty is
+  // the operator's own doing: it stays empty.
+  bool had_table = false;
+  {
+    const std::string query = std::string("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                                          "AND name='") + turn_table_name() + "';";
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(db, query.c_str(), -1, &statement, nullptr) == SQLITE_OK) {
+      if (sqlite3_step(statement) == SQLITE_ROW) {
+        had_table = sqlite3_column_int(statement, 0) > 0;
+      }
+      sqlite3_finalize(statement);
+    }
+  }
+
   char* message = nullptr;
   const std::string create = std::string("CREATE TABLE IF NOT EXISTS ") + turn_table_name() +
                              " (user TEXT NOT NULL, pass TEXT NOT NULL);";
@@ -152,9 +168,9 @@ inline bool load_turn_accounts(const std::string& path, const std::vector<TurnAc
   }
   if (message) sqlite3_free(message);
 
-  // A brand new book gets the default accounts, so that the broker has
-  // something to accept right away.
-  if (!was_there && !seed.empty()) {
+  // A brand new book (or one that never had the table) gets the default
+  // accounts, so that the broker has something to accept right away.
+  if ((!was_there || !had_table) && !seed.empty()) {
     for (const TurnAccount& account : seed) {
       sqlite3_stmt* insert = nullptr;
       const std::string sql = std::string("INSERT INTO ") + turn_table_name() +
