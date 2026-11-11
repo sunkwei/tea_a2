@@ -56,5 +56,8 @@ tests/.real/
 # The TURN account book the broker makes on its first start (it lives in the
 # directory the broker is started from, which can be the repository)
 a2_broker.db
+# SQLite writes these two next to the book when it runs in WAL mode
+a2_broker.db-shm
+a2_broker.db-wal
 
 clean/

@@ -1177,9 +1177,11 @@ int main(int argc, char** argv) {
   });
 
   // ---- the client side listens locally ------------------------------------
-  int lfd = -1;
+  // A socket handle, not an int: on Windows it is 64 bits wide and
+  // INVALID_SOCKET is (SOCKET)~0 - an int would truncate it.
+  tea_socket_t lfd = kTeaInvalidSocket;
   start_listener = [&]() {
-    if (lfd >= 0) return;
+    if (lfd != kTeaInvalidSocket) return;
     split_hostport(listen_addr, listen_host, listen_port);
     lfd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (lfd == kTeaInvalidSocket) return;

@@ -101,6 +101,19 @@ endif()
 
 # --- the two binaries --------------------------------------------------------
 add_executable(a2_broker ${TEA_ROOT}/src/tunnel_broker.cpp)
+if(WIN32)
+  # MinGW defaults to a much older _WIN32_WINNT than MSVC, which makes
+  # cpp-httplib refuse to build and hides CreateFile2(). Target Windows 10.
+  # The agent's own build says the same in its top-level CMakeLists - the
+  # tunnel is a separate project, so it has to say it again.
+  #
+  # Only on the two binaries: the vendored C libraries (usrsctp, libjuice,
+  # sqlite3, mbedTLS) are written for the Windows headers as they are, and
+  # NOMINMAX would take the min/max macros away from usrsctp.
+  target_compile_definitions(a2_broker PRIVATE
+    _WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000000
+    WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
 target_include_directories(a2_broker PRIVATE ${TEA_3RD}/nlohmann_json ${TEA_3RD}/libdatachannel/deps/libjuice/include)
 target_link_libraries(a2_broker PRIVATE juice Threads::Threads)
 # libjuice's STUN/TURN server needs a crypto backend for the message
@@ -141,6 +154,12 @@ endif()
 if(TEA_TUNNEL_ASSETS_DIR)
   target_sources(a2_tunnel PRIVATE ${TEA_TUNNEL_ASSETS_DIR}/web_assets.cpp)
   target_include_directories(a2_tunnel PRIVATE ${TEA_TUNNEL_ASSETS_DIR})
+endif()
+if(WIN32)
+  # Windows 10, like the broker above and like the agent's own build.
+  target_compile_definitions(a2_tunnel PRIVATE
+    _WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000000
+    WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 target_include_directories(a2_tunnel PRIVATE
   ${TEA_3RD}/nlohmann_json
