@@ -1809,6 +1809,11 @@ struct ApiServer::Impl {
   /// retry gets the same answer instead of making the machine work twice.
   std::unique_ptr<IdempotencyStore> idempotency;
 
+  /// Set when the process is on its way out and the running turns are being
+  /// given time to finish (see main.cpp). New turns are refused while it is
+  /// set: a turn that starts now would be killed by the exit anyway.
+  std::atomic<bool> draining{false};
+
   std::mutex mu;  // guards registry access and `turns`
   std::map<std::string, std::shared_ptr<ChatTurn>> turns;
   /// The same turns, by their handle. A turn stays here after it finished, so
@@ -5401,6 +5406,15 @@ void ApiServer::Impl::install_routes() {
 
   // ---- chat (SSE) --------------------------------------------------------
   svr.Post("/api/chat", [this](const httplib::Request& req, httplib::Response& res) {
+    // The process is restarting: the turns that are already running are being
+    // finished first. A new one would die with the process, so it is refused
+    // with a reason instead of pretending to work.
+    if (draining.load()) {
+      send_error(res, 503, "shutting_down",
+                 "the agent is restarting; the running turns are being finished first - "
+                 "try again in a moment");
+      return;
+    }
     nlohmann::json body;
     if (!parse_json_body(req, &body, res)) return;
 
@@ -6720,6 +6734,16 @@ void ApiServer::stop() {
 }
 
 bool ApiServer::is_running() const { return impl_ && impl_->server.is_running(); }
+
+int ApiServer::active_turns() const { return impl_ ? impl_->active_turn_count() : 0; }
+
+void ApiServer::begin_drain() {
+  if (!impl_) return;
+  impl_->draining.store(true);
+  LOG_INFO("server: draining - new turns are refused, the running ones may finish");
+}
+
+bool ApiServer::draining() const { return impl_ && impl_->draining.load(); }
 
 int ApiServer::port() const { return options_.port; }
 

@@ -524,17 +524,28 @@ class Watchdog(object):
         return out
 
     def check_agent(self):
-        """Is the agent still there?"""
+        """Is the agent still there?
+
+        Two checks in a row have to fail before this counts as an outage. A
+        restart (the new build is picked up with `systemctl --user restart a2`)
+        takes the agent away for a second or two, and that is not an outage:
+        the old alarm cried wolf every time somebody deployed, and the person
+        reading it learned to ignore it. One failed check is a hiccup; two in
+        a row are a fact.
+        """
         status, body = http_json(self.agent_url + "/api/health", timeout=self.args.timeout)
         if status == 0 or status >= 400:
             reason = "the agent does not answer: %s" % ((body or {}).get("error") or
                                                         ("HTTP %s" % status))
-            if self.state["seen"].get("agent_down"):
+            fails = int(self.state["seen"].get("agent_down_fails") or 0) + 1
+            self.state["seen"]["agent_down_fails"] = fails
+            if fails < 2 or self.state["seen"].get("agent_down"):
                 return False
             self.state["seen"]["agent_down"] = True
             self.escalate("agent_down", reason, None, level="error")
             return True
         self.state["seen"]["agent_down"] = False
+        self.state["seen"]["agent_down_fails"] = 0
         return False
 
     def check_quota(self):

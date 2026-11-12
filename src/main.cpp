@@ -36,18 +36,25 @@ using namespace tea;
 namespace {
 
 std::atomic<bool> g_stop(false);
+/// How many stop signals arrived. The second one means "not waiting any
+/// longer": the first one starts the drain, the second cuts it short.
+std::atomic<int> g_stop_signals(0);
 
 #ifdef _WIN32
 BOOL WINAPI console_handler(DWORD signal) {
   if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT || signal == CTRL_CLOSE_EVENT) {
     g_stop.store(true);
+    g_stop_signals.fetch_add(1);
     return TRUE;
   }
   return FALSE;
 }
 void install_signal_handlers() { SetConsoleCtrlHandler(console_handler, TRUE); }
 #else
-void posix_signal_handler(int) { g_stop.store(true); }
+void posix_signal_handler(int) {
+  g_stop.store(true);
+  g_stop_signals.fetch_add(1);
+}
 void install_signal_handlers() {
   std::signal(SIGINT, posix_signal_handler);
   std::signal(SIGTERM, posix_signal_handler);
@@ -159,6 +166,26 @@ void open_browser(const std::string& url) {
     // Nothing sensible to do; the URL is printed anyway.
   }
 #endif
+}
+
+/// How long the shutdown waits for the running turns to finish.
+///
+/// 0 means "do not wait" (the old behaviour: everything dies at once).
+/// The default is 10 minutes: long enough for a turn that is nearly done,
+/// short enough that a forgotten turn does not hold the service hostage.
+/// The unit has to agree with it (TimeoutStopSec), otherwise systemd kills
+/// the process in the middle of the wait.
+int drain_seconds_from_env() {
+  const char* raw = std::getenv("TEA_AGENT_DRAIN_SECONDS");
+  if (!raw || !*raw) return 600;
+  char* end = nullptr;
+  const long parsed = std::strtol(raw, &end, 10);
+  if (end == raw || parsed < 0 || parsed > 86400) {
+    LOG_WARN("main: ignoring TEA_AGENT_DRAIN_SECONDS=", raw,
+             " (needs an integer 0..86400)");
+    return 600;
+  }
+  return static_cast<int>(parsed);
 }
 
 /// Look for a CA bundle file next to the binary, in the repository, or in the
@@ -626,6 +653,50 @@ int main(int argc, char** argv) {
     if (!server.is_running()) {
       LOG_ERROR("server: the listener stopped unexpectedly");
       break;
+    }
+  }
+
+  // ---- the shutdown drains first ----------------------------------------
+  //
+  // `systemctl --user restart a2` is how a new build gets picked up, and it
+  // is usually run from another window: the person who asked for the restart
+  // is often in the middle of a conversation with this very agent. Killing
+  // that conversation on the spot loses the work - the turn is interrupted
+  // mid-way and the answer never arrives.
+  //
+  // So the running turns are given a chance to finish first. New turns are
+  // refused while the drain lasts (they would die with the process anyway),
+  // and a second signal stops the wait.
+  const int drain_seconds = drain_seconds_from_env();
+  if (drain_seconds > 0) {
+    server.begin_drain();
+    int active = server.active_turns();
+    if (active > 0) {
+      LOG_INFO("shutdown: ", active, " turn(s) are running; they are given up to ",
+               drain_seconds, " s to finish");
+      if (!args.has("quiet")) {
+        console_write_line("shutting down after the running turn(s) finish (" +
+                           std::to_string(active) + " running, up to " +
+                           std::to_string(drain_seconds) + " s)");
+      }
+      const int64_t deadline = now_ms() + static_cast<int64_t>(drain_seconds) * 1000;
+      while (now_ms() < deadline) {
+        if (g_stop_signals.load() > 1) {
+          LOG_INFO("shutdown: second signal - not waiting any longer");
+          break;
+        }
+        active = server.active_turns();
+        if (active <= 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      }
+      active = server.active_turns();
+      if (active > 0) {
+        LOG_WARN("shutdown: ", active, " turn(s) did not finish in time; stopping anyway");
+        if (!args.has("quiet")) {
+          console_write_line("stopping now (" + std::to_string(active) +
+                             " turn(s) did not finish in time)");
+        }
+      }
     }
   }
 

@@ -46,6 +46,13 @@ class ApiServer {
   bool start(const ServerOptions& options, std::string* err);
   void stop();
   bool is_running() const;
+  /// How many turns are still working. A restart uses it to wait for them
+  /// instead of killing them (see main.cpp).
+  int active_turns() const;
+  /// The process is on its way out: new turns are refused from now on, the
+  /// running ones are given time to finish.
+  void begin_drain();
+  bool draining() const;
   int port() const;
   /// The loopback URL. Always usable on this machine, which is why `--open`
   /// uses it even when the server is bound to every interface.

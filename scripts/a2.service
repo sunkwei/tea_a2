@@ -20,6 +20,11 @@ Environment=LANG=zh_CN.UTF-8
 Restart=on-failure
 RestartSec=3s
 # 手工占用 8383 会让启动失败：systemd 默认的启动限流把它拦在失败态，不会无限重试。
+#
+# 停机时**先把正在跑的对话做完**（agent 自己会等，见 TEA_AGENT_DRAIN_SECONDS，
+# 默认 600 秒）。systemd 默认只等 90 秒就 SIGKILL——那会把对话打断，所以这里
+# 给得比 agent 自己的上限长一点。第二次 `systemctl --user kill a2` 可以立刻停。
+TimeoutStopSec=660
 
 # 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
 # `journalctl --user` 根本读不到（已实测），所以直接 append 到文件。

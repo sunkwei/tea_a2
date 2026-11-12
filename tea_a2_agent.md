@@ -2539,3 +2539,32 @@ a2 收到 `Accept-Encoding: gzip` 就把答案压了再发。
   要**算到它之前**——app.js 里那套 `after`（指针在字符的哪半边）的逻辑
   少了这一句就会少选一个字符（隧道终端第一版就少了一个）。
 - **包里的 `docs/tunnel.md` 改了就要重打包重传**（运维同事照着它做）。
+
+## 重启不再打断正在跑的对话（1.2.12）
+
+**问题**：`systemctl --user restart a2` 是「上新版本」的动作，通常在**另一个窗口**里敲——
+而敲的人往往正在跟这个 agent 说话（今天上午就是这样连着三次掐掉了
+video_analyse 那一轮：08:25:54 / 08:27:59 / 08:30:38，每一次的轨迹都写着
+`cancelled: true`）。以前 SIGTERM 立刻把进程拆了，**正在跑的那一轮当场死掉**，
+回答永远不来。
+
+**做法：优雅退场（drain）**。
+
+- `src/main.cpp`：收到第一个信号 → `server.begin_drain()`（新来的对话用 503 明确拒绝，
+  并说明「正在重启，等一下」）→ 等正在跑的轮次做完（`TEA_AGENT_DRAIN_SECONDS`，
+  默认 600 秒）→ 再 `server.stop()`。**第二个信号不等了**（想立刻停就按两次）。
+- `src/server.{h,cpp}`：`active_turns()`（还在跑的轮数）、`begin_drain()`、`draining()`；
+  `/api/chat` 在退场期间回 503 `shutting_down`。
+- `scripts/a2.service`：**`TimeoutStopSec=660`**——systemd 默认只等 90 秒就 SIGKILL，
+  那会把「等对话做完」变成「对话还是被砍」。三台机器的单元都改了。
+- `sched/watchdog.py`：**连续两次**健康检查失败才算「agent 掉了」。以前重启那一秒的空档
+  就会报 `agent_down`（假警报），报多了人就学会无视它了。
+
+**坑**：
+
+- **别在自己身上 restart 自己**（老规矩）：新起的进程要等旧进程退出才能占住端口，
+  而旧进程在等我的这一轮结束 → 死等。所以本地换新二进制要用
+  `setsid nohup bash -c 'sleep 20; systemctl --user restart a2' &`：
+  那一轮结束后再重启，没有正在跑的对话，重启是瞬时的。
+- 退场期间**不要再开新对话**：它们会被 503 拒绝（这是故意的——新开的轮次反正会跟着进程死）。
+- 回归测试 `tests/smoke_drain.py`（8 项）：拿旧二进制跑**必须 FAIL**（进程当场就死了）。
