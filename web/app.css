@@ -1158,3 +1158,24 @@ button{font-family:inherit}
 }
 .shell-note{font-size:11.5px;color:var(--dsw-alias-label-caption);min-height:16px}
 .shell-note.warn{color:var(--dsw-alias-state-warn-primary)}
+
+/* ---------- 窄屏（手机） ---------- */
+/* 手机上没有 260px 给侧栏：它改成抽屉——默认在屏幕外，点顶栏那个按钮才滑进来。
+   宽屏的行为一点没变（媒体查询之外的东西原样留着）。 */
+@media (max-width:720px){
+  #sidebar{
+    position:fixed;left:0;top:0;bottom:0;width:min(78vw,300px);flex:none;z-index:60;
+    transform:translateX(-100%);transition:transform .18s ease;
+    box-shadow:0 8px 32px rgba(0,0,0,.22);
+  }
+  #app.side-open #sidebar{transform:none}
+  #app.side-collapsed #sidebar{display:none}
+  #topbar{height:48px;flex:0 0 48px;gap:8px;padding:0 10px}
+  .crumbs{font-size:12px}
+  .chat-col{max-width:100%;padding:12px}
+  .composer-wrap .chat-col{padding:6px 12px 14px}
+  .msg.user{max-width:92%}
+  .page{padding:12px}
+  /* 顶栏那一排按钮在窄屏上挤：让它们能横向滚，而不是把会话名挤没 */
+  .topbar-left{gap:6px}
+}

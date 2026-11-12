@@ -1,0 +1,75 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+}
+
+// The version of the agent this app carries. It is the version of the C++
+// core (src/version.cpp) - the app and the agent inside it are one thing.
+def agentVersion = "1.2.12"
+
+android {
+    namespace "com.tea.a2"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.tea.a2"
+        minSdk 26
+        targetSdk 34
+        versionCode 12
+        versionName agentVersion
+        ndk {
+            // arm64-v8a for the phones, x86_64 for the emulator.
+            abiFilters "arm64-v8a", "x86_64"
+        }
+    }
+
+    sourceSets {
+        main {
+            // liba2.so is built by the C++ project and copied in by
+            // ../scripts/build_android.sh.
+            jniLibs.srcDirs += ["src/main/jniLibs"]
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // A sideloaded app has to be installable without a key store, so
+            // the release build is signed with the debug key. A build that
+            // goes to a store gets a real key here.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    packagingOptions {
+        // The agent ships the web UI inside the library; no compression
+        // tricks needed, but the .so has to stay uncompressed for the loader.
+        jniLibs {
+            useLegacyPackaging false
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+// No dependencies on purpose: everything the app needs is in the Android
+// framework (WebView, services, notification listener, MediaProjection).
+// The Kotlin standard library comes with the Kotlin plugin.
+dependencies {
+    // Shizuku: the phone's own shell, without root. The user allows this
+    // app once; without it the app still works, it just cannot drive the
+    // screen or read the content providers.
+    implementation "dev.rikka.shizuku:api:13.1.5"
+    implementation "dev.rikka.shizuku:provider:13.1.5"
+}

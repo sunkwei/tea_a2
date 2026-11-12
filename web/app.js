@@ -4343,13 +4343,24 @@
     if (name === 'memory') loadMemory();
     if (name === 'logs') loadLogs();
     if (name === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); loadMcp(); }
+    // 手机上侧栏是抽屉：选完就收起来，别挡住刚打开的那页。
+    if (isNarrow() && !state.sidebarHidden) {
+      state.sidebarHidden = true;
+      applySidebar();
+      saveLS();
+    }
   }
   /* ---------- 侧边栏收起 / 展开 ---------- */
+  // 窄屏的判定：跟 CSS 的 @media (max-width:720px) 保持一致。
+  function isNarrow() { return window.innerWidth <= 720; }
   // 窄屏或专心读回答时，左侧 260px 一直是白占的。收起后由顶栏左侧的同一个图标
   // 展开回来（Ctrl/Cmd+B 也可以），状态记在 localStorage 里，下次打开保持原样。
   function applySidebar() {
     var hidden = !!state.sidebarHidden;
     $('app').classList.toggle('side-collapsed', hidden);
+    // 窄屏（手机）：侧栏是抽屉。开着的时候多一个 side-open，CSS 把它滑进来；
+    // 宽屏上这个类没有任何作用（媒体查询之外不读它）。
+    $('app').classList.toggle('side-open', !hidden && isNarrow());
     $('sidebar-show').classList.toggle('hidden', !hidden);
     $('sidebar-hide').setAttribute('aria-expanded', hidden ? 'false' : 'true');
     $('sidebar-show').setAttribute('aria-expanded', hidden ? 'true' : 'false');
@@ -7210,7 +7221,9 @@
     state.model = ls.model || null;
     state.logsAutoScroll = ls.logs_autoscroll !== false;
     $('logs-autoscroll').checked = state.logsAutoScroll;
-    state.sidebarHidden = ls.sidebar_hidden === true;
+    // 手机上侧栏默认是关着的（它是抽屉）；桌面保持用户上次的习惯。
+    state.sidebarHidden = ls.sidebar_hidden === true ||
+      (ls.sidebar_hidden !== false && window.innerWidth <= 720);
     applySidebar();
     updateTitle();                       // 加载工作区之前也先立住一个确定的标题
     state.stats = emptyStats();

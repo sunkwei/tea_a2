@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">A2</string>
+    <string name="setup_title">A2 setup</string>
+    <string name="capture_title">Screen capture</string>
+    <string name="notifications_title">A2 notifications</string>
+    <string name="notification_channel">Agent</string>
+    <string name="notification_running">The agent is running</string>
+</resources>

@@ -1,4 +1,7 @@
 #include "tools.h"
+#ifdef TEA_AGENT_ANDROID
+#include "phone_tool.h"
+#endif
 
 #include "output_filter.h"
 
@@ -3062,6 +3065,98 @@ ToolRegistry::ToolRegistry() {
     })JSON");
     defs_.push_back(def);
   }
+#ifdef TEA_AGENT_ANDROID
+  {
+    ToolDef def;
+    def.name = "toolkit_phone";
+    def.description =
+        "Ask the phone itself what only the phone can do: the notifications that "
+        "came in, where it is, what is on the clipboard, a screenshot of the "
+        "screen, opening an app or a URL, sending a text message, the installed "
+        "apps. The phone app has to be running and the user has to have granted "
+        "the matching permission (notification access, location, screen capture). "
+        "Use action=device for the battery and the storage. When the user gave "
+        "the app Shizuku (the phone's own shell, without root), the screen can "
+        "also be driven: action=tap, action=swipe, action=type, action=paste and "
+        "action=shell (a command that runs as the shell user).";
+    def.parameters = nlohmann::json::parse(R"JSON({
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["device", "notifications", "location", "clipboard_get", "clipboard_set", "open", "screenshot", "sms", "call", "apps", "shell", "tap", "swipe", "type", "paste"],
+          "description": "What to ask the phone for."
+        },
+        "text": {
+          "type": "string",
+          "description": "The text for clipboard_set and sms."
+        },
+        "url": {
+          "type": "string",
+          "description": "The URL to open (action=open)."
+        },
+        "package": {
+          "type": "string",
+          "description": "The app package to open, e.g. com.tencent.mm (action=open)."
+        },
+        "query": {
+          "type": "string",
+          "description": "A search term: the phone opens it in a search app (action=open)."
+        },
+        "to": {
+          "type": "string",
+          "description": "The phone number for action=sms."
+        },
+        "number": {
+          "type": "string",
+          "description": "The phone number for action=call."
+        },
+        "filter": {
+          "type": "string",
+          "description": "A substring that filters the app list (action=apps)."
+        },
+        "command": {
+          "type": "string",
+          "description": "The command to run as the shell user (action=shell). Needs Shizuku."
+        },
+        "x": {
+          "type": "integer",
+          "description": "The x coordinate of the tap (action=tap)."
+        },
+        "y": {
+          "type": "integer",
+          "description": "The y coordinate of the tap (action=tap)."
+        },
+        "x1": {
+          "type": "integer",
+          "description": "The x the drag starts at (action=swipe)."
+        },
+        "y1": {
+          "type": "integer",
+          "description": "The y the drag starts at (action=swipe)."
+        },
+        "x2": {
+          "type": "integer",
+          "description": "The x the drag ends at (action=swipe)."
+        },
+        "y2": {
+          "type": "integer",
+          "description": "The y the drag ends at (action=swipe)."
+        },
+        "ms": {
+          "type": "integer",
+          "description": "How long the drag takes (action=swipe). Default 300."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "How many notifications to return (action=notifications). Default 20."
+        }
+      },
+      "required": ["action"]
+    })JSON");
+    defs_.push_back(def);
+  }
+#endif
 }
 
 nlohmann::json ToolRegistry::openai_tools(const ProviderInfo* provider,
@@ -3135,6 +3230,10 @@ int ToolRegistry::timeout_ms(const std::string& name, const nlohmann::json& argu
   if (name == "toolkit_fleet") {
     return 900000;  // a fleet job on many devices is not a web request
   }
+  if (name == "toolkit_phone") {
+    // The GPS fix and the screen capture take their time.
+    return 60000;
+  }
   if (name == "toolkit_peer") {
     // The peer's own budget: the model says how long it may take.
     long long secs = arg_int(arguments, "timeout_s", 900);
@@ -3166,6 +3265,9 @@ ToolResult ToolRegistry::execute(const std::string& name, const nlohmann::json& 
     else if (name == "toolkit_fetch") result = tool_fetch(arguments, ctx);
     else if (name == "toolkit_fleet") result = tool_fleet(arguments, ctx);
     else if (name == "toolkit_peer") result = tool_peer(arguments, ctx);
+#ifdef TEA_AGENT_ANDROID
+    else if (name == "toolkit_phone") result = tool_phone(arguments, ctx);
+#endif
     else if (mcp_ && starts_with(name, "mcp__")) result = tool_mcp(name, arguments, ctx);
     else {
       result.ok = false;

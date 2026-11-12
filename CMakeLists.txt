@@ -192,6 +192,10 @@ if(TEA_AGENT_USE_MBEDTLS AND EXISTS ${TEA_3RD}/mbedtls/CMakeLists.txt)
   # Force the flag in both directions so a stale cache cannot leak through.
   if(WIN32)
     set(LINK_WITH_PTHREAD OFF CACHE BOOL "" FORCE)
+  elseif(ANDROID)
+    # Android's libc carries the pthreads: there is no libpthread to link,
+    # and asking for it fails the link with "unable to find library -lpthread".
+    set(LINK_WITH_PTHREAD OFF CACHE BOOL "" FORCE)
   else()
     set(LINK_WITH_PTHREAD ON CACHE BOOL "" FORCE)
   endif()
@@ -522,6 +526,37 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(tea_agent PRIVATE Threads::Threads)
+
+# --- the Android library (liba2.so) -------------------------------------------
+# The phone build is the same agent, compiled for bionic and loaded by the APK
+# through JNI. There is no executable on Android: Android 10+ refuses to exec
+# files out of an app's own data directory (W^X), so the agent has to live
+# inside the app process.
+#
+#   cmake -S . -B build-android \
+#     -DCMAKE_TOOLCHAIN_FILE=cmake/android-ndk.cmake \
+#     -DTEA_ANDROID_NDK=$HOME/work/android-sdk/ndk/27.3.13750724 \
+#     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 \
+#     -DTEA_AGENT_ANDROID_LIB=ON -DTEA_AGENT_BUILD_TUNNEL=OFF
+option(TEA_AGENT_ANDROID_LIB
+       "Build liba2.so (the JNI library the Android app loads) instead of the CLI" OFF)
+if(TEA_AGENT_ANDROID_LIB)
+  add_library(a2 SHARED ${TEA_SOURCES} src/android_jni.cpp src/phone_tool.cpp)
+  # TEA_AGENT_NO_MAIN: the APK calls tea_agent_main() through JNI.
+  target_compile_definitions(a2 PRIVATE TEA_AGENT_NO_MAIN TEA_AGENT_ANDROID=1)
+  target_include_directories(a2 PRIVATE ${TEA_GEN_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(a2 PRIVATE tea_3rd)
+  find_package(Threads REQUIRED)
+  target_link_libraries(a2 PRIVATE Threads::Threads)
+  if(ANDROID)
+    # __android_log_write() for the JNI layer.
+    target_link_libraries(a2 PRIVATE log)
+  endif()
+  set_target_properties(a2 PROPERTIES
+    OUTPUT_NAME "a2"
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+endif()
 
 # --- self-contained runtime -------------------------------------------------
 # Single-file deployment: the C++ runtime is linked statically so the binary does

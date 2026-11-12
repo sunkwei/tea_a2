@@ -209,7 +209,17 @@ std::string find_ca_bundle(const std::string& tea_home) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+namespace tea {
+
+/// Ask a running agent to stop (the Android service calls this when the
+/// app goes away). The signal handlers do the same thing; this is the
+/// programmatic version of the same two signals.
+void agent_request_stop() {
+  g_stop.store(true);
+  g_stop_signals.fetch_add(1);
+}
+
+int tea_agent_main(int argc, char** argv) {
   Args args;
   for (int i = 1; i < argc; ++i) {
     std::string token = argv[i];
@@ -709,3 +719,12 @@ int main(int argc, char** argv) {
   LOG_INFO("=== ", TEA_AGENT_NAME, " stopped ===");
   return 0;
 }
+
+}  // namespace tea
+
+// The CLI entry point. The Android build compiles this out
+// (TEA_AGENT_NO_MAIN): there the agent is a shared library and the APK
+// calls tea_agent_main() from JNI.
+#ifndef TEA_AGENT_NO_MAIN
+int main(int argc, char** argv) { return tea::tea_agent_main(argc, argv); }
+#endif

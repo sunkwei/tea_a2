@@ -1,0 +1,10 @@
+# Gradle / Android build output
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+
+# liba2.so is built by scripts/build_android.sh (it needs the NDK): the
+# binaries themselves are not in git, only the sources that make them.
+app/src/main/jniLibs/

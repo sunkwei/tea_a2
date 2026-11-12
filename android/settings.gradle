@@ -1,0 +1,28 @@
+// The Android app around the agent.
+//
+// The agent itself is built by the C++ project (liba2.so, see
+// ../scripts/build_android.sh); this project is the shell around it: the
+// foreground service that keeps it alive, the web view that shows its UI and
+// the phone bridge that gives it the things only a phone can do.
+//
+// maven.google.com is not reachable from every network, and the artifacts
+// live under dl.google.com/dl/android/maven2 - so the Google repository is
+// spelled out with its real address instead of `google()`.
+pluginManagement {
+    repositories {
+        maven { url = uri("https://dl.google.com/dl/android/maven2") }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        maven { url = uri("https://dl.google.com/dl/android/maven2") }
+        mavenCentral()
+    }
+}
+
+rootProject.name = "a2-android"
+include ":app"
