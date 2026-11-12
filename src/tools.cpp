@@ -3078,13 +3078,16 @@ ToolRegistry::ToolRegistry() {
         "Use action=device for the battery and the storage. When the user gave "
         "the app Shizuku (the phone's own shell, without root), the screen can "
         "also be driven: action=tap, action=swipe, action=type, action=paste and "
-        "action=shell (a command that runs as the shell user).";
+        "action=shell (a command that runs as the shell user). With the "
+        "accessibility service turned on, action=screen reads what is on the "
+        "screen as text, action=click taps the thing that says a given text, "
+        "and action=global does back/home/recents.";
     def.parameters = nlohmann::json::parse(R"JSON({
       "type": "object",
       "properties": {
         "action": {
           "type": "string",
-          "enum": ["device", "notifications", "location", "clipboard_get", "clipboard_set", "open", "screenshot", "sms", "call", "apps", "shell", "tap", "swipe", "type", "paste"],
+          "enum": ["device", "notifications", "location", "clipboard_get", "clipboard_set", "open", "screenshot", "sms", "call", "apps", "shell", "tap", "swipe", "type", "paste", "screen", "click", "global"],
           "description": "What to ask the phone for."
         },
         "text": {
@@ -3146,6 +3149,10 @@ ToolRegistry::ToolRegistry() {
         "ms": {
           "type": "integer",
           "description": "How long the drag takes (action=swipe). Default 300."
+        },
+        "global_action": {
+          "type": "string",
+          "description": "The global action for action=global: back, home, recents or notifications."
         },
         "limit": {
           "type": "integer",

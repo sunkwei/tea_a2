@@ -6,4 +6,6 @@
     <string name="notifications_title">A2 notifications</string>
     <string name="notification_channel">Agent</string>
     <string name="notification_running">The agent is running</string>
+    <string name="a11y_label">A2 无障碍</string>
+    <string name="a11y_description">让 A2 读懂屏幕上的内容并替你点击、输入（截图与短信仍需 Shizuku）。</string>
 </resources>

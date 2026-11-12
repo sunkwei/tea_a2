@@ -83,6 +83,9 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 | `open` | 打开 URL / 应用 / 搜索 | 无 |
 | `apps` | 装了哪些能打开的 app | 无 |
 | `screenshot` | 屏幕截图（PNG） | Shizuku 优先，否则 MediaProjection |
+| `screen` | **读屏**：当前界面上的文字与可点的控件 | 无障碍服务（或 Shizuku 的 uiautomator） |
+| `click` | **按文字点击**（“点那个叫『确认』的按钮”） | 无障碍服务（或 Shizuku） |
+| `global` | 全局动作：返回 / 主页 / 最近任务 / 通知栏 | 无障碍服务（或 Shizuku 的 keyevent） |
 | `sms` | 发短信 | 短信权限 + 设置里打开 |
 | `call` | 拨号 | 无 |
 | `shell` | **以 shell 身份跑一条命令** | Shizuku |
@@ -95,6 +98,28 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
 `type` 只能打 ASCII（`input text` 的老毛病）；中文走 `paste`：先把文字放进
 剪贴板，再 `input keyevent 279`（粘贴）。
+
+## 无障碍服务：轻手的一条路
+
+Shizuku 给的是 **shell 身份**（截图、短信、命令），但不是每个手机都有；**无障碍服务**
+是标准 Android 权限，用户在系统设置里点一下就有。app 的顶栏有「无障碍」按钮，
+点它直接跳到系统的无障碍设置页。
+
+它多出来的能力：
+
+- **读屏**：`toolkit_phone action=screen` → 当前界面的节点树（文字、哪些可点、坐标），
+  不是坐标而是**意思**（“按钮『确认』在 (x,y)”）；
+- **按文字点击**：`action=click {"text":"确认"}` —— 不用算坐标，中文按钮也能点；
+- **输入**：`action=type` 走无障碍时能打中文（`input text` 只能 ASCII）；
+- **全局动作**：`action=global {"action":"back|home|recents|notifications"}`。
+
+两者的分工：**无障碍优先、Shizuku 兜底**（桥里的每个动作都是先试无障碍，不行再走 shell）。
+
+⚠️ **force-stop 会关掉无障碍服务**：Android 在 app 被强制停止时会把它的无障碍服务
+也停掉（`settings get secure enabled_accessibility_services` 会变成 null）。所以别
+`am force-stop` 这个 app；实在要重启，开一次「无障碍」按钮再打开。
+
+⚠️ **银行/支付类 app 会检测无障碍**（认为你在自动化），可能拒绝登录。
 
 ## 从电脑上访问 / 驱动这台手机
 
@@ -198,6 +223,12 @@ app 这边也做了能做的：常驻一把 partial wake lock（`a2:agent`），
 | Shizuku 截图（`screencap -p`） | 真 PNG ✓（不用 MediaProjection 授权） |
 | Shizuku 模拟点击（`input tap`） | ✓ |
 | Shizuku 读短信收件箱（`content query`） | 读到真短信 ✓ |
+
+### 无障碍的坑
+
+- **`rootInActiveWindow` 会是 null**：锁屏/息屏时没有活动窗口 → 桥会自动退回 Shizuku
+  的 `uiautomator dump`（桥的回答里有 `source` 字段说明是哪儿来的，还有 `a11y` 状态）。
+- **force-stop 会把服务停掉**（见上）。
 
 ### Shizuku 的两个坑
 

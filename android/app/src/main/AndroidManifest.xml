@@ -93,6 +93,22 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
+        <!-- The accessibility service: the light way to read the screen and
+             act on it. The user turns it on in the system settings (the app
+             has a button that takes them there). -->
+        <service
+            android:name=".A11yService"
+            android:exported="true"
+            android:label="@string/a11y_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/a11y_service" />
+        </service>
+
         <!-- The notifications that came in: the user grants this in the
              system settings, the app cannot ask for it. -->
         <service

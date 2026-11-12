@@ -316,6 +316,26 @@ class MainActivity : Activity() {
                 ).show()
             }
         })
+        bar.addView(topButton("无障碍") {
+            // The accessibility service is turned on in the system settings -
+            // an app cannot ask for it by itself.
+            if (A11yService.enabled()) {
+                Toast.makeText(
+                    this,
+                    "无障碍已开启：agent 能读屏、按文字点击、输入",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                try {
+                    startActivity(
+                        Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } catch (e: Exception) {
+                    Toast.makeText(this, "打不开无障碍设置页", Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
         bar.addView(topButton("保活") {
             keepAlive()
         })

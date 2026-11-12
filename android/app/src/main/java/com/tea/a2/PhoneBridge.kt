@@ -229,6 +229,15 @@ class PhoneBridge(private val context: Context) {
             request.method == "GET" && request.path == "/phone/shizuku" ->
                 200 to ShizukuHelper.status().toString()
 
+            request.method == "GET" && request.path == "/phone/screen" ->
+                200 to screen().toString()
+
+            request.method == "POST" && request.path == "/phone/click" ->
+                200 to clickText(request.body).toString()
+
+            request.method == "POST" && request.path == "/phone/global" ->
+                200 to globalAction(request.body).toString()
+
             request.method == "POST" && request.path == "/phone/shell" ->
                 200 to shell(request.body).toString()
 
@@ -522,6 +531,125 @@ class PhoneBridge(private val context: Context) {
         return out
     }
 
+    /**
+     * The screen as text: the node tree from the accessibility service, or
+     * the UI dump from the shell (uiautomator) when there is none.
+     */
+    private fun screen(): JSONObject {
+        val a11y = A11yService.status()
+        if (A11yService.enabled()) {
+            val text = A11yService.screenText()
+            if (text.isNotBlank()) {
+                return JSONObject()
+                    .put("ok", true)
+                    .put("source", "accessibility")
+                    .put("text", text)
+                    .put("a11y", a11y)
+            }
+        }
+        // The shell's way: uiautomator dumps the same tree (as XML).
+        val dump = ShizukuHelper.execFull(
+            listOf("uiautomator", "dump", "/data/local/tmp/a2-ui.xml"), 20000
+        )
+        if (dump == null || dump.exitCode != 0) {
+            return JSONObject()
+                .put("ok", false)
+                .put("a11y", a11y)
+                .put("error", "no screen access yet - turn on the accessibility service " +
+                    "(or Shizuku) in the app's buttons")
+        }
+        val xml = ShizukuHelper.execFull(listOf("cat", "/data/local/tmp/a2-ui.xml"), 15000)?.stdout
+            ?: return JSONObject().put("ok", false).put("error", "the screen dump could not be read")
+        return JSONObject()
+            .put("ok", true)
+            .put("source", "shizuku")
+            .put("text", xml)
+            .put("a11y", a11y)
+    }
+
+    /**
+     * Clicks the thing that says [text]. The accessibility service can do it
+     * by name; the shell has to find the node in the dump and tap its
+     * centre.
+     */
+    private fun clickText(body: String): JSONObject {
+        val needle = parse(body).optString("text", "")
+        if (needle.isEmpty()) {
+            return JSONObject().put("ok", false).put("error", "'text' is required")
+        }
+        if (A11yService.enabled() && A11yService.clickText(needle)) {
+            return JSONObject().put("ok", true).put("source", "accessibility")
+        }
+        if (shizukuClick(needle)) {
+            return JSONObject().put("ok", true).put("source", "shizuku")
+        }
+        return JSONObject()
+            .put("ok", false)
+            .put("error", "nothing on the screen says '" + needle + "'")
+    }
+
+    /** The global actions (back, home, recents, notifications). */
+    private fun globalAction(body: String): JSONObject {
+        val action = parse(body).optString("action", "")
+        if (action.isEmpty()) {
+            return JSONObject().put("ok", false).put("error", "'action' is required")
+        }
+        if (A11yService.enabled() && A11yService.globalAction(action)) {
+            return JSONObject().put("ok", true).put("source", "accessibility")
+        }
+        // The shell has the keys for the global actions too.
+        val key = when (action.lowercase()) {
+            "back" -> "4"
+            "home" -> "3"
+            "recents" -> "187"
+            "notifications" -> "82"
+            else -> ""
+        }
+        if (key.isEmpty()) {
+            return JSONObject().put("ok", false).put("error", "unknown action '" + action + "'")
+        }
+        val result = ShizukuHelper.execFull(listOf("input", "keyevent", key), 10000)
+            ?: return JSONObject().put("ok", false).put("error", "Shizuku has not allowed this app yet")
+        return JSONObject().put("ok", result.exitCode == 0).put("source", "shizuku")
+    }
+
+    /** Finds a node with the text in the shell's dump and taps its centre. */
+    private fun shizukuClick(needle: String): Boolean {
+        val dump = ShizukuHelper.execFull(
+            listOf("uiautomator", "dump", "/data/local/tmp/a2-ui.xml"), 20000
+        ) ?: return false
+        if (dump.exitCode != 0) return false
+        val xml = ShizukuHelper.execFull(listOf("cat", "/data/local/tmp/a2-ui.xml"), 15000)?.stdout
+            ?: return false
+        for (element in xml.split("<node ")) {
+            if (!element.contains(needle, ignoreCase = true)) continue
+            val text = attribute(element, "text")
+            val description = attribute(element, "content-desc")
+            if (!text.contains(needle, ignoreCase = true) &&
+                !description.contains(needle, ignoreCase = true)
+            ) {
+                continue
+            }
+            val bounds = attribute(element, "bounds")
+            val numbers = Regex("""\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]""").find(bounds) ?: continue
+            val left = numbers.groupValues[1].toInt()
+            val top = numbers.groupValues[2].toInt()
+            val right = numbers.groupValues[3].toInt()
+            val bottom = numbers.groupValues[4].toInt()
+            val x = (left + right) / 2
+            val y = (top + bottom) / 2
+            val result = ShizukuHelper.execFull(listOf("input", "tap", "$x", "$y"), 10000)
+            return result != null && result.exitCode == 0
+        }
+        return false
+    }
+
+    /** One attribute of an XML element. */
+    private fun attribute(element: String, name: String): String {
+        val match = Regex("""$name="([^"]*)"""").find(element) ?: return ""
+        return match.groupValues[1]
+    }
+
     /** Runs a command as the shell user (Shizuku). */
     private fun shell(body: String): JSONObject {
         val payload = parse(body)
@@ -581,6 +709,11 @@ class PhoneBridge(private val context: Context) {
         val text = payload.optString("text", "")
         if (text.isEmpty()) {
             return JSONObject().put("ok", false).put("error", "'text' is required")
+        }
+        // The accessibility service types into the focused field - and it
+        // handles Chinese, which `input text` cannot.
+        if (A11yService.enabled() && A11yService.typeText(text)) {
+            return JSONObject().put("ok", true).put("source", "accessibility")
         }
         val escaped = text.replace(" ", "%s")
         val result = ShizukuHelper.execFull(listOf("input", "text", escaped), 10000)

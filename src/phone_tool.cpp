@@ -153,6 +153,24 @@ ToolResult tool_phone(const nlohmann::json& args, const ToolContext& ctx) {
     payload["number"] = number;
     return call_bridge("POST", "/phone/call", json_body(payload), 10000);
   }
+  if (action == "screen") {
+    // What is on the screen, as text: the accessibility tree, or the UI dump.
+    return call_bridge("GET", "/phone/screen", std::string(), 30000);
+  }
+  if (action == "click") {
+    const std::string text = arg_string(args, "text");
+    if (text.empty()) return fail("'text' is required for click");
+    nlohmann::json payload = nlohmann::json::object();
+    payload["text"] = text;
+    return call_bridge("POST", "/phone/click", json_body(payload), 30000);
+  }
+  if (action == "global") {
+    const std::string what = arg_string(args, "global_action");
+    if (what.empty()) return fail("'global_action' is required for global");
+    nlohmann::json payload = nlohmann::json::object();
+    payload["action"] = what;
+    return call_bridge("POST", "/phone/global", json_body(payload), 20000);
+  }
   if (action == "shell") {
     const std::string command = arg_string(args, "command");
     if (command.empty()) return fail("'command' is required for shell");
