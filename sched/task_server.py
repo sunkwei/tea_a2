@@ -61,6 +61,7 @@ if sys.version_info[0] < 3:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import plans  # noqa: E402
+import schedules  # noqa: E402
 import task_order  # noqa: E402
 import triggers  # noqa: E402
 from a2_ext_py import ApiError, Client  # noqa: E402
@@ -127,7 +128,7 @@ AGGREGATE_SYSTEM = (
 
 # Which queue this is. The client asks before it speaks (see the
 # client's _tasks_prefix): the version segment arrived in 0.21.0.
-QUEUE_VERSION = "1.2.12"
+QUEUE_VERSION = "1.2.13"
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -1259,7 +1260,8 @@ class Engine:
     """The scheduler: what to work on, and when."""
 
     def __init__(self, store, agent, events, args, trigger_store=None, thread_writer=None,
-                 thread_file=None, decorate_event=None, plan_store=None):
+                 thread_file=None, decorate_event=None, plan_store=None,
+                 schedule_store=None, default_workspace=None):
         self.store = store
         self.agent = agent
         self.events = events
@@ -1278,6 +1280,11 @@ class Engine:
         self.decorate_event = decorate_event or (lambda event: event)
         # The plans (the complex jobs that were split into steps).
         self.plan_store = plan_store
+        # The schedules (the work that comes back on its own, minute by
+        # minute) and the way to the workspace a task goes to when nobody
+        # named one.
+        self.schedule_store = schedule_store
+        self.default_workspace = default_workspace or (lambda: "")
         # The provider and model the queued work runs on: (provider, model,
         # read_at). It comes from provider.yaml (`task_model:`) and is read
         # again from time to time, so a changed file takes effect without
@@ -1943,6 +1950,110 @@ class Engine:
             log("plan %s is done: %d step(s)" % (plan.get("id"), len(steps)))
         finally:
             self.summarizing.discard(parent_id)
+
+    # ---- the schedules ----------------------------------------------------
+    def check_schedules(self, now=None):
+        """The schedules: when a minute of one of them comes, it becomes a task.
+
+        The queue looks at the schedules every round, but a schedule only
+        fires when the minute it names is really here: the finest grain is
+        one minute, and the clock of the machine is the one that counts.
+        """
+        if self.schedule_store is None:
+            return 0
+        fired = 0
+        for schedule in self.schedule_store.list_schedules(limit=500):
+            try:
+                if self.check_one_schedule(schedule, now):
+                    fired += 1
+            except Exception as exc:  # noqa: BLE001 - one bad schedule must not stop the rest
+                log("cannot check the schedule %s: %s: %s"
+                    % (schedule.get("id"), type(exc).__name__, exc))
+        return fired
+
+    def check_one_schedule(self, schedule, now=None):
+        """One schedule: does its minute come, and does it become a task?"""
+        if not schedule.get("enabled", True):
+            return False
+        if not schedules.is_due(schedule, now):
+            return False
+        now = time.time() if now is None else float(now)
+        schedule_id = schedule.get("id") or ""
+        # The work of the last run must be finished before the next one
+        # starts - unless the schedule says otherwise. A queue that piles
+        # up is a queue that drowns.
+        if not schedule.get("overlap"):
+            busy = self._schedule_busy_task(schedule)
+            if busy is not None:
+                schedule["skipped_count"] = int(schedule.get("skipped_count") or 0) + 1
+                schedule["last_error"] = ("上一次还没做完（%s），这一次没有排队"
+                                          % (busy.get("id") or ""))
+                self.schedule_store.save(schedule)
+                log("schedule %s: the last run (%s) is still going - skipped"
+                    % (schedule_id, busy.get("id")))
+                self._publish({"type": "schedule_skipped",
+                               "schedule": schedule_id, "task": busy})
+                return False
+        task = self.make_task_from_schedule(schedule, now)
+        if task is None:
+            return False
+        minute = schedules.parse_cron(schedule.get("cron") or "").prev_at_or_before(now)
+        schedule["last_fired_at"] = schedules.iso_from_epoch(minute) if minute else ""
+        schedule["last_run_at"] = now_iso()
+        schedule["last_task_id"] = task.get("id") or ""
+        schedule["run_count"] = int(schedule.get("run_count") or 0) + 1
+        schedule["last_error"] = ""
+        self.schedule_store.save(schedule)
+        log("schedule %s (%s) fired: task %s"
+            % (schedule_id, schedule.get("cron") or "", task.get("id")))
+        self._publish({"type": "schedule_fired", "schedule": schedule_id, "task": task})
+        return True
+
+    def _schedule_busy_task(self, schedule):
+        """The task of the last run of this schedule, if it is still going."""
+        task_id = schedule.get("last_task_id") or ""
+        if not task_id:
+            return None
+        task = self.store.load(schedule.get("workspace_id") or "", task_id)
+        if task is None or task.get("status") in TERMINAL:
+            return None
+        return task
+
+    def make_task_from_schedule(self, schedule, now=None):
+        """The task a schedule becomes when its minute comes."""
+        workspace_id = schedule.get("workspace_id") or ""
+        if not workspace_id and self.default_workspace:
+            try:
+                workspace_id = self.default_workspace() or ""
+            except Exception:  # noqa: BLE001 - the agent may be down
+                workspace_id = ""
+        if not workspace_id:
+            log("schedule %s has no workspace - nothing to do"
+                % (schedule.get("id") or ""))
+            return None
+        meta = dict(schedule.get("meta") or {})
+        meta["schedule_id"] = schedule.get("id") or ""
+        meta["cron"] = schedule.get("cron") or ""
+        task = new_task({
+            "prompt": schedule.get("prompt") or "",
+            "title": schedule.get("title") or "",
+            "provider": schedule.get("provider") or "",
+            "model": schedule.get("model") or "",
+        }, workspace_id,
+            allow_paths=schedule.get("allow_paths"),
+            priority=int(schedule.get("priority") or 0),
+            model_params=schedule.get("model_params"),
+            limits=schedule.get("limits"),
+            policy=schedule.get("policy"),
+            meta=meta)
+        task["tenant_id"] = schedule.get("tenant_id") or ""
+        task["identity"] = schedule.get("identity") or ""
+        self.store.create(task)
+        self._publish({"type": "task_created", "task": task})
+        self.store.audit("schedule", schedule.get("id") or "",
+                         {"task_id": task.get("id") or "",
+                          "cron": schedule.get("cron") or ""})
+        return task
 
     # ---- the final word about a task --------------------------------------
     def _finalize(self, workspace_id, task_id, status, fields=None):
@@ -2714,6 +2825,7 @@ class Engine:
             try:
                 self.round()
                 self.check_plans()
+                self.check_schedules()
             except AgentError as exc:
                 log("round failed: %s" % exc)
             except Exception as exc:  # noqa: BLE001
@@ -2891,6 +3003,10 @@ class Handler(BaseHTTPRequestHandler):
             return "/api/tasks/" + rest
         if path == "/v1/projects":
             return "/api/projects"
+        if path == "/v1/schedules":
+            return "/api/schedules"
+        if path.startswith("/v1/schedules/"):
+            return "/api/schedules/" + path[len("/v1/schedules/"):]
         if path.startswith("/v1/queues/") and path.endswith("/status"):
             return "/api/queue/state"
         if path.startswith("/v1/exports/"):
@@ -2961,6 +3077,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._list_plans()
         if path.startswith("/api/plans/"):
             return self._get_plan(path[len("/api/plans/"):])
+        if path == "/api/schedules":
+            return self._list_schedules()
+        if path.startswith("/api/schedules/"):
+            return self._get_schedule(path[len("/api/schedules/"):])
         if path.startswith("/api/triggers/"):
             return self._get_trigger(path[len("/api/triggers/"):])
         if path.startswith("/api/threads/"):
@@ -3019,6 +3139,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._create_plan()
         if path.startswith("/api/plans/") and path.endswith("/cancel"):
             return self._cancel_plan(path[len("/api/plans/"):-len("/cancel")])
+        if path == "/api/schedules":
+            return self._create_schedule()
+        if path.startswith("/api/schedules/") and path.endswith("/pause"):
+            return self._set_schedule_enabled(path[len("/api/schedules/"):-len("/pause")],
+                                               False)
+        if path.startswith("/api/schedules/") and path.endswith("/resume"):
+            return self._set_schedule_enabled(path[len("/api/schedules/"):-len("/resume")],
+                                               True)
         if path.startswith("/api/threads/") and path.endswith("/spill"):
             return self._thread_spill(path[len("/api/threads/"):-len("/spill")])
         if path.startswith("/api/tasks/"):
@@ -3035,6 +3163,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self._versioned(urllib.parse.urlparse(self.path).path)
         if not self._guard() or not self._rate_limit():
             return
+        if path.startswith("/api/schedules/"):
+            return self._delete_schedule(path[len("/api/schedules/"):])
         if path.startswith("/api/tasks/"):
             return self._delete(path.rsplit("/", 1)[-1])
         return self._error(404, "not_found", "no such endpoint: %s" % path)
@@ -4037,6 +4167,70 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "not_found", "no plan %r" % plan_id)
         self._json(200, self.app.plan_view(plan))
 
+    def _list_schedules(self):
+        caller = self._project_of_caller()
+        workspace_id = caller or self._one("workspace_id")
+        items = self.app.schedule_store.list_schedules(workspace_id=workspace_id)
+        views = [self.app.schedule_view(one) for one in items]
+        self._json(200, {"schedules": views, "count": len(views)})
+
+    def _get_schedule(self, schedule_id):
+        schedule = self.app.schedule_store.load(schedule_id)
+        if schedule is None:
+            return self._error(404, "not_found", "no schedule %r" % schedule_id)
+        if not self._check_project({"workspace_id": schedule.get("workspace_id") or ""}):
+            return self._forbid("schedule %s" % schedule_id)
+        self._json(200, self.app.schedule_view(schedule))
+
+    def _create_schedule(self):
+        body = self._body()
+        if body is None:
+            return self._error(400, "bad_request", "the request body is not JSON")
+        workspace_id = str(body.get("workspace_id") or "").strip()
+        caller = self._project_of_caller()
+        if caller and workspace_id and workspace_id != caller:
+            return self._forbid("project %s" % workspace_id)
+        key = str(self.headers.get("Idempotency-Key")
+                  or body.get("idempotency_key") or "").strip()
+        if key:
+            existing = self.app.schedule_store.find_by_key(key)
+            if existing is not None:
+                self._json(200, dict(self.app.schedule_view(existing), duplicate=True))
+                return
+        try:
+            schedule = self.app.create_schedule(
+                body, key=key,
+                tenant_id=self.app.store.tenant_of_key(self._key()),
+                identity=self.app.store.identity_of_key(self._key()))
+        except schedules.ScheduleError as exc:
+            return self._error(400, "bad_request", str(exc))
+        self._json(200, self.app.schedule_view(schedule))
+
+    def _set_schedule_enabled(self, schedule_id, enabled):
+        schedule = self.app.schedule_store.load(schedule_id)
+        if schedule is None:
+            return self._error(404, "not_found", "no schedule %r" % schedule_id)
+        if not self._check_project({"workspace_id": schedule.get("workspace_id") or ""}):
+            return self._forbid("schedule %s" % schedule_id)
+        schedule["enabled"] = bool(enabled)
+        self.app.schedule_store.save(schedule)
+        self.app.events.publish({
+            "type": "schedule_resumed" if enabled else "schedule_paused",
+            "schedule": schedule.get("id") or "",
+        })
+        self._json(200, self.app.schedule_view(schedule))
+
+    def _delete_schedule(self, schedule_id):
+        schedule = self.app.schedule_store.load(schedule_id)
+        if schedule is None:
+            return self._error(404, "not_found", "no schedule %r" % schedule_id)
+        if not self._check_project({"workspace_id": schedule.get("workspace_id") or ""}):
+            return self._forbid("schedule %s" % schedule_id)
+        self.app.schedule_store.delete(schedule_id)
+        self.app.events.publish({"type": "schedule_deleted",
+                                 "schedule": schedule_id})
+        self._json(200, {"ok": True, "id": schedule_id})
+
     def _list_threads(self):
         caller = self._project_of_caller()
         workspace_id = caller or self._one("workspace_id")
@@ -4276,9 +4470,12 @@ class App:
         self.trigger_store = triggers.TriggerStore(data_dir)
         # The plans (the complex jobs that were split into steps).
         self.plan_store = plans.PlanStore(data_dir)
+        # The schedules: the work that comes back on its own, minute by minute.
+        self.schedule_store = schedules.ScheduleStore(data_dir)
         self.engine = Engine(self.store, self.agent, self.events, args, self.trigger_store,
                              self.write_thread_file, self.thread_file_path,
-                             self.decorate_event, self.plan_store)
+                             self.decorate_event, self.plan_store,
+                             self.schedule_store, self.default_workspace)
         self.trigger_rules = triggers.Rules(getattr(args, "trigger_config", ""))
         self.trigger_service = triggers.TriggerService(
             self.trigger_store, self.trigger_rules,
@@ -4685,6 +4882,7 @@ class App:
             "done": counts.get(DONE, 0),
             "failed": counts.get(FAILED, 0),
             "cancelled": counts.get(CANCELLED, 0),
+            "schedules": len(self.schedule_store.list_schedules(limit=0)),
             "avg_queue_wait_s": round(sum(waits) / len(waits), 1) if waits else 0.0,
             "avg_task_duration_s": (round(sum(durations) / len(durations), 1)
                                     if durations else 0.0),
@@ -4805,6 +5003,61 @@ class App:
                 if ws.get("id") == wanted:
                     return wanted
         return workspaces[0].get("id", "")
+
+    def create_schedule(self, body, key="", tenant_id="", identity=""):
+        """One schedule: the recipe of a work that comes back on its own.
+
+        Everything that is wrong with the recipe is said here, at the door:
+        a schedule that cannot fire is not a schedule.
+        """
+        fields = schedules.normalize(body)
+        workspace_id = fields.get("workspace_id") or ""
+        if not workspace_id:
+            workspace_id = self.default_workspace()
+        if not workspace_id:
+            raise schedules.ScheduleError(
+                "'workspace_id' is required (the agent has no workspace)")
+        fields["workspace_id"] = workspace_id
+        record = schedules.new_schedule(fields)
+        record["idempotency_key"] = key or ""
+        record["tenant_id"] = tenant_id or ""
+        record["identity"] = identity or ""
+        # The knobs of the task this schedule makes: they are checked here,
+        # not after a long wait in the queue.
+        params, error = parse_model_params(body)
+        if error:
+            raise schedules.ScheduleError(error)
+        limits, error = parse_limits(body)
+        if error:
+            raise schedules.ScheduleError(error)
+        policy, error = parse_policy(body)
+        if error:
+            raise schedules.ScheduleError(error)
+        record["model_params"] = params
+        record["limits"] = limits
+        record["policy"] = policy
+        self.schedule_store.save(record)
+        self.events.publish({"type": "schedule_created",
+                             "schedule": self.schedule_view(record)})
+        self.store.audit("schedule", record.get("id") or "",
+                         {"cron": record.get("cron") or "",
+                          "prompt": (record.get("prompt") or "")[:200]},
+                         actor=identity or "")
+        return record
+
+    def schedule_view(self, schedule):
+        """The schedule as a reader wants it: when it fires next, what it did."""
+        view = dict(schedule)
+        view["status"] = "enabled" if schedule.get("enabled", True) else "paused"
+        nxt = schedules.next_fire(schedule)
+        view["next_fire_at"] = schedules.iso_from_epoch(nxt) if nxt else ""
+        view["next_fire_local"] = (time.strftime("%Y-%m-%d %H:%M", time.localtime(nxt))
+                                   if nxt else "")
+        view["next_fire_in_s"] = int(nxt - time.time()) if nxt else 0
+        last = schedules.parse_iso(schedule.get("last_fired_at") or "")
+        view["last_fired_local"] = (time.strftime("%Y-%m-%d %H:%M", time.localtime(last))
+                                    if last else "")
+        return view
 
     def cancel_task(self, workspace_id, task_id):
         task = self.store.load(workspace_id, task_id)
@@ -4976,6 +5229,10 @@ def main(argv=None):
                         help="queue the task described by this task order file")
     parser.add_argument("--submit", metavar="PROMPT",
                         help="put a task in the queue and exit (no server needed)")
+    parser.add_argument("--schedule", nargs=2, metavar=("EXPR", "PROMPT"),
+                        help="add a schedule (a cron expression and what to do) and exit")
+    parser.add_argument("--list-schedules", action="store_true",
+                        help="print the schedules and exit")
     parser.add_argument("--title", default="", help="title for --submit")
     parser.add_argument("--allow-path", action="append", default=[],
                         help="a directory the task may touch (repeatable; the file "
@@ -4997,6 +5254,27 @@ def main(argv=None):
 
     if args.submit_order:
         return submit_order(app, args)
+
+    if args.list_schedules:
+        for one in app.schedule_store.list_schedules():
+            print("%s  %-16s  %-4s  %s" % (one.get("id") or "",
+                                            one.get("cron") or "",
+                                            "on" if one.get("enabled", True) else "off",
+                                            one.get("title") or one.get("prompt") or ""))
+        return 0
+
+    if args.schedule:
+        expression, prompt = args.schedule
+        try:
+            schedule = app.create_schedule({"cron": expression, "prompt": prompt,
+                                            "title": args.title})
+        except schedules.ScheduleError as exc:
+            print("cannot make the schedule: %s" % exc, file=sys.stderr)
+            return 2
+        log("schedule %s added: %s (%s)" % (schedule.get("id") or "",
+                                            schedule.get("cron") or "",
+                                            schedule.get("title") or ""))
+        return 0
 
     if args.submit:
         agent = Agent(args.agent)

@@ -174,7 +174,7 @@ curl http://127.0.0.1:8283/api/tasks
 | `POST` | `/api/tasks/{id}/start?workspace_id=` | 现在就做这件事（同样过额度闸门） |
 | `POST` | `/api/tasks/{id}/cancel?workspace_id=` | 停掉正在跑的那个（`POST /api/chat/stop`） |
 | `POST` | `/api/tasks/{id}/confirm?workspace_id=` | 回答一个「等你确认」的任务：`{message}`，答案会成为同一会话的下一轮 |
-| `GET` | `/api/events` | 生命周期事件流（SSE）：`task_created` / `task_updated` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled`，以及 `trigger_received` / `trigger_decided`（触发器入口）、`watchdog_alert`（看门狗）、`speech`（router 的一句话）、`queue_paused` / `queue_resumed`、`thread_summarized` |
+| `GET` | `/api/events` | 生命周期事件流（SSE）：`task_created` / `task_updated` / `task_done` / `task_failed` / `task_waiting_confirmation` / `task_cancelled`，以及 `trigger_received` / `trigger_decided`（触发器入口）、`watchdog_alert`（看门狗）、`speech`（router 的一句话）、`queue_paused` / `queue_resumed`、`thread_summarized`、`schedule_created` / `schedule_fired` / `schedule_skipped` / `schedule_paused` / `schedule_resumed` / `schedule_deleted`（定时任务） |
 
 ### 使用手册：排队与撤销
 
@@ -428,6 +428,7 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
 | 看一条线索知道什么 | `GET /api/threads/{id}/context`——窗口（最近 8 步）、掉出窗口的旧进展、以及下一个同线索任务会拿到的 prompt。`POST /api/threads` 手工开一条线索 |
 | 写回线索的摘要 | `POST /api/threads/{id}/spill {"summary": "…", "count": N}`（router 用；只有本机操作员能写——摘要会进 prompt） |
 | 交一个**计划**（复杂活儿拆成几步） | `POST /api/plans {"title": "…", "goal": "…", "steps": [{"key": "s1", "title": "…", "prompt": "…", "depends_on": []}]}`——计划变成一个父任务（装最终结果）+ 每步一个任务；`depends_on` 里的步骤没做完，这一步就不启动。`GET /api/plans` / `GET /api/plans/{id}` 看计划，`POST /api/plans/{id}/cancel` 取消 |
+| 交一个**定时任务**（到点了就变成一条新任务） | `POST /api/schedules {"cron": "*/5 * * * *", "prompt": "…", "title": "…"}`——表达式是标准的五段（分 时 日 月 周，本机时间），最小粒度**一分钟**。`GET /api/schedules` / `GET /api/schedules/{id}` 看它们，`POST /api/schedules/{id}/pause` \| `/resume` 停/开，`DELETE /api/schedules/{id}` 删掉 |
 | 交一份任务单 | `python3 sched/task_server.py --submit-order <文件>`，或把 `*.order` 文件发给微信 bot |
 | 排队任务用哪个 **provider+模型** | provider.yaml 顶层一行 `task_model: <provider>+<模型名>`（例：`task_model: minimax+MiniMax-M3.1-Flash`）。队列问 agent 要这个值，改完一分钟内自己看到，不用重启。额度闸门查的就是这个 provider 的额度 |
 
@@ -466,6 +467,50 @@ python3 sched/planner.py --submit /tmp/plan.json
 ```
 
 **计划是建议，不是命令**：模型拆的步不一定对，所以中间有人——改完再交。
+
+### 定时任务：一件事按分钟自己回来
+
+`not_before` 是**一次**的：到点做一次。**定时任务**是**天天**的：给它一个 cron 表达式，
+到点了它就变成一条新任务，排队，等额度。
+
+```bash
+# 每 5 分钟看一眼日志，写一句总结
+curl -X POST http://127.0.0.1:8283/api/schedules -H 'Content-Type: application/json' -d '{
+  "cron": "*/5 * * * *",
+  "prompt": "看一眼任务队列的日志，写一句今天的情况",
+  "title": "每五分钟看一眼"
+}'
+
+# 不用起服务也能加（直接写进记录）
+python3 sched/task_server.py --schedule "30 9 * * 1-5" "工作日早上九点半整理收件箱"
+python3 sched/task_server.py --list-schedules
+```
+
+**表达式是标准的五段**（**本机时间**，和 crontab 一样）：
+
+| 写法 | 意思 |
+| --- | --- |
+| `* * * * *` | 每**一分钟**——最小粒度就是一分钟 |
+| `*/5 * * * *` | 每五分钟 |
+| `0 * * * *` | 每小时整点 |
+| `30 9 * * 1-5` | 工作日 09:30 |
+| `0 0 1 * *` | 每月 1 号零点 |
+| `@daily` / `@hourly` / `@weekly` / `@monthly` | 常见的那几个（`@daily` = `0 0 * * *`） |
+
+写错了当场就被挡下（400，并说清是哪一段不对）：`60 * * * *`（没有第 60 分钟）、
+`* * * *`（少一段）、`5-1 * * * *`（区间反了）都不行。
+
+**几条刻意的选择**：
+
+- **最小粒度一分钟**：没有「秒」这一段——要按秒来的东西不该用 cron。
+- **上一次没做完，下一次就不排**（`overlap: true` 可以改）：队列一忙，定时任务会攒成
+  一堆；攒着的那一次不算数，记录里写着「上一次还没做完」。
+- **错过的分钟合成一次**：队列停了十分钟，醒来只补**一次**，不会涌出十条任务。
+- **到点只是排进队列**：还是过额度闸门、还是排队等——定时任务不是特权。
+- **它只是队列的一部分**：定时任务做的事，和手排的任务走同一条路（同一个额度、
+  同一个工作区、同样的事件）。
+
+网页上也有：队列页面中间的「定时任务」，填表达式和要做的事，按「加上」。
 
 ### 任务单：一个文件交一份活儿
 

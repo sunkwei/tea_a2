@@ -212,6 +212,51 @@
     <p class="hint">任务单是一个文本文件：填好交给队列（<code>--submit-order</code>），
       一次能带全所有设置（工作区、额外目录、provider、模型、模型参数、优先级、定时、标签…）。</p>
   </div>
+  <h2>定时任务 <span class="n" id="n-sched">0</span></h2>
+  <div class="new">
+    <div class="grid">
+      <label class="f">
+        <span>什么时候（cron，最小 1 分钟）</span>
+        <span class="when">
+          <select id="sch-when">
+            <option value="*/5 * * * *">每 5 分钟</option>
+            <option value="* * * * *">每 1 分钟</option>
+            <option value="0 * * * *">每小时</option>
+            <option value="0 0 * * *">每天 00:00</option>
+            <option value="30 9 * * 1-5">工作日 09:30</option>
+            <option value="custom">自己写…</option>
+          </select>
+          <input id="sch-cron" type="text" spellcheck="false" placeholder="分 时 日 月 周" hidden>
+        </span>
+      </label>
+      <label class="f">
+        <span>主题</span>
+        <input id="sch-title" type="text" spellcheck="false" placeholder="一句话说清（可留空）">
+      </label>
+      <label class="f">
+        <span>工作区</span>
+        <input id="sch-workspace" type="text" list="dl-workspace" spellcheck="false"
+               placeholder="留空 = 队列自己的工作区">
+      </label>
+      <label class="f wide">
+        <span>每次到点要做的事</span>
+        <textarea id="sch-prompt" rows="2" spellcheck="false"
+                  placeholder="到点了就让 agent 做这件事。"></textarea>
+      </label>
+    </div>
+    <div class="newrow">
+      <button class="primary" id="sch-go">加上</button>
+      <label class="f" style="flex-direction: row; align-items: center; gap: 6px;">
+        <input id="sch-overlap" type="checkbox" style="width:auto">
+        <span>上一次没做完也照样排（默认不排）</span>
+      </label>
+      <span class="msg" id="sch-msg"></span>
+    </div>
+    <p class="hint">cron 是<b>本机时间</b>的五段：<code>分 时 日 月 周</code>——
+      <code>*/5 * * * *</code> 每五分钟，<code>30 9 * * 1-5</code> 工作日 09:30，
+      <code>@daily</code> 每天零点。最小粒度<b>一分钟</b>；错过的分钟会合成一次，不会涌出一堆任务。</p>
+  </div>
+  <div id="s-sched"></div>
   <h2>排队中 <span class="n" id="n-queued">0</span></h2>
   <div id="s-queued"></div>
   <h2>进行中 <span class="n" id="n-running">0</span></h2>
@@ -221,7 +266,8 @@
 </main>
 <script>
 'use strict';
-var state = { tasks: [], health: null, agent: '', at: Date.now(), providers: [] };
+var state = { tasks: [], health: null, agent: '', at: Date.now(), providers: [],
+               schedules: [] };
 
 function el(tag, cls, text) {
   var n = document.createElement(tag);
@@ -400,6 +446,57 @@ function card(t) {
   acts.appendChild(del);
   c.appendChild(acts);
   return c;
+}
+
+/// One schedule: when it fires, what it did, and what one can do to it.
+function scheduleCard(s) {
+  var c = el('div', 'card');
+  var r1 = el('div', 'row1');
+  r1.appendChild(el('span', 'title', s.title || s.prompt || s.id));
+  r1.appendChild(el('span', 'tid', s.id));
+  r1.appendChild(el('span', 'pill ' + (s.enabled ? 'running' : 'cancelled'),
+                     s.enabled ? '开着' : '停着'));
+  r1.appendChild(el('span', 'pill when', '⏰ ' + (s.cron || '')));
+  c.appendChild(r1);
+  c.appendChild(el('div', 'prompt clamp', s.prompt || ''));
+  var times = el('div', 'times');
+  times.appendChild(el('span', '', '下次 ' + (s.next_fire_local || '—')));
+  times.appendChild(el('span', '', '上次 ' + (s.last_fired_local || '还没跑过')));
+  times.appendChild(el('span', '', '跑了 ' + (s.run_count || 0) + ' 次'));
+  if (s.skipped_count) times.appendChild(el('span', '', '等了 ' + s.skipped_count + ' 次'));
+  c.appendChild(times);
+  if (s.last_error) c.appendChild(el('div', 'err', '✗ ' + s.last_error));
+  var acts = el('div', 'acts');
+  var pause = el('button', '', s.enabled ? '暂停' : '继续');
+  pause.onclick = function () {
+    fetch('/api/schedules/' + encodeURIComponent(s.id) + (s.enabled ? '/pause' : '/resume'),
+          { method: 'POST' }).then(loadSchedules);
+  };
+  acts.appendChild(pause);
+  var del = el('button', 'danger', '删除');
+  del.onclick = function () {
+    if (!window.confirm('删除这个定时任务？')) return;
+    fetch('/api/schedules/' + encodeURIComponent(s.id), { method: 'DELETE' })
+        .then(loadSchedules);
+  };
+  acts.appendChild(del);
+  c.appendChild(acts);
+  return c;
+}
+
+function loadSchedules() {
+  return fetch('/api/schedules').then(function (r) { return r.json(); }).then(function (d) {
+    var body = unwrap(d);
+    state.schedules = body.schedules || [];
+    var host = document.getElementById('s-sched');
+    host.textContent = '';
+    document.getElementById('n-sched').textContent = state.schedules.length;
+    if (!state.schedules.length) {
+      host.appendChild(el('div', 'empty', '（还没有定时任务）'));
+      return;
+    }
+    state.schedules.forEach(function (s) { host.appendChild(scheduleCard(s)); });
+  }).catch(function () {});
 }
 
 /// The queue answers in one shape: {code, message, request_id, data}. The page
@@ -591,6 +688,49 @@ function createTask() {
     .catch(function () { say('排队失败：连不上队列服务。', false); });
 }
 
+function saySchedule(text, ok) {
+  var box = document.getElementById('sch-msg');
+  box.textContent = text;
+  box.className = 'msg ' + (ok ? 'ok' : 'bad');
+}
+
+function createSchedule() {
+  var choice = val('sch-when');
+  var expression = choice === 'custom' ? val('sch-cron') : choice;
+  var prompt = val('sch-prompt');
+  if (!prompt) {
+    document.getElementById('sch-prompt').focus();
+    saySchedule('先写一句要做的事。', false);
+    return;
+  }
+  if (!expression) {
+    saySchedule('写一个 cron 表达式（分 时 日 月 周）。', false);
+    return;
+  }
+  var body = { cron: expression, prompt: prompt };
+  var title = val('sch-title');
+  if (title) body.title = title;
+  var workspace = val('sch-workspace');
+  if (workspace) body.workspace = workspace;
+  if (document.getElementById('sch-overlap').checked) body.overlap = true;
+  fetch('/api/schedules', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(body) })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: unwrap(d) }; }); })
+    .then(function (res) {
+      if (!res.ok) {
+        var err = (res.d && res.d.error) || {};
+        saySchedule('加上失败：' + (err.message || '未知错误'), false);
+        return;
+      }
+      saySchedule('加上了：' + (res.d.id || ''), true);
+      ['sch-prompt', 'sch-title', 'sch-cron'].forEach(function (id) {
+        document.getElementById(id).value = '';
+      });
+      loadSchedules();
+    })
+    .catch(function () { saySchedule('加上失败：连不上队列服务。', false); });
+}
+
 function refresh() {
   return fetch('/v1/agent-tasks').then(function (r) { return r.json(); }).then(function (d) {
     state.tasks = unwrap(d).tasks || [];
@@ -644,10 +784,20 @@ document.getElementById('new-when').addEventListener('change', function () {
   }
 });
 document.getElementById('new-provider').addEventListener('input', fillModels);
-refresh(); health(); loadPickers();
+document.getElementById('sch-go').onclick = createSchedule;
+document.getElementById('sch-when').addEventListener('change', function () {
+  var box = document.getElementById('sch-cron');
+  box.hidden = val('sch-when') !== 'custom';
+  if (!box.hidden && !box.value) box.value = '*/5 * * * *';
+});
+document.getElementById('sch-prompt').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); createSchedule(); }
+});
+refresh(); health(); loadPickers(); loadSchedules();
 setInterval(refresh, 5000);
 setInterval(health, 10000);
 setInterval(loadPickers, 60000);
+setInterval(loadSchedules, 10000);
 // 事件流：有任务变化就重画（比轮询快）
 try {
   var es = new EventSource('/api/events');

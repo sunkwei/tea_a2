@@ -19,6 +19,7 @@ README 讲的是「这是什么、为什么这么设计」；[HTTP 接口](api.m
 | 提交完就撒手，回头再来取结果（回合句柄） | [2.5](#25-回合句柄提交完可以撒手) |
 | 让这台机器去控制另一台 tea_a2（级联） | [2.17](#217-级联控制另一台-tea_a2) |
 | 定时做一件活儿（`not_before`、微信 `/at`） | [3.2.1](#321-定时做一件活儿) · [4](#4-聊天端的命令) |
+| 让活儿按时间自己回来（cron 定时任务） | [3.2.2](#322-定时任务cron) |
 | 在微信 / Telegram 里排队 | [4. 聊天端的命令](#4-聊天端的命令) |
 | 写脚本调 agent | [5. 给脚本用的客户端](#5-给脚本用的客户端) |
 | 构建、测试、装成服务 | [6. 脚本](#6-脚本) |
@@ -203,7 +204,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"1.2.12","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"1.2.13","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -795,6 +796,8 @@ python3 sched/task_server.py --agent http://127.0.0.1:8282 --port 8283
 | `--chat-timeout <s>` | 一轮对话最多等多久（0 = 不限） | `3600` |
 | `--sse-idle-timeout <s>` | 事件流多久没人说话就关掉 | `3600` |
 | `--submit <PROMPT>` | 排一个任务然后退出（**不需要服务在跑**） | |
+| `--schedule <EXPR> <PROMPT>` | 加一个定时任务然后退出（cron 表达式 + 要做的事） | |
+| `--list-schedules` | 打印定时任务然后退出 | |
 | `--title <t>` | `--submit` 的标题 | |
 | `--allow-path <dir>` | 这个任务能额外碰哪个目录（可重复） | |
 | `--no-serve` | 不开 HTTP 服务，只跑调度器（cron 式用法） | 关 |
@@ -869,6 +872,44 @@ curl -X POST http://127.0.0.1:8283/api/tasks \
      -H 'Content-Type: application/json' -H 'Idempotency-Key: run-2026-10-23-001' \
      -d '{"prompt":"..."}'
 ```
+
+### 3.2.2 定时任务（cron）
+
+「晚点做」是**一次**的。要**天天**做，给队列一个 cron 表达式：
+
+```bash
+# 每 5 分钟看一眼日志
+curl -X POST http://127.0.0.1:8283/api/schedules -H 'Content-Type: application/json' \
+     -d '{"cron":"*/5 * * * *","prompt":"看一眼日志，写一句总结","title":"每五分钟看一眼"}'
+
+# 不用服务在跑也能加（直接写进记录）
+python3 sched/task_server.py --schedule "30 9 * * 1-5" "工作日早上九点半整理收件箱"
+python3 sched/task_server.py --list-schedules
+
+# 看它们 / 停一个 / 开一个 / 删一个
+curl -s http://127.0.0.1:8283/api/schedules
+curl -X POST http://127.0.0.1:8283/api/schedules/sc_xxx/pause
+curl -X POST http://127.0.0.1:8283/api/schedules/sc_xxx/resume
+curl -X DELETE http://127.0.0.1:8283/api/schedules/sc_xxx
+```
+
+表达式是标准的五段（**本机时间**）：`分 时 日 月 周`。
+
+| 写法 | 意思 |
+| --- | --- |
+| `* * * * *` | 每**一分钟**（最小粒度就是一分钟） |
+| `*/5 * * * *` | 每五分钟 |
+| `0 * * * *` | 每小时整点 |
+| `30 9 * * 1-5` | 工作日 09:30 |
+| `@daily` / `@hourly` / `@weekly` / `@monthly` | 常见的那几个 |
+
+写错了当场 `400 bad_request`（`data.error` 里说清是哪一段）。
+
+**三条规矩**：
+
+- 上一次没做完，下一次**不排**（`overlap: true` 可以改）；
+- 错过的分钟**合成一次**（队列停了十分钟，醒来只补一次）；
+- 到点只是**排进队列**：还是过额度闸门、还是排队等。
 
 ### 3.3 看队列
 
@@ -978,6 +1019,10 @@ curl -s http://127.0.0.1:8283/api/tasks -H 'X-Project-Key: XXXX...'
 ```bash
 # 排一条（不用服务在跑）
 python3 sched/task_server.py --submit "做这件事" --title "标题"
+
+# 加一个定时任务（不用服务在跑）
+python3 sched/task_server.py --schedule "*/5 * * * *" "看一眼日志，写一句总结"
+python3 sched/task_server.py --list-schedules
 
 # 让这个任务能碰工作区以外的目录
 python3 sched/task_server.py --submit "整理 /data/raw 的日志" --allow-path /data/raw
