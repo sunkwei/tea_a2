@@ -33,6 +33,11 @@ class MainActivity : Activity() {
     /// reported, not retried in a loop.
     @Volatile
     private var pageLoaded: Boolean = false
+    /// The line that tells the user which address the computer has to open.
+    private var addressText: TextView? = null
+    /// The address that is on the screen right now.
+    @Volatile
+    private var shownAddress: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -149,6 +154,34 @@ class MainActivity : Activity() {
     }
 
     /**
+     * Writes the address the computer has to open.
+     *
+     * The agent listens on every interface, so it does not care which network
+     * the phone is on - but the *address* changes (a new Wi-Fi, a new DHCP
+     * lease). The line has to follow it, and the user has to be told: the
+     * peer snippet on the computer holds the old address.
+     */
+    private fun refreshAddress(settings: A2Settings) {
+        val address = PhoneNet.primaryAddress(this)
+        val url = if (address.isEmpty()) "" else "http://$address:${settings.port}"
+        val text = if (url.isEmpty()) {
+            "没有 Wi-Fi 地址（电脑现在连不上）"
+        } else {
+            "电脑打开：$url"
+        }
+        addressText?.text = text
+        val old = shownAddress
+        shownAddress = address
+        if (old.isNotEmpty() && old != address && address.isNotEmpty()) {
+            Toast.makeText(
+                this,
+                "地址变了（$old → $address），重新复制一次给电脑",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /**
      * Watches the agent: when it is gone (restarted, crashed) the page is
      * loaded again once it is back. The page itself is never reloaded just
      * because a subresource failed - that was a reload loop.
@@ -162,6 +195,9 @@ class MainActivity : Activity() {
                         pageLoaded = false
                         handler.post { loadWhenReady(settings) }
                     }
+                    // The address follows the network: the agent keeps
+                    // listening, but the number the computer has to use moves.
+                    handler.post { refreshAddress(settings) }
                 }.start()
                 handler.postDelayed(this, 10000)
             }
@@ -169,11 +205,12 @@ class MainActivity : Activity() {
     }
 
     /** Copies the snippet for the desktop's ~/.tea_agent/tea_agent.yaml. */
-    private fun copyPeerSnippet(settings: A2Settings, url: String) {
-        if (url.isEmpty()) {
+    private fun copyPeerSnippet(settings: A2Settings, address: String) {
+        if (address.isEmpty()) {
             Toast.makeText(this, "还没有局域网地址", Toast.LENGTH_SHORT).show()
             return
         }
+        val url = "http://$address:${settings.port}"
         val snippet = buildString {
             append("# 桌面上的 ~/.tea_agent/tea_agent.yaml 里加这段：\n")
             append("peers:\n")
@@ -354,19 +391,14 @@ class MainActivity : Activity() {
         addressRow.orientation = LinearLayout.HORIZONTAL
         addressRow.gravity = Gravity.CENTER_VERTICAL
         addressRow.setPadding(12, 0, 12, 0)
-        val addressText = TextView(this)
-        addressText.textSize = 12f
-        addressText.setTextColor(0xFF9AA0A6.toInt())
-        val lanIp = PhoneNet.primaryAddress(this)
-        val url = if (lanIp.isEmpty()) "" else "http://$lanIp:${settings.port}"
-        addressText.text = if (url.isEmpty()) {
-            "没拿到局域网地址（Wi-Fi 没连？）"
-        } else {
-            "电脑打开：$url"
-        }
-        addressRow.addView(addressText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val label = TextView(this)
+        label.textSize = 12f
+        label.setTextColor(0xFF9AA0A6.toInt())
+        addressText = label
+        refreshAddress(settings)
+        addressRow.addView(label, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         addressRow.addView(topButton("复制") {
-            copyPeerSnippet(settings, addressText.text.toString())
+            copyPeerSnippet(settings, PhoneNet.primaryAddress(this))
         })
 
         val view = WebView(this)

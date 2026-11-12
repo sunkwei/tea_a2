@@ -95,6 +95,34 @@ object PhoneNet {
         return found.toList()
     }
 
-    /** The address a computer should use, or an empty string. */
-    fun primaryAddress(context: Context): String = lanAddresses(context).firstOrNull() ?: ""
+    /**
+     * The address a computer should use - the Wi-Fi one, or an empty string.
+     *
+     * The other addresses (a VPN, the cellular ones) are not reachable from
+     * another machine, so reporting them would only send the user to a dead
+     * address.
+     */
+    fun primaryAddress(context: Context): String {
+        for (address in lanAddresses(context)) {
+            if (isWifiAddress(address)) return address
+        }
+        return ""
+    }
+
+    /** Is this address the one of the Wi-Fi interface? */
+    private fun isWifiAddress(address: String): Boolean {
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                val item = interfaces.nextElement()
+                if (!item.name.startsWith("wlan")) continue
+                for (own in item.inetAddresses) {
+                    if (own is Inet4Address && own.hostAddress == address) return true
+                }
+            }
+        } catch (e: Exception) {
+            // fall through: the caller's list is still usable
+        }
+        return false
+    }
 }
