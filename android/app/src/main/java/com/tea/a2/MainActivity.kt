@@ -70,6 +70,16 @@ class MainActivity : Activity() {
     private fun keepAlive() {
         val power = getSystemService(android.os.PowerManager::class.java)
         val exempt = power?.isIgnoringBatteryOptimizations(packageName) == true
+        if (exempt) {
+            // The battery exemption is already there. The vendor's own policy
+            // ("省电策略") is the one that really matters, and it cannot be
+            // read from here - so send the user to the app's page anyway.
+            Toast.makeText(
+                this,
+                "电量优化已豁免；还要确认「省电策略」是无限制",
+                Toast.LENGTH_LONG
+            ).show()
+        }
         if (!exempt) {
             // Xiaomi / HyperOS: the per app power policy ("省电策略") is what
             // really decides whether the app keeps running with the screen
@@ -239,13 +249,31 @@ class MainActivity : Activity() {
         bar.gravity = Gravity.CENTER_VERTICAL
         bar.setPadding(8, 8, 8, 8)
 
-        bar.addView(topButton("Setup") {
+        bar.addView(topButton("配置") {
             startActivity(Intent(this, SetupActivity::class.java))
         })
-        bar.addView(topButton("Capture") {
-            CaptureActivity.ask(this)
+        bar.addView(topButton("截屏") {
+            // Two ways to take a picture:
+            //  * Shizuku's `screencap` - no consent, works everywhere;
+            //  * MediaProjection - needs the user's consent, but Android 16
+            //    only gives that type of foreground service to the system
+            //    (it wants the privileged CAPTURE_VIDEO_OUTPUT permission),
+            //    so on Android 16 it is a dead end for a normal app.
+            when {
+                ShizukuHelper.permissionGranted() -> Toast.makeText(
+                    this,
+                    "截屏走 Shizuku 的 screencap，不用授权；让 agent 直接截就行",
+                    Toast.LENGTH_LONG
+                ).show()
+                android.os.Build.VERSION.SDK_INT >= 36 -> Toast.makeText(
+                    this,
+                    "这台 Android 不让普通 app 用录屏授权，截屏请开 Shizuku",
+                    Toast.LENGTH_LONG
+                ).show()
+                else -> CaptureActivity.ask(this)
+            }
         })
-        bar.addView(topButton("Browser") {
+        bar.addView(topButton("浏览器") {
             val url = "http://127.0.0.1:${settings.port}/"
             startActivity(
                 Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -269,12 +297,16 @@ class MainActivity : Activity() {
                 ).show()
             }
         })
-        bar.addView(topButton("后台") {
+        bar.addView(topButton("保活") {
             keepAlive()
         })
-        bar.addView(topButton("Stop") {
+        bar.addView(topButton("停止") {
             AgentService.stop(this)
-            Toast.makeText(this, "the agent is stopping", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "agent 已停止；重新打开 app 就会再起来",
+                Toast.LENGTH_LONG
+            ).show()
         })
 
         val view = WebView(this)
