@@ -20,11 +20,18 @@ import android.util.Log
 class AgentService : Service() {
 
     private var bridge: PhoneBridge? = null
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
+        // The type matters: the two argument startForeground() takes every
+        // type the manifest declares - and on Android 16 a service that
+        // declares mediaProjection needs the system permission
+        // CAPTURE_VIDEO_OUTPUT to start at all. So the service starts with
+        // its own type only, and the capture type is added later (if the
+        // system allows it).
+        startInForeground()
 
         val settings = A2Settings(this)
         val teaHome = settings.teaHome()
@@ -50,6 +57,23 @@ class AgentService : Service() {
         if (token.isNotEmpty()) {
             argv += listOf("--api-token", token)
         }
+        // A partial wake lock: with the screen off the system is free to
+        // throttle the CPU, and then a turn takes minutes instead of
+        // seconds. The cost is the battery.
+        if (A2Settings(this).keepAwake) {
+            try {
+                val power = getSystemService(android.os.PowerManager::class.java)
+                wakeLock = power?.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK, "a2:agent"
+                )?.also {
+                    it.acquire()
+                    Log.i(TAG, "the wake lock is held")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "the wake lock could not be taken: " + e.message)
+            }
+        }
+
         Log.i(TAG, "starting the agent: " + argv.joinToString(" "))
         A2Native.start(argv.toTypedArray())
 
@@ -58,10 +82,37 @@ class AgentService : Service() {
         }
     }
 
+    /**
+     * Starts (or keeps) the service in the foreground with its own type.
+     * A failure here must not take the app down: the agent can run without
+     * the notification.
+     */
+    private fun startInForeground(type: Int = 0) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && type != 0) {
+                // Android 14+: the type is named explicitly.
+                startForeground(NOTIFICATION_ID, buildNotification(), type)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    buildNotification(),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                // Before Android 14 the types come from the manifest.
+                startForeground(NOTIFICATION_ID, buildNotification())
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "the foreground service did not start: " + e.message)
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_MEDIA_PROJECTION) {
             // The service is already in the foreground; this adds the type
-            // the screen capture needs.
+            // the screen capture needs. On Android 16 the system may refuse
+            // it (CAPTURE_VIDEO_OUTPUT is a system permission) - then the
+            // capture goes through Shizuku instead.
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
@@ -81,6 +132,13 @@ class AgentService : Service() {
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "the service is going away")
+        try {
+            wakeLock?.release()
+        } catch (e: Exception) {
+            // releasing twice is not an error
+        }
+        wakeLock = null
         bridge?.stop()
         bridge = null
         A2Native.stop()
@@ -142,6 +200,9 @@ class AgentService : Service() {
          * before the app may take a screenshot. The agent's service is
          * already in the foreground; this adds the second type to it.
          */
+        @Volatile
+        var mediaProjectionAllowed: Boolean = true
+
         fun enableMediaProjection(context: android.content.Context) {
             val intent = Intent(context, AgentService::class.java)
             intent.action = ACTION_MEDIA_PROJECTION

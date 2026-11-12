@@ -47,6 +47,15 @@ class A2Settings(context: Context) {
         get() = prefs.getBoolean("lan_access", false)
         set(value) = prefs.edit().putBoolean("lan_access", value).apply()
 
+    /**
+     * Whether the agent holds a partial wake lock. Without it the system
+     * may throttle the CPU when the screen is off; with it the agent keeps
+     * working (and keeps the battery busy).
+     */
+    var keepAwake: Boolean
+        get() = prefs.getBoolean("keep_awake", true)
+        set(value) = prefs.edit().putBoolean("keep_awake", value).apply()
+
     /** Whether the bridge answers at all. */
     var bridgeEnabled: Boolean
         get() = prefs.getBoolean("bridge_enabled", true)

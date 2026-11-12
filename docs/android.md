@@ -130,6 +130,47 @@ agent 说话，而 agent 能跑命令。开之前想清楚。
 | 截图（MediaProjection） | 82 KB 的真 PNG，连截三张 1～3 秒 ✅ |
 | 手机上的 Web UI | 侧栏收成抽屉、聊天区占满 ✅ |
 
+## 真机上遇到的两个坑（小米 HyperOS / Android 16）
+
+### 1. Android 16：一启动就退（`SecurityException`）
+
+Android 16 上，带 `mediaProjection` 类型的前台服务还需要系统权限
+`CAPTURE_VIDEO_OUTPUT`——普通 app 拿不到。而 `startForeground(id, notification)`
+这个两参数的版本会把 **manifest 里声明的所有类型**都算进去，于是 app 一启动就崩：
+
+```
+java.lang.SecurityException: Starting FGS with type mediaProjection
+  requires permissions: ... [android.permission.CAPTURE_VIDEO_OUTPUT, android.permission.project_media]
+```
+
+**做法**：前台服务只用 `specialUse` 类型启动（三参数的 `startForeground` 明确写类型），
+截屏时再单独加 `mediaProjection` 类型；加不上就退到 Shizuku 的 `screencap`。
+
+### 2. 息屏之后 agent 变聋（HyperOS 冻结 uid）
+
+屏幕一关，HyperOS 会**冻结整个 uid**（不是普通的 Doze，是厂商自己的那层）：
+
+```
+PowerManagerServiceImpl: Partial wakeLock:['a2:agent' ...], disabled: true, reason: greeze
+PowerManagerServiceImpl: ... reason: UidFrozen
+```
+
+被冻结的 uid 里所有线程都不跑——端口还在监听，但没人应答；app 的 wakelock 也被系统
+禁用。唤醒屏幕立刻恢复。
+
+**做法**（一次设置，app 里的「后台」按钮会带你过去）：
+设置 → 应用设置 → 应用管理 → A2 →
+- **省电策略 → 无限制**（这一条最关键：冻结列表就是按它来的）
+- 允许通知（前台服务的通知要看得见）
+- 允许后台活动 / 锁住最近任务（可选）
+
+app 这边也做了能做的：常驻一把 partial wake lock（`a2:agent`），让系统在允许的
+情况下别给 CPU 降频；顶栏的「后台」按钮会依次尝试厂商的省电策略页
+（`miui.intent.action.POWER_HIDE_MODE_APP_LIST`）、系统的电量优化豁免页、通知设置页。
+
+> 注：`dumpsys deviceidle whitelist +<包名>`（Doze 白名单）**不够**——HyperOS 冻结
+> 是厂商层的行为，跟 Doze 白名单是两套东西。
+
 ## 已知的边界
 
 - **没有 root 就没有别的 app 的私有目录**。Shizuku 的 shell 身份也读不到

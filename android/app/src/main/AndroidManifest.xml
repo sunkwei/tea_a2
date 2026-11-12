@@ -13,6 +13,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 息屏时系统会冻结后台的 app（Doze / HyperOS 的「省电」），agent 就断了。
+         这一条权限是让系统弹那个「允许后台运行」的窗口。 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 息屏时系统可以给后台的 app 降频：agent 拿着一把 partial wake lock。 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- The phone bridge: where the phone is, what is on the clipboard. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

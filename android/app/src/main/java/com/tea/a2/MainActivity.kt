@@ -43,6 +43,7 @@ class MainActivity : Activity() {
         // The agent needs a moment to bind its port. Loading the page before
         // that gives the user "ERR_CONNECTION_REFUSED" and a dead screen.
         loadWhenReady(settings)
+        checkKeepAlive(settings)
         handleSharedText(intent)
     }
 
@@ -50,6 +51,98 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleSharedText(intent)
+    }
+
+    /**
+     * Keeps the agent alive when the screen is off.
+     *
+     * When the phone dozes, the system freezes the app: the agent keeps its
+     * process but stops answering - the web UI shows a dead page. Two things
+     * have to be true: the app must be exempt from the battery optimisation,
+     * and its notifications must be on (a foreground service without a
+     * notification is a foreground service the system may drop).
+     */
+    private fun keepAlive() {
+        val power = getSystemService(android.os.PowerManager::class.java)
+        val exempt = power?.isIgnoringBatteryOptimizations(packageName) == true
+        if (!exempt) {
+            // Xiaomi / HyperOS: the per app power policy ("省电策略") is what
+            // really decides whether the app keeps running with the screen
+            // off. That screen has its own intent; the standard one only
+            // leads to the battery list.
+            if (openVendorPowerSettings()) return
+            try {
+                startActivity(
+                    Intent(
+                        android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + packageName)
+                    )
+                )
+                return
+            } catch (e: Exception) {
+                // Some ROMs do not have that screen; fall through to the
+                // manual settings.
+            }
+        }
+        val notifications = getSystemService(android.app.NotificationManager::class.java)
+        if (notifications != null && !notifications.areNotificationsEnabled()) {
+            try {
+                startActivity(
+                    Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+                )
+                return
+            } catch (e: Exception) {
+                // no such screen either: the manual settings it is
+            }
+        }
+        try {
+            startActivity(
+                Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:" + packageName))
+            )
+        } catch (e: Exception) {
+            Toast.makeText(this, "no settings screen on this phone", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * The vendor screen where the per app power policy lives. MIUI and
+     * HyperOS keep it here; other ROMs do not have it, and the caller falls
+     * back to the standard battery optimisation screen.
+     */
+    private fun openVendorPowerSettings(): Boolean {
+        val candidates = listOf(
+            Intent("miui.intent.action.POWER_HIDE_MODE_APP_LIST")
+                .putExtra("package_name", packageName)
+                .putExtra("packageName", packageName)
+                .putExtra("package_label", getString(R.string.app_name)),
+            Intent("com.miui.powerkeeper.ui.HiddenAppsConfigActivity")
+                .putExtra("package_name", packageName)
+                .putExtra("packageName", packageName)
+        )
+        for (intent in candidates) {
+            try {
+                startActivity(intent)
+                return true
+            } catch (e: Exception) {
+                // this ROM does not have that screen
+            }
+        }
+        return false
+    }
+
+    /** Tells the user (once) that the agent needs the exemption. */
+    private fun checkKeepAlive(settings: A2Settings) {
+        val power = getSystemService(android.os.PowerManager::class.java)
+        if (power?.isIgnoringBatteryOptimizations(packageName) == true) return
+        handler.postDelayed({
+            Toast.makeText(
+                this,
+                "点顶栏的「后台」放行一次，息屏后 agent 才不会被冻住",
+                Toast.LENGTH_LONG
+            ).show()
+        }, 1500)
     }
 
     /** Waits for the agent to answer, then shows its web UI. */
@@ -149,6 +242,9 @@ class MainActivity : Activity() {
                     Toast.LENGTH_LONG
                 ).show()
             }
+        })
+        bar.addView(topButton("后台") {
+            keepAlive()
         })
         bar.addView(topButton("Stop") {
             AgentService.stop(this)

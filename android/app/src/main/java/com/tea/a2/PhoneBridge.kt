@@ -446,7 +446,9 @@ class PhoneBridge(private val context: Context) {
         if (png == null) {
             return JSONObject()
                 .put("ok", false)
-                .put("error", "no screen capture yet - the user has to allow it once in the app")
+                .put("error", "no screen capture yet - the user has to allow it once in the app " +
+                    "(on Android 16 the system only lets the screen projection app do this; " +
+                    "with Shizuku the picture comes from 'screencap' instead)")
         }
         return JSONObject()
             .put("ok", true)
