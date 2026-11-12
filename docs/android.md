@@ -171,6 +171,34 @@ app 这边也做了能做的：常驻一把 partial wake lock（`a2:agent`），
 > 注：`dumpsys deviceidle whitelist +<包名>`（Doze 白名单）**不够**——HyperOS 冻结
 > 是厂商层的行为，跟 Doze 白名单是两套东西。
 
+## 真机验收（小米 2311DRK48C，Android 16 / HyperOS）
+
+息屏状态下跑通的（屏幕关掉、手机放桌上）：
+
+| 事情 | 结果 |
+| --- | --- |
+| `/api/health`、`/api/tools`、`/api/config/reload` | 都应答 ✓ |
+| 一次裸模型调用（`/api/llm/chat`） | 2.3 s 返回 ✓ |
+| 整轮对话（`POST /api/chat`） | 3.5 s 跑完 ✓ |
+| **agent 自己调 `toolkit_phone`** | 「小米 2311DRK48C / Android 16 / 电量 97%」✓ |
+| Shizuku shell（`id`） | `uid=2000(shell)`，带 input/log/adb/sdcard 组 ✓ |
+| Shizuku 截图（`screencap -p`） | 真 PNG ✓（不用 MediaProjection 授权） |
+| Shizuku 模拟点击（`input tap`） | ✓ |
+| Shizuku 读短信收件箱（`content query`） | 读到真短信 ✓ |
+
+### Shizuku 的两个坑
+
+1. **`Shizuku.newProcess` 是 private**（v13 的 API），得反射调用；它返回的
+   `ShizukuRemoteProcess` 就是一个 `java.lang.Process` ✓。
+2. **`Process.waitFor(timeout)` 在 Shizuku 上不能用**：远端进程没结束时它抛异常而不是
+   说「还在跑」，基类实现当场就放弃了。要用 Shizuku 自己的
+   `waitForTimeout(timeout, unit)`。
+
+### 还有一条要注意的
+
+一个卡死的轮子会把会话占住，之后的对话都接在它上面（看起来像「请求没反应」）。
+`GET /api/turns` 能看到卡住的那一轮。
+
 ## 已知的边界
 
 - **没有 root 就没有别的 app 的私有目录**。Shizuku 的 shell 身份也读不到

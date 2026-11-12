@@ -122,6 +122,24 @@ object ShizukuHelper {
 
     private class Raw(val exitCode: Int, val stdoutBytes: ByteArray, val stderrBytes: ByteArray)
 
+    /**
+     * Waits for the command to end.
+     *
+     * java.lang.Process.waitFor(timeout) does not work with Shizuku: the
+     * remote process throws instead of saying "still running", so the base
+     * implementation gives up at once. Shizuku has its own waitForTimeout().
+     */
+    private fun waitFor(process: Process, timeoutMs: Long): Boolean = try {
+        if (process is rikka.shizuku.ShizukuRemoteProcess) {
+            process.waitForTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+        } else {
+            process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "the wait failed: " + e.message)
+        false
+    }
+
     private fun run(command: List<String>, timeoutMs: Long): Raw? {
         if (!permissionGranted()) return null
         var process: Process? = null
@@ -135,10 +153,19 @@ object ShizukuHelper {
             errThread.isDaemon = true
             outThread.start()
             errThread.start()
-            process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            val exited = waitFor(process, timeoutMs)
             outThread.join(500)
             errThread.join(500)
-            Raw(process.exitValue(), out.toByteArray(), err.toByteArray())
+            val code = if (exited) {
+                try {
+                    process.exitValue()
+                } catch (e: Exception) {
+                    -1
+                }
+            } else {
+                -1
+            }
+            Raw(code, out.toByteArray(), err.toByteArray())
         } catch (e: Exception) {
             Log.w(TAG, "the command failed: " + e.message)
             null
