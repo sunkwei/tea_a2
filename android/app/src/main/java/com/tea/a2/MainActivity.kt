@@ -28,6 +28,10 @@ class MainActivity : Activity() {
     private var webView: WebView? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    /// True once the agent's page has loaded: after that a failed load is
+    /// reported, not retried in a loop.
+    @Volatile
+    private var pageLoaded: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +47,7 @@ class MainActivity : Activity() {
         // The agent needs a moment to bind its port. Loading the page before
         // that gives the user "ERR_CONNECTION_REFUSED" and a dead screen.
         loadWhenReady(settings)
+        startWatchdog(settings)
         checkKeepAlive(settings)
         handleSharedText(intent)
     }
@@ -132,6 +137,26 @@ class MainActivity : Activity() {
         return false
     }
 
+    /**
+     * Watches the agent: when it is gone (restarted, crashed) the page is
+     * loaded again once it is back. The page itself is never reloaded just
+     * because a subresource failed - that was a reload loop.
+     */
+    private fun startWatchdog(settings: A2Settings) {
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                Thread {
+                    val alive = probe(settings.port)
+                    if (!alive && pageLoaded) {
+                        pageLoaded = false
+                        handler.post { loadWhenReady(settings) }
+                    }
+                }.start()
+                handler.postDelayed(this, 10000)
+            }
+        }, 10000)
+    }
+
     /** Tells the user (once) that the agent needs the exemption. */
     private fun checkKeepAlive(settings: A2Settings) {
         val power = getSystemService(android.os.PowerManager::class.java)
@@ -149,6 +174,7 @@ class MainActivity : Activity() {
     private fun loadWhenReady(settings: A2Settings, attempt: Int = 0) {
         val url = "http://127.0.0.1:${settings.port}/"
         val view = webView
+        pageLoaded = false
         Thread {
             val alive = probe(settings.port)
             handler.post {
@@ -162,9 +188,9 @@ class MainActivity : Activity() {
                     }, 2500)
                 } else if (attempt < 60) {
                     handler.postDelayed({ loadWhenReady(settings, attempt + 1) }, 500)
-                } else {
-                    webView?.loadUrl(url)
                 }
+                // Out of tries: do not load a page that cannot work. The
+                // watchdog below tries again when the agent is back.
             }
         }.start()
     }
@@ -261,10 +287,28 @@ class MainActivity : Activity() {
                 request: android.webkit.WebResourceRequest?,
                 error: android.webkit.WebResourceError?
             ) {
+                // Only a broken **main frame** means "the page itself is gone".
+                // A failing subresource (the agent's event stream, a font) is
+                // the agent's business - reloading the page for it turns into
+                // a reload loop: the screen flickers once a second and the
+                // phone burns a third of a core.
+                val mainFrame = request?.isForMainFrame ?: true
+                if (!mainFrame) return
+                // The page is already loaded and working: a failed reload
+                // should not turn into an endless retry.
+                if (pageLoaded) {
+                    android.util.Log.w("A2WebView", "the page failed to load: " + error)
+                    return
+                }
                 // The agent was not up yet (or it just restarted): try again.
                 handler.postDelayed({
                     loadWhenReady(A2Settings(this@MainActivity))
                 }, 1500)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                pageLoaded = true
             }
         }
         view.webChromeClient = object : WebChromeClient() {
