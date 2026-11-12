@@ -39,12 +39,16 @@ class A2Settings(context: Context) {
         set(value) = prefs.edit().putString("api_token", value).apply()
 
     /**
-     * Whether the agent listens on every interface. Off by default: the web
-     * UI and the chat API have no password, so anybody on the same Wi-Fi
-     * could talk to the agent - and the agent can run commands.
+     * Whether the agent listens on every interface (0.0.0.0), so that a
+     * computer on the same Wi-Fi can open it.
+     *
+     * On by default: the point of a phone agent is that the computer can
+     * drive it. The peer channel (and /api/exec) is protected by the token
+     * below; the web UI and the chat API are not - anybody on the same
+     * network can talk to the agent, and the agent can run commands.
      */
     var lanAccess: Boolean
-        get() = prefs.getBoolean("lan_access", false)
+        get() = prefs.getBoolean("lan_access", true)
         set(value) = prefs.edit().putBoolean("lan_access", value).apply()
 
     /**
@@ -93,6 +97,13 @@ class A2Settings(context: Context) {
 
     /** True when the agent has something to talk to. */
     fun isConfigured(): Boolean = readProvider().isNotBlank()
+
+    /** The peer secret, made once and kept. */
+    fun token(): String {
+        val existing = apiToken
+        if (existing.isNotEmpty()) return existing
+        return newApiToken()
+    }
 
     /** A fresh secret for the peer channel. */
     fun newApiToken(): String {

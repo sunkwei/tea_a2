@@ -53,10 +53,9 @@ class AgentService : Service() {
         if (settings.lanAccess) {
             argv += listOf("--host", "0.0.0.0")
         }
-        val token = settings.apiToken
-        if (token.isNotEmpty()) {
-            argv += listOf("--api-token", token)
-        }
+        // The peer secret: made once and kept, so a computer can drive this
+        // phone (the peer channel and /api/exec are the ones it guards).
+        argv += listOf("--api-token", settings.token())
         // A partial wake lock: with the screen off the system is free to
         // throttle the CPU, and then a turn takes minutes instead of
         // seconds. The cost is the battery.

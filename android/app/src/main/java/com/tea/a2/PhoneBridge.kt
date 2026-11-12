@@ -289,6 +289,11 @@ class PhoneBridge(private val context: Context) {
             })
         }
         info.put("agent_url", "http://127.0.0.1:" + A2Settings(context).port)
+        // The addresses a computer on the same network can use.
+        info.put("lan_addresses", PhoneNet.lanAddresses(context))
+        info.put("lan_url", PhoneNet.primaryAddress(context).let {
+            if (it.isEmpty()) "" else "http://$it:" + A2Settings(context).port
+        })
         return info
     }
 

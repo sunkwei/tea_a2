@@ -13,6 +13,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 
 /**
@@ -167,6 +168,24 @@ class MainActivity : Activity() {
         }, 10000)
     }
 
+    /** Copies the snippet for the desktop's ~/.tea_agent/tea_agent.yaml. */
+    private fun copyPeerSnippet(settings: A2Settings, url: String) {
+        if (url.isEmpty()) {
+            Toast.makeText(this, "还没有局域网地址", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val snippet = buildString {
+            append("# 桌面上的 ~/.tea_agent/tea_agent.yaml 里加这段：\n")
+            append("peers:\n")
+            append("  phone:\n")
+            append("    url: ").append(url).append("\n")
+            append("    token: ").append(settings.token()).append("\n")
+        }
+        val clipboard = getSystemService(android.content.ClipboardManager::class.java)
+        clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("a2-peer", snippet))
+        Toast.makeText(this, "已复制：粘到电脑的 tea_agent.yaml", Toast.LENGTH_LONG).show()
+    }
+
     /** Tells the user (once) that the agent needs the exemption. */
     private fun checkKeepAlive(settings: A2Settings) {
         val power = getSystemService(android.os.PowerManager::class.java)
@@ -309,6 +328,27 @@ class MainActivity : Activity() {
             ).show()
         })
 
+        // The address a computer on the same Wi-Fi has to use, and a button
+        // that copies the peer snippet for the desktop's tea_agent.yaml.
+        val addressRow = LinearLayout(this)
+        addressRow.orientation = LinearLayout.HORIZONTAL
+        addressRow.gravity = Gravity.CENTER_VERTICAL
+        addressRow.setPadding(12, 0, 12, 0)
+        val addressText = TextView(this)
+        addressText.textSize = 12f
+        addressText.setTextColor(0xFF9AA0A6.toInt())
+        val lanIp = PhoneNet.primaryAddress(this)
+        val url = if (lanIp.isEmpty()) "" else "http://$lanIp:${settings.port}"
+        addressText.text = if (url.isEmpty()) {
+            "没拿到局域网地址（Wi-Fi 没连？）"
+        } else {
+            "电脑打开：$url"
+        }
+        addressRow.addView(addressText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        addressRow.addView(topButton("复制") {
+            copyPeerSnippet(settings, addressText.text.toString())
+        })
+
         val view = WebView(this)
         view.settings.javaScriptEnabled = true
         view.settings.domStorageEnabled = true
@@ -370,6 +410,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
         root.addView(barScroll)
+        root.addView(addressRow)
         root.addView(view, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
         ))

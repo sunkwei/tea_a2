@@ -96,27 +96,40 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 `type` 只能打 ASCII（`input text` 的老毛病）；中文走 `paste`：先把文字放进
 剪贴板，再 `input keyevent 279`（粘贴）。
 
-## 从电脑上驱动这台手机
+## 从电脑上访问 / 驱动这台手机
 
-手机的 agent 在 `127.0.0.1:8383`。想让桌面上的 a2 把它当 peer：
+agent **默认就听 `0.0.0.0:8383`**（手机桥那个 8384 仍然只听 127.0.0.1——那是内部
+接口，不该给外面）。app 的按钮栏下面有一行写着**手机当前的局域网地址**，旁边一个
+「复制」按钮，复制出来的是现成的配置片段：
 
-1. app 的设置里打开「LAN 访问」→ agent 改成听 `0.0.0.0`；
-2. 生成一个 API token（peer 通道要它）；
-3. 桌面上的 `~/.tea_agent/tea_agent.yaml`：
-
-```yaml
+```
+# 桌面上的 ~/.tea_agent/tea_agent.yaml 里加这段：
 peers:
   phone:
-    url: http://<手机的局域网IP>:8383
-    token: <app 里那个 token>
+    url: http://172.16.1.220:8383
+    token: ca47e773bf9adcc5a4d00ded11ce62ee007c
 ```
 
-然后 `toolkit_peer chat peer=phone prompt="看一下今天的通知"` 就让手机自己的
-agent 干活了（它用自己的 provider、自己的上下文）。
+- **网页**：电脑上直接开 `http://<手机的局域网IP>:8383/` 就是手机上的 agent（同一个
+  程序、同一份上下文）。
+- **当 peer 用**（桌面的 a2 驱动手机）：把上面那段加到桌面
+  `~/.tea_agent/tea_agent.yaml`，然后
+  `toolkit_peer chat peer=phone prompt="看一下今天的通知"` —— 手机用自己的
+  provider、自己的上下文干活。
 
-⚠️ **安全**：Web UI 和聊天接口**没有密码**，`--api-token` 只挡 `/api/exec` 和
-peer 通道。所以「LAN 访问」默认是关的——同一个 Wi-Fi 上的人能直接跟手机上的
-agent 说话，而 agent 能跑命令。开之前想清楚。
+实测（小米 2311DRK48C，Wi-Fi 172.16.1.220）：
+`/api/health`、`/`（网页 UI）、`/api/peer/health`、`/api/peer/tools` 从电脑都通 ✓。
+
+### 地址是怎么挑的
+
+手机上常常有好几个地址：Wi-Fi（wlan0）、VPN（tun0）、蜂窝（ccmi*）。**电脑能连的
+只有 Wi-Fi 那个**，所以 app 优先挑 wlan0（接口名 + ConnectivityManager 的 Wi-Fi 网络
+两个来源），VPN 地址排在后面。
+
+⚠️ **安全**：Web UI 和聊天接口**没有密码**——`--api-token` 只挡 `/api/exec` 和
+peer 通道。所以同一个 Wi-Fi 上的人能直接跟手机上的 agent 说话，**而 agent 能跑命令**
+（`toolkit_exec` 不受令牌保护）。token 是自动生成并一直保留的（存在 app 的
+SharedPreferences 里），改不了除非重装。
 
 ## 验证过的（模拟器上真跑过）
 
