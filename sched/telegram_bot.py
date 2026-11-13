@@ -72,6 +72,12 @@ COMMANDS = [
     {"command": "files", "description": "再要一次这个任务的产出文件"},
     {"command": "retry", "description": "重做一个失败的任务"},
     {"command": "quota", "description": "额度还剩多少"},
+    {"command": "at", "description": "定时做一次（'23:30' 或 '+5'）"},
+    {"command": "cron", "description": "交一个定时任务（cron 表达式 + 要做的事）"},
+    {"command": "crons", "description": "定时任务列表"},
+    {"command": "cronpause", "description": "停掉一个定时任务"},
+    {"command": "cronresume", "description": "再开一个定时任务"},
+    {"command": "crondel", "description": "删掉一个定时任务"},
     {"command": "help", "description": "这条说明"},
 ]
 
@@ -240,7 +246,10 @@ class TelegramBot(channel.TaskChannel):
             "· /retry <id> 重做一个失败的任务\n"
             "· /files <id> 把这个任务的产出文件发过来\n"
             "· /at <时间> <活儿> 定时做（'+5' 五小时后，'23:30' 今天晚上十点半）\n"
-            "· 消息后面加 @23:30 也可以定时\n"
+            "· 消息后面加 @23:30 也可以定时（只做一次）\n"
+            "· /cron <表达式> <活儿> 交一个定时任务（会一直重复）\n"
+            "· /crons 定时任务列表\n"
+            "· /cronpause <id> /cronresume <id> /crondel <id> 管定时任务\n"
             "· 直接发文件 = 排一个任务，文件会放进工作区\n"
             "· /help 这条说明")
 
