@@ -140,6 +140,34 @@ def split_schedule(text):
     return (text or "")[:match.start()].strip(), match.group(1)
 
 
+def split_cron(tokens):
+    """The cron expression and the work, out of the words after the command.
+
+    The expression is five fields (or one macro like "@daily"), the work is
+    everything after it:
+
+        ["30", "9", "*", "*", "1-5", "收个邮件", "总结一下"]
+            -> ("30 9 * * 1-5", "收个邮件 总结一下")
+    """
+    words = [str(one) for one in (tokens or []) if str(one).strip()]
+    if not words:
+        return "", ""
+    if words[0].startswith("@"):
+        expression, rest = words[0], words[1:]
+    else:
+        expression, rest = " ".join(words[:5]), words[5:]
+    return expression, " ".join(rest).strip()
+
+
+def clean_error(message):
+    """The queue's errors carry the HTTP status in front ("400: ...")."""
+    text = str(message or "")
+    head, sep, tail = text.partition(": ")
+    if sep and head.isdigit():
+        return tail
+    return text
+
+
 def is_task_order(name):
     """Does this file say it is a task order?
 
@@ -179,6 +207,24 @@ def fmt_task(task):
     return line
 
 
+def fmt_schedule(schedule):
+    """One line about a schedule - the work that comes back on its own."""
+    status = "开着" if schedule.get("enabled", True) else "停着"
+    line = "%s  %-16s  %s  %s" % (
+        schedule.get("id", "?"), schedule.get("cron") or "", status,
+        schedule.get("title") or (schedule.get("prompt") or "")[:30])
+    nxt = schedule.get("next_fire_local") or ""
+    if nxt:
+        line += "  下次 %s" % nxt
+    last = schedule.get("last_fired_local") or ""
+    if last:
+        line += "  上次 %s" % last
+    runs = int(schedule.get("run_count") or 0)
+    if runs:
+        line += "  已跑 %d 次" % runs
+    return line
+
+
 class Queue(_Queue):
     """The task server's API - the queue the chat drives.
 
@@ -213,6 +259,42 @@ class Queue(_Queue):
         except ChannelError as exc:
             log("no key for the workspace: %s" % exc)
             return ""
+
+    # -- the schedules ----------------------------------------------------
+    def list_schedules(self, workspace_id=None):
+        """The schedules of the project - the work that comes back on its own."""
+        query = self._query(workspace_id=workspace_id)
+        path = "/api/schedules" + (("?" + query) if query else "")
+        return self._request("GET", path)
+
+    def create_schedule(self, expression, prompt, workspace_id=None, title="",
+                        key="", **extra):
+        """Hand the queue a recipe: "at these minutes, do this"."""
+        body = {"cron": expression, "prompt": prompt}
+        if workspace_id:
+            body["workspace_id"] = workspace_id
+        if title:
+            body["title"] = title
+        for name, value in (extra or {}).items():
+            if value not in (None, "", [], {}):
+                body[name] = value
+        headers = {"Idempotency-Key": key} if key else None
+        return self._request("POST", "/api/schedules", body, headers=headers)
+
+    def pause_schedule(self, schedule_id):
+        """Stop a schedule from firing (it keeps its recipe)."""
+        return self._request("POST", "/api/schedules/%s/pause"
+                             % urllib.parse.quote(schedule_id))
+
+    def resume_schedule(self, schedule_id):
+        """Let a paused schedule fire again."""
+        return self._request("POST", "/api/schedules/%s/resume"
+                             % urllib.parse.quote(schedule_id))
+
+    def delete_schedule(self, schedule_id):
+        """Throw the recipe away."""
+        return self._request("DELETE", "/api/schedules/%s"
+                             % urllib.parse.quote(schedule_id))
 
     def events(self, workspace_id=None, timeout=3600):
         """The queue's event stream (SSE), as the parsed frames.
@@ -275,6 +357,9 @@ class TaskChannel:
             "· /del <id> 删掉\n"
             "· /answer <id> <内容> 回答一个等你确认的任务\n"
             "· /quota 额度还剩多少\n"
+            "· /cron <表达式> <活儿> 交一个定时任务（会一直重复）\n"
+            "· /crons 定时任务列表\n"
+            "· /cronpause <id> /cronresume <id> /crondel <id> 管定时任务\n"
             "· /help 这条说明")
 
     def __init__(self, args):
@@ -296,6 +381,45 @@ class TaskChannel:
     def channel_name(self):
         """The name of the chat, for the log."""
         return "chat"
+
+    def own_user_id(self):
+        """The id of the account this channel serves.
+
+        Empty in the base class: a chat that talks to many people (the
+        telegram bot) has no single account of its own. The WeChat bot has
+        exactly one - the account it is logged in as.
+        """
+        return ""
+
+    def recipient_of(self, task):
+        """Who this task's result goes to.
+
+        The order, and why:
+
+        1. **the task came through this channel** - we know the person, and
+           they are waiting for it;
+        2. **the task is a scheduled one** - it belongs to the account whose
+           workspace it ran in, and only that account's channel ever sees
+           its events (the queue filters the stream by project). So the
+           result goes to **that account**, not to whoever the recipe
+           happened to name: a hand-written recipe can carry a wrong id (a
+           typo, an id from another machine) and then the result would go
+           nowhere at all;
+        3. **the task's own meta names a recipient** - somebody submitted it
+           by hand for that person;
+        4. **this channel's own account** - the last resort.
+        """
+        task = task if isinstance(task, dict) else {}
+        owner = self.owner.get(task.get("id") or "")
+        if owner:
+            return owner
+        meta = task.get("meta") or {}
+        named = str(meta.get(self.META_USER_KEY) or "").strip()
+        if meta.get("schedule_id"):
+            # A scheduled task: the account it belongs to. The recipe's own
+            # id is only a fallback for a channel without an account.
+            return self.own_user_id() or named
+        return named or self.own_user_id()
 
     def normalize(self, text):
         """The text as the channel understands it (the transport may rewrite it)."""
@@ -540,7 +664,18 @@ class TaskChannel:
                 if not tasks:
                     return "队列是空的。"
                 lines = [fmt_task(t) for t in tasks[-12:]]
-                return "任务（%d）：\n%s" % (len(tasks), "\n".join(lines))
+                out = "任务（%d）：\n%s" % (len(tasks), "\n".join(lines))
+                # The recurring work is not in the task list - it is a recipe
+                # that has not fired yet. Say so, so "where is my daily job?"
+                # has an answer.
+                try:
+                    recipes = self.queue.list_schedules(
+                        workspace_id=self.ensure_workspace()).get("schedules") or []
+                except ChannelError:
+                    recipes = []
+                if recipes:
+                    out += "\n定时任务 %d 个（/crons 看）" % len(recipes)
+                return out
             if cmd in ("/status", "/状态"):
                 if not rest:
                     return "用法：/status <任务id>"
@@ -617,6 +752,60 @@ class TaskChannel:
                 self.owner[task_id] = user_id
                 started = task.get("starts_at_local") or when
                 return ("已排队 %s\n「%s」\n%s 之后才能开工。" % (task_id, what[:60], started))
+            if cmd in ("/cron", "/schedule", "/cronadd", "/定时任务"):
+                # /cron 30 9 * * 1-5 工作日早上九点半整理收件箱
+                expression, what = split_cron(rest)
+                if not expression or not what:
+                    return ("用法：/cron <cron 表达式> <要做的活儿>\n"
+                            "表达式是五段（分 时 日 月 周，本机时间）："
+                            "'30 9 * * 1-5'（工作日 9:30）、'*/5 * * * *'（每 5 分钟）、"
+                            "'@daily'（每天零点）。\n"
+                            "这是会一直重复的活儿；只做一次的用 /at。")
+                try:
+                    schedule = self.queue.create_schedule(
+                        expression, what, workspace_id=self.ensure_workspace(),
+                        title=what[:40],
+                        provider=self.args.provider or None,
+                        meta={self.META_USER_KEY: user_id},
+                        key=idempotency_key(user_id, "cron:" + expression + "|" + what))
+                except ChannelError as exc:
+                    return "定时任务没建成：%s" % clean_error(exc)
+                nxt = schedule.get("next_fire_local") or ""
+                return ("定时任务 %s 建好了\n「%s」\ncron: %s\n下次：%s"
+                        % (schedule.get("id", "?"), what[:60],
+                           schedule.get("cron") or expression, nxt or "算不出来"))
+            if cmd in ("/crons", "/schedules", "/cronlist", "/计划", "/定时列表"):
+                listing = self.queue.list_schedules(workspace_id=self.ensure_workspace())
+                items = listing.get("schedules") or []
+                if not items:
+                    return ("还没有定时任务。\n"
+                            "用法：/cron <cron 表达式> <要做的活儿>")
+                lines = [fmt_schedule(one) for one in items[:20]]
+                return "定时任务（%d）：\n%s" % (len(items), "\n".join(lines))
+            if cmd in ("/cronpause", "/cronstop", "/暂停定时"):
+                if not rest:
+                    return "用法：/cronpause <定时任务id>"
+                try:
+                    self.queue.pause_schedule(rest[0])
+                except ChannelError as exc:
+                    return "出了点问题：%s" % exc
+                return "停掉 %s（配方留着，/cronresume 再开）" % rest[0]
+            if cmd in ("/cronresume", "/cronstart", "/恢复定时"):
+                if not rest:
+                    return "用法：/cronresume <定时任务id>"
+                try:
+                    self.queue.resume_schedule(rest[0])
+                except ChannelError as exc:
+                    return "出了点问题：%s" % exc
+                return "开了 %s" % rest[0]
+            if cmd in ("/crondel", "/crondelete", "/cronrm", "/删定时"):
+                if not rest:
+                    return "用法：/crondel <定时任务id>"
+                try:
+                    self.queue.delete_schedule(rest[0])
+                except ChannelError as exc:
+                    return "出了点问题：%s" % exc
+                return "删掉了定时任务 %s" % rest[0]
             if cmd in ("/retry", "/重试"):
                 if not rest:
                     return "用法：/retry <任务id>"
@@ -646,7 +835,7 @@ class TaskChannel:
         task_id = task.get("id", "")
         users = []
         if task_id:
-            user_id = self.owner.get(task_id) or (task.get("meta") or {}).get(self.META_USER_KEY)
+            user_id = self.recipient_of(task)
             if user_id:
                 users = [user_id]
         else:
@@ -679,7 +868,7 @@ class TaskChannel:
         task = event.get("task") or {}
         task_id = task.get("id", "")
         if task_id:
-            user_id = self.owner.get(task_id) or (task.get("meta") or {}).get(self.META_USER_KEY)
+            user_id = self.recipient_of(task)
             users = [user_id] if user_id else []
         else:
             users = []
@@ -698,7 +887,7 @@ class TaskChannel:
         # The files of a finished task go out with the answer: a result the
         # user cannot open on their phone is only half an answer.
         if event.get("speech_of") == "task_done" and task_id:
-            user_id = self.owner.get(task_id) or (task.get("meta") or {}).get(self.META_USER_KEY)
+            user_id = self.recipient_of(task)
             if user_id:
                 try:
                     count = self.send_task_files(user_id, task)
@@ -725,7 +914,7 @@ class TaskChannel:
             return False
         task = event.get("task") or {}
         task_id = task.get("id", "")
-        user_id = self.owner.get(task_id) or (task.get("meta") or {}).get(self.META_USER_KEY)
+        user_id = self.recipient_of(task)
         if not user_id:
             return False
         if kind == "task_done":

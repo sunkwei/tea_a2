@@ -35,10 +35,12 @@ import argparse
 import base64
 import binascii
 import hashlib
+import http.client
 import io
 import json
 import os
 import re
+import socket
 import struct
 import subprocess
 import sys
@@ -206,6 +208,77 @@ def encode_aes_key(key):
     return base64.b64encode(key.hex().encode("ascii")).decode("ascii")
 
 
+# -- the network ---------------------------------------------------------
+# The WeChat CDN (novac2c.cdn.weixin.qq.com) also has IPv6 addresses, and
+# this machine cannot reach them: the SYN goes out and no answer ever comes
+# back. Python's socket.create_connection tries every address of a host in
+# turn, so an upload first waited out the whole timeout (120 s) for each
+# dead IPv6 address before it fell back to IPv4 - a push of five files took
+# twenty minutes, and the upload ticket was stale by then ("prepare failed").
+# IPv4 first, IPv6 only as a backup: the CDN answers on IPv4 in 50 ms.
+
+
+def connect_ipv4_first(address, timeout=None, source_address=None):
+    """One connection to the address - IPv4 before IPv6."""
+    host, port = address
+    infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    infos.sort(key=lambda one: 0 if one[0] == socket.AF_INET else 1)
+    err = None
+    for af, socktype, proto, canonname, sa in infos:
+        sock = socket.socket(af, socktype, proto)
+        if timeout is not None:
+            sock.settimeout(timeout)
+        if source_address:
+            sock.bind(source_address)
+        try:
+            sock.connect(sa)
+            return sock
+        except OSError as exc:
+            sock.close()
+            err = exc
+    if err is not None:
+        raise err
+    raise OSError("no address for %s" % (host,))
+
+
+class IPv4FirstConnection(http.client.HTTPSConnection):
+    """HTTPS that dials IPv4 before IPv6.
+
+    The TLS handshake is the one of HTTPSConnection - only the socket
+    underneath is ours.
+    """
+
+    def connect(self):
+        self.sock = connect_ipv4_first((self.host, self.port), self.timeout,
+                                        self.source_address)
+        if self._tunnel_host:
+            self._tunnel()
+        server_hostname = self._tunnel_host or self.host
+        self.sock = self._context.wrap_socket(self.sock,
+                                              server_hostname=server_hostname)
+
+
+class IPv4FirstHandler(urllib.request.HTTPSHandler):
+    """The handler that uses that connection."""
+
+    def https_open(self, req):
+        return self.do_open(IPv4FirstConnection, req,
+                            context=self._context, check_hostname=self._check_hostname)
+
+
+_OPENER = None
+_OPENER_LOCK = threading.Lock()
+
+
+def http_open(req, timeout=None):
+    """Open a request - over IPv4 whenever the host has one."""
+    global _OPENER
+    with _OPENER_LOCK:
+        if _OPENER is None:
+            _OPENER = urllib.request.build_opener(IPv4FirstHandler)
+    return _OPENER.open(req, timeout=timeout)
+
+
 class ILink:
     """The raw iLink protocol: login, long polling, sending.
 
@@ -253,7 +326,7 @@ class ILink:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with http_open(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", "replace")
@@ -341,7 +414,7 @@ class ILink:
         req = urllib.request.Request(url, data=ciphertext, method="POST")
         req.add_header("Content-Type", "application/octet-stream")
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with http_open(req, timeout=120) as resp:
                 resp.read()
                 param = resp.headers.get("x-encrypted-param")
         except urllib.error.HTTPError as exc:
@@ -358,7 +431,7 @@ class ILink:
         """The bytes behind a full CDN url."""
         req = urllib.request.Request(url, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with http_open(req, timeout=120) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
             raise ILinkError("CDN download failed: HTTP %s" % exc.code, status=exc.code) from None
@@ -371,7 +444,7 @@ class ILink:
                % (self.cdn_base, urllib.parse.quote(encrypt_query_param, safe="")))
         req = urllib.request.Request(url, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with http_open(req, timeout=120) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
             raise ILinkError("CDN download failed: HTTP %s" % exc.code, status=exc.code) from None
@@ -566,7 +639,7 @@ def save_qr(directory, content):
         data = b""
         try:
             req = urllib.request.Request(text, method="GET")
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with http_open(req, timeout=20) as resp:
                 data = resp.read()
         except (urllib.error.URLError, OSError, ValueError):
             data = b""
@@ -639,6 +712,21 @@ class WeChatBot(channel.TaskChannel):
     """The bot: poll WeChat, drive the queue, answer the user."""
 
     META_USER_KEY = "wechat_user_id"
+
+    def own_user_id(self):
+        """The id of this WeChat account (the one that gets the results).
+
+        The account's own id is in the credentials (the login status reports
+        it). It is what a **scheduled** task's result goes to: the schedule
+        belongs to the account whose workspace it runs in, and only that
+        account's channel sees its events - so the result must not be looked
+        up in a recipe that somebody wrote by hand (it may carry a wrong id,
+        and then the result goes nowhere).
+        """
+        try:
+            return str(self.state.data.get("ilink_user_id") or "").strip()
+        except Exception:  # noqa: BLE001 - the state may not be loaded yet
+            return ""
 
     HELP = ("用法：\n"
             "· 任何一句话 = 排一个任务（额度够就自动开工）\n"

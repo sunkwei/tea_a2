@@ -135,7 +135,9 @@ class MockQueue(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     calls = []
     tasks = {}
+    schedules = {}
     counter = 0
+    schedule_counter = 0
 
     def log_message(self, *args):
         pass
@@ -166,6 +168,8 @@ class MockQueue(BaseHTTPRequestHandler):
         if self.path.startswith("/api/tasks?"):
             return self._json({"tasks": list(MockQueue.tasks.values()),
                                "counts": {"queued": 1, "running": 0, "done": 0}})
+        if self.path.startswith("/api/schedules"):
+            return self._json({"schedules": list(MockQueue.schedules.values())})
         if self.path.startswith("/api/tasks/"):
             task_id = self.path.split("/api/tasks/")[1].split("?")[0]
             task = MockQueue.tasks.get(task_id)
@@ -183,6 +187,18 @@ class MockQueue(BaseHTTPRequestHandler):
             body = {}
         MockQueue.calls.append(("POST", self.path, body,
                                 self.headers.get("Idempotency-Key", "")))
+        if self.path == "/api/schedules":
+            MockQueue.schedule_counter += 1
+            sid = "sc_mock%03d" % MockQueue.schedule_counter
+            schedule = {"id": sid, "cron": body.get("cron", ""),
+                        "prompt": body.get("prompt", ""),
+                        "title": body.get("title", ""),
+                        "workspace_id": body.get("workspace_id", ""),
+                        "meta": body.get("meta") or {},
+                        "enabled": True, "run_count": 0,
+                        "next_fire_local": "明天 09:30"}
+            MockQueue.schedules[sid] = schedule
+            return self._json(schedule)
         if self.path == "/api/tasks":
             MockQueue.counter += 1
             task_id = "t_mock%03d" % MockQueue.counter
@@ -195,6 +211,13 @@ class MockQueue(BaseHTTPRequestHandler):
                     "allow_paths": body.get("allow_paths") or []}
             MockQueue.tasks[task_id] = task
             return self._json(task)
+        if "/pause" in self.path or "/resume" in self.path:
+            sid = self.path.split("/api/schedules/")[1].split("/")[0]
+            schedule = MockQueue.schedules.get(sid)
+            if schedule is None:
+                return self._error(404, "not_found", "no such schedule")
+            schedule["enabled"] = "/resume" in self.path
+            return self._json(schedule)
         if "/start" in self.path or "/cancel" in self.path or "/confirm" in self.path \
                 or "/retry" in self.path:
             task_id = self.path.split("/api/tasks/")[1].split("/")[0]
@@ -216,6 +239,11 @@ class MockQueue(BaseHTTPRequestHandler):
 
     def do_DELETE(self):  # noqa: N802
         MockQueue.calls.append(("DELETE", self.path))
+        if self.path.startswith("/api/schedules/"):
+            sid = self.path.split("/api/schedules/")[1].split("?")[0]
+            MockQueue.schedules.pop(sid, None)
+            self._json({"ok": True, "id": sid})
+            return
         task_id = self.path.split("/api/tasks/")[1].split("?")[0]
         MockQueue.tasks.pop(task_id, None)
         self._json({"ok": True, "id": task_id})
@@ -362,6 +390,55 @@ def main():
               bool(ws_id) and os.path.isdir(ws_path), (ws_id, ws_path))
         check("the workspace is registered with the agent",
               any(w.get("path") == ws_path for w in MockAgent.workspaces), MockAgent.workspaces)
+
+        # ---- who gets the result -----------------------------------------
+        # The rule: **whoever created the scheduled task gets it**. A scheduled
+        # task runs in the workspace of one account, and only that account's
+        # channel ever sees its events - so the result goes to that account,
+        # not to whatever id the recipe happens to name (a hand-written recipe
+        # can carry a wrong one, and then the result goes nowhere).
+        check("the bot knows its own account", bot.own_user_id() == "me-1",
+              bot.own_user_id())
+        check("a task this bot queued goes back to its author",
+              bot.recipient_of({"id": "t_1", "meta": {"wechat_user_id": "u1"}}) == "u1",
+              bot.recipient_of({"id": "t_1", "meta": {"wechat_user_id": "u1"}}))
+        check("a scheduled task goes to the account that owns it",
+              bot.recipient_of({"id": "t_2", "meta": {"schedule_id": "sc_1",
+                                                      "wechat_user_id": "somebody-else"}})
+              == "me-1",
+              bot.recipient_of({"id": "t_2", "meta": {"schedule_id": "sc_1",
+                                                       "wechat_user_id": "somebody-else"}}))
+        check("a scheduled task without a recipe id still goes to the account",
+              bot.recipient_of({"id": "t_3", "meta": {"schedule_id": "sc_2"}}) == "me-1",
+              bot.recipient_of({"id": "t_3", "meta": {"schedule_id": "sc_2"}}))
+        check("a task somebody named a recipient for goes to them",
+              bot.recipient_of({"id": "t_4", "meta": {"wechat_user_id": "u9"}}) == "u9",
+              bot.recipient_of({"id": "t_4", "meta": {"wechat_user_id": "u9"}}))
+        check("a task nobody named a recipient for goes to the account that owns it",
+              bot.recipient_of({"id": "t_5", "meta": {}}) == "me-1",
+              bot.recipient_of({"id": "t_5", "meta": {}}))
+
+        # ---- /cron: a scheduled task, bound to this account ---------------
+        # The rule the whole thing hangs on: **whoever creates the scheduled
+        # task gets its result**. The chat knows the account, so the recipe
+        # carries it - and the channel resolves it again at push time, so a
+        # recipe with a wrong id still reaches the right account.
+        MockQueue.calls = []
+        reply = bot.handle("/cron 30 9 * * * 每天帮我看看邮件", "u1")
+        check("/cron answers with the new schedule", "sc_mock" in reply, reply)
+        made = [c for c in MockQueue.calls if c[0] == "POST" and c[1] == "/api/schedules"]
+        check("the schedule went to the queue", len(made) == 1, MockQueue.calls)
+        body = made[0][2] if made else {}
+        check("the schedule knows when it fires", body.get("cron") == "30 9 * * *", body)
+        check("the schedule knows what to do", body.get("prompt") == "每天帮我看看邮件", body)
+        check("the schedule belongs to the account that asked for it",
+              (body.get("meta") or {}).get("wechat_user_id") == "u1", body)
+        check("the schedule runs in that account's workspace",
+              body.get("workspace_id") == ws_id, body)
+        reply = bot.handle("/crons", "u1")
+        check("/crons lists the schedules", "sc_mock" in reply, reply)
+        reply = bot.handle("/cron", "u1")
+        check("/cron without an expression explains itself", "用法" in reply, reply)
 
         # ---- plain text queues a task -----------------------------------
         MockQueue.calls = []
