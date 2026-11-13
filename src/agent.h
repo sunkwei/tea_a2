@@ -10,9 +10,9 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+#include "insert_queue.h"
 #include "llm.h"
 #include "message.h"
-#include "prompt_queue.h"
 #include "tools.h"
 #include "workspace.h"
 
@@ -60,8 +60,8 @@ struct TurnOptions {
   /// tools at all would get all of them.
   bool tools_given = false;
   /// The stage profile this turn runs under (see role.h). It is resolved when
-  /// the turn starts and frozen for the turn: switching the role applies to
-  /// the *next* turn. The role may only tighten what the turn may do.
+  /// the turn starts and frozen for the turn: switching the role applies to the
+  /// *next* turn. The role may only tighten what the turn may do.
   std::shared_ptr<const Role> role;
   /// The exec fence of this turn: which commands it may run. Empty => the open
   /// semantics (nothing is fenced). See ExecPolicy.
@@ -70,15 +70,21 @@ struct TurnOptions {
   /// (see Settings), never loosen them: the task queue says how much of the
   /// machine's budget this task gets, and the machine keeps the final word.
   TurnBudget budget;
-  /// Prompts typed while this turn was already running. The loop adopts one per
-  /// iteration (FIFO) before building that iteration's request; whatever is left
-  /// when the loop stops is reported back as `queue_unconsumed`. May be null.
-  PromptInbox* inbox = nullptr;
+  /// The messages the user typed while this turn was running. The loop adopts
+  /// the ones that ask to be inserted **now**, one per iteration, before that
+  /// iteration's request is built - so the tool calls the model decides next
+  /// already know about them. The others wait for the turn to end and start a
+  /// turn of their own; the HTTP layer owns that hand-off. May be null.
+  InsertQueue* queue = nullptr;
   /// The id this turn is known by. The HTTP layer hands one out before the
   /// turn starts, so a caller that submitted the turn and walked away can ask
   /// "how did it go?" with the same string the audit trail uses. Empty => the
   /// trajectory recorder makes one.
   std::string turn_id;
+  /// The queued message this turn was started for (empty => the user sent it
+  /// directly). It goes into the `start` event, so a client knows which of
+  /// its queued messages this turn is about.
+  std::string queue_id;
   /// Per-turn overrides of the model knobs (`reasoning_effort`, `temperature`,
   /// `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `seed`,
   /// `max_tokens`), in the same shape the request body uses. They win over the

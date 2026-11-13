@@ -2,10 +2,14 @@
 """Smoke test for queued prompts ("消息插队").
 
 While a turn is running the composer stays usable: Enter enqueues the text
-instead of starting a second turn, and the agent loop adopts exactly one queued
-prompt per iteration. Before adoption every prompt can be cancelled. Prompts that
-are never adopted (the turn was stopped) are handed back on the SSE stream so the
+instead of starting a second turn. This file covers the **immediate** timing
+(`{"insert": "now"}`): the agent loop adopts exactly one queued prompt per
+iteration. Before adoption every prompt can be cancelled. Prompts that are
+never adopted (the turn was stopped) are handed back on the SSE stream so the
 UI can restore them instead of dropping the user's text.
+
+The other timing - the default, "wait for the turn to end" - has its own file:
+tests/smoke_insert_queue.py.
 
 The mock provider drives three scenarios:
 
@@ -397,7 +401,7 @@ providers:
             status, queued = post_json(
                 agent_port,
                 "/api/chat/queue",
-                {"session_id": turn.session_id, "message": text},
+                {"session_id": turn.session_id, "message": text, "insert": "now"},
             )
             check(
                 "queue accepts " + text + " during a tool call",
@@ -468,7 +472,7 @@ providers:
         status, queued = post_json(
             agent_port,
             "/api/chat/queue",
-            {"session_id": turn.session_id, "message": "QUEUED-SLOW"},
+            {"session_id": turn.session_id, "message": "QUEUED-SLOW", "insert": "now"},
         )
         check("queue accepts a prompt while the model streams", status == 200, queued)
         check("slow turn finished", turn.join())
@@ -501,7 +505,7 @@ providers:
             status, queued = post_json(
                 agent_port,
                 "/api/chat/queue",
-                {"session_id": turn.session_id, "message": text},
+                {"session_id": turn.session_id, "message": text, "insert": "now"},
             )
             check("queue accepts " + text, status == 200, queued)
             ids.append((queued.get("queued") or {}).get("id"))
@@ -567,14 +571,16 @@ providers:
         )
 
         # ---- 5) refusal cases ---------------------------------------------
+        # No turn is running for this session: the message starts one of its own
+        # (that is the whole point of the queue: the text is never lost).
         status, err = post_json(
             agent_port,
             "/api/chat/queue",
             {"session_id": turn.session_id, "message": "too late"},
         )
         check(
-            "queueing without a running turn is refused with 409",
-            status == 409 and (err.get("error") or {}).get("code") == "no_active_turn",
+            "queueing without a running turn starts one",
+            status == 200 and err.get("turn_running") is True and err.get("turn_id"),
             (status, err),
         )
 

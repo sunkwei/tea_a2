@@ -305,7 +305,7 @@ providers:
         check("no turn is reported after they finished",
               call(port, "GET", "/api/chat/turns")[1]["turns"] == [])
 
-        # ---- 3. same session: queued by default ---------------------------
+        # ---- 3. same session: queued by default (waits for the turn) ------
         first = []
         t1 = threading.Thread(target=stream, args=(
             port, "/api/chat", {"workspace_id": wid, "session_id": sid_a,
@@ -325,10 +325,17 @@ providers:
         t1.join(120)
         adopted = any(e.get("type") == "queue_adopted" and e.get("content") == "second question"
                       for e in first)
-        check("the running turn adopts the queued message", adopted,
+        check("the running turn does not adopt the queued message", not adopted,
+              [e.get("type") for e in first][-6:])
+        handover = [e for e in first if e.get("type") == "turn_handover"]
+        check("the session is handed over to the next turn", len(handover) == 1,
               [e.get("type") for e in first][-6:])
         check("the queued message did not cancel the turn",
               "stopped" not in types_of(first), types_of(first)[-3:])
+        # The next turn answers the queued message: wait for that answer.
+        wait_until(lambda: any(str(m.get("content") or "").startswith("second")
+                               for m in persisted(port, sid_a)["messages"]
+                               if m.get("role") == "assistant"), timeout=60)
         msgs = persisted(port, sid_a)["messages"]
         users = [str(m.get("content") or "") for m in msgs if m.get("role") == "user"]
         answers = [str(m.get("content") or "") for m in msgs if m.get("role") == "assistant"]

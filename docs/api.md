@@ -68,11 +68,11 @@
 | `GET` | `/api/providers/{name}/usage` | 查该 provider 的订阅额度（provider 声明了 `supports_usage` 才有）；用 provider 自己的 key 去查，key 不下发。上游失败返回 502 与原因 |
 | `GET` | `/api/providers/{name}/models` | 问这个 provider 现在提供哪些模型：服务端用 provider 自己的 key 去问 `GET {api_url}/v1/models`（key 不下发）。返回每个模型的默认配置、来源、新增了哪些、哪些已经不再提供。上游失败返回 502 与原因 |
 | `POST` | `/api/providers/{name}/models` | 把确认后的模型列表写进 `provider.yaml`：`{"models":[{"id":…,"max_context_tokens":…,"max_output_tokens":…,"supports_tools":…,"supports_reasoning":…,"supports_vision":…}]}`。**只改这个 provider 的 `models:` 块**（别的 provider、注释、settings 块原样保留），先校验再替换 |
-| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE），消息在该轮的下一次迭代被采纳；要替换正在跑的那一轮，带 `{"interrupt": true}`。可带 `limits`（这一轮的预算，见下）、`tools`（这一轮允许用的工具）、`allow_paths`（这一轮额外可碰的目录）、`policy`（这一轮的**策略**，见下「策略与围栏」）、`task_id` / `task_context`（这一轮在做哪个排队任务）、`async`（**提交完就撒手**：见下「回合句柄」） |
+| **`POST`** | **`/api/chat`** | **SSE 流式对话（主入口）**。该会话已有轮次在跑时**默认排队**：返回 `200` + `{"queued":{…},"turn_running":true}`（JSON，不是 SSE）。排队消息**默认等这一轮跑完**，然后自己开**新一轮**；带 `{"insert":"now"}` 则由正在跑的这一轮在下一次模型请求之前采纳它（见下「插话：两种时机」）。要替换正在跑的那一轮，带 `{"interrupt": true}`。可带 `limits`（这一轮的预算，见下）、`tools`（这一轮允许用的工具）、`allow_paths`（这一轮额外可碰的目录）、`policy`（这一轮的**策略**，见下「策略与围栏」）、`task_id` / `task_context`（这一轮在做哪个排队任务）、`async`（**提交完就撒手**：见下「回合句柄」） |
 | `POST` | `/api/chat/stop` | 中断当前轮次（对所有人）。**必须带 `{"session_id":"…"}`**，否则 `cancelled` 一直是 false |
-| `POST` | `/api/chat/queue` | 轮次进行中把消息插队（下一轮采纳） |
+| `POST` | `/api/chat/queue` | 把消息排进这个会话的队列。**默认等正在跑的那一轮结束**（然后开新一轮）；带 `{"insert":"now"}` 由那一轮在下一次模型请求之前采纳。没有轮次在跑时，这条消息**自己开一轮**（不再报 409） |
 | `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
-| `GET` | `/api/chat/queue?session_id=` | 查看当前排队消息 |
+| `GET` | `/api/chat/queue?session_id=` | 查看这个会话的排队消息（每条带 `insert`：`after` / `now`） |
 | `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
@@ -567,7 +567,7 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 
 | `type` | 含义 |
 | --- | --- |
-| `start` | 本轮开始（session / provider / model / `messages_before`） |
+| `start` | 本轮开始（session / provider / model / `messages_before`）。这一轮是从哪条排队消息起来的，带 `queue_id`（直接发的是没有这个字段） |
 | `reasoning_delta` | 思考流 |
 | `content_delta` | 正文增量 |
 | `tool_args_delta` | 工具调用参数的流式增量（只用于进度/速度统计，不当正文渲染） |
@@ -576,8 +576,11 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 | `tool_result` | `ok` / `elapsed_ms` / `output` / `truncated`，外加跟 `tool_start` 一样的 `started_at` / `timeout_ms` |
 | `iteration_end` | 单轮结束，带 `usage` 与 `metrics` |
 | `compaction` | 上下文被压缩：`covered_messages`（折掉的条数）/ `summary_bytes` / `live_tokens` / `trigger_tokens`，`dropped: true` 表示摘要没生成成、那一段旧消息被直接丢弃。回合内部也会发（长回合每轮都查压力） |
-| `queue_adopted` | 采纳了一条排队消息（`id` / `content` / `pending`） |
-| `queue_unconsumed` | 轮次结束时仍未采纳的排队消息（`items[]`），客户端应放回输入框 |
+| `queue_queued` | 有新消息进了这个会话的队列（`id` / `content` / `insert` / `pending`）。同一会话的其它窗口据此更新排队条 |
+| `queue_adopted` | 正在跑的这一轮采纳了一条「立即插入」的消息（`id` / `content` / `iteration` / `pending` / `insert`）。它在下一次模型请求之前进入上下文 |
+| `queue_unconsumed` | **用户叫停**时还没生效的排队消息（`items[]`），客户端应放回输入框 |
+| `queue_dropped` | 交接开不了新一轮（活跃轮次到顶），那条消息放回了队列（`id` / `reason`） |
+| `turn_handover` | 这一轮自己结束了，队列里的下一条消息**接手**（`next_turn_id` / `queue_id` / `remaining` / `session_id`）。客户端据此跟到新一轮 |
 | `budget` | 这一轮的预算到点了（`limit` 是撞到的那条：iterations / wall_ms / tool_calls / total_tokens；带 `budget` 与 `budget_used`）。**不是失败**：这一轮是正常结束的 |
 | `done` | 全部结束，带整轮的 `usage` / `metrics` / `content` / `trajectory_id`。`stop_reason` 说明它为什么停（`""` = 模型自己收尾，`budget` = 预算到点，`repeated_output` = 模型在原地打转）；`budget` / `budget_used` 是这一轮的预算和用量 |
 | `stopped` | 被 `/api/chat/stop` 中断 |
@@ -729,7 +732,7 @@ curl -s http://device:8282/api/chat/turns
 
 **多个客户端同时看一轮**是允许的、而且是鼓励的用法：每个连接有自己的回放游标，
 所以在台式机上发起一个长任务、拿着笔记本走过去接着看，两边看到的是同一条流；任意一边都能
-插队（`queue_adopted` 会同时出现在两边）。
+插话（`queue_queued` 会同时出现在两边）。
 
 跟着看和打断它是两件事，所以输入框右侧有两个按钮：
 
@@ -792,12 +795,17 @@ curl -s http://device:8282/api/chat/turns
 `node tests/ui_two_clients.mjs`、`node tests/ui_second_client.mjs`（冷启动不被拽走）、
 `node tests/ui_topic_url.mjs`（同一浏览器的两个标签页各看各的主题，刷新仍在原主题）。
 
-### 插队：轮次进行中追加消息（同会话默认排队）
+### 插话：轮次进行中追加消息（两种时机）
 
 一轮可能跑很久（长工具、多轮迭代、思考模型）。这段时间里**再发一条 `POST /api/chat` 不会
-顶掉它**：消息进入**当前轮次自己的**队列，agent loop 在下一轮迭代开始前采纳最早的一条，
-把它作为普通 user 消息追加进会话，然后带着新的上下文继续请求模型。一轮只采纳一条，连发几条
-不会挤进同一个请求。
+顶掉它**：消息进入**这个会话的**队列。队列有两条道，消息走哪一条由 `insert` 决定：
+
+| `insert` | 什么时候生效 | 说明 |
+| --- | --- | --- |
+| `after`（**默认**） | **等这一轮跑完**，然后自己开**新一轮** | 正在跑的那一轮完全不受影响：它的工具、它的答案都不变 |
+| `now` | **立即插入**：正在跑的这一轮在下一次模型请求之前采纳它 | 消息作为一条普通 user 消息进上下文，**模型决定的下一轮工具调用已经知道它** |
+
+`insert` 写错（比如 `"soon"`）→ `400 bad_request`：拼错的参数不能当默认值。
 
 这是为"一个主题、多个窗口"服务的默认行为——另一个浏览器不能因为手快就把别人正在看的任务
 扔掉。响应因此有两种形状：
@@ -808,7 +816,12 @@ curl -s -X POST http://device:8282/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
 # {"ok":true,"session_id":"s_xxx","workspace_id":"ws_xxx","turn_running":true,
-#  "queued":{"id":"q_...","content":"..."},"pending":1}
+#  "queued":{"id":"q_...","content":"...","insert":"after"},"pending":1}
+
+# 立即插入：同一轮在下一次模型请求之前采纳它
+curl -s -X POST http://device:8282/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"先别动那个文件","insert":"now"}'
 
 # 明确要求顶掉正在跑的那一轮（对所有人）：服务端先取消、等旧 worker 收尾并落盘，
 # 再重新读取会话、开始新一轮。15 秒内停不下来（比如卡在长工具里）返回 409 turn_still_running。
@@ -820,13 +833,25 @@ curl -s -N -X POST http://device:8282/api/chat \
 curl -s -X POST http://device:8282/api/chat/queue \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
-# {"ok":true,"queued":{"id":"q_...","content":"..."},"pending":1}
+# {"ok":true,"queued":{"id":"q_...","content":"...","insert":"after"},"pending":1,
+#  "turn_running":true,"turn_id":"t_..."}
 
 # 采纳前可以取消：带 id 取消一条，不带 id 取消全部
 curl -s -X POST http://device:8282/api/chat/queue/cancel \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"s_xxx","id":"q_..."}'
+
+# 队列里现在有什么
+curl -s 'http://device:8282/api/chat/queue?session_id=s_xxx'
+# {"ok":true,"pending":1,"items":[{"id":"q_...","content":"...","insert":"after"}]}
 ```
+
+**队列挂在会话上，不在轮次上**：「等这轮结束」的消息必须活过这一轮。它什么时候跑：
+
+- **这一轮自己结束**（答完 / 到预算 / 报错）→ **交接**：队列里最早的一条开**新一轮**，
+  旧的那条流上发 `turn_handover`（带新轮次的 id），客户端跟过去就行。
+- **用户叫停**（`/api/chat/stop`、`interrupt`）→ **退回**：还没生效的消息原样退回
+  （`queue_unconsumed`），客户端放回输入框。叫停 = 什么都别自动开始。
 
 为什么 `interrupt` 要等旧 worker：那个 worker 手里攥着自己那份 `Session`，结束时会整份写回。
 在它停之前启动新一轮，新一轮写下的问题与回答会被旧的那份覆盖掉（修复前可稳定复现：新一轮
@@ -836,27 +861,33 @@ SSE 上的对应事件：
 
 | `type` | 含义 |
 | --- | --- |
-| `queue_adopted` | 已采纳：`id` / `content` / `iteration` / `pending`。该消息已落盘为 user 消息 |
-| `queue_unconsumed` | 轮次在采纳前结束（停止 / 报错 / 迭代上限），`items[]` 原样退回，客户端应放回输入框 |
+| `queue_queued` | 有新消息进了队列（`id` / `content` / `insert` / `pending`）。同一会话的其它窗口据此更新排队条 |
+| `queue_adopted` | 正在跑的这一轮采纳了一条「立即插入」的消息（`id` / `content` / `iteration` / `pending`）。该消息已落盘为 user 消息 |
+| `queue_unconsumed` | 用户叫停时还没生效的消息，`items[]` 原样退回，客户端应放回输入框 |
+| `queue_dropped` | 交接开不了新一轮（活跃轮次到顶），那条消息放回了队列（`id` / `reason`） |
+| `turn_handover` | 这一轮自己结束了，队列里的下一条接手（`next_turn_id` / `queue_id` / `remaining` / `session_id`） |
 | `artifacts` | 本轮产出了新文件：`items[]`（`path` / `bytes` / `kind` / `tool` / `turn`）。UI 用它把下载链接补到回答下面 |
 | `todo` | 任务列表变了：`items[]`（`{id,text,status}`）、`total`、`done`。UI 用它实时更新进度条，不需要等轮次结束。轮次结束、计划被关掉时 `items` 为空，`carried[]` 是这一轮没做完的步骤（下一轮会接回来）；下一轮接回计划时 `resumed: true` |
 | `tool_images` | `toolkit_load_image` 把图片附加进了对话：`content` 是那条 user 消息的文本，`images[]` 是 `{path, mime}`。客户端应把它插进当前对话（图片走 `/raw`），与本轮结束时回读会话的结果一致 |
 
 几条刻意的约束：
 
-- **队列随轮次存活**。轮次结束队列即销毁，不会留到下一次、无关的对话里突然发出去。
-- **模型已经给完最终答案时也会采纳**：loop 发现队列非空就继续迭代，而不是把消息留成下一轮
-  HTTP 请求；只有停止 / 报错 / 迭代上限才会退回。
+- **「立即插入」不打断正在执行的工具**，也不撤销模型已经决定的工具调用：它的保证是
+  「下一次模型请求之前生效」。第一轮例外——那一轮的工具调用是消息到达之前就定好的。
 - **只收文本**。图片必须在请求时解码、校验并落到工作区，`/api/chat` 已经为「开始一轮」做了
   这些；排队路径（包括 `/api/chat` 的默认排队）带 `images` 会明确返回 `400/409
   images_not_queued`，而不是静默丢掉。
-- 没有进行中的轮次时 `/api/chat/queue` 返回 `409 no_active_turn`：这时直接 `POST /api/chat` 就行。
+- **没有轮次在跑时，`/api/chat/queue` 自己开一轮**（不再返回 `409 no_active_turn`）：
+  轮次恰好在这一刻结束也不能把用户的字吞掉。会话这个服务端根本没见过 → `404 not_found`。
+- **队列在内存里**：服务重启即丢（已知限制）。
 - **任务列表 / 改名 / 删除在轮次进行中会被拒绝（`409 turn_running`）**：这些写操作也是
   "读文件 → 改一处 → 整份写回"，正在跑的 worker 会在下一次迭代把改动覆盖回去。等它结束再来。
 
-内置 Web UI 把这条路径做成了输入框行为：生成中按 **Enter** 进入排队（输入框上方显示排队条，
-每条都能点 × 取消），`Shift+Enter` 仍是换行，右侧是「停止」，旁边还有一个「离开」（只停止
-跟随、不中断轮次）。轮次结束时仍未采纳的消息会自动放回输入框，不会丢字。
+内置 Web UI 把这条路径做成了输入框行为：输入框旁边有一个**插话时机**的按钮
+（`⏳ 等这轮结束` ⇄ `⚡ 立即插入`，点一下切换，选择记在这个浏览器里）；生成中按 **Enter**
+按当前时机排队（输入框上方显示排队条，每条都带着自己的时机标签，都能点 × 取消），
+**Alt+Enter** = 立即插入（不管按钮现在是什么），`Shift+Enter` 仍是换行，右侧是「停止」，
+旁边还有一个「离开」（只停止跟随、不中断轮次）。
 
 ### `metrics`：指标栏的数据来源
 

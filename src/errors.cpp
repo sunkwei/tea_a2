@@ -128,6 +128,9 @@ std::vector<ErrorInfo> build_catalog() {
   entries.push_back({"unknown_turn", 404, false, 0,
                       "no turn with this id is known here",
                       "the id may be from another machine, or the handle was dropped"});
+  entries.push_back({"already_exists", 409, false, 0,
+                      "this workspace already has something with that name",
+                      "edit the one that is there, or pick another name"});
   entries.push_back({"config_missing", 409, false, 0,
                       "there is no provider.yaml, so there is nothing to replace",
                       "configure one first"});
@@ -197,6 +200,9 @@ std::vector<ErrorInfo> build_catalog() {
   entries.push_back({"models_failed", 502, true, 5,
                       "the provider did not answer the model list",
                       "try again, or look the model up by hand"});
+  entries.push_back({"shutting_down", 503, true, 5,
+                      "the agent is restarting and the running turns are being finished first",
+                      "try again in a moment"});
   entries.push_back({"upstream_error", 502, true, 5,
                       "the provider answered with an error",
                       "the message carries the provider's own answer"});

@@ -458,6 +458,15 @@ button{font-family:inherit}
   flex:0 0 auto;color:var(--dsw-alias-state-business-primary);
   font:11px/16px var(--ds-font-family-code);
 }
+/* 队列条上的时机标签：这条消息什么时候生效 */
+.queue-item .q-when{
+  flex:0 0 auto;padding:0 6px;border-radius:6px;
+  border:.5px solid var(--dsw-alias-border-l1);
+  color:var(--dsw-alias-label-caption);font:11px/16px var(--ds-font-family-code);
+}
+.queue-item .q-when.now{
+  border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);
+}
 .queue-item .q-text{
   flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:var(--dsw-alias-label-secondary);
@@ -518,6 +527,21 @@ button{font-family:inherit}
 .sess-running{color:var(--dsw-alias-state-business-primary)}
 .send.stop:hover{background:var(--dsw-static-red-400)}
 .send:disabled{opacity:.4;cursor:not-allowed}
+
+/* 插话时机：会话进行中时，新消息是「等这轮结束」还是「立即插入」。
+   它是**指示器**：告诉用户这条消息什么时候生效，也能点一下换时机。 */
+.insert-chip{
+  flex:0 0 auto;height:28px;padding:0 10px;border-radius:8px;white-space:nowrap;
+  border:.5px solid var(--dsw-alias-border-l1);background:transparent;
+  color:var(--dsw-alias-label-tertiary);font-size:12px;cursor:pointer;
+}
+.insert-chip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+.insert-chip.on{
+  border-color:var(--dsw-alias-state-business-primary);
+  color:var(--dsw-alias-state-business-primary);
+}
+/* 没有轮次在跑的时候没有「插话」可言：安静下来，但仍然可以先选好时机。 */
+.insert-chip.idle{opacity:.55}
 
 /* 语音输入的麦克风按钮：和「发送」一样是圆按钮，但安静一点（次要动作）。
    录音中变成红色并轻微脉动——一眼能看出「现在正在收音」。 */

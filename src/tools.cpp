@@ -2452,6 +2452,17 @@ ToolResult tool_peer(const nlohmann::json& args, const ToolContext& ctx) {
       return result;
     }
     if (turn.content.empty() && turn.steps.empty() && !turn.done) {
+      // The peer answered with an envelope instead of a stream: it **queued**
+      // the message (the peer's own turn is still running). Say so - the
+      // message is not lost, it runs when that turn ends.
+      nlohmann::json envelope = nlohmann::json::parse(resp.body, nullptr, false);
+      if (envelope.is_object() && envelope.contains("queued")) {
+        result.ok = true;
+        result.output = "The peer queued the message (its own turn is still running): it runs "
+                        "when that turn ends. Ask again with the same session_id to see the "
+                        "answer.";
+        return result;
+      }
       result.output = "error: the peer answered nothing (HTTP " + std::to_string(resp.status) +
                       "). It may have queued the message instead of running it.";
       return result;

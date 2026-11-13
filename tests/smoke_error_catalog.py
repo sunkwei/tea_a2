@@ -209,8 +209,14 @@ def source_pairs():
     src = io.open(SERVER_SRC, encoding="utf-8").read()
     # The variable the response is called by does not matter ("res", "res_",
     # ...), only the status and the code do.
-    return set((int(m.group(1)), m.group(2))
-               for m in re.finditer(r'send_error\(\s*\w+\s*,\s*(\d+),\s*"([a-z_]+)"', src))
+    pairs = set((int(m.group(1)), m.group(2))
+                for m in re.finditer(r'send_error\(\s*\w+\s*,\s*(\d+),\s*"([a-z_]+)"', src))
+    # The turn launcher reports its failures the same way, through a small
+    # helper (see launch_turn in server.cpp): the pair is still a pair the API
+    # can answer with, so the catalog has to know it.
+    pairs |= set((int(m.group(1)), m.group(2))
+                 for m in re.finditer(r'\bfail\(\s*(\d+),\s*"([a-z_]+)"', src))
+    return pairs
 
 
 def catalog_pairs():

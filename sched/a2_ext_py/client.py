@@ -250,6 +250,27 @@ class Client:
             raw = exc.read().decode("utf-8", "replace")
             raise ApiError(exc.code, raw, raw) from None
         with resp:
+            # The agent answers with a stream, unless it **queued** the message
+            # (the session already had a turn running). Then the answer is a
+            # JSON envelope - say so instead of returning nothing.
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "text/event-stream" not in ctype:
+                raw = resp.read().decode("utf-8", "replace")
+                try:
+                    envelope = json.loads(raw or "{}")
+                except ValueError:
+                    envelope = {}
+                if isinstance(envelope, dict) and envelope.get("queued"):
+                    yield {"type": "queued",
+                           "queued": envelope.get("queued"),
+                           "turn_id": envelope.get("turn_id"),
+                           "session_id": envelope.get("session_id"),
+                           "message": ("the message was queued: the session's turn is still "
+                                       "running, the message runs when it ends")}
+                    return
+                raise ApiError(resp.status or 0,
+                               "the agent did not answer with a stream (HTTP %s)"
+                               % (resp.status or 0), raw)
             for frame in self.sse(resp):
                 yield frame
 

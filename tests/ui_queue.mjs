@@ -1,8 +1,9 @@
 // Browser test for queued prompts ("消息插队").
 //
 // The contract pinned here:
-//   * Enter while a turn is streaming enqueues the text instead of starting a
-//     second turn, and clears the composer;
+//   * Alt+Enter while a turn is streaming enqueues the text for an immediate
+//     insertion (the running turn takes it before its next tool call) instead
+//     of starting a second turn, and clears the composer;
 //   * the queued prompts show up in the composer's queue strip in order;
 //   * × cancels one before it is adopted;
 //   * when the agent loop adopts it, the chip disappears and the text becomes a
@@ -149,14 +150,16 @@ providers:
       items: Array.prototype.map.call(strip.querySelectorAll('.queue-item'), function (row) {
         return row.querySelector('.q-text').textContent;
       }),
+      immediate: !!strip.querySelector('.queue-item .q-when.now'),
       input: document.getElementById('input').value
     };
   })()`);
-  const enqueue = (text) => evalJs(`(function(){
+  const enqueue = (text, alt) => evalJs(`(function(){
     var ta = document.getElementById('input');
     ta.value = ${JSON.stringify(text)};
     ta.dispatchEvent(new Event('input'));
-    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    ta.dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'Enter', altKey: ${alt ? 'true' : 'false'}, bubbles: true }));
     return true;
   })()`);
 
@@ -171,13 +174,15 @@ providers:
   check('turn is streaming',
     (await evalJs(`document.getElementById('send').className.indexOf('stop') >= 0`)) === true);
 
-  await enqueue('queued one');
+  await enqueue('queued one', true);
   await sleep(300);
-  await enqueue('queued two');
+  await enqueue('queued two', true);
   await sleep(400);
 
   let q = await queueState();
-  check('Enter while streaming shows the queue strip', q && q.hidden === false, JSON.stringify(q));
+  check('Alt+Enter while streaming shows the queue strip', q && q.hidden === false, JSON.stringify(q));
+  check('the queued prompt is marked as an immediate insertion',
+    !!(q && q.immediate), JSON.stringify(q));
   check('both prompts are listed in order',
     q && JSON.stringify(q.items) === JSON.stringify(['queued one', 'queued two']),
     JSON.stringify(q && q.items));

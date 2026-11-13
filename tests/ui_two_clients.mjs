@@ -145,6 +145,8 @@ const VIEW = `(function(){
            users: document.querySelectorAll('#messages .msg.user').length,
            assistants: a.length,
            queued: q.classList.contains('hidden') ? 0 : q.querySelectorAll('.queue-item').length,
+           immediate: q.classList.contains('hidden') ? false
+                      : !!q.querySelector('.queue-item .q-when.now'),
            running: document.querySelectorAll('.sess-running').length,
            liveText: live ? live.textContent : '',
            textLen: last ? last.textContent.length : 0,
@@ -250,11 +252,13 @@ try {
   check('B follows the same stream live', !!bGrew, JSON.stringify(bGrew));
 
   // ---- 3) B queues a prompt; both see it adopted ------------------------
+  // Alt+Enter = 立即插入：正在跑的这一轮在下一次工具调用之前采纳它。
+  // （默认的「等这轮结束」是另一条路：那一轮结束后它开新一轮。）
   await clientB.evalJs(`(function(){
     var ta = document.getElementById('input');
     ta.value = '排队 from B';
     ta.dispatchEvent(new Event('input'));
-    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', altKey: true, bubbles: true }));
     return true;
   })()`);
   const bQueued = await waitFor(async () => {
@@ -262,6 +266,8 @@ try {
     return v.queued === 1 ? v : null;
   }, 8000);
   check('B queued the prompt instead of starting a second turn', !!bQueued, JSON.stringify(bQueued));
+  check('the queued prompt is marked as an immediate insertion',
+    !!(bQueued && bQueued.immediate), JSON.stringify(bQueued));
   const adopted = await waitFor(async () => {
     const a = await clientA.evalJs(VIEW);
     const b = await clientB.evalJs(VIEW);

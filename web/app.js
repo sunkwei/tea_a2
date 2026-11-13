@@ -36,6 +36,12 @@
     streaming: false, abort: null, stopTimer: null,
     attachments: [],
     queue: [], queueRestore: [], queueDone: {},
+    /// 插话时机：一轮还在跑时，新消息什么时候生效。
+    /// 'after' = 等这轮结束（默认：这一轮跑完后它开**新一轮**）；
+    /// 'now' = 立即插入（插到正在跑的这一轮，下一次工具调用之前生效）。
+    insertMode: 'after',
+    /// 这一轮结束时，队列里的下一条消息接手了（turn_handover）：跟上新一轮。
+    handover: null,
     sidebarHidden: false,
     ended: false, streamError: null, expanded: {}, stickBottom: true,
     trajectory: [], trajFull: {}, lastTrajectoryId: null,
@@ -112,7 +118,8 @@
       localStorage.setItem(LS_KEY, JSON.stringify({
         view: state.view, workspace_id: state.workspace ? state.workspace.id : null,
         model: state.model, task_server: taskServerInput ? taskServerInput.value.trim() : undefined,
-        logs_autoscroll: state.logsAutoScroll, sidebar_hidden: state.sidebarHidden
+        logs_autoscroll: state.logsAutoScroll, sidebar_hidden: state.sidebarHidden,
+        insert_mode: state.insertMode
       }));
     } catch (e) { /* 隐私模式下忽略 */ }
   }
@@ -1838,6 +1845,12 @@
       state.stats = emptyStats();                 // 新一轮：指标栏先清空，等 metrics 到达再填
       state.liveTokens = 0; state.liveStartAt = 0;
       state.turnSteps = 0; state.turnStartAt = Date.now();
+      // 这一轮是从哪条排队消息起来的（交接）？那条已经生效了，排队条上划掉。
+      if (ev.queue_id) {
+        state.queueDone[ev.queue_id] = true;
+        state.queue = state.queue.filter(function (q) { return q.id !== ev.queue_id; });
+        renderQueue();
+      }
       renderMetrics();
       renderChat();
       return;
@@ -1920,6 +1933,34 @@
         : ('上下文已压缩：' + covered + ' 条旧消息已折叠为摘要');
       state.live.blocks.push({ type: 'notice', text: note });
       renderChat(); scrollMaybe(true);
+      return;
+    }
+    if (ev.type === 'queue_queued') {
+      // 另一个窗口（或另一台机器）往这个会话的队列里放了一条消息：排队条上
+      // 也要看得见，别让用户以为自己的字丢了。
+      if (ev.id && !state.queueDone[ev.id] &&
+          !state.queue.some(function (q) { return q.id === ev.id; })) {
+        // queueDone 记住这个 id：POST /api/chat/queue 的回答可能比这条事件晚到，
+        // 晚到时不能再补一条一样的排队条。
+        state.queueDone[ev.id] = true;
+        state.queue.push({
+          id: ev.id, content: ev.content || '', created_at: ev.created_at || '',
+          insert: ev.insert || INSERT_AFTER
+        });
+        renderQueue();
+      }
+      return;
+    }
+    if (ev.type === 'turn_handover') {
+      // 这一轮结束了，队列里的下一条消息接手：新一轮已经在服务端跑起来了。
+      // 跟上去（finalizeStream 收尾时做）。
+      state.handover = { session_id: ev.session_id || '', turn_id: ev.next_turn_id || '' };
+      if (ev.queue_id) {
+        state.queueDone[ev.queue_id] = true;
+        state.queue = state.queue.filter(function (q) { return q.id !== ev.queue_id; });
+        renderQueue();
+      }
+      toast('上一轮结束，排队消息开始新一轮');
       return;
     }
     if (ev.type === 'queue_adopted') {
@@ -2037,6 +2078,7 @@
     state.streaming = on;
     updatePlaceholder();
     updateComposer();
+    renderInsertChip();
     // 「进行中」标记只属于**没在跟随**的会话（见 renderSessions）：跟随状态一变，
     // 侧栏那一行就得重画，否则接上之后标记还挂着。
     renderSessions();
@@ -2061,6 +2103,10 @@
   }
   function finalizeStream() {
     var sid = state.session ? state.session.id : null;
+    // 交接：这一轮结束时，队列里的下一条消息接手了（turn_handover）。收尾之后
+    // 跟上去看新一轮。
+    var handover = state.handover;
+    state.handover = null;
     cancelLiveRender();
     state.live = null; state.liveNode = null; state.liveView = null; state.ended = false;
     if (state.stopTimer) { clearTimeout(state.stopTimer); state.stopTimer = null; }
@@ -2106,7 +2152,11 @@
       }
     }, function () { }).then(loadTrajectories).then(function () {
       attachTrajectories();
-    }).then(finish, finish);
+    }).then(finish, finish).then(function () {
+      if (!handover || !sid) return;
+      if (handover.session_id && handover.session_id !== sid) return;
+      maybeAttach(sid);
+    });
     loadSessions();
   }
   /* ---------- 粘贴图片 ---------- */
@@ -2377,14 +2427,39 @@
     else startRecording();
   }
 
+  /* ---------- 插话时机（会话进行中时，新消息什么时候生效） ---------- */
+  // 「等这轮结束」是默认：这条消息排队，这一轮跑完后它开**新一轮**，正在跑的
+  // 那一轮一点不受影响。「立即插入」：插到正在跑的这一轮里，下一次模型请求
+  // 之前生效——模型决定的下一轮工具调用已经知道它。
+  // 快捷键 Alt+Enter = 立即插入（不管 chip 现在是什么）。
+  var INSERT_AFTER = 'after', INSERT_NOW = 'now';
+
+  function insertModeLabel(mode) {
+    return mode === INSERT_NOW ? '⚡ 立即插入' : '⏳ 等这轮结束';
+  }
+
+  function renderInsertChip() {
+    var chip = $('insert-chip');
+    if (!chip) return;
+    var now = state.insertMode === INSERT_NOW;
+    chip.textContent = insertModeLabel(state.insertMode);
+    chip.classList.toggle('on', now);
+    // 没有轮次在跑的时候没有「插话」可言：安静下来，但仍然可以先选好时机。
+    chip.classList.toggle('idle', !state.streaming);
+    chip.title = now
+      ? '这一轮还没停：这条消息会插进正在跑的这一轮，在下一轮工具调用之前生效'
+      : '这一轮还没停：这条消息会排队，等这一轮结束后开新一轮（Alt+Enter = 立即插入）';
+  }
+
   /* ---------- 排队消息（会话进行中按 Enter） ---------- */
   // 一轮可能跑很久（长工具、多轮迭代）。这时按 Enter 不再被忽略或直接开第二轮，
-  // 而是把消息放进该轮自己的队列：agent loop 每轮采纳一条，采纳前随时可以取消。
-  // 队列随轮次存活——轮次结束仍未采纳的会被服务端退回（queue_unconsumed），
-  // 这里再放回输入框，绝不悄悄丢掉用户已经打出来的字。
+  // 而是把消息放进**这个会话**的队列（见上面的「插话时机」：等这轮结束，还是立即插入）。
+  // 默认的「等这轮结束」：这一轮跑完后，服务端把队列里最早的一条交给**新一轮**；
+  // 用户叫停时还没生效的消息会被服务端退回（queue_unconsumed），这里再放回输入框，
+  // 绝不悄悄丢掉用户已经打出来的字。
   var INPUT_PLACEHOLDER = '输入消息，Enter 发送，Shift+Enter 换行（可直接粘贴图片）';
   var SETUP_PLACEHOLDER = '需要 provider.yaml 才能开始对话（终端等其他功能不受影响）';
-  var QUEUE_PLACEHOLDER = '会话进行中：Enter 排队（下一轮采纳，采纳前可取消），Shift+Enter 换行';
+  var QUEUE_PLACEHOLDER = '会话进行中：Enter 排队（这轮结束后开始），Alt+Enter 立即插入，Shift+Enter 换行';
   var FORK_PLACEHOLDER = '分叉模式：Enter 会新建一个从选中轮次分出的会话，当前会话保持原样';
 
   function renderQueue() {
@@ -2396,6 +2471,13 @@
       var row = el('div', 'queue-item');
       row.title = q.content || '';
       row.appendChild(el('span', 'q-tag', '排队 ' + (i + 1)));
+      // 时机标签：这条消息什么时候生效（⏳ 等这轮结束 / ⚡ 立即插入）。
+      var when = el('span', 'q-when' + (q.insert === INSERT_NOW ? ' now' : ''),
+                    insertModeLabel(q.insert));
+      when.title = q.insert === INSERT_NOW
+        ? '插到正在跑的这一轮：下一次工具调用之前生效'
+        : '等这一轮跑完，它开新一轮';
+      row.appendChild(when);
       row.appendChild(el('span', 'q-text', q.content || ''));
       var del = btn('q-cancel', '×', function () { cancelQueued(q.id); });
       del.title = '取消这条排队消息（采纳前都可以取消）';
@@ -2414,7 +2496,7 @@
 
   /// Enter while a turn is running. Returns true when the key press was handled,
   /// so the caller never falls through to starting a second turn.
-  function queueMessage() {
+  function queueMessage(forceMode) {
     var ta = $('input');
     var text = ta.value.replace(/\s+$/, '');
     if (!state.streaming || !text) return false;
@@ -2423,20 +2505,25 @@
       return true;
     }
     if (!state.session) { toast('请先选择工作区'); return true; }
+    // 时机：chip 说了算，Alt+Enter 强制「立即插入」。
+    var mode = forceMode || state.insertMode;
     api('api/chat/queue', {
       method: 'POST',
-      body: { session_id: state.session.id, message: text }
+      body: { session_id: state.session.id, message: text, insert: mode }
     }).then(function (res) {
       ta.value = ''; autoGrow();
       var q = (res && res.queued) || {};
       // 这轮可能在响应回来之前就已经采纳了它（SSE 走另一条连接），别再补一条。
       if (!q.id || !state.queueDone[q.id]) {
         state.queue.push({
-          id: q.id || '', content: q.content || text, created_at: q.created_at || ''
+          id: q.id || '', content: q.content || text, created_at: q.created_at || '',
+          insert: q.insert || mode
         });
       }
       renderQueue();
-      toast('已排队，agent 下一轮采纳；采纳前可取消');
+      toast(mode === INSERT_NOW
+        ? '已排队：立即插入（下一轮工具调用之前生效）'
+        : '已排队：这一轮结束后开新一轮；采纳前可取消');
     }, function (e) {
       toast('排队失败：' + (e && e.message ? e.message : String(e)));
     });
@@ -2449,6 +2536,8 @@
       method: 'POST',
       body: { session_id: state.session.id, id: id }
     }).then(function (res) {
+      // 记下这个 id：排队事件晚到时别把已经取消的消息又加回来。
+      state.queueDone[id] = true;
       state.queue = state.queue.filter(function (q) { return q.id !== id; });
       renderQueue();
       toast(res && res.cancelled ? '已取消排队' : '这条消息已经被采纳，无法取消');
@@ -2602,7 +2691,10 @@
   function restoreQueue(sid) {
     return api('api/chat/queue?session_id=' + encodeURIComponent(sid)).then(function (d) {
       if (!state.session || state.session.id !== sid) return;
-      state.queue = (d.items || []).filter(function (it) { return it && it.id; });
+      state.queue = (d.items || []).filter(function (it) { return it && it.id; })
+        .map(function (it) { return { id: it.id, content: it.content || '',
+                                      created_at: it.created_at || '',
+                                      insert: it.insert || INSERT_AFTER }; });
       renderQueue();
     }, function () {});
   }
@@ -2717,7 +2809,9 @@
           workspace_id: state.workspace.id, session_id: s.id, message: text,
           images: images.length ? images.map(function (a) { return a.dataUrl; }) : undefined,
           provider: state.model ? state.model.provider : undefined,
-          model: state.model ? state.model.model : undefined
+          model: state.model ? state.model.model : undefined,
+          // 这一轮已经在跑（别的窗口）时，这条消息什么时候生效。
+          insert: state.insertMode
         }),
         signal: ctrl.signal
       }).then(function (res) {
@@ -2741,11 +2835,14 @@
       if (d.queued && d.queued.id && !state.queueDone[d.queued.id]) {
         state.queue.push({
           id: d.queued.id, content: d.queued.content || text,
-          created_at: d.queued.created_at || ''
+          created_at: d.queued.created_at || '',
+          insert: d.queued.insert || state.insertMode
         });
       }
       renderQueue(); renderChat();
-      toast('这个会话的一轮还在跑：消息已排队，agent 下一步采纳（两个窗口看同一份输出）');
+      toast((d.queued && d.queued.insert === INSERT_NOW)
+        ? '这个会话的一轮还在跑：消息已排队，会立即插进这一轮'
+        : '这个会话的一轮还在跑：消息已排队，这一轮结束后开新一轮（两个窗口看同一份输出）');
       // 接上那一轮：这个窗口从"只看历史"变成跟着别人正在跑的直播。
       return maybeAttach(queuedSid);
     }, function (err) {
@@ -7143,7 +7240,9 @@
         e.preventDefault();
         // 生成中：进入排队；空闲：正常发送。分工明确，不会因为按了 Enter 就
         // 在背后开第二轮把当前这一轮顶掉。
-        if (state.streaming) queueMessage(); else sendMessage();
+        // Alt+Enter = 立即插入（不管 chip 现在是什么）：这一轮还没停，而你话急。
+        if (state.streaming) queueMessage(e.altKey ? INSERT_NOW : null);
+        else sendMessage();
       }
     });
     $('send').onclick = function () {
@@ -7155,6 +7254,16 @@
     };
     var micBtn = $('mic');
     if (micBtn) micBtn.onclick = function () { toggleRecording(); };
+    // 插话时机：点一下在「等这轮结束」和「立即插入」之间切换。
+    var insertChip = $('insert-chip');
+    if (insertChip) insertChip.onclick = function () {
+      state.insertMode = state.insertMode === INSERT_NOW ? INSERT_AFTER : INSERT_NOW;
+      saveLS();
+      renderInsertChip();
+      toast(state.insertMode === INSERT_NOW
+        ? '下一条消息：立即插入（插到正在跑的这一轮，下一轮工具调用之前生效）'
+        : '下一条消息：等这轮结束（这一轮跑完后，它开新一轮）');
+    };
     var detachBtn = $('detach');
     if (detachBtn) detachBtn.onclick = detachStream;
     $('sidebar-hide').onclick = function () { toggleSidebar(true); };
@@ -7487,6 +7596,8 @@
     state.model = ls.model || null;
     state.logsAutoScroll = ls.logs_autoscroll !== false;
     $('logs-autoscroll').checked = state.logsAutoScroll;
+    // 插话时机是**这个浏览器**的偏好（每个窗口可以不一样）。
+    state.insertMode = ls.insert_mode === 'now' ? 'now' : 'after';
     // 手机上侧栏默认是关着的（它是抽屉）；桌面保持用户上次的习惯。
     state.sidebarHidden = ls.sidebar_hidden === true ||
       (ls.sidebar_hidden !== false && window.innerWidth <= 720);
@@ -7494,6 +7605,7 @@
     updateTitle();                       // 加载工作区之前也先立住一个确定的标题
     state.stats = emptyStats();
     bind();
+    renderInsertChip();
     updateComposer();
     renderMetrics();
     renderWorkspaceChip(); renderModelChip(); renderSessions(); renderChat();

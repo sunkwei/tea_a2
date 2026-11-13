@@ -287,20 +287,28 @@ curl -sN -X POST $B/api/chat -H 'Content-Type: application/json' \
 `interrupt` 会**等旧 worker 收尾落盘**（最多 15 秒）才开新一轮——旧 worker 手里攥着
 自己那份会话，提前重启会把新消息覆盖掉。15 秒内停不下来返回 `409 turn_still_running`。
 
-只想排队、不要 SSE 的客户端用这两个接口：
+只想排队、不要 SSE 的客户端用这几个接口。排队消息**默认等这一轮跑完**，然后自己开
+**新一轮**；`"insert":"now"` 则由正在跑的那一轮在下一次模型请求之前采纳它：
 
 ```bash
-# 插队
+# 排队（等这轮结束）
 curl -s -X POST $B/api/chat/queue -H 'Content-Type: application/json' \
   -d '{"session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
+
+# 排队（立即插入：这一轮在下一次工具调用之前就知道它）
+curl -s -X POST $B/api/chat/queue -H 'Content-Type: application/json' \
+  -d '{"session_id":"s_xxx","message":"先别动那个文件","insert":"now"}'
 
 # 取消一条（带 id）或全部（不带 id）
 curl -s -X POST $B/api/chat/queue/cancel -H 'Content-Type: application/json' \
   -d '{"session_id":"s_xxx","id":"q_..."}'
 
-# 看排队
+# 看排队（每条带 insert：after / now）
 curl -s "$B/api/chat/queue?session_id=s_xxx"
 ```
+
+没有轮次在跑时，`/api/chat/queue` **自己开一轮**（不再报 409）；这个会话服务端根本没见过
+才报 `404 not_found`。
 
 ### 2.4 中断、查询、接回去
 
@@ -1406,7 +1414,7 @@ HTTP 引擎、轨迹开关等。
 | `HTTP 400: invalid params, 400 (2013)`（MiniMax） | provider 对不上历史里的工具调用：同一个调用被答复了两次、结果没有对应的调用、调用没有答复。**发出去之前会自动修好**（日志里有一行 `repaired the tool-call structure`）；还是被拒就看日志里 `the request was rejected - N messages, ...` 那行——请求有多大、provider 原话是什么都在里面 |
 | 带图的请求被拒（也是 `invalid params, 400 (2013)`） | provider 不认这张图，多半是图本身坏了（文件少了一个字节就会这样，而且 provider 的拒绝还是**时灵时不灵**的：同一张坏图，10 次里可能 5 次被拒）。**程序会把图从请求里摘掉再试一次**，这一轮继续，只是模型这一次看不到图（日志里一行 `the picture(s) are dropped`）。会话不会再被锁死；要让模型重新看见，把完好的图重新放进工作区再 `toolkit_load_image` |
 | `409 turn_still_running` | 顶掉旧轮次时它 15 秒内没停下来（通常卡在一个停不掉的工具里）。先 `POST /api/chat/stop`，等它停了再顶 |
-| `409 no_active_turn` | 这个会话没有在跑的轮次。直接 `POST /api/chat` 就行，不用 `/api/chat/queue` |
+| `409 no_active_turn` | 这个会话没有在跑的轮次（`/api/chat/attach` 用它）。`/api/chat/queue` 不再报这个错——没有轮次时它自己开一轮 |
 | `400 images_not_queued` | 排队路径不收图片（图片必须在请求时解码落盘）。等这一轮结束，或用 `interrupt` 顶掉 |
 | `429 too_many_subscribers` | 跟着看的浏览器超过 `TEA_AGENT_MAX_SUBSCRIBERS`（默认 8） |
 | `429 too_many_active_turns` | 同时在跑的轮次超过 `TEA_AGENT_MAX_ACTIVE_TURNS`（默认 24） |

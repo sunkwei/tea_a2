@@ -202,6 +202,12 @@
                  因为这个原因消失——下面 renderMic() 会把原因说清楚。 -->
             <button class="mic hidden" id="mic" type="button" title="语音输入"
                     aria-label="语音输入"></button>
+            <!-- 插话时机：一轮还在跑时，这条消息什么时候生效。
+                 「等这轮结束」= 排队，这一轮跑完后它开**新一轮**；
+                 「立即插入」= 插到正在跑的这一轮，下一次工具调用之前生效。
+                 快捷键 Alt+Enter = 立即插入（不管这个按钮现在是什么）。 -->
+            <button class="insert-chip" id="insert-chip" type="button"
+                    title="插话时机（点一下切换；Alt+Enter = 立即插入）">⏳ 等这轮结束</button>
             <button class="send" id="send" type="button" title="发送"></button>
           </div>
           <!-- 指标栏：耗时 / 轮次 / 步数 / 速度 / 缓存命中率 / 上下文用量 / 本轮输出

@@ -1052,6 +1052,56 @@ nlohmann::json model_to_json(const DiscoveredModel& m) {
 }
 
 // ---------------------------------------------------------------------------
+// What one turn is asked to do.
+//
+// The HTTP handler fills it from the request; the hand-off (a message that
+// waited for the running turn to end) copies the spec of that turn and swaps
+// in the new message. Keeping it in one struct is what makes the hand-off
+// possible at all: the next turn has to run under the same provider, the same
+// tools and the same fences as the turn it follows.
+// ---------------------------------------------------------------------------
+struct TurnSpec {
+  std::string workspace_id;
+  /// The session the turn belongs to. Empty => a new session is created.
+  std::string session_id;
+  std::string message;
+  /// The attachments of the message, as the data URLs the caller sent. They
+  /// are decoded and stored when the turn starts (the workspace is not open
+  /// before that).
+  std::vector<std::string> image_payloads;
+  std::string provider;
+  std::string model;
+  std::string system_prompt;
+  std::vector<std::string> tools;
+  bool tools_given = false;
+  /// The role the caller named (empty => the workspace's current role).
+  std::string role_id;
+  /// The role this turn runs under, resolved when the turn started and frozen
+  /// for the turn: switching the role applies to the *next* turn.
+  std::shared_ptr<const Role> role;
+  std::string task_id;
+  std::string task_context;
+  std::vector<std::string> allow_paths;
+  ExecPolicy exec_policy;
+  nlohmann::json knob_overrides = nlohmann::json::object();
+  TurnBudget budget;
+  /// The id of the request that started the turn. Every frame of the turn
+  /// carries it.
+  std::string request_id;
+  /// The queued message this turn was started for (empty => the user sent it
+  /// directly). The UI uses it to take that message off its queue strip.
+  std::string queue_id;
+};
+
+/// Why a turn could not be started: the status and the code the HTTP layer
+/// answers with.
+struct TurnError {
+  int status = 500;
+  std::string code;
+  std::string message;
+};
+
+// ---------------------------------------------------------------------------
 // One streaming chat turn.
 //
 // The turn outlives the connection that started it. Every event is kept in a
@@ -1104,14 +1154,20 @@ struct ChatTurn {
   /// one). It carries the answer, the usage, the metrics and the stop reason,
   /// so the status can answer without replaying the stream.
   nlohmann::json outcome = nlohmann::json::object();
-  /// False once the worker has finished the loop and is winding down: after that
-  /// a late `enqueue_prompt` must be refused, otherwise it would sit in the inbox
-  /// of a turn that will never read it again.
-  bool accepting = true;
   std::atomic<bool> cancel{false};
-  /// Prompts the user typed while this turn is running. Adopted one per agent
-  /// iteration; see prompt_queue.h.
-  PromptInbox inbox;
+  /// The messages the user typed while this turn was running. The queue belongs
+  /// to the **session**, not to this turn: a message that waits for the turn to
+  /// end has to outlive it. This turn adopts the ones that ask to be inserted
+  /// *now*; the others start a turn of their own once this one is over. See
+  /// insert_queue.h.
+  std::shared_ptr<InsertQueue> queue;
+  /// What this turn was asked to do. The hand-off to the next turn copies it.
+  std::shared_ptr<const TurnSpec> spec;
+  /// True while this turn is handing the session over to the next one: the
+  /// next turn takes the slot of this one in the server's table, and this turn
+  /// is on its way out. It is not "a turn that is being replaced" - nothing is
+  /// cancelled, the work is already done.
+  std::atomic<bool> handing_over{false};
   std::thread worker;
 
   /// One attached HTTP response: which frame it wants next.
@@ -1305,24 +1361,6 @@ struct ChatTurn {
       if (!changed.empty()) j["files_changed"] = changed;
     }
     return j;
-  }
-
-  /// Queue one prompt. Returns false when the turn has already stopped accepting
-  /// them (finished, or the worker is winding down). The check and the push share
-  /// `mu` with close()/begin_shutdown(), so a prompt cannot slip into a turn that
-  /// nobody will ever drain.
-  bool enqueue_prompt(const QueuedPrompt& prompt) {
-    std::lock_guard<std::mutex> lock(mu);
-    if (!accepting) return false;
-    inbox.push(prompt);
-    return true;
-  }
-
-  /// Called by the worker after run_turn returned, before the final drain: from
-  /// here on new prompts are refused and the drain below is authoritative.
-  void begin_shutdown() {
-    std::lock_guard<std::mutex> lock(mu);
-    accepting = false;
   }
 
   /// Called repeatedly by httplib for one attached response; returns false to end
@@ -1829,6 +1867,19 @@ struct ApiServer::Impl {
   /// the old worker is still stuck (e.g. in a long tool call).
   std::vector<std::shared_ptr<ChatTurn>> retired;
 
+  /// The messages that are waiting for a turn, per session. The queue belongs
+  /// to the **session**, not to the turn: a message that waits for the turn to
+  /// end has to outlive it.
+  std::map<std::string, std::shared_ptr<InsertQueue>> session_queues;
+  /// How the last turn of a session was configured. A message that waited for
+  /// that turn to end starts its own turn under the same provider, the same
+  /// tools and the same fences - the caller said nothing about them.
+  std::map<std::string, std::shared_ptr<const TurnSpec>> session_specs;
+  /// Serialises the hand-over (a queued message starting the next turn). Two
+  /// of them at once would start two turns for one session. Taken before
+  /// `mu`, never the other way round.
+  std::mutex handover_mu;
+
   /// The shells this server hands out (the web terminal). Independent of the
   /// agent: no model, no tools, no sessions.
   ShellRegistry shells;
@@ -1842,6 +1893,22 @@ struct ApiServer::Impl {
   /// kept behind its token. See the definition for why it is one function.
   httplib::Server::HandlerResponse pre_route(const httplib::Request& req,
                                              httplib::Response& res);
+
+  /// Start a turn: build it, register it and let it work. The HTTP handler
+  /// and the hand-off (a queued message starting the next turn) both come
+  /// here, so a turn looks the same whoever started it.
+  std::shared_ptr<ChatTurn> launch_turn(const TurnSpec& spec, TurnError* err);
+
+  /// Start the next turn of a session's queue: the oldest waiting message
+  /// becomes a turn of its own. `previous` is the turn that just ended (it
+  /// carries the spec to copy); null means "use the session's last spec".
+  std::shared_ptr<ChatTurn> start_next_queued_turn(const std::string& session_id,
+                                                    const std::shared_ptr<ChatTurn>& previous);
+
+  /// The queue of a session has messages and no turn is running for it: start
+  /// the next one. The safety net for a message that arrived while the turn
+  /// was winding down.
+  void start_queued_turn_if_idle(const std::string& session_id);
 
   /// Run the web tools the model asked for, put the results back into the
   /// request and let the caller ask the model again.
@@ -1899,6 +1966,50 @@ struct ApiServer::Impl {
       turns_by_id.erase(it);
       --excess;
     }
+  }
+
+  /// The queue of one session (created on demand). Callers must hold `mu`.
+  std::shared_ptr<InsertQueue> queue_for_locked(const std::string& session_id) {
+    auto it = session_queues.find(session_id);
+    if (it != session_queues.end()) return it->second;
+    std::shared_ptr<InsertQueue> queue = std::make_shared<InsertQueue>();
+    session_queues[session_id] = queue;
+    return queue;
+  }
+
+  /// The queue of one session, or null when the session never had one.
+  std::shared_ptr<InsertQueue> session_queue(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = session_queues.find(session_id);
+    return it == session_queues.end() ? nullptr : it->second;
+  }
+
+  /// Put a message into the session's queue. Returns false when no turn is
+  /// running for that session: the caller then starts a turn for the message
+  /// instead of queueing it.
+  ///
+  /// The check and the push are one step: a message must not slip into a
+  /// queue that nobody will ever read.
+  bool queue_message(const std::string& session_id, const QueuedPrompt& prompt) {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = turns.find(session_id);
+    if (it == turns.end() || !it->second || it->second->finished()) return false;
+    queue_for_locked(session_id)->push(prompt);
+    return true;
+  }
+
+  /// Drop the queue of a session when nothing is waiting in it any more.
+  ///
+  /// Not while a turn is running for that session: the turn adopts "insert
+  /// now" messages from **this** queue, and a second queue object would hide
+  /// them from it.
+  void drop_empty_queue_locked(const std::string& session_id) {
+    auto it = session_queues.find(session_id);
+    if (it == session_queues.end()) return;
+    if (!it->second->empty()) return;
+    auto turn_it = turns.find(session_id);
+    if (turn_it != turns.end() && turn_it->second && !turn_it->second->finished()) return;
+    session_queues.erase(it);
   }
 
   bool session_turn_running(const std::string& session_id) {
@@ -2049,9 +2160,12 @@ struct ApiServer::Impl {
   /// A request that names a role must name one that exists; the pointer may
   /// dangle (the role file was deleted), and then the turn runs without a
   /// role and says so in the log.
-  std::shared_ptr<const Role> role_for_turn(const Workspace& ws, const nlohmann::json& body,
+  /// The role a turn runs under. `named` is the role the caller asked for
+  /// (empty => the workspace's current one, read fresh: switching the role
+  /// applies to the next turn).
+  std::shared_ptr<const Role> role_for_turn(const Workspace& ws, const std::string& named_in,
                                              std::string* err) const {
-    const std::string named = trim(json_string(body, "role"));
+    const std::string named = trim(named_in);
     const std::string id = named.empty() ? ws.current_role_id() : named;
     if (id.empty()) return nullptr;
     const RoleSet roles = ws.load_roles();
@@ -2510,6 +2624,369 @@ httplib::Server::HandlerResponse ApiServer::Impl::pre_route(const httplib::Reque
   httplib::Request& routed = const_cast<httplib::Request&>(req);
   routed.path = "/api/" + tail;
   return httplib::Server::HandlerResponse::Unhandled;
+}
+
+// ---------------------------------------------------------------------------
+// Starting a turn
+// ---------------------------------------------------------------------------
+
+std::shared_ptr<ChatTurn> ApiServer::Impl::launch_turn(const TurnSpec& spec, TurnError* err) {
+  auto fail = [&](int status, const std::string& code, const std::string& message) {
+    if (err) {
+      err->status = status;
+      err->code = code;
+      err->message = message;
+    }
+    return std::shared_ptr<ChatTurn>();
+  };
+
+  // The ceiling on the turns this server carries. A turn that cannot be
+  // started is refused with a reason, not silently dropped.
+  {
+    const int active = active_turn_count();
+    if (active >= max_active_turns()) {
+      return fail(429, "too_many_turns",
+                  "this server is already running " + std::to_string(active) + " turns (limit " +
+                      std::to_string(max_active_turns()) +
+                      "); wait for one to finish or stop it first");
+    }
+  }
+
+  auto turn = std::make_shared<ChatTurn>();
+  turn->started_at = now_iso8601();
+  turn->started_ms = now_ms();
+  // The handle: the caller gets it back (202) and can ask how the turn went
+  // later, long after the connection is gone. The trajectory uses the same
+  // id, so the audit trail of this turn is at /api/turns/<handle>/trajectory.
+  turn->turn_id = make_id("t_");
+  // The id of this request: it goes on every frame of the turn.
+  turn->request_id = spec.request_id;
+
+  std::string e;
+  if (!open_workspace(spec.workspace_id, &turn->workspace, &e)) {
+    return fail(404, "not_found", e);
+  }
+  turn->workspace_id = turn->workspace.id();
+
+  // The stage profile of this turn. It is resolved here, before the worker
+  // starts, and frozen into the turn: switching the role applies to the
+  // next turn, so a running turn never changes its own rules.
+  std::shared_ptr<const Role> role;
+  {
+    std::string role_err;
+    role = role_for_turn(turn->workspace, spec.role_id, &role_err);
+    if (!role_err.empty()) return fail(400, "bad_request", role_err);
+  }
+  if (role) LOG_INFO("chat: the turn runs under the role '", role->id, "'");
+
+  // The role tightens the turn; it never widens it. The caller's own choice
+  // wins where the two disagree (the caller is the more specific one), the
+  // role decides where the caller said nothing.
+  std::string provider = spec.provider;
+  std::string model = spec.model;
+  std::vector<std::string> allowed_tools = spec.tools;
+  bool tools_given = spec.tools_given;
+  TurnBudget budget = spec.budget;
+  if (role) {
+    if (provider.empty() && !role->provider.empty()) provider = role->provider;
+    if (model.empty() && !role->model.empty()) model = role->model;
+    if (!role->tools.empty()) {
+      std::vector<std::string> narrowed;
+      if (tools_given) {
+        for (std::size_t i = 0; i < allowed_tools.size(); ++i) {
+          for (std::size_t k = 0; k < role->tools.size(); ++k) {
+            if (allowed_tools[i] == role->tools[k]) {
+              narrowed.push_back(allowed_tools[i]);
+              break;
+            }
+          }
+        }
+      } else {
+        narrowed = role->tools;
+      }
+      allowed_tools = narrowed;
+      tools_given = true;
+    }
+    if (role->limits.any()) budget = role->limits.tightened_by(budget);
+  }
+
+  // The session this turn belongs to. An unknown session id simply starts a
+  // fresh conversation.
+  if (!spec.session_id.empty()) {
+    turn->workspace.load_session(spec.session_id, &turn->session, nullptr);
+  }
+  if (turn->session.info.id.empty()) {
+    Session created;
+    if (!turn->workspace.create_session("", &created, &e)) {
+      return fail(500, "session_error", e);
+    }
+    turn->session = created;
+  }
+  turn->session_id = turn->session.info.id;
+  // Where the audit trail of this turn will be written: the status reports
+  // the files it changed, and it reads them from there.
+  turn->trajectory_path = trajectory_file_path(turn->workspace.run_dir(), turn->session_id);
+
+  // ---- image attachments ------------------------------------------------
+  std::vector<ImageAttachment> images;
+  {
+    const std::size_t count = spec.image_payloads.size();
+    if (count > 0) {
+      const std::string artifacts = turn->workspace.artifacts_dir();
+      if (!make_dirs(artifacts)) {
+        return fail(500, "io_error", "cannot create " + artifacts);
+      }
+      for (std::size_t i = 0; i < count; ++i) {
+        std::string bytes;
+        std::string decode_err;
+        if (!decode_image_payload(spec.image_payloads[i], &bytes, &decode_err)) {
+          return fail(400, "bad_image",
+                      "image " + std::to_string(i + 1) + ": " + decode_err);
+        }
+        if (bytes.size() > kMaxImageBytes) {
+          return fail(413, "image_too_large",
+                      "image " + std::to_string(i + 1) + " is " + human_size(bytes.size()) +
+                          "; the limit is " + human_size(kMaxImageBytes));
+        }
+        const char* mime = sniff_image_mime(bytes);
+        if (!mime) {
+          return fail(400, "bad_image",
+                      "image " + std::to_string(i + 1) +
+                          " is not a PNG, JPEG, GIF or WebP (identified by content, not by name)");
+        }
+        const std::string file =
+            path_join(artifacts, "img_" + random_hex(8) + image_extension_for(mime));
+        std::string io_err;
+        if (!write_file(file, bytes, false, &io_err)) {
+          return fail(500, "io_error", "cannot store the image: " + io_err);
+        }
+        ImageAttachment att;
+        att.mime = mime;
+        // Workspace-relative, so the session file stays portable and the /raw
+        // route can serve it back to the UI.
+        att.path = turn->workspace.display_path(file);
+        images.push_back(att);
+      }
+      LOG_INFO("chat: ", images.size(), " image attachment(s) stored under ", artifacts);
+    }
+  }
+
+  // The queue of the session: the messages that are waiting for a turn.
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    turn->queue = queue_for_locked(turn->session_id);
+  }
+
+  // What this turn was asked to do. The hand-over to the next turn copies it.
+  TurnSpec turn_spec = spec;
+  turn_spec.workspace_id = turn->workspace_id;
+  turn_spec.session_id = turn->session_id;
+  turn_spec.provider = provider;
+  turn_spec.model = model;
+  turn_spec.tools = allowed_tools;
+  turn_spec.tools_given = tools_given;
+  turn_spec.budget = budget;
+  turn_spec.role = role;
+  turn_spec.image_payloads.clear();
+  turn->spec = std::make_shared<const TurnSpec>(turn_spec);
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    session_specs[turn->session_id] = turn->spec;
+  }
+
+  // ---- register and run -------------------------------------------------
+  std::vector<std::shared_ptr<ChatTurn>> graveyard;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    prune_turns_locked(&graveyard);
+    auto it = turns.find(turn->session_id);
+    if (it != turns.end() && it->second) {
+      // A turn that is still running on this id was either queued into
+      // (the default) or interrupted and waited for. The one exception is the
+      // hand-over: that turn is done and is on its way out.
+      if (!it->second->finished() && !it->second->handing_over.load()) {
+        LOG_WARN("chat: replacing a still-running turn on session ", turn->session_id,
+                 " without an explicit interrupt");
+        it->second->cancel.store(true);
+        retired.push_back(it->second);  // destroyed after the lock is released
+      }
+      turns.erase(it);
+    }
+    turns[turn->session_id] = turn;
+    // The handle index: the turn stays queryable by its id after it finished,
+    // so a caller that walked away can still ask how it went.
+    turns_by_id[turn->turn_id] = turn;
+    turn_handles.push_back(turn->turn_id);
+    prune_handles_locked(&graveyard);
+  }
+  // Joining a finished worker is immediate; doing it here keeps `mu` free.
+  graveyard.clear();
+
+  AppConfig* cfg = config;
+  ToolRegistry* reg = tools;
+  std::shared_ptr<const TurnSpec> turn_spec_ptr = turn->spec;
+  turn->worker = std::thread([this, turn, cfg, reg, turn_spec_ptr, images]() {
+    Agent agent(cfg, reg);
+    TurnOptions options;
+    options.provider = turn_spec_ptr->provider;
+    options.model = turn_spec_ptr->model;
+    options.stream = true;
+    options.queue = turn->queue.get();
+    options.system_prompt = turn_spec_ptr->system_prompt;
+    options.tools = turn_spec_ptr->tools;
+    options.tools_given = turn_spec_ptr->tools_given;
+    options.role = turn_spec_ptr->role;
+    options.task_id = turn_spec_ptr->task_id;
+    options.task_context = turn_spec_ptr->task_context;
+    options.allow_paths = turn_spec_ptr->allow_paths;
+    options.exec_policy = turn_spec_ptr->exec_policy;
+    options.budget = turn_spec_ptr->budget;
+    options.knob_overrides = turn_spec_ptr->knob_overrides;
+    // The audit trail is written under the handle's id, so one string
+    // identifies this turn everywhere.
+    options.turn_id = turn->turn_id;
+    options.queue_id = turn_spec_ptr->queue_id;
+    EventEmitter emit = [turn](const nlohmann::json& event) {
+      turn->observe_event(event);
+      turn->emit_event(event);
+    };
+    try {
+      agent.run_turn(turn->workspace, &turn->session, turn_spec_ptr->message, images, options,
+                     emit, &turn->cancel);
+    } catch (const std::exception& e) {
+      nlohmann::json event = nlohmann::json::object();
+      event["type"] = "error";
+      event["message"] = std::string("agent crashed: ") + e.what();
+      turn->emit_event(event);
+    }
+    // The turn is over: the history it left behind is what the cleaner
+    // gets to look at.
+    maybe_gc_history(turn->workspace);
+    // The queue belongs to the session, not to this turn. What happens to the
+    // messages in it depends on how this turn ended:
+    //   * the user stopped it -> they go back to the caller (the browser puts
+    //     them into the composer), and nothing starts by itself;
+    //   * the turn ended by itself -> the next message starts a turn of its
+    //     own (the hand-over).
+    if (turn->cancel.load()) {
+      std::vector<QueuedPrompt> leftover;
+      if (turn->queue) leftover = turn->queue->drain();
+      if (!leftover.empty()) {
+        nlohmann::json items = nlohmann::json::array();
+        for (std::size_t i = 0; i < leftover.size(); ++i) {
+          nlohmann::json item = nlohmann::json::object();
+          item["id"] = leftover[i].id;
+          item["content"] = leftover[i].text;
+          item["created_at"] = leftover[i].created_at;
+          item["insert"] = insert_mode_name(leftover[i].mode);
+          items.push_back(item);
+        }
+        nlohmann::json event = nlohmann::json::object();
+        event["type"] = "queue_unconsumed";
+        event["items"] = items;
+        turn->emit_event(event);
+        LOG_INFO("queue: ", leftover.size(),
+                 " queued message(s) handed back (the turn was stopped)");
+      }
+    } else if (turn->queue) {
+      // A message that asked to be inserted *now* but was not adopted (the
+      // turn ended first) waits for the next turn like any other message.
+      turn->queue->downgrade_now();
+    }
+    // The hand-over: the next message starts a turn of its own. It happens
+    // before the close, so the client learns about it on this stream.
+    start_next_queued_turn(turn->session_id, turn);
+    turn->close();
+    // A message that arrived while the turn was winding down would otherwise
+    // sit in the queue with nobody to run it.
+    start_queued_turn_if_idle(turn->session_id);
+    // A session whose queue is empty and has no turn running does not need one
+    // any more. (Not while a turn runs: that turn adopts from this very
+    // queue, and a second queue object would hide the messages from it.)
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      drop_empty_queue_locked(turn->session_id);
+    }
+  });
+
+  return turn;
+}
+
+std::shared_ptr<ChatTurn> ApiServer::Impl::start_next_queued_turn(
+    const std::string& session_id, const std::shared_ptr<ChatTurn>& previous) {
+  // One hand-over at a time: two of them would start two turns for one
+  // session.
+  std::lock_guard<std::mutex> handover_lock(handover_mu);
+
+  // The turn this one follows: it carries the spec to copy.
+  std::shared_ptr<const TurnSpec> base;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = session_specs.find(session_id);
+    if (it != session_specs.end()) base = it->second;
+  }
+  if (!base && previous) base = previous->spec;
+  if (!base) return nullptr;
+
+  // The oldest waiting message becomes the next turn.
+  std::shared_ptr<InsertQueue> queue = session_queue(session_id);
+  if (!queue) return nullptr;
+  QueuedPrompt next;
+  if (!queue->pop_next(&next)) return nullptr;
+
+  TurnSpec spec = *base;
+  spec.message = next.text;
+  spec.queue_id = next.id;
+  // The role of the workspace applies to the next turn: switching the role
+  // while a turn was running was meant for the turn that follows it.
+  spec.role_id.clear();
+  spec.role.reset();
+  spec.image_payloads.clear();
+  spec.request_id.clear();
+
+  if (previous) previous->handing_over.store(true);
+  TurnError err;
+  std::shared_ptr<ChatTurn> next_turn = launch_turn(spec, &err);
+  if (!next_turn) {
+    if (previous) previous->handing_over.store(false);
+    // The message could not start a turn: put it back, it still waits.
+    queue->push_front(next);
+    LOG_WARN("chat: cannot start the next turn for session ", session_id, ": ", err.message);
+    if (previous) {
+      nlohmann::json event = nlohmann::json::object();
+      event["type"] = "queue_dropped";
+      event["id"] = next.id;
+      event["reason"] = err.message;
+      previous->emit_event(event);
+    }
+    return nullptr;
+  }
+
+  if (previous) {
+    // Tell the client on the old stream: the next turn is on its way, and this
+    // is the message it was started for.
+    nlohmann::json event = nlohmann::json::object();
+    event["type"] = "turn_handover";
+    event["next_turn_id"] = next_turn->turn_id;
+    event["queue_id"] = next.id;
+    event["session_id"] = session_id;
+    event["remaining"] = static_cast<int>(queue->size());
+    previous->emit_event(event);
+    LOG_INFO("chat: handed session ", session_id, " over to turn ", next_turn->turn_id,
+             " (queued message ", next.id, ")");
+  } else {
+    LOG_INFO("chat: started turn ", next_turn->turn_id, " for the queued message ", next.id,
+             " of session ", session_id);
+  }
+  return next_turn;
+}
+
+void ApiServer::Impl::start_queued_turn_if_idle(const std::string& session_id) {
+  std::shared_ptr<ChatTurn> running = find_turn(session_id);
+  if (running && !running->finished()) return;
+  std::shared_ptr<InsertQueue> queue = session_queue(session_id);
+  if (!queue || queue->empty()) return;
+  start_next_queued_turn(session_id, nullptr);
 }
 
 void ApiServer::Impl::install_routes() {
@@ -5817,14 +6294,34 @@ void ApiServer::Impl::install_routes() {
       interrupt = body["interrupt"].get<bool>();
     }
 
+    // "insert": when the message takes effect.
+    //   "after" (the default): the message waits for the running turn to end
+    //     and then starts a turn of its own - the running turn is not
+    //     disturbed at all.
+    //   "now": the running turn adopts the message before its next model
+    //     request, so the tool calls it decides next already know about it.
+    InsertMode insert_mode = InsertMode::kAfter;
+    {
+      nlohmann::json::const_iterator it = body.find("insert");
+      if (it != body.end() && !it->is_null()) {
+        if (!it->is_string() || !parse_insert_mode(it->get<std::string>(), &insert_mode)) {
+          send_error(res, 400, "bad_request",
+                     "'insert' must be \"after\" (the message waits for the running turn to "
+                     "end) or \"now\" (the running turn takes it before its next tool call)");
+          return;
+        }
+      }
+    }
+
     // ---- same-session policy: queue by default, replace only on request -----
     //
     // Two windows on one topic are a feature, so a second message must not
     // silently throw away what the other window (or the other machine) is
-    // watching. Default: the message joins the running turn's inbox and the
-    // agent adopts it at the next iteration - that is exactly what
-    // POST /api/chat/queue does, so this route answers with the same shape and
-    // the UI shows the queue strip.
+    // watching. Default: the message joins the **session's** queue. By default
+    // it waits for the running turn to end and then starts a turn of its own;
+    // with {"insert": "now"} the running turn adopts it before its next model
+    // request. POST /api/chat/queue does the same, so this route answers with
+    // the same shape and the UI shows the queue strip.
     //
     // Replacing the turn needs `{"interrupt": true}`, and even then the old
     // worker is waited for: it owns its own Session copy and writes it wholesale,
@@ -5838,7 +6335,7 @@ void ApiServer::Impl::install_routes() {
         if (!interrupt) {
           if (images_json.is_array() && !images_json.empty()) {
             send_error(res, 409, "images_not_queued",
-                       "this session's turn is still running, and a queued prompt cannot carry "
+                       "this session's turn is still running, and a queued message cannot carry "
                        "images; wait for it to finish, or send {\"interrupt\": true} to replace it");
             return;
           }
@@ -5846,27 +6343,41 @@ void ApiServer::Impl::install_routes() {
           queued.id = make_id("q_");
           queued.text = trim(message);
           queued.created_at = now_iso8601();
-          if (!running->enqueue_prompt(queued)) {
+          queued.mode = insert_mode;
+          if (!queue_message(requested_session, queued)) {
             // The turn closed between the check and the push: fall through and
             // start a fresh turn instead of dropping the message.
             LOG_INFO("chat: session ", requested_session,
-                     " finished just as the prompt was queued; starting a new turn");
+                     " finished just as the message was queued; starting a new turn");
           } else {
-            LOG_INFO("chat: queued prompt ", queued.id, " for the running turn of session ",
-                     requested_session, " (", running->inbox.size(), " pending)");
+            std::shared_ptr<InsertQueue> queue = session_queue(requested_session);
+            const int pending = queue ? static_cast<int>(queue->size()) : 0;
+            LOG_INFO("chat: queued message ", queued.id, " (", insert_mode_name(insert_mode),
+                     ") for the running turn of session ", requested_session, " (", pending,
+                     " pending)");
+            // The other windows of this session show the queue strip too.
+            nlohmann::json queued_event = nlohmann::json::object();
+            queued_event["type"] = "queue_queued";
+            queued_event["id"] = queued.id;
+            queued_event["content"] = queued.text;
+            queued_event["insert"] = insert_mode_name(insert_mode);
+            queued_event["created_at"] = queued.created_at;
+            queued_event["pending"] = pending;
+            running->emit_event(queued_event);
             nlohmann::json j = nlohmann::json::object();
             j["ok"] = true;
             j["queued"] = {{"id", queued.id},
                            {"content", queued.text},
-                           {"created_at", queued.created_at}};
-            j["pending"] = static_cast<int>(running->inbox.size());
+                           {"created_at", queued.created_at},
+                           {"insert", insert_mode_name(insert_mode)}};
+            j["pending"] = pending;
             j["session_id"] = requested_session;
             j["workspace_id"] = running->workspace_id;
             // The client uses this to say "another window is answering; your
             // message waits its turn" instead of pretending it started a turn.
             j["turn_running"] = true;
             // The handle of the turn that is already running: the queued
-            // prompt joins it, so that is the turn to watch.
+            // message joins it, so that is the turn to watch.
             j["turn_id"] = running->turn_id;
             j["state"] = "running";
             j["status_url"] = "/api/turns/" + running->turn_id;
@@ -5909,102 +6420,49 @@ void ApiServer::Impl::install_routes() {
       }
     }
 
-    {
-      const int active = active_turn_count();
-      if (active >= max_active_turns()) {
-        send_error(res, 429, "too_many_turns",
-                   "this server is already running " + std::to_string(active) +
-                       " turns (limit " + std::to_string(max_active_turns()) +
-                       "); wait for one to finish or stop it first");
-        return;
-      }
-    }
-
-    auto turn = std::make_shared<ChatTurn>();
-    turn->started_at = now_iso8601();
-    turn->started_ms = now_ms();
-    // The handle: the caller gets it back (202) and can ask how the turn went
-    // later, long after the connection is gone. The trajectory uses the same
-    // id, so the audit trail of this turn is at /api/turns/<handle>/trajectory.
-    turn->turn_id = make_id("t_");
-    // The id of this request: it goes on every frame of the turn.
-    turn->request_id = response_request_id(res);
-    std::string err;
-    if (!open_workspace(workspace_id, &turn->workspace, &err)) {
-      send_error(res, 404, "not_found", err);
-      return;
-    }
-    turn->workspace_id = turn->workspace.id();
-
-    // The stage profile of this turn. It is resolved here, before the worker
-    // starts, and frozen into the turn: switching the role applies to the
-    // next turn, so a running turn never changes its own rules.
-    std::shared_ptr<const Role> role;
-    {
-      std::string role_err;
-      role = role_for_turn(turn->workspace, body, &role_err);
-      if (!role_err.empty()) {
-        send_error(res, 400, "bad_request", role_err);
-        return;
-      }
-    }
-    if (role) LOG_INFO("chat: the turn runs under the role '", role->id, "'");
-
-    if (!requested_session.empty()) {
-      // Unknown session ids simply start a fresh conversation.
-      turn->workspace.load_session(requested_session, &turn->session, nullptr);
-    }
-    if (turn->session.info.id.empty()) {
-      Session created;
-      if (!turn->workspace.create_session("", &created, &err)) {
-        send_error(res, 500, "session_error", err);
-        return;
-      }
-      turn->session = created;
-    }
-    turn->session_id = turn->session.info.id;
-    // Where the audit trail of this turn will be written: the status reports
-    // the files it changed, and it reads them from there.
-    turn->trajectory_path = trajectory_file_path(turn->workspace.run_dir(), turn->session_id);
-
-    // Not const: the role of the turn may name a model, and it only does so
-    // when the caller did not ask for one.
-    std::string provider = json_string(body, "provider");
-    std::string model = json_string(body, "model");
+    // ---- what the turn is asked to do -------------------------------------
+    TurnSpec spec;
+    spec.workspace_id = workspace_id;
+    spec.session_id = requested_session;
+    spec.message = message;
+    spec.request_id = response_request_id(res);
+    spec.provider = json_string(body, "provider");
+    spec.model = json_string(body, "model");
     // The agent loop as a primitive: a caller that keeps its own policy may hand
     // in the persona it wants and the tools it is willing to let the model use.
-    const std::string system_prompt = trim(json_string(body, "system_prompt"));
+    spec.system_prompt = trim(json_string(body, "system_prompt"));
+    // The stage profile: the one the caller named, or the workspace's current
+    // one. It is resolved when the turn starts.
+    spec.role_id = trim(json_string(body, "role"));
+    // The task this turn works on (the task queue lives in the task
+    // server, so the caller says what the work is; this side only tells the
+    // model "this turn works on that task").
+    spec.task_id = trim(json_string(body, "task_id"));
+    spec.task_context = trim(json_string(body, "task_context"));
+
     // The tools this turn may use. The caller may name them at the top level
     // or inside the policy block (the task queue puts them there). Naming an
     // empty list means "no tools at all" - that is different from saying
     // nothing about them.
-    std::vector<std::string> allowed_tools;
-    bool tools_given = false;
     {
       auto tools_it = body.find("tools");
       if (tools_it != body.end() && tools_it->is_array()) {
-        tools_given = true;
+        spec.tools_given = true;
         for (std::size_t i = 0; i < tools_it->size(); ++i) {
-          if ((*tools_it)[i].is_string()) allowed_tools.push_back((*tools_it)[i].get<std::string>());
+          if ((*tools_it)[i].is_string()) spec.tools.push_back((*tools_it)[i].get<std::string>());
         }
       } else {
         nlohmann::json::const_iterator policy_it = body.find("policy");
         if (policy_it != body.end() && policy_it->is_object()) {
           nlohmann::json::const_iterator pol_tools = policy_it->find("tools");
-          // An empty list here means "the usual set" - that is what the task
-          // queue documents ("empty => the usual set"), and the queue only
-          // sends the key when it means something. The top level `tools` is
-          // the opposite: an empty list there means "no tools at all".
           if (pol_tools != policy_it->end() && !pol_tools->is_null() &&
               !(pol_tools->is_array() && pol_tools->empty()) &&
               !(pol_tools->is_string() && trim(pol_tools->get<std::string>()).empty())) {
-            tools_given = true;
+            spec.tools_given = true;
             std::vector<std::string> names;
             if (pol_tools->is_array()) {
               for (std::size_t i = 0; i < pol_tools->size(); ++i) {
-                if ((*pol_tools)[i].is_string()) {
-                  names.push_back(trim((*pol_tools)[i].get<std::string>()));
-                }
+                if (pol_tools->at(i).is_string()) names.push_back(trim(pol_tools->at(i).get<std::string>()));
               }
             } else if (pol_tools->is_string()) {
               // "a, b; c" - the queue accepts that spelling too.
@@ -6021,79 +6479,60 @@ void ApiServer::Impl::install_routes() {
               }
             }
             for (std::size_t i = 0; i < names.size(); ++i) {
-              if (!names[i].empty()) allowed_tools.push_back(names[i]);
+              if (!names[i].empty()) spec.tools.push_back(names[i]);
             }
           }
         }
       }
     }
-    // The budget of this turn. The request may only tighten the machine's
+    // The budget of the turn. The request may only tighten the machine's
     // ceilings - see TurnBudget::tightened_by.
-    TurnBudget request_budget;
     {
       std::string limits_err;
-      if (!parse_turn_limits(body, &request_budget, &limits_err)) {
+      if (!parse_turn_limits(body, &spec.budget, &limits_err)) {
         send_error(res, 400, "bad_request", limits_err);
         return;
       }
     }
-    // The role tightens the turn; it never widens it. The caller's own
-    // choice wins where the two disagree (the caller is the more specific
-    // one), the role decides where the caller said nothing.
-    if (role) {
-      if (provider.empty() && !role->provider.empty()) provider = role->provider;
-      if (model.empty() && !role->model.empty()) model = role->model;
-      if (!role->tools.empty()) {
-        std::vector<std::string> narrowed;
-        if (tools_given) {
-          for (std::size_t i = 0; i < allowed_tools.size(); ++i) {
-            for (std::size_t k = 0; k < role->tools.size(); ++k) {
-              if (role->tools[k] == allowed_tools[i]) {
-                narrowed.push_back(allowed_tools[i]);
-                break;
-              }
-            }
-          }
-        } else {
-          narrowed = role->tools;
-        }
-        allowed_tools = narrowed;
-        tools_given = true;
-      }
-      if (role->limits.any()) request_budget = role->limits.tightened_by(request_budget);
-    }
-
-    const std::string task_id = trim(json_string(body, "task_id"));
-    // What the task is: id, title, request. The task queue lives in the task
-    // server (sched/task_server.py), so the caller says what the work is; this
-    // side only tells the model "this turn works on that task".
-    const std::string task_context = trim(json_string(body, "task_context"));
     // The model knobs for this turn (`reasoning_effort`, `temperature`, ...).
     // The same overrides /api/llm/chat takes: a caller that drives its own
     // policy can say "this turn thinks less" without touching the config.
-    nlohmann::json knob_overrides = nlohmann::json::object();
     {
       static const char* const kKnobKeys[] = {
           "reasoning_effort", "temperature", "top_p", "top_k",
           "frequency_penalty", "presence_penalty", "seed", "max_tokens"};
-      for (std::size_t i = 0; i < sizeof(kKnobKeys) / sizeof(kKnobKeys[0]); ++i) {
-        if (body.contains(kKnobKeys[i])) knob_overrides[kKnobKeys[i]] = body[kKnobKeys[i]];
+      for (nlohmann::json::const_iterator k = body.begin(); k != body.end(); ++k) {
+        const std::string key = k.key();
+        bool known = false;
+        for (std::size_t i = 0; i < sizeof(kKnobKeys) / sizeof(kKnobKeys[0]); ++i) {
+          if (key == kKnobKeys[i]) { known = true; break; }
+        }
+        if (known) spec.knob_overrides[key] = k.value();
       }
     }
     // Extra directories the file tools may touch in this turn. A caller that
-    // drives its own policy (the task queue) says per task what it may work
-    // in; the grant lasts this turn only.
-    std::vector<std::string> allow_paths;
+    // drives its own policy says per task what it may work in; the grant lasts
+    // this turn only.
+    {
+      auto allow_it = body.find("allow_paths");
+      if (allow_it != body.end() && allow_it->is_array()) {
+        for (std::size_t i = 0; i < allow_it->size(); ++i) {
+          if (!(*allow_it)[i].is_string()) continue;
+          std::string one = trim((*allow_it)[i].get<std::string>());
+          if (!one.empty()) spec.allow_paths.push_back(one);
+        }
+      }
+    }
     // The exec fence of this turn: which commands it may run. Empty => the
     // open semantics (nothing is fenced) - a policy is opt-in.
-    ExecPolicy exec_policy;
     {
       nlohmann::json::const_iterator policy_it = body.find("policy");
       if (policy_it != body.end() && policy_it->is_object()) {
         nlohmann::json::const_iterator exec_it = policy_it->find("exec");
         if (exec_it != policy_it->end() && exec_it->is_object()) {
-          const char* const kLists[2] = {"allow", "deny"};
-          std::vector<std::string>* targets[2] = {&exec_policy.allow, &exec_policy.deny};
+          static const char* const kLists[2] = {"allow", "deny"};
+          std::vector<std::string>* targets[2] = {&spec.exec_policy.allow,
+                                                   &spec.exec_policy.deny};
           for (int k = 0; k < 2; ++k) {
             nlohmann::json::const_iterator list_it = exec_it->find(kLists[k]);
             if (list_it == exec_it->end() || !list_it->is_array()) continue;
@@ -6106,17 +6545,8 @@ void ApiServer::Impl::install_routes() {
         }
       }
     }
-    auto allow_it = body.find("allow_paths");
-    if (allow_it != body.end() && allow_it->is_array()) {
-      for (std::size_t i = 0; i < allow_it->size(); ++i) {
-        if (!(*allow_it)[i].is_string()) continue;
-        const std::string one = trim((*allow_it)[i].get<std::string>());
-        if (!one.empty()) allow_paths.push_back(one);
-      }
-    }
 
     // ---- image attachments ------------------------------------------------
-    std::vector<ImageAttachment> images;
     if (images_json.is_array() && !images_json.empty()) {
       if (images_json.size() > kMaxImagesPerMessage) {
         send_error(res, 400, "too_many_images",
@@ -6127,9 +6557,9 @@ void ApiServer::Impl::install_routes() {
       // otherwise the provider answers with a confusing 400, or silently
       // ignores them and the user believes the model looked at the picture.
       const ProviderInfo* pinfo =
-          config->provider(provider.empty() ? config->active_provider : provider);
-      std::string model_name = model.empty() ? (pinfo ? pinfo->primary_model() : std::string())
-                                            : model;
+          config->provider(spec.provider.empty() ? config->active_provider : spec.provider);
+      std::string model_name = spec.model.empty() ? (pinfo ? pinfo->primary_model() : std::string())
+                                                  : spec.model;
       const ModelInfo* minfo = pinfo ? pinfo->find_model(model_name) : nullptr;
       // Mirror the agent's fallback: an unknown model name resolves to the
       // provider's default, so a stale id in the UI must not look like "this
@@ -6145,11 +6575,6 @@ void ApiServer::Impl::install_routes() {
                        "vision model before attaching images");
         return;
       }
-      const std::string artifacts = turn->workspace.artifacts_dir();
-      if (!make_dirs(artifacts)) {
-        send_error(res, 500, "io_error", "cannot create " + artifacts);
-        return;
-      }
       for (std::size_t i = 0; i < images_json.size(); ++i) {
         const nlohmann::json& item = images_json[i];
         std::string raw;
@@ -6159,69 +6584,18 @@ void ApiServer::Impl::install_routes() {
           send_error(res, 400, "bad_request", "image " + std::to_string(i + 1) + " has no data");
           return;
         }
-        std::string bytes;
-        std::string decode_err;
-        if (!decode_image_payload(raw, &bytes, &decode_err)) {
-          send_error(res, 400, "bad_image", "image " + std::to_string(i + 1) + ": " + decode_err);
-          return;
-        }
-        if (bytes.size() > kMaxImageBytes) {
-          send_error(res, 413, "image_too_large",
-                     "image " + std::to_string(i + 1) + " is " + human_size(bytes.size()) +
-                         "; the limit is " + human_size(kMaxImageBytes));
-          return;
-        }
-        const char* mime = sniff_image_mime(bytes);
-        if (!mime) {
-          send_error(res, 400, "bad_image",
-                     "image " + std::to_string(i + 1) +
-                         " is not a PNG, JPEG, GIF or WebP (identified by content, not by name)");
-          return;
-        }
-        const std::string file = path_join(artifacts, "img_" + random_hex(8) + image_extension_for(mime));
-        std::string io_err;
-        if (!write_file(file, bytes, false, &io_err)) {
-          send_error(res, 500, "io_error", "cannot store the image: " + io_err);
-          return;
-        }
-        ImageAttachment att;
-        att.mime = mime;
-        // Workspace-relative, so the session file stays portable and the /raw
-        // route can serve it back to the UI.
-        att.path = turn->workspace.display_path(file);
-        images.push_back(att);
+        spec.image_payloads.push_back(raw);
       }
-      LOG_INFO("chat: ", images.size(), " image attachment(s) stored under ", artifacts);
     }
 
-    std::vector<std::shared_ptr<ChatTurn>> graveyard;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      prune_turns_locked(&graveyard);
-      auto it = turns.find(turn->session_id);
-      if (it != turns.end() && it->second) {
-        // Should be unreachable: a turn still running on this id was either
-        // queued into (default) or interrupted and waited for above. Keep the
-        // guard anyway - replacing a live worker without the wait is exactly the
-        // race that silently dropped messages.
-        LOG_WARN("chat: replacing a still-running turn on session ", turn->session_id,
-                 " without an explicit interrupt");
-        it->second->cancel.store(true);
-        retired.push_back(it->second);  // destroyed after the lock is released
-        turns.erase(it);
-      }
-      turns[turn->session_id] = turn;
-      // The handle index: the turn stays queryable by its id after it
-      // finished, so a caller that walked away can still ask how it went.
-      turns_by_id[turn->turn_id] = turn;
-      turn_handles.push_back(turn->turn_id);
-      prune_handles_locked(&graveyard);
+    // ---- start the turn ---------------------------------------------------
+    TurnError launch_err;
+    std::shared_ptr<ChatTurn> turn = launch_turn(spec, &launch_err);
+    if (!turn) {
+      send_error(res, launch_err.status, launch_err.code, launch_err.message);
+      return;
     }
-    // Joining a finished worker is immediate; doing it here keeps `mu` free.
-    graveyard.clear();
 
-    AppConfig* cfg = config;
-    ToolRegistry* reg = tools;
     // The turn this request started: a retry with the same idempotency key
     // finds it here and follows it instead of starting a new one. The answer
     // (the 202 body) is remembered by `send_json`; a stream has no body, so
@@ -6231,69 +6605,6 @@ void ApiServer::Impl::install_routes() {
     } else {
       idem.save_turn(turn->turn_id);
     }
-
-    turn->worker = std::thread([this, turn, cfg, reg, message, images, provider, model,
-                             system_prompt, allowed_tools, tools_given, role, task_id,
-                             task_context, allow_paths, exec_policy, knob_overrides,
-                             request_budget]() {
-      Agent agent(cfg, reg);
-      TurnOptions options;
-      options.provider = provider;
-      options.model = model;
-      options.stream = true;
-      options.inbox = &turn->inbox;
-      options.system_prompt = system_prompt;
-      options.tools = allowed_tools;
-      options.tools_given = tools_given;
-      options.role = role;
-      options.task_id = task_id;
-      options.task_context = task_context;
-      options.allow_paths = allow_paths;
-      options.exec_policy = exec_policy;
-      options.budget = request_budget;
-      options.knob_overrides = knob_overrides;
-      // The audit trail is written under the handle's id, so one string
-      // identifies this turn everywhere.
-      options.turn_id = turn->turn_id;
-      EventEmitter emit = [turn](const nlohmann::json& event) {
-        turn->observe_event(event);
-        turn->emit_event(event);
-      };
-      try {
-        agent.run_turn(turn->workspace, &turn->session, message, images, options, emit,
-                       &turn->cancel);
-      } catch (const std::exception& e) {
-        nlohmann::json event = nlohmann::json::object();
-        event["type"] = "error";
-        event["message"] = std::string("agent crashed: ") + e.what();
-        turn->emit_event(event);
-      }
-      // The turn is over: the history it left behind is what the cleaner
-      // gets to look at.
-      maybe_gc_history(turn->workspace);
-      // run_turn drains the queue when it finishes, but a prompt can still land
-      // in the microseconds between that drain and the worker stopping. Refuse
-      // new ones first, then the drain below is final. Anything left is handed
-      // back to the browser, which restores it to the composer; leaking it here
-      // would make a queued message vanish without a trace.
-      turn->begin_shutdown();
-      std::vector<QueuedPrompt> leftover = turn->inbox.drain();
-      if (!leftover.empty()) {
-        nlohmann::json items = nlohmann::json::array();
-        for (std::size_t i = 0; i < leftover.size(); ++i) {
-          nlohmann::json item = nlohmann::json::object();
-          item["id"] = leftover[i].id;
-          item["content"] = leftover[i].text;
-          item["created_at"] = leftover[i].created_at;
-          items.push_back(item);
-        }
-        nlohmann::json event = nlohmann::json::object();
-        event["type"] = "queue_unconsumed";
-        event["items"] = items;
-        turn->emit_event(event);
-      }
-      turn->close();
-    });
 
     if (async_submit) {
       // 202: the turn is under way and the caller may walk away. The handle
@@ -6485,7 +6796,9 @@ void ApiServer::Impl::install_routes() {
     graveyard.clear();  // ~ChatTurn joins the worker: never under `mu`
     nlohmann::json j = turn ? turn->status_json() : nlohmann::json::object();
     if (turn) {
-      j["pending"] = static_cast<long long>(turn->inbox.size());
+      // The messages that are waiting for a turn of this session.
+      std::shared_ptr<InsertQueue> queue = session_queue(session_id);
+      j["pending"] = static_cast<long long>(queue ? queue->size() : 0);
     } else {
       j["running"] = false;
       j["session_id"] = session_id;
@@ -6512,7 +6825,8 @@ void ApiServer::Impl::install_routes() {
     nlohmann::json list = nlohmann::json::array();
     for (std::size_t i = 0; i < live.size(); ++i) {
       nlohmann::json t = live[i]->status_json();
-      t["pending"] = static_cast<long long>(live[i]->inbox.size());
+      std::shared_ptr<InsertQueue> queue = session_queue(live[i]->session_id);
+      t["pending"] = static_cast<long long>(queue ? queue->size() : 0);
       list.push_back(t);
     }
     nlohmann::json j = nlohmann::json::object();
@@ -6580,12 +6894,16 @@ void ApiServer::Impl::install_routes() {
     send_json(res, j);
   });
 
-  // ---- queued prompts ----------------------------------------------------
-  // A prompt typed while a turn is already running does not start a second turn:
-  // it is appended to the running conversation at the next agent iteration. The
-  // queue belongs to that turn, so stopping or replacing the turn throws the
-  // remaining prompts back to the caller (`queue_unconsumed` on the SSE stream)
-  // instead of firing them later in an unrelated turn.
+  // ---- queued messages ---------------------------------------------------
+  // A message typed while a turn is still running does not start a second turn:
+  // it goes into the **session's** queue. By default it waits for the running
+  // turn to end and then starts a turn of its own ("insert": "after"); with
+  // {"insert": "now"} the running turn adopts it before its next model
+  // request.
+  //
+  // The queue belongs to the session, so it outlives the turn: stopping the
+  // turn hands the remaining messages back to the caller (`queue_unconsumed`
+  // on the SSE stream) instead of firing them later in an unrelated turn.
   svr.Post("/api/chat/queue", [this](const httplib::Request& req, httplib::Response& res) {
     nlohmann::json body;
     if (!parse_json_body(req, &body, res)) return;
@@ -6599,31 +6917,27 @@ void ApiServer::Impl::install_routes() {
       send_error(res, 400, "bad_request", "'message' is required");
       return;
     }
-    // Queued prompts are text-only. An image must be decoded, size-checked and
+    // "insert": when the message takes effect.
+    InsertMode insert_mode = InsertMode::kAfter;
+    {
+      nlohmann::json::const_iterator it = body.find("insert");
+      if (it != body.end() && !it->is_null()) {
+        if (!it->is_string() || !parse_insert_mode(it->get<std::string>(), &insert_mode)) {
+          send_error(res, 400, "bad_request",
+                     "'insert' must be \"after\" (the message waits for the running turn to "
+                     "end) or \"now\" (the running turn takes it before its next tool call)");
+          return;
+        }
+      }
+    }
+    // Queued messages are text-only. An image must be decoded, size-checked and
     // written into the workspace before it can be referenced, which /api/chat
     // does for the request that starts a turn; silently dropping them here would
     // be worse than refusing.
     auto images_it = body.find("images");
     if (images_it != body.end() && images_it->is_array() && !images_it->empty()) {
       send_error(res, 400, "images_not_queued",
-                 "a queued prompt cannot carry images; wait for the running turn to finish");
-      return;
-    }
-
-    // No pruning here: this endpoint must stay fast, and destroying a retired
-    // turn joins its worker (which can be stuck in a long tool call). A finished
-    // turn refuses `enqueue_prompt` on its own, and the dead entry is reaped by
-    // the next /api/chat for that session.
-    std::shared_ptr<ChatTurn> turn;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      auto it = turns.find(session_id);
-      if (it != turns.end()) turn = it->second;
-    }
-
-    if (!turn) {
-      send_error(res, 409, "no_active_turn",
-                 "this session has no running turn; send the message directly");
+                 "a queued message cannot carry images; wait for the running turn to finish");
       return;
     }
 
@@ -6631,18 +6945,108 @@ void ApiServer::Impl::install_routes() {
     prompt.id = make_id("q_");
     prompt.text = trim(message);
     prompt.created_at = now_iso8601();
-    if (!turn->enqueue_prompt(prompt)) {
-      send_error(res, 409, "no_active_turn",
-                 "the running turn just finished; send the message directly");
+    prompt.mode = insert_mode;
+
+    // No pruning here: this endpoint must stay fast, and destroying a retired
+    // turn joins its worker (which can be stuck in a long tool call). A finished
+    // turn is reaped by the next /api/chat for that session.
+    std::shared_ptr<ChatTurn> turn = find_turn(session_id);
+    const bool running = turn && !turn->finished();
+    bool queued = false;
+    if (running) {
+      queued = queue_message(session_id, prompt);
+      if (!queued) {
+        // The turn closed between the check and the push: fall through and
+        // start a turn for the message instead of dropping it.
+        LOG_INFO("chat: session ", session_id,
+                 " finished just as the message was queued; starting a turn for it");
+        turn.reset();
+      }
+    }
+
+    if (!queued) {
+      // No turn is running for this session: the message starts a turn of its
+      // own. That needs the workspace the session lives in - the one of the
+      // last turn of this session.
+      std::string workspace_id;
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        auto it = session_specs.find(session_id);
+        if (it != session_specs.end() && it->second) workspace_id = it->second->workspace_id;
+      }
+      if (workspace_id.empty()) {
+        send_error(res, 404, "not_found",
+                   "this session has no running turn and this server does not know it either; "
+                   "send the message with POST /api/chat");
+        return;
+      }
+      // Into the queue first, so the hand-over picks it up (and keeps the
+      // order when there are older messages waiting).
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        queue_for_locked(session_id)->push(prompt);
+      }
+      std::shared_ptr<ChatTurn> started = start_next_queued_turn(session_id, nullptr);
+      if (!started) {
+        // A turn is running for this session after all (it started while this
+        // request was on its way): the message waits for it.
+        started = find_turn(session_id);
+        if (!started || started->finished()) {
+          send_error(res, 409, "no_active_turn",
+                     "this session has no running turn and the message could not start one; "
+                     "send it with POST /api/chat");
+          return;
+        }
+      }
+      std::shared_ptr<InsertQueue> queue = session_queue(session_id);
+      nlohmann::json j = nlohmann::json::object();
+      j["ok"] = true;
+      j["queued"] = {{"id", prompt.id},
+                     {"content", prompt.text},
+                     {"created_at", prompt.created_at},
+                     {"insert", insert_mode_name(insert_mode)}};
+      j["pending"] = static_cast<int>(queue ? queue->size() : 0);
+      j["session_id"] = started->session_id;
+      j["workspace_id"] = started->workspace_id;
+      j["turn_running"] = true;
+      j["turn_id"] = started->turn_id;
+      j["state"] = "running";
+      j["status_url"] = "/api/turns/" + started->turn_id;
+      j["events_url"] = "/api/turns/" + started->turn_id + "/events";
+      LOG_INFO("chat: started turn ", started->turn_id, " for the queued message ", prompt.id,
+               " of session ", session_id);
+      send_json(res, j, 200);
       return;
     }
 
-    LOG_INFO("chat: queued prompt ", prompt.id, " for session ", session_id, " (",
-             turn->inbox.size(), " pending)");
+    std::shared_ptr<InsertQueue> queue = session_queue(session_id);
+    const int pending = queue ? static_cast<int>(queue->size()) : 0;
+    LOG_INFO("chat: queued message ", prompt.id, " (", insert_mode_name(insert_mode),
+             ") for session ", session_id, " (", pending, " pending)");
+    // The other windows of this session show the queue strip too.
+    nlohmann::json queued_event = nlohmann::json::object();
+    queued_event["type"] = "queue_queued";
+    queued_event["id"] = prompt.id;
+    queued_event["content"] = prompt.text;
+    queued_event["insert"] = insert_mode_name(insert_mode);
+    queued_event["created_at"] = prompt.created_at;
+    queued_event["pending"] = pending;
+    turn->emit_event(queued_event);
+
     nlohmann::json j = nlohmann::json::object();
     j["ok"] = true;
-    j["queued"] = {{"id", prompt.id}, {"content", prompt.text}, {"created_at", prompt.created_at}};
-    j["pending"] = static_cast<int>(turn->inbox.size());
+    j["queued"] = {{"id", prompt.id},
+                   {"content", prompt.text},
+                   {"created_at", prompt.created_at},
+                   {"insert", insert_mode_name(insert_mode)}};
+    j["pending"] = pending;
+    j["session_id"] = session_id;
+    j["workspace_id"] = turn->workspace_id;
+    j["turn_running"] = true;
+    j["turn_id"] = turn->turn_id;
+    j["state"] = "running";
+    j["status_url"] = "/api/turns/" + turn->turn_id;
+    j["events_url"] = "/api/turns/" + turn->turn_id + "/events";
     send_json(res, j);
   });
 
@@ -6656,21 +7060,16 @@ void ApiServer::Impl::install_routes() {
       send_error(res, 400, "bad_request", "'session_id' is required");
       return;
     }
-    std::shared_ptr<ChatTurn> turn;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      auto it = turns.find(session_id);
-      if (it != turns.end()) turn = it->second;
-    }
+    std::shared_ptr<InsertQueue> queue = session_queue(session_id);
     int cancelled = 0;
     int pending = 0;
-    if (turn) {
+    if (queue) {
       if (id.empty()) {
-        cancelled = static_cast<int>(turn->inbox.drain().size());
+        cancelled = static_cast<int>(queue->drain().size());
       } else {
-        cancelled = turn->inbox.remove(id) ? 1 : 0;
+        cancelled = queue->remove(id) ? 1 : 0;
       }
-      pending = static_cast<int>(turn->inbox.size());
+      pending = static_cast<int>(queue->size());
     }
     nlohmann::json j = nlohmann::json::object();
     j["ok"] = true;
@@ -6686,19 +7085,15 @@ void ApiServer::Impl::install_routes() {
       send_error(res, 400, "bad_request", "'session_id' is required");
       return;
     }
-    std::shared_ptr<ChatTurn> turn;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      auto it = turns.find(session_id);
-      if (it != turns.end()) turn = it->second;
-    }
+    std::shared_ptr<InsertQueue> queue = session_queue(session_id);
     std::vector<QueuedPrompt> items;
-    if (turn) items = turn->inbox.snapshot();
+    if (queue) items = queue->snapshot();
     nlohmann::json arr = nlohmann::json::array();
     for (std::size_t i = 0; i < items.size(); ++i) {
       arr.push_back({{"id", items[i].id},
                      {"content", items[i].text},
-                     {"created_at", items[i].created_at}});
+                     {"created_at", items[i].created_at},
+                     {"insert", insert_mode_name(items[i].mode)}});
     }
     nlohmann::json j = nlohmann::json::object();
     j["ok"] = true;

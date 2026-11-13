@@ -1292,6 +1292,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // Which stage the turn runs under: the UI shows it, and the trajectory
   // keeps it, so a week later one can tell what the rules were back then.
   start_event["role"] = role ? role->id : std::string();
+  // The queued message this turn was started for (empty => the user sent it
+  // directly). The UI takes that message off its queue strip.
+  if (!options.queue_id.empty()) start_event["queue_id"] = options.queue_id;
   emit(start_event);
 
   // --- build the tool schema ----------------------------------------------
@@ -1380,16 +1383,20 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   std::vector<ImageAttachment> tool_images;
   std::size_t tool_images_attached = 0;
 
-  // Take the oldest prompt the user queued while this turn was running and
-  // append it as a normal user message. Doing it here (rather than in the HTTP
-  // layer) means the adopted prompt lands in the same context/session/trajectory
-  // as everything else, and the model sees it together with all the tool output
-  // that happened since the previous round.
+  // Take the message the user asked to insert **now** and append it as a
+  // normal user message. Doing it here (rather than in the HTTP layer) means
+  // the adopted message lands in the same context/session/trajectory as
+  // everything else, and the model sees it together with all the tool output
+  // that happened since the previous round - so the tool calls it decides next
+  // already know about it.
+  //
+  // The messages that wait for this turn to end are NOT taken here: they start
+  // a turn of their own once this one is over (the HTTP layer hands them over).
   auto adopt_queued = [&](int iteration) -> bool {
-    if (!options.inbox) return false;
+    if (!options.queue) return false;
     for (;;) {
       QueuedPrompt queued;
-      if (!options.inbox->pop(&queued)) return false;
+      if (!options.queue->pop_now(&queued)) return false;
       const std::string text = trim(queued.text);
       if (text.empty()) continue;  // junk cannot happen via the API, but stay safe
       Message message = Message::make("user", text);
@@ -1403,11 +1410,12 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       event["id"] = queued.id;
       event["content"] = text;
       event["iteration"] = iteration;
-      event["pending"] = static_cast<int>(options.inbox->size());
+      event["pending"] = static_cast<int>(options.queue->size());
+      event["insert"] = insert_mode_name(queued.mode);
       event["created_at"] = message.created_at;
       emit(event);
       LOG_INFO("queue: adopted prompt ", queued.id, " at iteration ", iteration,
-               " (", options.inbox->size(), " still queued)");
+               " (", options.queue->size(), " still queued)");
       workspace.log("info", "queue: adopted a queued prompt at iteration " +
                                 std::to_string(iteration));
       return true;
@@ -1764,11 +1772,12 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     emit(iteration_event);
 
     if (chat.tool_calls.empty()) {
-      // The model is done, but a prompt queued while it was answering must not
-      // wait for a whole new HTTP turn: continue the loop and adopt it at the
-      // top of the next iteration.
-      if (options.inbox && !options.inbox->empty()) {
-        LOG_DEBUG("queue: model finished but a prompt is queued; continuing");
+      // The model is done, but a message that asked to be inserted *now* must
+      // not wait for a whole new HTTP turn: continue the loop and adopt it at
+      // the top of the next iteration. The messages that wait for this turn to
+      // end are not adopted here - they start their own turn afterwards.
+      if (options.queue && options.queue->has_now()) {
+        LOG_DEBUG("queue: model finished but a message wants to be inserted now; continuing");
         continue;
       }
       finished = true;
@@ -2219,27 +2228,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     workspace.save_session(*session, nullptr);
   }
 
-  // Anything still queued was never adopted: the turn was stopped, failed or hit
-  // the iteration cap. Hand it back so the caller can restore the text instead of
-  // dropping what the user typed.
-  if (options.inbox) {
-    std::vector<QueuedPrompt> leftovers = options.inbox->drain();
-    if (!leftovers.empty()) {
-      nlohmann::json items = nlohmann::json::array();
-      for (std::size_t i = 0; i < leftovers.size(); ++i) {
-        nlohmann::json item = nlohmann::json::object();
-        item["id"] = leftovers[i].id;
-        item["content"] = leftovers[i].text;
-        item["created_at"] = leftovers[i].created_at;
-        items.push_back(item);
-      }
-      nlohmann::json event = nlohmann::json::object();
-      event["type"] = "queue_unconsumed";
-      event["items"] = items;
-      emit(event);
-      LOG_INFO("queue: ", leftovers.size(), " queued prompt(s) not adopted (turn ended)");
-    }
-  }
+  // The queue is **not** drained here: it belongs to the session, not to this
+  // turn. A message that was not adopted is either handed to the next turn (the
+  // turn ended by itself) or given back to the caller (the user stopped it) -
+  // both are the HTTP layer's business, because only it knows which of the two
+  // happened.
 
   out.ok = out.error.empty() && !out.cancelled;
   out.elapsed_ms = now_ms() - started;
