@@ -2041,6 +2041,59 @@ struct ApiServer::Impl {
     return j;
   }
 
+  /// The role a turn runs under: the one the request names, or the one the
+  /// workspace points at.
+  ///
+  /// The workspace pointer is read fresh, so a switch reaches the *next*
+  /// turn - a turn that is already running keeps the role it started with.
+  /// A request that names a role must name one that exists; the pointer may
+  /// dangle (the role file was deleted), and then the turn runs without a
+  /// role and says so in the log.
+  std::shared_ptr<const Role> role_for_turn(const Workspace& ws, const nlohmann::json& body,
+                                             std::string* err) const {
+    const std::string named = trim(json_string(body, "role"));
+    const std::string id = named.empty() ? ws.current_role_id() : named;
+    if (id.empty()) return nullptr;
+    const RoleSet roles = ws.load_roles();
+    const Role* role = roles.find(id);
+    if (!role) {
+      if (!named.empty()) {
+        if (err) *err = "no such role in this workspace: " + id;
+        return nullptr;
+      }
+      LOG_WARN("workspace ", ws.id(), ": the role '", id,
+               "' does not exist (any more); this turn runs without a role");
+      return nullptr;
+    }
+    return std::make_shared<const Role>(*role);
+  }
+
+  /// Everything the role page needs: the roles of this workspace, the one the
+  /// workspace is in, and the files that could not be parsed.
+  nlohmann::json roles_info(const Workspace& ws) {
+    const RoleSet roles = ws.load_roles();
+    nlohmann::json j = nlohmann::json::object();
+    nlohmann::json list = nlohmann::json::array();
+    for (std::size_t i = 0; i < roles.all().size(); ++i) list.push_back(roles.all()[i].to_json());
+    j["roles"] = list;
+    j["errors"] = roles.errors();
+    j["dir"] = ws.roles_dir();
+    j["relative_dir"] = ws.display_path(ws.roles_dir());
+    const std::string current = ws.current_role_id();
+    const Role* role = current.empty() ? nullptr : roles.find(current);
+    j["current"] = role ? role->to_json() : nlohmann::json();
+    j["current_id"] = current;
+    j["current_exists"] = role != nullptr;
+    // Which roles are files of this workspace (as opposed to the built-in
+    // templates that live in the program).
+    nlohmann::json files = nlohmann::json::array();
+    for (std::size_t i = 0; i < roles.all().size(); ++i) {
+      if (ws.role_has_file(roles.all()[i].id)) files.push_back(roles.all()[i].id);
+    }
+    j["files"] = files;
+    return j;
+  }
+
   /// Write `yaml_text` as provider.yaml and reload it in place. Validation
   /// happens against a scratch file, so a bad config never replaces a working
   /// one (and never leaves the server without a config). On failure `res` is
@@ -2437,6 +2490,14 @@ httplib::Server::HandlerResponse ApiServer::Impl::pre_route(const httplib::Reque
       known = true;
       break;
     }
+  }
+  if (!known && tail.compare(0, 11, "workspaces/") == 0 &&
+      tail.find("/role") != std::string::npos) {
+    // The role routes of a workspace are mirrored as well. Switching the
+    // stage is the operator's business, and the operator may well be another
+    // a2 driving this one over the peer channel - the agent itself may not
+    // switch (a stage that could promote itself could lift its own fences).
+    known = true;
   }
   if (!known) {
     send_error(res, 404, "not_found", "the peer channel has no route '" + tail + "'");
@@ -4420,9 +4481,18 @@ void ApiServer::Impl::install_routes() {
             Agent agent(config, tools);
             Session session;
             session.info.created_at = now_iso8601();
-            const std::string prompt = agent.build_system_prompt(ws, session);
+            // The preview shows what the next turn really sends, so it has to
+            // carry the role the next turn would run under.
+            const RoleSet roles = ws.load_roles();
+            const Role* role = nullptr;
+            const std::string current_role = ws.current_role_id();
+            if (!current_role.empty()) role = roles.find(current_role);
+            const std::string prompt = agent.build_system_prompt(ws, session, std::string(),
+                                                                std::string(), role);
             nlohmann::json j = nlohmann::json::object();
             j["system_prompt"] = prompt;
+            j["role"] = role ? role->to_json() : nlohmann::json();
+            j["role_id"] = role ? role->id : std::string();
             j["bytes"] = static_cast<long long>(prompt.size());
             j["estimated_tokens"] = Agent::estimate_tokens(prompt);
             j["settings_file"] = ws.settings_file();
@@ -5239,6 +5309,253 @@ void ApiServer::Impl::install_routes() {
             send_json(res, j);
           });
 
+  // ---- roles (the stage profiles of a workspace) ---------------------------
+  //
+  // A role is a named way of working: a persona, the rules of the stage and
+  // the boundaries it runs under (tools, command fence, model, budget). The
+  // files live in <run_dir>/roles/<id>.yaml; the *current* role is a pointer
+  // in the workspace's settings.yaml.
+  //
+  // Only the user switches the role - the operator in the web UI, or another
+  // a2 driving this one over the API. The agent itself has no tool for it:
+  // a stage that could promote itself could lift its own fences.
+  //
+  // A switch applies to the **next** turn: the role of a running turn is
+  // frozen when the turn starts.
+  svr.Get(R"(/api/workspaces/([^/]+)/roles)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            send_json(res, roles_info(ws));
+          });
+
+  svr.Get(R"(/api/workspaces/([^/]+)/roles/([^/]+))",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string id = req.matches[2].str();
+            if (!valid_role_id(id)) {
+              send_error(res, 400, "bad_request", "'" + id + "' is not a usable role name");
+              return;
+            }
+            // A built-in role has no file (it lives in the program); a
+            // workspace file with the same id is the user's own version.
+            Role role;
+            std::string content;
+            if (ws.role_has_file(id)) {
+              if (!parse_role_file(ws.role_file(id), id, &role, &err)) {
+                send_error(res, 404, "not_found", err);
+                return;
+              }
+              read_file(ws.role_file(id), &content, 256u * 1024u);
+            } else if (!builtin_role(id, &role, &err)) {
+              send_error(res, 404, "not_found", "no such role in this workspace: " + id);
+              return;
+            } else {
+              content = builtin_role_text(id);
+            }
+            nlohmann::json j = roles_info(ws);
+            j["role"] = role.to_json();
+            j["content"] = content;
+            j["has_file"] = ws.role_has_file(id);
+            send_json(res, j);
+          });
+
+  svr.Put(R"(/api/workspaces/([^/]+)/roles/([^/]+))",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            nlohmann::json body;
+            if (!parse_json_body(req, &body, res)) return;
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string id = req.matches[2].str();
+            if (!valid_role_id(id)) {
+              send_error(res, 400, "bad_request", "'" + id + "' is not a usable role name");
+              return;
+            }
+            const std::string content = json_string(body, "content");
+            // The text is parsed before it is written: a role file that does
+            // not load would be a stage that silently does nothing.
+            Role role;
+            if (!parse_role_text(content, id, &role, &err)) {
+              send_error(res, 400, "bad_request", err);
+              return;
+            }
+            std::string write_err;
+            if (!make_dirs(ws.roles_dir(), &write_err)) {
+              send_error(res, 500, "io_error", write_err);
+              return;
+            }
+            if (!write_file_atomic(ws.role_file(id), content, &write_err)) {
+              send_error(res, 500, "io_error", write_err);
+              return;
+            }
+            role.path = ws.role_file(id);
+            LOG_INFO("role ", id, ": written (", content.size(), " bytes)");
+            nlohmann::json j = roles_info(ws);
+            j["ok"] = true;
+            j["role"] = role.to_json();
+            send_json(res, j);
+          });
+
+  svr.Delete(R"(/api/workspaces/([^/]+)/roles/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+              Workspace ws;
+              std::string err;
+              if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+                send_error(res, 404, "not_found", err);
+                return;
+              }
+              const std::string id = req.matches[2].str();
+              if (!valid_role_id(id)) {
+                send_error(res, 400, "bad_request", "'" + id + "' is not a usable role name");
+                return;
+              }
+              if (!ws.role_has_file(id)) {
+                // A built-in role lives in the program: there is no file to
+                // delete. Copy it to get your own version.
+                const bool is_builtin = !builtin_role_text(id).empty();
+                send_error(res, 404, "not_found",
+                           is_builtin
+                               ? ("'" + id + "' is a built-in role (part of the program); copy it "
+                                  "to make your own version")
+                               : ("no such role in this workspace: " + id));
+                return;
+              }
+              if (remove_path(ws.role_file(id), false, &err)) {
+                LOG_INFO("role ", id, ": deleted");
+              } else {
+                send_error(res, 500, "io_error", err);
+                return;
+              }
+              // A pointer to a role that is gone would leave every turn
+              // without one: clear it.
+              if (ws.current_role_id() == id) {
+                std::string clear_err;
+                ws.set_current_role("", &clear_err);
+              }
+              send_json(res, roles_info(ws));
+            });
+
+  // Copy a role into a new one: the copy is a normal, writable role on disk.
+  //
+  // This is how a built-in role (需求分析 / 项目设计 / 开发 / 测试 / 运维) is
+  // made yours: the built-in lives in the program and is a template; the
+  // copy is a file in the workspace's roles/ directory that you can edit.
+  // Copying a built-in always takes the **pristine template**, so a copy is
+  // never a copy of somebody's edit.
+  svr.Post(R"(/api/workspaces/([^/]+)/roles/([^/]+)/copy)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             nlohmann::json body;
+             if (!parse_json_body(req, &body, res)) return;
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             const std::string id = req.matches[2].str();
+             if (!valid_role_id(id)) {
+               send_error(res, 400, "bad_request", "'" + id + "' is not a usable role name");
+               return;
+             }
+             // The source: the workspace's own file, or the built-in template.
+             std::string content;
+             Role source;
+             if (ws.role_has_file(id)) {
+               if (!parse_role_file(ws.role_file(id), id, &source, &err)) {
+                 send_error(res, 400, "bad_request", err);
+                 return;
+               }
+               read_file(ws.role_file(id), &content, 256u * 1024u);
+             } else if (builtin_role(id, &source, &err)) {
+               content = builtin_role_text(id);
+             } else {
+               send_error(res, 404, "not_found", "no such role in this workspace: " + id);
+               return;
+             }
+             // The name of the copy: what the caller asked for, or the first
+             // free "<id>-copy", "<id>-copy2", ...
+             std::string target = trim(json_string(body, "as"));
+             if (target.empty()) {
+               target = id + "-copy";
+               int n = 2;
+               while (ws.role_has_file(target)) {
+                 target = id + "-copy" + std::to_string(n);
+                 ++n;
+               }
+             }
+             if (!valid_role_id(target)) {
+               send_error(res, 400, "bad_request",
+                          "'" + target + "' is not a usable role name (letters, digits, dash, "
+                          "underscore, dot)");
+               return;
+             }
+             if (ws.role_has_file(target)) {
+               send_error(res, 409, "already_exists",
+                          "this workspace already has a role named '" + target + "'");
+               return;
+             }
+             // The copy gets its own display name: two roles called 需求分析
+             // are hard to tell apart in the list.
+             std::string copy = copy_role_text(content, source.display_name + "（副本）");
+             Role copy_role;
+             if (!parse_role_text(copy, target, &copy_role, &err)) {
+               send_error(res, 400, "bad_request", err);
+               return;
+             }
+             std::string write_err;
+             if (!make_dirs(ws.roles_dir(), &write_err)) {
+               send_error(res, 500, "io_error", write_err);
+               return;
+             }
+             if (!write_file_atomic(ws.role_file(target), copy, &write_err)) {
+               send_error(res, 500, "io_error", write_err);
+               return;
+             }
+             copy_role.path = ws.role_file(target);
+             LOG_INFO("role ", id, ": copied to ", target, " (", copy.size(), " bytes)");
+             nlohmann::json j = roles_info(ws);
+             j["ok"] = true;
+             j["role"] = copy_role.to_json();
+             j["content"] = copy;
+             j["copied_from"] = id;
+             send_json(res, j);
+           });
+
+  // The switch itself: point the workspace at a role ("" clears it). The
+  // change lands in the next turn - a running turn keeps its role.
+  svr.Post(R"(/api/workspaces/([^/]+)/role)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             nlohmann::json body;
+             if (!parse_json_body(req, &body, res)) return;
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             const std::string id = trim(json_string(body, "role"));
+             if (!ws.set_current_role(id, &err)) {
+               send_error(res, 400, "bad_request", err);
+               return;
+             }
+             nlohmann::json j = roles_info(ws);
+             j["ok"] = true;
+             send_json(res, j);
+           });
+
   // ---- workspace access (the 受限工作区 / 全局 switch) ----------------------
   // `--allow-outside-workspace` used to be a start-up-only decision: changing your
   // mind meant restarting the process (and, if the agent runs headless on a
@@ -5619,6 +5936,20 @@ void ApiServer::Impl::install_routes() {
     }
     turn->workspace_id = turn->workspace.id();
 
+    // The stage profile of this turn. It is resolved here, before the worker
+    // starts, and frozen into the turn: switching the role applies to the
+    // next turn, so a running turn never changes its own rules.
+    std::shared_ptr<const Role> role;
+    {
+      std::string role_err;
+      role = role_for_turn(turn->workspace, body, &role_err);
+      if (!role_err.empty()) {
+        send_error(res, 400, "bad_request", role_err);
+        return;
+      }
+    }
+    if (role) LOG_INFO("chat: the turn runs under the role '", role->id, "'");
+
     if (!requested_session.empty()) {
       // Unknown session ids simply start a fresh conversation.
       turn->workspace.load_session(requested_session, &turn->session, nullptr);
@@ -5636,16 +5967,64 @@ void ApiServer::Impl::install_routes() {
     // the files it changed, and it reads them from there.
     turn->trajectory_path = trajectory_file_path(turn->workspace.run_dir(), turn->session_id);
 
-    const std::string provider = json_string(body, "provider");
-    const std::string model = json_string(body, "model");
+    // Not const: the role of the turn may name a model, and it only does so
+    // when the caller did not ask for one.
+    std::string provider = json_string(body, "provider");
+    std::string model = json_string(body, "model");
     // The agent loop as a primitive: a caller that keeps its own policy may hand
     // in the persona it wants and the tools it is willing to let the model use.
     const std::string system_prompt = trim(json_string(body, "system_prompt"));
+    // The tools this turn may use. The caller may name them at the top level
+    // or inside the policy block (the task queue puts them there). Naming an
+    // empty list means "no tools at all" - that is different from saying
+    // nothing about them.
     std::vector<std::string> allowed_tools;
-    auto tools_it = body.find("tools");
-    if (tools_it != body.end() && tools_it->is_array()) {
-      for (std::size_t i = 0; i < tools_it->size(); ++i) {
-        if ((*tools_it)[i].is_string()) allowed_tools.push_back((*tools_it)[i].get<std::string>());
+    bool tools_given = false;
+    {
+      auto tools_it = body.find("tools");
+      if (tools_it != body.end() && tools_it->is_array()) {
+        tools_given = true;
+        for (std::size_t i = 0; i < tools_it->size(); ++i) {
+          if ((*tools_it)[i].is_string()) allowed_tools.push_back((*tools_it)[i].get<std::string>());
+        }
+      } else {
+        nlohmann::json::const_iterator policy_it = body.find("policy");
+        if (policy_it != body.end() && policy_it->is_object()) {
+          nlohmann::json::const_iterator pol_tools = policy_it->find("tools");
+          // An empty list here means "the usual set" - that is what the task
+          // queue documents ("empty => the usual set"), and the queue only
+          // sends the key when it means something. The top level `tools` is
+          // the opposite: an empty list there means "no tools at all".
+          if (pol_tools != policy_it->end() && !pol_tools->is_null() &&
+              !(pol_tools->is_array() && pol_tools->empty()) &&
+              !(pol_tools->is_string() && trim(pol_tools->get<std::string>()).empty())) {
+            tools_given = true;
+            std::vector<std::string> names;
+            if (pol_tools->is_array()) {
+              for (std::size_t i = 0; i < pol_tools->size(); ++i) {
+                if ((*pol_tools)[i].is_string()) {
+                  names.push_back(trim((*pol_tools)[i].get<std::string>()));
+                }
+              }
+            } else if (pol_tools->is_string()) {
+              // "a, b; c" - the queue accepts that spelling too.
+              const std::string raw = trim(pol_tools->get<std::string>());
+              std::string current;
+              for (std::size_t i = 0; i <= raw.size(); ++i) {
+                const char c = i < raw.size() ? raw[i] : ',';
+                if (c == ',' || c == ';' || c == ' ') {
+                  if (!current.empty()) names.push_back(current);
+                  current.clear();
+                } else {
+                  current += c;
+                }
+              }
+            }
+            for (std::size_t i = 0; i < names.size(); ++i) {
+              if (!names[i].empty()) allowed_tools.push_back(names[i]);
+            }
+          }
+        }
       }
     }
     // The budget of this turn. The request may only tighten the machine's
@@ -5658,6 +6037,32 @@ void ApiServer::Impl::install_routes() {
         return;
       }
     }
+    // The role tightens the turn; it never widens it. The caller's own
+    // choice wins where the two disagree (the caller is the more specific
+    // one), the role decides where the caller said nothing.
+    if (role) {
+      if (provider.empty() && !role->provider.empty()) provider = role->provider;
+      if (model.empty() && !role->model.empty()) model = role->model;
+      if (!role->tools.empty()) {
+        std::vector<std::string> narrowed;
+        if (tools_given) {
+          for (std::size_t i = 0; i < allowed_tools.size(); ++i) {
+            for (std::size_t k = 0; k < role->tools.size(); ++k) {
+              if (role->tools[k] == allowed_tools[i]) {
+                narrowed.push_back(allowed_tools[i]);
+                break;
+              }
+            }
+          }
+        } else {
+          narrowed = role->tools;
+        }
+        allowed_tools = narrowed;
+        tools_given = true;
+      }
+      if (role->limits.any()) request_budget = role->limits.tightened_by(request_budget);
+    }
+
     const std::string task_id = trim(json_string(body, "task_id"));
     // What the task is: id, title, request. The task queue lives in the task
     // server (sched/task_server.py), so the caller says what the work is; this
@@ -5828,8 +6233,9 @@ void ApiServer::Impl::install_routes() {
     }
 
     turn->worker = std::thread([this, turn, cfg, reg, message, images, provider, model,
-                             system_prompt, allowed_tools, task_id, task_context, allow_paths,
-                             exec_policy, knob_overrides, request_budget]() {
+                             system_prompt, allowed_tools, tools_given, role, task_id,
+                             task_context, allow_paths, exec_policy, knob_overrides,
+                             request_budget]() {
       Agent agent(cfg, reg);
       TurnOptions options;
       options.provider = provider;
@@ -5838,6 +6244,8 @@ void ApiServer::Impl::install_routes() {
       options.inbox = &turn->inbox;
       options.system_prompt = system_prompt;
       options.tools = allowed_tools;
+      options.tools_given = tools_given;
+      options.role = role;
       options.task_id = task_id;
       options.task_context = task_context;
       options.allow_paths = allow_paths;

@@ -133,6 +133,16 @@
           </button>
           <div id="model-dropdown" class="dropdown hidden"></div>
         </div>
+        <!-- 角色：工作区的「阶段档案」（人设 + 阶段规矩 + 工具/命令/模型边界）。
+             只有使用者能切换（网页里的你，或用 API 驱动这台机器的另一个 a2）；
+             切换后从**下一轮**生效，正在跑的那一轮保持它开始时的角色。 -->
+        <div class="dd-wrap">
+          <button id="role-chip" class="chip" type="button" aria-haspopup="true" aria-expanded="false"
+                  title="当前角色（阶段档案）：切换后从下一轮生效">
+            <span class="chip-text" id="role-chip-text">角色</span><span class="chev-sm">›</span>
+          </button>
+          <div id="role-dropdown" class="dropdown hidden"></div>
+        </div>
         <div class="status" id="status" title="服务状态">
           <span class="status-dot" id="status-dot"></span><span id="status-text">连接中…</span>
         </div>
@@ -393,6 +403,33 @@
             <textarea class="ta doc-editor" id="system-prompt-editor" rows="12" spellcheck="false"
                       placeholder="读取中…（这里是当前生效的 system prompt；保存后从下一轮开始生效）"></textarea>
             <div class="doc-scripts" id="system-prompt-hint"></div>
+          </div>
+          <!-- 角色：这个工作区的「阶段档案」。每个角色是一份 YAML（人设 +
+               阶段规矩 + 工具/命令围栏 + 模型 + 预算），放在
+               .tea_agent_run/roles/<id>.yaml；当前角色是指在工作区
+               settings.yaml 里的一个指针。切换只由使用者做（网页里的你，
+               或用 API 驱动这台机器的另一个 a2），agent 自己没有这个权限：
+               能自己升格的阶段也能自己松绑。切换从下一轮生效。 -->
+          <h3 class="sec-title">角色</h3>
+          <div class="doc-card">
+            <div class="doc-head">
+              <span class="doc-title">角色（阶段档案）</span>
+              <span class="doc-path" id="role-dir"></span>
+              <span class="doc-actions">
+                <span class="doc-meta" id="role-meta"></span>
+                <button class="btn" id="role-new" type="button" title="新建一个角色文件">新建</button>
+                <button class="btn" id="role-copy" type="button"
+                        title="把选中的角色复制成一个新的（内置角色复制的是原始模板）">复制</button>
+                <button class="btn" id="role-use" type="button"
+                        title="把工作区切到这个角色（从下一轮生效）">设为当前</button>
+                <button class="btn" id="role-delete" type="button">删除</button>
+                <button class="btn primary" id="role-save" type="button">保存</button>
+              </span>
+            </div>
+            <div class="role-list" id="role-list"></div>
+            <textarea class="ta doc-editor" id="role-editor" rows="12" spellcheck="false"
+                      placeholder="角色定义（YAML）。name 是显示名，system_prompt 替换人设，checklist 是本阶段的规矩，tools/exec/model/limits 是这一阶段的边界。"></textarea>
+            <div class="doc-scripts" id="role-hint"></div>
           </div>
           <!-- 文件访问范围：把 --allow-outside-workspace 搬到网页上。默认「受限
                工作区」= 工具的路径解析被限制在工作区根目录内（README 的默认值）；

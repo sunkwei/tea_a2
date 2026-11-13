@@ -765,6 +765,19 @@ button{font-family:inherit}
 .note-add{display:flex;gap:10px;align-items:flex-start;margin-bottom:16px}
 .note-add .ta{flex:1 1 auto}
 .note-list{display:flex;flex-direction:column;gap:8px}
+/* 角色（阶段档案）：一排可点的角色名，当前角色带一个「当前」标记。 */
+.role-list{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.role-item{
+  height:26px;padding:0 10px;border-radius:13px;font-size:12px;cursor:pointer;
+  background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l1);
+  color:var(--dsw-alias-label-secondary);display:inline-flex;align-items:center;gap:6px;
+}
+.role-item:hover{background:var(--dsw-alias-interactive-bg-hover-solid);color:var(--dsw-alias-label-primary)}
+.role-item.active{border-color:var(--dsw-static-deepseek-500);color:var(--dsw-alias-label-primary)}
+.role-cur{font-size:10px;color:var(--dsw-static-deepseek-500)}
+.role-ro{font-size:10px;color:var(--dsw-alias-state-warn-label)}
+.role-bi{font-size:10px;color:var(--dsw-alias-label-caption)}
+.doc-editor.readonly{opacity:.75}
 /* 工作区经验（agent.md）：一个可编辑的文本卡片，位于长期记忆条目之上 */
 .doc-card{
   margin-bottom:18px;padding:10px 12px 12px;border:.5px solid var(--dsw-alias-border-l1);

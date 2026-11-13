@@ -14,6 +14,7 @@
 ├── memory/memory.json        # 长期记忆（结构化条目）
 ├── agent.md                  # 本工作区的经验（注入 prompt，见下）
 ├── system_prompt.md          # 工作区级 system prompt 覆盖（空 = 用默认，见下）
+├── roles/<id>.yaml           # 角色（阶段档案）：人设 + 规矩 + 边界，见下
 ├── scripts/                  # 可复用脚本，跨会话保留
 ├── merges.jsonl              # 合并记录（tools/merge_work_area.py 每次合并留一行）
 ├── trajectories/<sid>.jsonl  # 每轮轨迹，一轮一行（见 [轨迹](api.md#轨迹每一轮实际做了什么的审计记录)）
@@ -118,6 +119,124 @@ bool write_file_atomic(const std::string& path, const std::string& data, std::st
   （`system_prompt.md` 变成空文件）——以后机器级默认改了，这里还会跟着变；
 - 保存空白（或与默认完全相同的文本）同样等于「没有覆盖」，不会把今天的默认值钉死在
   工作区里。
+
+### 角色：这个工作区的「阶段档案」
+
+一个项目往往分阶段：先分析，再设计，再开发，再测试。每个阶段想要的东西不一样——
+分析阶段只想读代码，开发阶段要能改文件，测试阶段只想跑测试还不能提交。**角色**就是
+把这些差异写成一份可切换的档案：
+
+```
+<workspace>/.tea_agent_run/roles/<id>.yaml    # 角色定义（一份一个文件）
+<workspace>/.tea_agent_run/settings.yaml       # settings.role: <id>（当前角色）
+```
+
+一份角色是 YAML：
+
+```yaml
+name: 开发                      # 显示名（省略就是 id）
+description: 写代码、跑测试        # 一句话说明
+system_prompt: |                # 替换人设（整体替换默认人格那一段）
+  你是本项目的开发者：先读代码，再改代码。
+checklist: |                   # 本阶段的规矩，追加在人设之后
+  改代码前先跑一次现有测试。
+tools:                         # 这一阶段能用的工具（省略 = 不额外限制）
+  - toolkit_exec
+  - toolkit_file
+  - "mcp__*"                    # 结尾的 * 表示一族工具
+read_only: true                # 只读阶段：文件工具不能写、建、删、移动
+exec:                          # 这一阶段的命令围栏
+  deny:
+    - "git push *"
+model:                         # 这一阶段用哪个模型（省略 = 用机器的默认）
+  provider: deepseek
+  model: deepseek-chat
+limits:                        # 这一阶段的预算（省略 = 用机器的上限）
+  max_iterations: 120
+```
+
+- `tools` 里的一项要么是工具名，要么是**一族**（结尾一个 `*`，例如 `mcp__*` 是所有
+  MCP 服务器的工具）。清单与调用方给的取交集，角色只能让它更短。
+- `read_only: true` 是**工具层**的保证：`toolkit_file` 的 write/append/mkdir/delete/move
+  一律被拒（不只是提示词里说一句「别改文件」）。
+- 一个文件也可以写**好几个**角色（YAML 的列表，每一项自己带 `id:`）——一份文件一个角色
+  是为了好编辑，列表是给人一口气写完五个角色用的：
+
+```yaml
+- id: analysis
+  name: 需求分析
+  read_only: true
+- id: dev
+  name: 开发
+  tools: [toolkit_exec, toolkit_file]
+```
+
+角色文件**只放在工作区里**（没有全局角色库）：同一个工作区里的阶段是这个项目的事。
+机器级 `tea_agent.yaml` 里也可以写 `role:`，那只是**默认指针**，角色文件仍然要在
+工作区里存在，否则每一轮都会在日志里说「这个角色不存在」。
+
+四条规则：
+
+1. **只有使用者能切**。网页里是你，另一个 a2 用 API 驱动这台机器时也是你。**agent 自己
+   没有这个工具**——能自己升格的阶段，也能自己松绑。
+2. **切换从下一轮生效**。角色在一轮开始时定下并冻结：正在跑的那一轮保持它开始时的角色，
+   不会中途换人设。指针每轮开始时重读，所以切换不用重开工作区。
+3. **角色只收紧，不放宽**。工具是「角色允许的」∩「调用方允许的」，命令要同时过了角色
+   的围栏和这一轮自己的围栏，预算取更小的那个，模型是调用方没点名时才用角色指定的。
+   工作区的设置永远压得住角色。
+4. **agent.md 不按角色拆**。经验（构建命令、目录约定、路径陷阱）大部分与阶段无关，
+   拆开就变成几份互相看不见的碎片。经验的**归属**记在角色上（谁在哪个阶段踩的坑），
+   但文件只有一份。
+
+一层角色块的顺序（拼在 persona 之后）：
+
+```
+Current role: 开发 (dev) - 写代码、跑测试
+Rules of this stage:
+改代码前先跑一次现有测试。
+Tools available in this stage: toolkit_exec, toolkit_file
+Commands this stage must not run: git push *
+```
+
+接口：
+
+| 接口 | 干什么 |
+| --- | --- |
+| `GET /api/workspaces/{id}/roles` | 列出这个工作区的角色：`roles[]`、`current`（当前角色）、`errors`（读不出来的角色文件） |
+| `GET /api/workspaces/{id}/roles/{name}` | 一个角色的解析结果 + 原始 YAML（`content`）；内置模板没有文件，`content` 是模板本身 |
+| `PUT /api/workspaces/{id}/roles/{name}` | 写角色：`{"content":"<YAML>"}`。**先解析再写**：读不出来的角色文件不会落盘 |
+| `DELETE /api/workspaces/{id}/roles/{name}` | 删角色（删的是**工作区里的文件**；内置模板删不掉：它不是文件）；当前角色指向它时，指针一并清掉 |
+| `POST /api/workspaces/{id}/roles/{name}/copy` | **复制**一个角色成新的（`{"as":"新id"}`，不给就自动取 `<id>-copy`）；副本是工作区里的普通角色 |
+| `POST /api/workspaces/{id}/role` | **切换**：`{"role":"dev"}`（空串 = 取消角色）。写进 settings.yaml，下一轮生效 |
+| `POST /api/chat` | 额外可带 `role`：**这一轮**用哪个角色，不动工作区的指针；角色不存在 → 400 |
+
+网页上：顶栏有一个「角色」徽标（和「模型」一样是下拉），点一下换角色；「设置 → 角色」
+里可以新建、编辑（YAML）、删除、设为当前。
+
+### 内置的五个角色
+
+agent 自带五个角色，**工作区第一次打开时写进 `roles/`**（已有文件绝不覆盖，所以改过的
+角色不会被换回去，删掉的也不会长回来）：
+
+| id | 名字 | 干什么 | 结构化的限制 |
+| --- | --- | --- | --- |
+| `analysis` | 需求分析 | 澄清需求、定义范围、拆用户故事、识别风险与验收标准 | **只读**（文件工具不能写）；围栏挡住 `rm` / `git reset` / `git commit` / `git push` |
+| `design` | 项目设计 | 把已确认的需求变成架构、模块、接口、数据模型与技术方案 | 围栏挡住 `rm -rf` / `git reset` / `git clean` / `git push` |
+| `dev` | 开发 | 按需求与设计实现代码，保证可运行、可读、可测 | 围栏挡住 `git push`；工具表里带 `mcp__*`（扩展层的工具照常用） |
+| `test` | 测试 | 测试计划、用例、执行验证、缺陷报告、回归跟踪 | 围栏挡住 `git push` 与 `git reset --hard` |
+| `ops` | 运维 | 部署、监控、告警、日志、容量、安全与回滚 | 围栏挡住 `git push` |
+
+它们是**普通角色**：想改就改（YAML 就在 `roles/<id>.yaml` 里），想删就删，想加就照着
+写一份新的。每个角色的「工具/能力」清单是按 a2 **真实存在**的工具写的
+（`toolkit_exec` / `toolkit_file` / `toolkit_workspace_search` /
+`toolkit_history_search` / `toolkit_memory` / `toolkit_todo` / `toolkit_task` /
+`toolkit_agent_doc` / `toolkit_load_image` / `toolkit_search` / `toolkit_fetch`），
+写一个 a2 没有的工具，模型是没法照做的。
+
+> 围栏是**前缀匹配**：模式 `"git push *"` 匹配 `git push origin main`，但**不**匹配
+> `sudo git push …`。围栏是「阶段不许做」的声明，不是沙箱。
+
+回归：`python3 tests/smoke_role.py`（60 项）、`node tests/ui_role.mjs`（19 项）。
 
 ### 只读的工作区：路径在，写不进去
 

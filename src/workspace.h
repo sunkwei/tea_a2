@@ -15,6 +15,7 @@
 #include "config.h"
 #include "history_gc.h"
 #include "message.h"
+#include "role.h"
 
 namespace tea {
 
@@ -208,6 +209,27 @@ class Workspace {
   std::string system_prompt_file() const;
   std::string agent_doc_file() const;
   std::string scripts_dir() const;
+  /// The directory the workspace's roles live in: <run_dir>/roles.
+  std::string roles_dir() const;
+  /// The file of one role: <run_dir>/roles/<id>.yaml.
+  std::string role_file(const std::string& id) const;
+  /// The roles of this workspace: the files in `roles/` **and** the built-in
+  /// templates that ship with the agent. A file with the same id as a built-in
+  /// wins (it is the user's own version of it). A file that cannot be parsed
+  /// is skipped and reported by the set, so one broken role file does not
+  /// hide the others.
+  RoleSet load_roles() const;
+  /// Is this role a file of this workspace (as opposed to a built-in
+  /// template that has not been copied yet)?
+  bool role_has_file(const std::string& id) const;
+  /// The role this workspace is in right now (its id), or "" when there is
+  /// none. Read fresh from settings.yaml: the pointer is what the user
+  /// switches, and the switch has to reach the next turn without reopening
+  /// the workspace.
+  std::string current_role_id() const;
+  /// Point the workspace at a role ("" clears it). The pointer is written to
+  /// <run_dir>/settings.yaml as `role:`.
+  bool set_current_role(const std::string& id, std::string* err);
   std::string sessions_dir() const;
   std::string memory_file() const;
   std::string log_file() const;
@@ -226,6 +248,10 @@ class Workspace {
   /// cannot parse - silently rewriting a broken settings.yaml would hide the
   /// reason the workspace came up with the wrong settings.
   bool write_setting_bool(const std::string& key, bool value, std::string* err);
+
+  /// Set one string key in `<run_dir>/settings.yaml`. The value is written
+  /// YAML-quoted, so an id with a colon or a hash in it stays a string.
+  bool write_setting_string(const std::string& key, const std::string& value, std::string* err);
 
   /// Map a user/model supplied path to an absolute one, enforcing the
   /// workspace boundary unless allow_outside_workspace is set.
@@ -330,6 +356,12 @@ class Workspace {
   static std::string derive_title(const std::string& text);
 
  private:
+  /// The shared body of write_setting_bool / write_setting_string: a targeted
+  /// line edit in `<run_dir>/settings.yaml` (the file belongs to the operator,
+  /// so comments, key order and quoting survive byte for byte).
+  bool write_setting_line(const std::string& key, const std::string& value_literal,
+                          std::string* err);
+
   WorkspaceEntry entry_;
   std::string root_;
   std::string run_dir_;

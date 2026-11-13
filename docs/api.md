@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`1.2.13`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
+| `GET` | `/api/health` | 探活、版本（`1.3.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
@@ -53,6 +53,10 @@
 | `POST` | `/api/config/reload` | **重新读一遍磁盘上的** `provider.yaml` 并热加载（文件是手写或从别处拷过来的时候用；光刷新网页没用，配置在服务端的内存里）。先校验再替换：文件不存在 → 404 `config_missing`，文件坏了 → 400 `invalid_config`（**当前配置不动**）；有轮次在跑时 409 |
 | `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax\|mimo","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`，小米 MiMo 默认模型 `mimo-v2.6-flash`）；key 不会出现在任何响应里。**生成的配置不查额度**（`supports_usage` 关着）：批量部署时每台设备都去问额度会把账号弄进风控；上传的 `provider.yaml` 不受此限。MiMo 的网关由 key 形状决定：`sk-…` → `api.xiaomimimo.com`，`tp-…`/`ttp-…` → `token-plan-cn.xiaomimimo.com`。配置成功后，**这台机器还没有任何工作区**时，服务端会把 **`$HOME` 注册成一个工作区**（对话、文件、记忆都要有个落脚的地方，默认就用家目录），响应里多一个 `workspace` 字段；已经注册过工作区的机器**不受影响**：原来那个不会被改动，也不会再多出一个。 |
 | `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
+| `GET` | `/api/workspaces/{id}/roles` | 这个工作区的**角色**（阶段档案）：`roles[]`（每个角色的解析结果：人设、规矩、工具表、`read_only`、围栏、模型、预算）、`current`（当前角色）、`current_id`、`errors`（读不出来的角色文件）。见下「角色」 |
+| `GET` / `PUT` / `DELETE` | `/api/workspaces/{id}/roles/{name}` | 读 / 写 / 删一个角色。PUT 的 body 是 `{"content":"<YAML>"}`，**先解析再写**（读不出来的角色文件不落盘）；GET 除了解析结果还带原始 YAML（`content`） |
+| `POST` | `/api/workspaces/{id}/roles/{name}/copy` | **复制一个角色**：内置角色是程序里的模板，要改先复制。body 可带 `{"as":"新id"}`（不给就自动取 `<id>-copy`）；副本落在工作区的 `roles/` 里，是**普通角色**（可写可删）。复制内置角色拿到的永远是**原始模板** |
+| `POST` | `/api/workspaces/{id}/role` | **切换当前角色**：`{"role":"dev"}`（空串 = 取消）。写进工作区的 settings.yaml，**从下一轮生效**（正在跑的那一轮不变） |
 | `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
 | `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
@@ -73,6 +77,38 @@
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
 
+### 角色：这个工作区的「阶段档案」
+
+一个项目分阶段（分析 / 设计 / 开发 / 测试），每阶段想要的东西不一样。**角色**把这些差异
+写成一份可切换的档案：人设、阶段规矩、工具、命令围栏、模型、预算。文件在
+`<workspace>/.tea_agent_run/roles/<id>.yaml`，当前角色是指在工作区 settings.yaml 里的
+一个指针（`settings.role`）。
+
+- **只有使用者能切**：网页里是你，另一个 a2 用 API 驱动这台机器时也是你。agent 自己没有
+  这个工具——能自己升格的阶段也能自己松绑。
+- **切换从下一轮生效**：角色在一轮开始时定下并冻结；指针每轮重读，所以切换不用重开工作区。
+- **角色只收紧，不放宽**：工具取交集，命令要同时过了角色和这一轮两道围栏，预算取更小的
+  那个；工作区的设置永远压得住角色。
+- `POST /api/chat` 额外可带 `role`：**这一轮**用哪个角色，不动工作区的指针；角色不存在 → 400。
+- 一个角色文件可以写一个角色（映射），也可以写**几个**（列表，每项带 `id:`）。
+- 角色里的 `read_only: true` 是工具层的保证：文件工具的写/建/删/移一律被拒。
+- **agent 自带五个角色**（需求分析 / 项目设计 / 开发 / 测试 / 运维）：它们是**程序里的
+  模板**，不是工作区文件。要改先 `POST .../roles/{name}/copy` 复制一份——副本是工作区
+  里的普通角色。内置角色不能直接改、也不能删（它不是文件）；工作区里与它同名的文件是你的
+  版本（盖住模板），删掉它模板就回来。
+
+```bash
+# 切到「开发」这个角色（下一轮生效）
+curl -s -X POST $B/api/workspaces/ws_x/role -H 'Content-Type: application/json' \
+  -d '{"role":"dev"}'
+
+# 这一轮临时用「测试」角色
+curl -s -X POST $B/api/chat -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_x","message":"跑一遍测试","role":"qa"}'
+```
+
+完整的格式与字段见 [工作区与运行时存储](workspace.md#角色这个工作区的阶段档案)。
+
 ### 策略与围栏：这一轮能做什么
 
 文件工具本来就有围栏（工作区 + `allow_paths`），**命令工具没有**——一轮被限制了目录，
@@ -90,6 +126,20 @@ curl -s -X POST $B/api/chat -H 'Content-Type: application/json' -d '{
   那一整条；`"npm *"` **不**匹配 `sudo npm install`；
 - **不给 `policy` 就什么都不围**（现在的开放语义不变，老用法什么都不受影响）；
 - 围栏是**这一轮**的事：下一轮又开了。
+
+**这一轮能用的工具**有两个地方可以写，顶层的 `tools` 优先：
+
+```bash
+curl -s -X POST $B/api/chat -H 'Content-Type: application/json' -d '{
+  "workspace_id":"ws_x","message":"跑一下测试",
+  "tools":["toolkit_exec","toolkit_file"]}'
+```
+
+- 顶层 `tools` 是工具名的清单；`policy.tools` 同样有效（任务队列就是这么发的，
+  可以是清单也可以是 `"a, b; c"` 这样的字符串）；
+- **顶层给了空清单 `[]` = 一个工具都不给**（纯聊天）；**不给这个字段** = 用常规那套工具。
+  `policy.tools` 的空清单按任务队列的约定算「没这个字段」（还是常规那套工具）。
+- 角色也会限制工具（见上「角色」）：两者取交集，角色只能让清单更短。
 
 ### 幂等键：同一个请求问两次，就是一个请求
 

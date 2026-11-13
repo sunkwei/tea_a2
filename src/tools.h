@@ -49,27 +49,6 @@ struct ToolResult {
   bool todos_changed = false;
 };
 
-/// The exec fence of one turn: which commands it may run.
-///
-/// The file tools are fenced by the workspace; the command tool was not, so a
-/// turn that was given a narrow set of directories could still run a command
-/// that touched anything. A caller that drives its own policy (the task
-/// queue) can now say what may be run:
-///
-///     "policy": {"exec": {"allow": ["npm *", "git *"], "deny": ["rm -rf *"]}}
-///
-/// An empty policy keeps the open semantics: nothing is fenced, nothing
-/// breaks.
-struct ExecPolicy {
-  /// The commands that may run. Empty => everything that is not denied.
-  std::vector<std::string> allow;
-  /// The commands that may not run. Checked first: a denied command is
-  /// denied even when it is also allowed.
-  std::vector<std::string> deny;
-  /// Is there a fence at all?
-  bool empty() const { return allow.empty() && deny.empty(); }
-};
-
 /// Is this command allowed by the fence? `why` says why not (empty when it
 /// is allowed).
 ///
@@ -104,6 +83,12 @@ struct ToolContext {
   McpRegistry* mcp = nullptr;
   /// The exec fence of this turn (null => no fence). See ExecPolicy.
   const ExecPolicy* exec_policy = nullptr;
+  /// The fence of the stage profile this turn runs under (see role.h). It
+  /// applies on top of the turn's own fence: a command has to pass both.
+  const ExecPolicy* exec_policy_role = nullptr;
+  /// A read-only stage (see role.h): the file tools may read and list, but
+  /// not write, delete, move or create anything.
+  bool read_only = false;
   /// The turn's deadline (absolute epoch milliseconds; 0 => no deadline). The
   /// turn's wall clock is a ceiling for the whole turn, the tools included: a
   /// command that would run past it is cut short instead of keeping the turn

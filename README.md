@@ -103,6 +103,7 @@ build/bin/tea_agent --workspace . --open
 | | |
 | --- | --- |
 | **任务队列**（`sched/task_server.py`） | 排队、调度、交互挂起、导出、事件流；微信 / Telegram 前端。见 [任务队列](docs/tasks.md) |
+| **角色**（工作区的阶段档案） | 分析 / 设计 / 开发 / 测试各写一份：人设、阶段规矩、工具、命令围栏、模型、预算。**只有使用者能切**（网页或另一个 a2 调 API），切换从下一轮生效。见 [角色](docs/workspace.md#角色这个工作区的阶段档案) |
 | **级联**（`toolkit_peer`） | 一台 tea_a2 直接控制另一台。见 [级联](docs/peer.md) |
 | **隧道侧载**（`a2_broker` + `a2_tunnel`） | **外网访问内网的 a2**：设备旁多一个侧载，把外网的连接转到 a2 上；a2 本体零改动，隧道断了也不影响它照常工作。见 [隧道](docs/tunnel.md) · [运维手册](docs/ops_manual.md) |
 | **机群**（`sched/fleet_server.py`） | 一台服务器管 40 台设备：台账、每日采集、灰度升级、审计。见 [机群运维](docs/fleet.md) |
@@ -120,7 +121,7 @@ build/bin/tea_agent --workspace . --open
 | [使用手册](docs/tea_a2_manual.md) | **命令清单**：命令行参数、curl 配方、队列命令、微信命令、脚本、环境变量 |
 | [用起来](docs/using.md) | 界面导览：配置对话框、工作区、主题、分叉、图片、搜索 |
 | [配置](docs/config.md) | `provider.yaml`、额度与搜索抓取、语音输入、MCP、按工作区覆盖 |
-| [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、销毁、导出 |
+| [工作区与运行时存储](docs/workspace.md) | `.tea_agent_run/` 里有什么、并发、agent.md、角色、销毁、导出 |
 | **跑起来 / 运维** | |
 | [构建与跨平台编译](docs/build.md) | 依赖、本机构建、交叉编译（aarch64 / Windows）、产物校验 |
 | [部署](docs/deploy.md) | 嵌入式设备、静态单文件、TLS、systemd 单元、Windows 自启 |

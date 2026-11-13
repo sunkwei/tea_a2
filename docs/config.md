@@ -112,6 +112,10 @@ providers:
 > 配置文件里若还留着 `roles:`，启动时会打一条 WARN 列出被忽略的角色名，但**不会**再影响选择
 > ——升级后默认模型可能因此变化（变成第一个 provider 的第一个模型），请检查一次
 > `/api/providers` 的 `active`。
+>
+> （现在的**角色**是另一回事：工作区的阶段档案，文件在
+> `<workspace>/.tea_agent_run/roles/`，与这个旧键无关。见
+> [工作区与运行时存储](workspace.md#角色这个工作区的阶段档案)。）
 api_key 只在日志里以掩码出现，HTTP 接口从不下发。
 
 ### 查模型并回填（设置页的「更新模型」）
@@ -640,9 +644,14 @@ settings:
   compaction_keep_recent: 4
   compaction_summary_max_tokens: 4096   # 摘要请求的预算：思考模型先花 reasoning 的钱
   tool_output_max_lines: 400
+  role: dev                     # 当前角色（阶段档案），见 workspace.md
   system_prompt: |             # 也可以整体替换默认规则
     ...
 ```
+
+`role` 是**当前角色**的指针（角色本身是 `<workspace>/.tea_agent_run/roles/<id>.yaml`）。
+它每轮开始时重读，所以切换从**下一轮**生效；只有使用者能切（网页或 API），agent 自己
+没有这个权限。详见 [工作区与运行时存储](workspace.md#角色这个工作区的阶段档案)。
 
 另外有一个工作区指令文件 `<workspace>/.tea_agent_run/instructions.md`，内容会原样拼进
 system prompt 的「Workspace instructions」小节——用来放「这个项目怎么构建、怎么测、有哪些约定」，

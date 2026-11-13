@@ -2614,3 +2614,110 @@ video_analyse 那一轮：08:25:54 / 08:27:59 / 08:30:38，每一次的轨迹都
   `tests/ui_cron.mjs`（11 项，Chrome：网页上那一块）。
   真队列那一段靠**改写记录文件里的 `last_fired_at`** 把时间往前拨——
   测试不该真的等一分钟。
+
+---
+
+## 角色：工作区的阶段档案（2026-11-13）
+
+**要什么**：一个项目分阶段——先分析，再设计，再开发，再测试。每个阶段要的东西不一样：
+分析阶段只想读代码，开发阶段要能改文件，测试阶段只想跑测试还不能提交。以前这件事只能
+靠人每次手工改 `system_prompt.md`（换个说法还要改回来），现在做成**角色**：一个工作区里
+几份可切换的档案。
+
+**长什么样**：
+
+```
+<workspace>/.tea_agent_run/roles/<id>.yaml    # 角色定义（一份一个文件）
+<workspace>/.tea_agent_run/settings.yaml       # settings.role: <id>（当前角色）
+```
+
+一份角色是 YAML：`name`（显示名）、`description`、`system_prompt`（替换人设）、
+`checklist`（本阶段的规矩）、`tools`（这一阶段能用的工具）、`exec`（命令围栏）、
+`model`、`limits`。源码 `src/role.{h,cpp}`。
+
+**几个刻意的选择**：
+
+- **agent.md 不按角色拆**。经验（构建命令、目录约定、路径陷阱）大部分与阶段无关，
+  拆开就变成几份互相看不见的碎片——开发阶段不知道测试阶段踩过什么坑。
+  阶段的差别体现在**角色自己的边界**上，不体现在记忆的分区上。
+- **只有使用者能切，agent 自己不能**。切角色的接口是 HTTP（网页 / 另一个 a2 走
+  `/api/peer/*`），**不给 agent 任何工具**：能自己升格的阶段，也能自己松绑。
+- **切换从下一轮生效**：角色在一轮开始时定下并冻结（`TurnOptions::role` 是
+  `shared_ptr<const Role>`，随那一轮走完）。指针每轮重读 → 切换不用重开工作区，
+  正在跑的那一轮也不受影响。
+- **角色只收紧，不放宽**（跟 `TurnBudget` 一个规矩）：工具取交集、命令要同时过了角色
+  和这一轮两道围栏、预算取更小的那个、模型是调用方没点名时才用角色指定的。
+  所以两处**没有合并**而是**各管一道**：`ToolContext::exec_policy`（这一轮的）与
+  `ToolContext::exec_policy_role`（角色的）。
+- **角色文件只放工作区**（没有全局库）：阶段是项目的事。机器级 `tea_agent.yaml` 的
+  `role:` 只是默认指针，文件仍然要在工作区里存在。
+- **人设的优先级**：调用方 > 角色 > `system_prompt.md` > `settings.yaml` > 内置。
+
+**坑**：
+
+- **`ExecPolicy` 从 `tools.h` 挪到了 `config.h`**：`role.h` 要用它，而
+  `tools.h → workspace.h → role.h` 会成环（`tools.h` 里有 `Workspace*`）。
+  策略类的结构体放在 `config.h`（那里已经有 `TurnBudget`）最自然。
+- **`POST /api/chat` 的 `tools: []` 以前是「不限制」**：空清单和「没这个字段」被混成
+  一件事（`options.tools.empty()`）。现在有 `tools_given` 标志：给了空清单 = 一个工具
+  都不给，没给 = 常规那套。文档早就写的是后者，代码一直没做到。
+- **任务队列发的 `policy.tools` 以前没人读**（服务端只读顶层的 `tools`）：现在两处都读，
+  队列那种 `"a, b; c"` 字符串也认。
+- **角色指针每轮重读**：`settings.yaml` 平时是「打开工作区时读一次」（为了让 prompt
+  前缀稳定），所以角色指针单独再读一遍那个文件。
+- **`/api/peer/*` 是白名单**：角色的那几条路由（`workspaces/<id>/role…`）要单独加进去，
+  否则另一个 a2 切不了（而「使用者可能是另一个 a2」正是需求）。
+- 回归：`tests/smoke_role.py`（47 项，含 peer 通道）与 `tests/ui_role.mjs`（17 项，Chrome：
+  顶栏的角色徽标 + 设置页的角色卡）。截图脚本 `.tea_agent_run/scripts/role_shot.mjs`。
+
+---
+
+## 角色：内置的五个阶段（2026-11-13 追加）
+
+角色这件事的骨架在上一节；这一节是**内置的那五个**（需求分析 / 项目设计 / 开发 /
+测试 / 运维），源码 `src/role_builtin.cpp`。
+
+**怎么进工作区的**：**不进去**——它们是**程序里的模板**（`src/role_builtin.cpp`），
+工作区只放用户自己做的角色。要改内置角色，先**复制**一份
+（`POST /api/workspaces/{id}/roles/{name}/copy`）：副本落在 `roles/<新id>.yaml`，
+是**普通角色**（可写、可删、能当当前角色），显示名带「（副本）」。
+复制内置角色拿到的永远是**原始模板**（不是谁改过的版本）。
+
+工作区里有一个与内置角色**同名**的文件时，那个文件是用户的版本（盖住模板）；
+删掉它，模板就回来。内置角色本身**不能删**（它不是文件）。
+
+**按真实 toolkit 修正过**：每个角色的「工具/能力」清单列的是 a2 **真有的**工具
+（`toolkit_exec` / `toolkit_file` / `toolkit_workspace_search` /
+`toolkit_history_search` / `toolkit_memory` / `toolkit_todo` / `toolkit_task` /
+`toolkit_agent_doc` / `toolkit_load_image` / `toolkit_search` / `toolkit_fetch`），
+而不是「可以读取和整理文档」这种没有对应工具的话。回归里有一条检查：**角色里出现的
+每个工具名都必须是真工具**（或一族 `mcp__*`）——将来改了工具表，这条会先红。
+
+**结构化的限制**（不只是在提示词里说说）：
+
+- `tools:` 白名单。名字要么是工具名，要么是**一族**（结尾一个 `*`）：`mcp__*` 是所有
+  MCP 服务器的工具。过滤在 `agent.cpp` 的 `tool_allowed_by()`（原来只有全等比较）。
+- `read_only: true`：文件工具的 write/append/mkdir/delete/move **一律被拒**
+  （`ToolContext::read_only` → `tool_file()`）。「需求分析」这个阶段就是只读的——
+  分析阶段碰不到你的代码，靠的是工具层，不是靠模型记住那句「别改文件」。
+- `exec.deny:`：这个阶段不许跑的命令（`git push`、`rm -rf` 之类）。
+
+**几个坑**：
+
+- **一个角色文件可以写一个角色（映射），也可以写几个（列表）**：人一口气写五个角色时
+  自然会写成列表（`RoleSet::load` 两种都认；列表里的每一项要自己带 `id:`，因为文件名
+  只能给一个角色起名）。
+- **列表里的角色要先把 YAML 节点转回文本再解析**（`dump_yaml()` + yaml-cpp 的
+  `Emitter`）：一个解析器服务两种形状，省掉第二套解析逻辑。
+- **内置角色的 id 用 ASCII**（`analysis` / `design` / `dev` / `test` / `ops`），中文放在
+  `name:` 里：id 是文件名，中文文件名在某些文件系统/编码上是雷。
+- **`mcp.yaml` 在 provider.yaml 旁边，不在 tea home 里**（写测试时别搞反）。
+- 回归：`tests/smoke_role.py`（74 项：内置模板、复制、只读阶段、围栏、mcp__* 一族、
+  peer 通道）与 `tests/ui_role.mjs`（23 项，Chrome：内置只读 → 复制 → 可写）。
+- **角色占了 run_dir 的字节 → 历史的清理器会把它们算进预算**（`smoke_gc.py` 抓到的）：
+  角色是**用户的文件**（跟 `agent.md`、`settings.yaml` 一个性质），清理器不会删它们，
+  却会因为它们占地方去删会话。修法：`tree_size(run_dir)` 减去 `tree_size(roles/)`，
+  预算只管历史。
+- **内置角色是模板，不是文件**：所以 `set_current_role()` 不能只认文件（内置角色没有
+  文件！）→ 要 `role_has_file(id) || builtin_role_text(id)` 才算数。
+  「切换到内置角色」曾经直接 400，就是这个坑。

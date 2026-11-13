@@ -87,6 +87,16 @@
       content: '', current: '', custom: false, path: '',
       defaultPrompt: '', defaultSource: 'builtin', maxBytes: 0,
       effectiveBytes: 0, estimatedTokens: 0, loading: false, touched: false
+    },
+    // 角色：这个工作区的「阶段档案」。list 是全部角色，current 是工作区当前
+    // 指向的那个（切换从下一轮生效），selected 是设置页里正在编辑的那个。
+    roles: {
+      list: [], current: '', currentExists: false, errors: [], dir: '',
+      // files: the ids that are real files of this workspace. The built-in
+      // roles are templates in the program - they are not files until they
+      // are copied.
+      files: [],
+      selected: '', content: '', original: '', loading: false, touched: false
     }
   };
 
@@ -3069,8 +3079,10 @@
   function closeDropdowns() {
     $('model-dropdown').classList.add('hidden');
     $('ws-dropdown').classList.add('hidden');
+    $('role-dropdown').classList.add('hidden');
     $('model-chip').setAttribute('aria-expanded', 'false');
     $('ws-chip').setAttribute('aria-expanded', 'false');
+    $('role-chip').setAttribute('aria-expanded', 'false');
     var dd = $('session-export-menu');
     if (dd) dd.classList.add('hidden');
     var ex = $('session-export');
@@ -4097,11 +4109,19 @@
       $('files-search-clear').classList.add('hidden');
     }
     renderWorkspaceChip(); renderChat(); renderMetrics(); saveLS();
+    // 角色是工作区的：换工作区就要换角色（顶栏的徽标也跟着换）。
+    if (changed) {
+      state.roles.list = []; state.roles.current = ''; state.roles.currentExists = false;
+      state.roles.selected = ''; state.roles.content = ''; state.roles.original = '';
+      state.roles.touched = false;
+      renderRoleChip(); renderRoleList(); renderRoleEditor();
+      loadRoles();
+    }
     return loadSessions().then(function () {
       if (state.view === 'files') loadTree(state.files.dir);
       if (state.view === 'memory') loadMemory();
       if (state.view === 'logs') loadLogs();
-      if (state.view === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); }
+      if (state.view === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); loadRoles(); }
       if (!silent) toast('已切换工作区：' + w.name);
     });
   }
@@ -4342,7 +4362,7 @@
     }
     if (name === 'memory') loadMemory();
     if (name === 'logs') loadLogs();
-    if (name === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); loadMcp(); }
+    if (name === 'settings') { renderSettings(); loadSystemPrompt(); loadAccess(); loadMcp(); loadRoles(); }
     // 手机上侧栏是抽屉：选完就收起来，别挡住刚打开的那页。
     if (isNarrow() && !state.sidebarHidden) {
       state.sidebarHidden = true;
@@ -5199,6 +5219,237 @@
       body.appendChild(pre);
       openDialog('完整 system prompt', body, [{ label: '关闭', primary: true, onClick: closeDialog }]);
     }, function (e) { toast('读取完整提示词失败：' + e.message); });
+  }
+  /* ---------- 角色（阶段档案） ---------- */
+  // 角色是这个工作区的「阶段档案」：人设 + 阶段规矩 + 这一阶段的边界
+  // （工具、命令围栏、模型、预算）。文件在 .tea_agent_run/roles/<id>.yaml，
+  // 当前角色是指在工作区 settings.yaml 里的一个指针。
+  //
+  // 只有使用者能切换：网页里的你，或用 API 驱动这台机器的另一个 a2。agent
+  // 自己没有这个工具 —— 能自己升格的阶段也能自己松绑。
+  //
+  // 切换从**下一轮**生效：正在跑的那一轮保持它开始时的角色。
+  function findRole(id) {
+    if (!id) return null;
+    for (var i = 0; i < state.roles.list.length; i++) {
+      if (state.roles.list[i].id === id) return state.roles.list[i];
+    }
+    return null;
+  }
+  function loadRoles() {
+    if (!state.workspace) { renderRoleChip(); renderRoleList(); return Promise.resolve(); }
+    var wsid = state.workspace.id;
+    state.roles.loading = true;
+    return api('api/workspaces/' + encodeURIComponent(wsid) + '/roles').then(function (d) {
+      if (!state.workspace || state.workspace.id !== wsid) return;   // 期间切了工作区
+      state.roles.list = d.roles || [];
+      state.roles.current = d.current_id || '';
+      state.roles.currentExists = !!d.current_exists;
+      state.roles.errors = d.errors || [];
+      state.roles.dir = d.relative_dir || d.dir || '';
+      state.roles.files = d.files || [];
+      // 选中的角色还在就留着；不在了（被删了）就退回当前角色。
+      if (!findRole(state.roles.selected)) {
+        state.roles.selected = state.roles.current ||
+          (state.roles.list.length ? state.roles.list[0].id : '');
+      }
+      state.roles.loading = false;
+      renderRoleChip();
+      renderRoleList();
+      return loadRoleContent(state.roles.selected);
+    }, function (e) {
+      state.roles.loading = false;
+      renderRoleChip();
+      toast('读取角色失败：' + e.message);
+    });
+  }
+  function loadRoleContent(id) {
+    if (!id || !state.workspace) {
+      state.roles.content = ''; state.roles.original = '';
+      renderRoleEditor();
+      return Promise.resolve();
+    }
+    var wsid = state.workspace.id;
+    return api('api/workspaces/' + encodeURIComponent(wsid) + '/roles/' +
+      encodeURIComponent(id)).then(function (d) {
+      if (!state.workspace || state.workspace.id !== wsid) return;
+      state.roles.content = d.content || '';
+      state.roles.original = d.content || '';
+      state.roles.touched = false;
+      renderRoleEditor();
+    }, function (e) {
+      state.roles.content = ''; state.roles.original = '';
+      renderRoleEditor();
+      toast('读取角色失败：' + e.message);
+    });
+  }
+  function renderRoleChip() {
+    var chip = $('role-chip');
+    if (!chip) return;
+    var cur = findRole(state.roles.current);
+    $('role-chip-text').textContent = cur ? (cur.name || cur.id) : '角色';
+    chip.title = cur
+      ? ('当前角色：' + (cur.name || cur.id) + '（' + cur.id + '）· 切换后从下一轮生效')
+      : '没有角色：直接用默认人设';
+  }
+  function renderRoleMenu() {
+    var dd = $('role-dropdown');
+    if (!dd) return;
+    clear(dd);
+    var none = btn('dd-item' + (state.roles.current ? '' : ' active'), '（无角色）', function () {
+      switchRole('');
+    });
+    if (!state.roles.current) none.appendChild(el('span', 'check', '✓'));
+    dd.appendChild(none);
+    state.roles.list.forEach(function (r) {
+      var active = state.roles.current === r.id;
+      var it = btn('dd-item' + (active ? ' active' : ''), r.name || r.id, function () {
+        switchRole(r.id);
+      });
+      if (r.description) it.title = r.description;
+      if (active) it.appendChild(el('span', 'check', '✓'));
+      dd.appendChild(it);
+    });
+    if (!state.roles.list.length) {
+      dd.appendChild(el('div', 'dd-group', '这个工作区还没有角色（在设置页新建）'));
+    }
+  }
+  function switchRole(id) {
+    if (!state.workspace) { toast('请先选择工作区'); return; }
+    var wsid = state.workspace.id;
+    api('api/workspaces/' + encodeURIComponent(wsid) + '/role',
+      { method: 'POST', body: { role: id } }).then(function () {
+        closeDropdowns();
+        return loadRoles();
+      }).then(function () {
+        toast(id ? ('已切换角色：' + id + '（下一轮生效）') : '已取消角色（下一轮生效）');
+      }, function (e) { toast('切换角色失败：' + e.message); });
+  }
+  function renderRoleList() {
+    var list = $('role-list');
+    if (!list) return;
+    clear(list);
+    state.roles.list.forEach(function (r) {
+      var active = state.roles.selected === r.id;
+      var it = btn('role-item' + (active ? ' active' : '') +
+        (state.roles.current === r.id ? ' current' : ''), r.name || r.id, function () {
+          state.roles.selected = r.id;
+          state.roles.touched = false;
+          renderRoleList();
+          loadRoleContent(r.id);
+        });
+      if (state.roles.current === r.id) it.appendChild(el('span', 'role-cur', '当前'));
+      if (r.builtin) it.appendChild(el('span', 'role-bi', '内置'));
+      if (r.read_only) it.appendChild(el('span', 'role-ro', '只读'));
+      list.appendChild(it);
+    });
+    if (!state.roles.list.length) {
+      list.appendChild(el('span', 'hint', '这个工作区还没有角色。点「新建」写一个。'));
+    }
+  }
+  function roleIsFile(id) {
+    if (!id) return false;
+    return state.roles.files.indexOf(id) >= 0;
+  }
+  function renderRoleEditor() {
+    var editor = $('role-editor');
+    if (!editor) return;
+    if (!state.roles.touched) editor.value = state.roles.content;
+    // A built-in role is a template in the program: there is no file to
+    // save, so the editor is read-only until the role is copied.
+    var sel = findRole(state.roles.selected);
+    var template = !!(sel && sel.builtin && !roleIsFile(sel.id));
+    editor.readOnly = template;
+    editor.classList.toggle('readonly', template);
+    var dirty = editor.value !== state.roles.original;
+    $('role-dir').textContent = state.roles.dir || '';
+    $('role-dir').title = state.roles.dir || '';
+    var cur = findRole(state.roles.current);
+    var meta = dirty ? '未保存'
+      : (state.roles.loading ? '读取中…' : (state.roles.current ? ('当前：' + (cur ? (cur.name || cur.id) : state.roles.current)) : '当前：无角色'));
+    $('role-meta').textContent = meta;
+    $('role-meta').classList.toggle('dirty', dirty);
+    $('role-save').disabled = !dirty || template;
+    $('role-delete').disabled = !state.roles.selected;
+    $('role-use').disabled = !state.roles.selected || state.roles.current === state.roles.selected;
+    var hint = $('role-hint');
+    clear(hint);
+    hint.appendChild(el('span', 's-nm',
+      '角色只能收紧：它限制工具、命令、模型和预算，不会放宽工作区的设置。'));
+    if (sel && sel.read_only) {
+      hint.appendChild(el('span', null, '这个阶段是只读的：文件工具不能写、建、删、移动'));
+    }
+    if (template) {
+      hint.appendChild(el('span', null, '内置角色是模板：点「复制」存一份自己的，改那份'));
+    }
+    hint.appendChild(el('span', null, '切换角色从下一轮生效，正在跑的这一轮不变'));
+    state.roles.errors.forEach(function (e) {
+      hint.appendChild(el('span', null, '读不出来的角色文件：' + e));
+    });
+  }
+  function saveRole() {
+    if (!state.workspace || !state.roles.selected) return;
+    var id = state.roles.selected;
+    var content = $('role-editor').value;
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/roles/' +
+      encodeURIComponent(id), { method: 'PUT', body: { content: content } }).then(function () {
+        state.roles.touched = false;
+        return loadRoles();
+      }).then(function () {
+        toast('角色 ' + id + ' 已保存');
+      }, function (e) { toast('保存失败：' + e.message); });
+  }
+  function newRole() {
+    if (!state.workspace) { toast('请先选择工作区'); return; }
+    var name = (prompt('新角色的名字（文件名，会是 .tea_agent_run/roles/<名字>.yaml）') || '').trim();
+    if (!name) return;
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('名字只能用字母、数字、点、下划线和短横线'); return; }
+    var content = 'name: ' + name + '\ndescription: \nsystem_prompt: |\n  \nchecklist: |\n  \n';
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/roles/' +
+      encodeURIComponent(name), { method: 'PUT', body: { content: content } }).then(function () {
+        state.roles.selected = name;
+        state.roles.touched = false;
+        return loadRoles();
+      }).then(function () {
+        toast('已新建角色 ' + name);
+      }, function (e) { toast('新建失败：' + e.message); });
+  }
+  /// Copy the selected role into a new one: the copy is a normal, writable
+  /// role on disk. Copying a built-in takes the pristine template.
+  function copyRole() {
+    if (!state.workspace || !state.roles.selected) return;
+    var src = findRole(state.roles.selected);
+    var id = state.roles.selected;
+    var suggested = (src && src.builtin && !roleIsFile(id)) ? (id + '-copy') : (id + '-copy');
+    var name = (prompt('复制成哪个角色？（新角色的 id，会是 .tea_agent_run/roles/' +
+      suggested + '.yaml）', suggested) || '').trim();
+    if (!name) return;
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('id 只能用字母、数字、点、下划线和短横线'); return; }
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/roles/' +
+      encodeURIComponent(id) + '/copy', { method: 'POST', body: { as: name } }).then(function (d) {
+        state.roles.selected = d.role.id;
+        state.roles.touched = false;
+        return loadRoles();
+      }).then(function () {
+        toast('已复制成角色 ' + name + '，可以改了');
+      }, function (e) { toast('复制失败：' + e.message); });
+  }
+  function deleteRole() {
+    if (!state.workspace || !state.roles.selected) return;
+    var id = state.roles.selected;
+    if (!confirm('删除角色 ' + id + '？该角色的文件会从工作区里消失。')) return;
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/roles/' +
+      encodeURIComponent(id), { method: 'DELETE' }).then(function () {
+        state.roles.selected = '';
+        state.roles.content = ''; state.roles.original = '';
+        return loadRoles();
+      }).then(function () {
+        toast('已删除角色 ' + id);
+      }, function (e) { toast('删除失败：' + e.message); });
+  }
+  function useRole() {
+    if (!state.workspace || !state.roles.selected) return;
+    switchRole(state.roles.selected);
   }
   /* ---------- 销毁：删除 tea home 与所有工作区的 .tea_agent_run ---------- */
   // 不可逆操作，所以先 GET 列出将删除的路径（用户能看到自己这台机器上究竟是
@@ -6976,6 +7227,12 @@
       closeDropdowns();
       if (open) { renderModelMenu(); $('model-dropdown').classList.remove('hidden'); $('model-chip').setAttribute('aria-expanded', 'true'); }
     };
+    $('role-chip').onclick = function (e) {
+      e.stopPropagation();
+      var open = $('role-dropdown').classList.contains('hidden');
+      closeDropdowns();
+      if (open) { renderRoleMenu(); $('role-dropdown').classList.remove('hidden'); $('role-chip').setAttribute('aria-expanded', 'true'); }
+    };
     document.addEventListener('click', function (e) {
       if (!e.target.closest || !e.target.closest('.dd-wrap')) closeDropdowns();
       if (!e.target.closest || !e.target.closest('#shell-menu')) shellMenuClose();
@@ -7053,6 +7310,15 @@
     $('system-prompt-editor').addEventListener('input', function () {
       state.systemPrompt.touched = true;
       renderSystemPrompt();
+    });
+    $('role-save').onclick = saveRole;
+    $('role-new').onclick = newRole;
+    $('role-delete').onclick = deleteRole;
+    $('role-use').onclick = useRole;
+    $('role-copy').onclick = copyRole;
+    $('role-editor').addEventListener('input', function () {
+      state.roles.touched = true;
+      renderRoleEditor();
     });
     $('agent-doc-save').onclick = saveAgentDoc;
     $('agent-doc-revert').onclick = function () {
@@ -7149,7 +7415,7 @@
 
     $('destroy-run').onclick = openDestroyDialog;
     $('settings-refresh').onclick = function () {
-      loadProviders(); loadTools(); loadSystemPrompt(); loadAccess(); loadMcp();
+      loadProviders(); loadTools(); loadSystemPrompt(); loadAccess(); loadMcp(); loadRoles();
       loadHealth(true).catch(function () {});
     };
     // 「刷新」= 把所有 MCP 服务器停掉再重新启动一遍。改完 provider.yaml 里的

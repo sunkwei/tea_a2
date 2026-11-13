@@ -13,6 +13,30 @@
 
 namespace tea {
 
+/// The exec fence of one turn: which commands it may run.
+///
+/// The file tools are fenced by the workspace; the command tool was not, so a
+/// turn that was given a narrow set of directories could still run a command
+/// that touched anything. A caller that drives its own policy (the task
+/// queue) can now say what may be run:
+///
+///     "policy": {"exec": {"allow": ["npm *", "git *"], "deny": ["rm -rf *"]}}
+///
+/// An empty policy keeps the open semantics: nothing is fenced, nothing
+/// breaks.
+///
+/// It lives here (and not in tools.h) because it is a *policy*: the workspace
+/// roles carry one too, and a role must not depend on the tools.
+struct ExecPolicy {
+  /// The commands that may run. Empty => everything that is not denied.
+  std::vector<std::string> allow;
+  /// The commands that may not run. Checked first: a denied command is
+  /// denied even when it is also allowed.
+  std::vector<std::string> deny;
+  /// Is there a fence at all?
+  bool empty() const { return allow.empty() && deny.empty(); }
+};
+
 /// Whether assistant `reasoning_content` is echoed back on the follow-up
 /// request. Providers disagree, and both behaviours are fatal if guessed wrong:
 /// thinking-mode gateways (vLLM/SGLang/GLM/Kimi/opencode) *require* it, while
@@ -307,6 +331,12 @@ struct Settings {
   bool utf8_console = true;
   std::string shell;  // "cmd" | "powershell" | "bash" | "" => auto
   std::string system_prompt;
+
+  /// The stage profile this workspace works in ("" => no role). The pointer
+  /// lives in the workspace's settings.yaml and is read at the start of every
+  /// turn, so switching it applies to the next turn. The role itself is a file
+  /// under <run_dir>/roles/.
+  std::string role;
 
   // ---- tool output ------------------------------------------------------
   /// Hard cap on retained lines per tool result, applied on top of

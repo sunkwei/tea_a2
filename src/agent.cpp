@@ -347,6 +347,21 @@ long long Agent::estimate_tokens(const std::vector<Message>& messages) {
   return total;
 }
 
+/// Does the allowlist name this tool? An entry may end with '*' to name a
+/// family: "mcp__*" is every tool of an MCP server.
+static bool tool_allowed_by(const std::vector<std::string>& allow, const std::string& name) {
+  for (std::size_t k = 0; k < allow.size(); ++k) {
+    const std::string& pattern = allow[k];
+    if (pattern == name) return true;
+    if (!pattern.empty() && pattern[pattern.size() - 1] == '*' &&
+        name.size() >= pattern.size() - 1 &&
+        name.compare(0, pattern.size() - 1, pattern, 0, pattern.size() - 1) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// The extra directories this turn may touch, as the prompt should say it.
 static std::string allowed_roots_line(const Workspace& workspace) {
   const std::vector<std::string>& roots = workspace.allowed_roots();
@@ -362,28 +377,76 @@ static std::string allowed_roots_line(const Workspace& workspace) {
 
 std::string Agent::build_system_prompt(const Workspace& workspace, const Session& session,
                                            const std::string& persona_override,
-                                           const std::string& task_context) const {
+                                           const std::string& task_context,
+                                           const Role* role) const {
   const EnvironmentInfo& env = machine_environment();
   const Settings& st = workspace.settings();
   std::ostringstream out;
   // Persona precedence, most specific first:
-  //   1. `<workspace>/.tea_agent_run/system_prompt.md`, read fresh on every call
+  //   1. the caller's own prompt (a caller that drives its own policy);
+  //   2. the role's `system_prompt` (the stage profile of this turn);
+  //   3. `<workspace>/.tea_agent_run/system_prompt.md`, read fresh on every call
   //      so an edit in the UI reaches the *next* turn (or the next iteration of
   //      a running one) without a restart;
-  //   2. the workspace's `settings.yaml: system_prompt` (loaded when opened);
-  //   3. the machine-level default (tea_agent.yaml or the built-in rules).
+  //   4. the workspace's `settings.yaml: system_prompt` (loaded when opened);
+  //   5. the machine-level default (tea_agent.yaml or the built-in rules).
   // A caller that drives its own policy may hand in the persona it wants;
   // it wins over the workspace file, which in turn wins over the machine default.
   const std::string override_prompt = trim(persona_override);
+  const std::string role_prompt = role ? trim(role->system_prompt) : std::string();
   const std::string workspace_prompt = trim(workspace.load_system_prompt());
   if (!override_prompt.empty()) {
     out << override_prompt << "\n\n";
+  } else if (!role_prompt.empty()) {
+    out << role_prompt << "\n\n";
   } else if (!workspace_prompt.empty()) {
     out << workspace_prompt << "\n\n";
   } else if (!st.system_prompt.empty()) {
     out << st.system_prompt << "\n\n";
   } else {
     out << config_->default_system_prompt() << "\n\n";
+  }
+
+  // The stage profile of this turn (see role.h). It is resolved once, when the
+  // turn starts, and frozen for the turn - switching the role applies to the
+  // next turn, not in the middle of this one. The block says what the stage is
+  // and what it may not do, so a refused command reads as a rule of the stage
+  // instead of a bug.
+  if (role && !role->id.empty()) {
+    out << "\nCurrent role: " << role->display_name << " (" << role->id << ")";
+    if (!role->description.empty()) out << " - " << role->description;
+    out << "\n";
+    if (!role->checklist.empty()) {
+      out << "Rules of this stage:\n" << role->checklist << "\n";
+    }
+    if (role->read_only) {
+      out << "This stage is read-only: the file tools cannot write, create, move or delete "
+             "anything. Deliver your result in the answer.\n";
+    }
+    if (!role->tools.empty()) {
+      out << "Tools available in this stage: ";
+      for (std::size_t i = 0; i < role->tools.size(); ++i) {
+        if (i) out << ", ";
+        out << role->tools[i];
+      }
+      out << "\n";
+    }
+    if (!role->exec.deny.empty()) {
+      out << "Commands this stage must not run: ";
+      for (std::size_t i = 0; i < role->exec.deny.size(); ++i) {
+        if (i) out << ", ";
+        out << role->exec.deny[i];
+      }
+      out << "\n";
+    }
+    if (!role->exec.allow.empty()) {
+      out << "Commands this stage may run: ";
+      for (std::size_t i = 0; i < role->exec.allow.size(); ++i) {
+        if (i) out << ", ";
+        out << role->exec.allow[i];
+      }
+      out << "\n";
+    }
   }
 
   // Everything below is probed from the real device and kept byte-stable for the
@@ -605,12 +668,12 @@ std::string truncate_middle(const std::string& text, std::size_t keep_bytes) {
 void Agent::build_context(const Workspace& workspace, const Session& session,
                           const ModelInfo* model, std::vector<Message>* out,
                           ContextStats* stats, const std::string& persona_override,
-                          const std::string& task_context) const {
+                          const std::string& task_context, const Role* role) const {
   const Settings& st = workspace.settings();
   out->clear();
   Message system;
   system.role = "system";
-  system.content = build_system_prompt(workspace, session, persona_override, task_context);
+  system.content = build_system_prompt(workspace, session, persona_override, task_context, role);
   system.created_at = now_iso8601();
   out->push_back(system);
 
@@ -917,7 +980,7 @@ bool Agent::maybe_compact(Workspace& workspace, Session* session, const std::str
                           const std::string& model, const ModelInfo* model_info,
                           std::atomic<bool>* cancel, const EventEmitter& emit, bool force,
                           const std::string& persona_override,
-                          const std::string& task_context) {
+                          const std::string& task_context, const Role* role) {
   if (!session) return false;
   const Settings& st = workspace.settings();
   if (!st.enable_compaction) return false;
@@ -925,7 +988,8 @@ bool Agent::maybe_compact(Workspace& workspace, Session* session, const std::str
 
   std::vector<Message> probe;
   ContextStats stats;
-  build_context(workspace, *session, model_info, &probe, &stats, persona_override, task_context);
+  build_context(workspace, *session, model_info, &probe, &stats, persona_override, task_context,
+                role);
 
   // Trigger on pressure, not on the hard boundary: compacting at 100% of the
   // budget means the next turn is immediately over it again.
@@ -1029,6 +1093,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
                            std::atomic<bool>* cancel) {
   TurnResult out;
   const int64_t started = now_ms();
+
+  // The stage profile of this turn. It was resolved when the turn was
+  // submitted and is frozen here: switching the role applies to the next turn,
+  // so a turn never changes its own rules halfway through.
+  const Role* role = options.role.get();
 
   // The file tools' boundary: the workspace root, plus whatever this turn was
   // granted. A Workspace is one turn's copy, so the grant does not outlive it.
@@ -1205,7 +1274,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // Runs before the start event so a compaction event lands first in the stream.
   if (st.enable_compaction) {
     maybe_compact(workspace, session, provider, model, model_info, cancel, emit_all, false,
-                  options.system_prompt, options.task_context);
+                  options.system_prompt, options.task_context, role);
   }
 
   // --- announce the turn ---------------------------------------------------
@@ -1220,6 +1289,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // its earlier iterations; the replay rebuilds them in the live bubble, so it
   // drops everything past this index first instead of showing them twice.
   start_event["messages_before"] = static_cast<long long>(session->messages.size());
+  // Which stage the turn runs under: the UI shows it, and the trajectory
+  // keeps it, so a week later one can tell what the rules were back then.
+  start_event["role"] = role ? role->id : std::string();
   emit(start_event);
 
   // --- build the tool schema ----------------------------------------------
@@ -1241,15 +1313,11 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
   // A caller that drives its own policy can hand the agent exactly the tools it
   // wants - or none at all (an empty list turns the turn into a plain
   // conversation with the model).
-  if (!options.tools.empty()) {
+  if (options.tools_given) {
     nlohmann::json kept = nlohmann::json::array();
     for (std::size_t i = 0; i < tools_json.size(); ++i) {
       const std::string name = tools_json[i]["function"]["name"].get<std::string>();
-      bool wanted = false;
-      for (std::size_t k = 0; k < options.tools.size(); ++k) {
-        if (options.tools[k] == name) { wanted = true; break; }
-      }
-      if (wanted) kept.push_back(tools_json[i]);
+      if (tool_allowed_by(options.tools, name)) kept.push_back(tools_json[i]);
     }
     tools_json = kept;
   }
@@ -1399,7 +1467,7 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     std::vector<Message> context;
     ContextStats ctx_stats;
     build_context(workspace, *session, model_info, &context, &ctx_stats, options.system_prompt,
-                  options.task_context);
+                  options.task_context, role);
 
     // The pressure check has to happen *inside* the turn. A long turn grows
     // the context with every tool result, and a check that only runs before
@@ -1408,10 +1476,10 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     // 23-iteration turn reached 918k of a 1M window and was killed by a 400).
     if (st.enable_compaction && ctx_stats.trigger > 0 && ctx_stats.live_used >= ctx_stats.trigger) {
       if (maybe_compact(workspace, session, provider, model, model_info, cancel, emit_all, false,
-                        options.system_prompt, options.task_context)) {
+                        options.system_prompt, options.task_context, role)) {
         // The history was folded: the request has to be built again.
         build_context(workspace, *session, model_info, &context, &ctx_stats, options.system_prompt,
-                      options.task_context);
+                      options.task_context, role);
       }
     }
 
@@ -1582,9 +1650,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
         overflow_recovered = true;
         LOG_WARN("llm: provider reported a context overflow; compacting and retrying");
         if (maybe_compact(workspace, session, provider, model, model_info, cancel, emit_all, true,
-                          options.system_prompt, options.task_context)) {
+                          options.system_prompt, options.task_context, role)) {
           build_context(workspace, *session, model_info, &context, &ctx_stats,
-                      options.system_prompt, options.task_context);
+                      options.system_prompt, options.task_context, role);
           continue;
         }
         break;
@@ -1736,6 +1804,12 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       if (!options.task_id.empty()) tool_ctx.task_id = &options.task_id;
       // The exec fence of this turn (empty => nothing is fenced).
       if (!options.exec_policy.empty()) tool_ctx.exec_policy = &options.exec_policy;
+      // The stage's fence applies on top of the turn's: a command has to pass
+      // both. The role may only tighten what the turn may do.
+      if (role && !role->exec.empty()) tool_ctx.exec_policy_role = &role->exec;
+      // A read-only stage may not modify anything: the file tools refuse to
+      // write, delete or move.
+      if (role && role->read_only) tool_ctx.read_only = true;
       // The turn's wall clock is the tool's deadline too: a build that runs
       // past the end of the budget must not keep the turn alive.
       tool_ctx.deadline_ms = budget_deadline_ms;
@@ -1783,11 +1857,8 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       // about what the model is shown (see the tool schema above) - it is the
       // caller's decision, and the agent enforces it.
       bool tool_allowed = true;
-      if (!options.tools.empty()) {
-        tool_allowed = false;
-        for (std::size_t k = 0; k < options.tools.size(); ++k) {
-          if (options.tools[k] == call.name) { tool_allowed = true; break; }
-        }
+      if (options.tools_given) {
+        tool_allowed = tool_allowed_by(options.tools, call.name);
       }
       const bool tool_not_allowed = arguments_valid && !tool_allowed;
       // The budget of the turn: a tool call that would cross the ceiling does

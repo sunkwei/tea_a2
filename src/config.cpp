@@ -381,6 +381,7 @@ void apply_settings(Settings& s, const YAML::Node& node,
   if (yhas(node, "utf8_console")) s.utf8_console = ybool(node, "utf8_console", s.utf8_console);
   if (yhas(node, "shell")) s.shell = ystr(node, "shell", s.shell);
   if (yhas(node, "system_prompt")) s.system_prompt = ystr(node, "system_prompt", s.system_prompt);
+  if (yhas(node, "role")) s.role = ystr(node, "role", s.role);
   if (yhas(node, "tool_output_max_lines"))
     s.tool_output_max_lines = static_cast<int>(yint(node, "tool_output_max_lines", s.tool_output_max_lines));
   if (yhas(node, "enable_compaction"))

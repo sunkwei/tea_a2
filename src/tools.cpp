@@ -158,6 +158,19 @@ ToolResult tool_exec(const nlohmann::json& args, const ToolContext& ctx) {
       return result;
     }
   }
+  // The stage's own fence (the role of this turn): the turn's policy and the
+  // role's policy both have to allow the command.
+  if (ctx.exec_policy_role != nullptr && !ctx.exec_policy_role->empty()) {
+    std::string why;
+    if (!exec_command_allowed(*ctx.exec_policy_role, command, &why)) {
+      result.ok = false;
+      result.output = "error: " + why;
+      result.meta["command"] = command;
+      result.meta["fenced"] = true;
+      LOG_WARN("toolkit_exec: the role fenced the command: ", sanitize_for_terminal(command));
+      return result;
+    }
+  }
 
   CommandOptions options;
   options.command = command;
@@ -401,6 +414,19 @@ ToolResult tool_file(const nlohmann::json& args, const ToolContext& ctx) {
   if (path.empty()) {
     result.output = "error: " + err;
     return result;
+  }
+
+  // A read-only stage (see role.h): the file may be read and listed, but
+  // nothing is created, changed or removed. The guarantee is here, not in the
+  // prompt.
+  if (ctx.read_only) {
+    const bool mutating = op == "write" || op == "append" || op == "mkdir" ||
+                           op == "delete" || op == "move";
+    if (mutating) {
+      result.output = "error: this stage is read-only - '" + op +
+                      "' is not allowed here (the role of this turn does not modify files)";
+      return result;
+    }
   }
 
   if (op == "read") return tool_read(path, ctx, args);

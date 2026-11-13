@@ -381,6 +381,7 @@ bool Workspace::open(const WorkspaceEntry& entry, const Settings& base_settings,
   dirs.push_back(path_parent(log_file()));
   dirs.push_back(path_parent(memory_file()));
   dirs.push_back(scripts_dir());
+  dirs.push_back(roles_dir());
   for (std::size_t i = 0; i < dirs.size(); ++i) {
     if (dirs[i].empty()) continue;
     std::string reason;
@@ -466,10 +467,106 @@ std::size_t Workspace::system_prompt_max_bytes() const {
   return kSystemPromptMaxBytes;
 }
 
+std::string Workspace::roles_dir() const {
+  return path_join(run_dir_, "roles");
+}
+
+std::string Workspace::role_file(const std::string& id) const {
+  return path_join(roles_dir(), id + ".yaml");
+}
+
+RoleSet Workspace::load_roles() const {
+  RoleSet set = RoleSet::load(roles_dir());
+  // The built-in templates are part of the program, not files here: the
+  // workspace holds the roles the user made. A workspace file with the same
+  // id wins - it is the user's own version of that role, and deleting the
+  // file brings the template back.
+  const std::vector<std::pair<std::string, std::string>>& builtins = builtin_roles();
+  for (std::size_t i = 0; i < builtins.size(); ++i) {
+    if (set.find(builtins[i].first) != nullptr) continue;
+    Role role;
+    std::string err;
+    if (!builtin_role(builtins[i].first, &role, &err)) {
+      LOG_WARN("workspace ", entry_.id, ": ", err);
+      continue;
+    }
+    set.add(role);
+  }
+  return set;
+}
+
+bool Workspace::role_has_file(const std::string& id) const {
+  return path_exists(role_file(id));
+}
+
+std::string Workspace::current_role_id() const {
+  // Fresh on purpose: the pointer is what the user switches, and the switch
+  // has to reach the next turn without reopening the workspace. The settings
+  // of the workspace itself are read once (the prompt prefix must stay
+  // stable), so this one file is parsed again here.
+  std::string text;
+  if (path_exists(settings_file()) && read_file(settings_file(), &text, 1024u * 1024u)) {
+    try {
+      const YAML::Node root = YAML::Load(text);
+      if (root && root.IsMap()) {
+        const YAML::Node block = root["settings"] ? root["settings"] : root;
+        if (block && block.IsMap()) {
+          const YAML::Node value = block["role"];
+          if (value && value.IsScalar()) return trim(value.as<std::string>());
+        }
+      }
+    } catch (const std::exception&) {
+      // A settings.yaml that does not parse keeps the value it had when the
+      // workspace was opened; the workspace already logged the reason.
+    }
+  }
+  return trim(settings_.role);
+}
+
+bool Workspace::set_current_role(const std::string& id, std::string* err) {
+  const std::string clean = trim(id);
+  if (!clean.empty()) {
+    if (!valid_role_id(clean)) {
+      if (err) *err = "'" + clean + "' is not a usable role name";
+      return false;
+    }
+    // The role must exist: a file of this workspace, or one of the built-in
+    // templates (they live in the program, not in a file).
+    if (!role_has_file(clean) && builtin_role_text(clean).empty()) {
+      if (err) *err = "no such role in this workspace: " + clean;
+      return false;
+    }
+  }
+  if (!write_setting_string("role", clean, err)) return false;
+  settings_.role = clean;
+  LOG_INFO("workspace ", entry_.id, ": the role is now ", clean.empty() ? "(none)" : clean,
+           " (applies from the next turn on)");
+  return true;
+}
+
 bool Workspace::write_setting_bool(const std::string& key, bool value, std::string* err) {
+  return write_setting_line(key, value ? "true" : "false", err);
+}
+
+bool Workspace::write_setting_string(const std::string& key, const std::string& value,
+                                     std::string* err) {
+  // YAML-quoted: an id may hold characters a bare scalar would read as
+  // something else (a colon, a hash, a leading quote).
+  std::string quoted = "\"";
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    const char c = value[i];
+    if (c == '"' || c == '\\') quoted += '\\';
+    quoted += c;
+  }
+  quoted += "\"";
+  return write_setting_line(key, quoted, err);
+}
+
+bool Workspace::write_setting_line(const std::string& key, const std::string& value_literal,
+                                   std::string* err) {
   StateLock lock(state_mutex());
   const std::string path = settings_file();
-  const std::string literal = std::string(key) + ": " + (value ? "true" : "false");
+  const std::string literal = std::string(key) + ": " + value_literal;
   const std::string indent_unit = "  ";
 
   std::string text;
@@ -644,7 +741,7 @@ bool Workspace::write_setting_bool(const std::string& key, bool value, std::stri
     return false;
   }
   if (settings_.force_allow_outside_workspace) settings_.allow_outside_workspace = true;
-  LOG_INFO("workspace ", entry_.id, ": ", key, " = ", value ? "true" : "false", " written to ",
+  LOG_INFO("workspace ", entry_.id, ": ", key, " = ", value_literal, " written to ",
            display_path(path));
   return true;
 }
@@ -1356,7 +1453,14 @@ bool Workspace::gc_history(const HistoryGcLimits& limits, HistoryGcReport* repor
 
   // ---- 3. over budget: the oldest sessions go --------------------------
   if (limits.max_bytes > 0) {
+    // The budget is about the *history*: the roles are the user's own files
+    // (like agent.md and settings.yaml), the cleaner never removes them, so
+    // counting them here would only make it delete sessions it cannot make
+    // room for.
     int64_t size = tree_size(run_dir_);
+    const int64_t roles_size = tree_size(roles_dir());
+    if (roles_size > 0) size -= roles_size;
+    if (size < 0) size = 0;
     for (std::size_t i = sessions.size(); i > static_cast<std::size_t>(limits.keep_recent); --i) {
       if (size <= limits.max_bytes) break;
       const GcEntry& e = sessions[i - 1];

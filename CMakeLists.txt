@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"1.2.13\"")
+    "  const char* const kVersionString = \"1.3.0\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -472,6 +472,8 @@ set(TEA_SOURCES
   src/mcp.cpp
   src/tools.cpp
   src/workspace.cpp
+  src/role.cpp
+  src/role_builtin.cpp
   src/llm.cpp
   src/trajectory.cpp
   src/agent.cpp

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,14 @@ struct TurnOptions {
   /// supports). A caller that drives its own policy can hand the agent exactly the
   /// tools it wants - or none at all.
   std::vector<std::string> tools;
+  /// The caller named a tool set, even an empty one. Without this flag an
+  /// empty `tools` would mean "the usual set", and a caller that asks for no
+  /// tools at all would get all of them.
+  bool tools_given = false;
+  /// The stage profile this turn runs under (see role.h). It is resolved when
+  /// the turn starts and frozen for the turn: switching the role applies to
+  /// the *next* turn. The role may only tighten what the turn may do.
+  std::shared_ptr<const Role> role;
   /// The exec fence of this turn: which commands it may run. Empty => the open
   /// semantics (nothing is fenced). See ExecPolicy.
   ExecPolicy exec_policy;
@@ -155,7 +164,8 @@ class Agent {
                      const std::string& model, const ModelInfo* model_info,
                      std::atomic<bool>* cancel, const EventEmitter& emit, bool force = false,
                      const std::string& persona_override = std::string(),
-                     const std::string& task_context = std::string());
+                     const std::string& task_context = std::string(),
+                     const Role* role = nullptr);
 
   /// Exposed so the HTTP layer can show exactly what the model receives.
   /// `persona_override` replaces the persona block when it is not empty.
@@ -163,13 +173,15 @@ class Agent {
   /// empty the turn is an ordinary conversation.
   std::string build_system_prompt(const Workspace& workspace, const Session& session,
                                const std::string& persona_override = std::string(),
-                               const std::string& task_context = std::string()) const;
+                               const std::string& task_context = std::string(),
+                               const Role* role = nullptr) const;
 
  private:
   void build_context(const Workspace& workspace, const Session& session, const ModelInfo* model,
                      std::vector<Message>* out, ContextStats* stats = nullptr,
                      const std::string& persona_override = std::string(),
-                     const std::string& task_context = std::string()) const;
+                     const std::string& task_context = std::string(),
+                     const Role* role = nullptr) const;
   bool compact_history(Workspace& workspace, Session* session, const std::string& provider,
                        const std::string& model, const ModelInfo* model_info,
                        std::atomic<bool>* cancel, long long retain_tokens);
