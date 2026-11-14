@@ -2845,3 +2845,37 @@ video_analyse 那一轮：08:25:54 / 08:27:59 / 08:30:38，每一次的轨迹都
 - **在跑着的 agent 旁边 build = 掐断当前这一轮**（appstub 会重启它）。要避开就
   用另一个 build 目录/端口起一个实例做验证，或者先把要验证的东西做完再 build。
 - 那一轮被掐断后，界面上的轨迹行会留一个「未完成」（修好之前是「进行中」）。
+
+---
+
+## 隧道多了一个角色：远程桌面（2026-11-14）
+
+`a2_tunnel` 多了两个角色（`--role desktop` / `--role control`）：设备那边抓屏、
+外面那边看画面并把鼠标键盘送回去。做法与细节在 `docs/tunnel.md`（「远程桌面：
+两个新角色」那一节）与 `docs/tunnel_sidecar_manual.md`（第五节）。
+
+**这一版走 JPEG，不是 H.264**：H.264 那条路也写好了（Media Foundation 的
+H.264 编码器/解码器 MFT，`src/tunnel_video.cpp`），但本机的编码器不接
+NV12→H.264 的类型组合，所以第一个版本用 GDI+ 的 JPEG（2 帧/秒、质量 50、
+最宽 1280）。要切 H.264 只需要换 `tunnel_video` 里那层。
+
+**踩出来的几件事（换机器也会遇到）**：
+
+- **WIC 的 JPEG 编解码器不一定在**（本机就没有：`CreateDecoderFromFilename`
+  直接失败），**GDI+ 的在**（`GdipSaveImageToStream` ✓）。找 JPEG 编码器要
+  **按 MIME（image/jpeg）找**，别写死 CLSID —— 写死的那个在本机认成了 PNG，
+  一张 1 MB 的图把数据通道塞爆了，后面全卡住。
+- **别让客户端复用穿过代理的连接**：代理那条连接对端会收掉，httplib 的客户端
+  不会自己重连 → 从那以后每个请求都失败。`set_keep_alive(false)`（每个请求
+  一条连接）+ 设备端 `set_keep_alive_max_count(1)`（一个连接一个请求，
+  keep-alive 会把工作线程占住几秒，线程池会被占满）。
+- **尺寸跟着画面走**（响应的 `X-Screen-*` 头）：另外单开一个请求去问尺寸，
+  那条连接在代理里活不久 → 失败 → 后面整条链路都卡住。
+- **隧道关连接时别直接 close**：socket 缓冲区里还没被读走的字节会被丢掉 →
+  读的人看到「连接被重置」。半关（`shutdown(SD_SEND)`，Windows 的名字）→
+  读的人先把剩下的字节读完，再看到 EOF。
+- **这版 MinGW 的 COM/MF 头跟 MSDN 不一样**：`IStream` 是老版
+  （ISequentialStream 形状，`Read`/`Write` 三个参数）、`IMFTransform` 没有
+  `GetOutput`（用 `ProcessOutput`）、`IMFMediaBuffer::Lock` 三个参数、
+  `IWICBitmapEncoder::CreateNewFrame` 两个参数、GDI+ 的扁平 API 在
+  `Gdiplus::DllExports` 里、状态码是 `Gdiplus::Ok`。照着 MSDN 写会编不过。

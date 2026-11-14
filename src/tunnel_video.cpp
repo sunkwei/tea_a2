@@ -537,8 +537,10 @@ bool H264Encoder::start(int width, int height, int fps, int bitrate, std::string
 
   IMFActivate** activates = nullptr;
   UINT32 count = 0;
-  HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, &in_type, &out_type,
-                          &activates, &count);
+  // Every encoder, not just the hardware ones: the software encoder is
+  // the one that is everywhere.
+  HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, 0, &in_type, &out_type, &activates,
+                          &count);
   if (FAILED(hr) || activates == nullptr || count == 0) {
     if (err) *err = "this Windows has no H.264 encoder";
     return false;
