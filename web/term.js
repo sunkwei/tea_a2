@@ -77,38 +77,66 @@
       this.params = '';
       this.viewOffset = 0;        // 往回翻了多少行
       this.cursorVisible = true;  // 程序可以用 CSI ?25l 把它藏起来
+      this.autowrap = true;       // DECAWM (?7)：到最右边要不要换行
+      this.origin = false;        // DECOM (?6)：光标定位是不是相对滚动区
+      this.alt = null;            // 备用屏幕开着的时候，主屏幕存在这儿
+      this.altActive = false;
       this.dirty = true;
     };
 
-    TermScreen.prototype.blank = function () {
+    // 一行空白（cols 个格子）。
+    function blankLine(cols) {
       var line = [];
       var st = termDefaultStyle();
-      for (var i = 0; i < this.cols; i++) line.push({ c: ' ', s: st });
+      for (var i = 0; i < cols; i++) line.push({ c: ' ', s: st });
       return line;
+    }
+
+    // 把一行裁成新的宽度：多的丢掉，少的补空白（真终端不重排）。
+    function fitLine(line, cols) {
+      var st = termDefaultStyle();
+      while (line.length < cols) line.push({ c: ' ', s: st });
+      if (line.length > cols) line.length = cols;
+      return line;
+    }
+
+    // 一块屏幕（若干行 + 回滚缓冲 + 光标）缩到新的尺寸。
+    // 变矮：最下面几行挤进回滚缓冲，光标跟着内容一起往上挪。
+    // 变高：下面补空白行，回滚缓冲里的历史不要拉回屏幕。
+    function fitBlock(block, cols, rows) {
+      var oldRows = block.lines.length;
+      for (var i = 0; i < block.lines.length; i++) fitLine(block.lines[i], cols);
+      for (var j = 0; j < block.back.length; j++) fitLine(block.back[j], cols);
+      if (rows < oldRows) {
+        var drop = oldRows - rows;
+        var head = block.lines.splice(0, drop);   // 最上面几行挤进回滚缓冲
+        block.back = head.concat(block.back);
+        block.cy = Math.max(0, block.cy - drop);
+      } else {
+        while (block.lines.length < rows) block.lines.push(blankLine(cols));
+      }
+      block.cx = Math.min(block.cx, cols - 1);
+      block.cy = Math.min(block.cy, rows - 1);
+      return block;
+    }
+
+    TermScreen.prototype.blank = function () {
+      return blankLine(this.cols);
     };
 
     TermScreen.prototype.resize = function (cols, rows) {
       cols = Math.max(20, Math.min(500, cols || this.cols));
       rows = Math.max(5, Math.min(200, rows || this.rows));
       if (cols === this.cols && rows === this.rows) return;
-      var old = this.back.concat(this.lines);
       this.cols = cols;
       this.rows = rows;
-      this.lines = [];
-      var start = Math.max(0, old.length - rows);
-      for (var i = start; i < old.length; i++) {
-        var line = old[i];
-        var st = termDefaultStyle();
-        while (line.length < cols) line.push({ c: ' ', s: st });
-        if (line.length > cols) line.length = cols;
-        this.lines.push(line);
-      }
-      while (this.lines.length < rows) this.lines.push(this.blank());
-      this.back = old.slice(0, start);
-      this.cx = Math.min(this.cx, cols - 1);
-      this.cy = Math.min(this.cy, rows - 1);
+      fitBlock(this, cols, rows);
+      // 备用屏幕开着的时候主屏幕藏在 alt 里，也得跟着改尺寸，
+      // 不然 tmux 退出以后主屏幕的大小跟当前对不上。
+      if (this.alt) fitBlock(this.alt, cols, rows);
       this.top = 0;
       this.bot = rows - 1;
+      this.wrapNext = false;   // 宽度变了，挂着的那次换行不作数
       this.dirty = true;
     };
 
@@ -158,6 +186,7 @@
         }
         if (ch === '\t') {
           this.cx = Math.min(this.cols - 1, (Math.floor(this.cx / 8) + 1) * 8);
+          this.wrapNext = false;
           this.dirty = true;
           continue;
         }
@@ -175,29 +204,36 @@
       var line = this.lines[this.cy];
       if (!line) return;
       line[this.cx] = { c: ch, s: this.style };
-      this.cx++;
-      if (this.cx >= this.cols) {
+      if (this.cx < this.cols - 1) {
+        this.cx++;
+      } else if (this.autowrap) {
+        // 到了最右边：光标先不动，挂着一次换行，等下一个字符再换。
+        // 真终端就是这样，tmux 画满宽的状态条靠的也是它。
         this.cx = this.cols - 1;
         this.wrapNext = true;
       }
       this.dirty = true;
     };
 
+    // 上下挪光标（LF / IND / RI）：挂着的那次换行就此作废。
     TermScreen.prototype.lineFeed = function () {
       if (this.cy === this.bot) this.scrollUp(1);
       else if (this.cy < this.rows - 1) this.cy++;
+      this.wrapNext = false;
       this.dirty = true;
     };
 
     TermScreen.prototype.index = function () {
       if (this.cy === this.bot) this.scrollUp(1);
       else if (this.cy < this.rows - 1) this.cy++;
+      this.wrapNext = false;
       this.dirty = true;
     };
 
     TermScreen.prototype.reverseIndex = function () {
       if (this.cy === this.top) this.scrollDown(1);
       else if (this.cy > 0) this.cy--;
+      this.wrapNext = false;
       this.dirty = true;
     };
 
@@ -235,6 +271,59 @@
       this.cx = Math.min(this.saved.cx, this.cols - 1);
       this.cy = Math.min(this.saved.cy, this.rows - 1);
       this.style = this.saved.style;
+      this.wrapNext = false;
+      this.dirty = true;
+    };
+
+    /* ---- 备用屏幕（DECSET 1049）----
+     * tmux 启动时切到备用屏幕画自己的界面，退出时切回来。
+     * 没有这块的话，tmux 的界面会把 shell 的屏幕冲掉，
+     * 退出 tmux 以后连原来的提示符都找不回来。 */
+    TermScreen.prototype.enterAltScreen = function () {
+      if (this.altActive) return;
+      this.alt = {
+        lines: this.lines,
+        back: this.back,
+        dropped: this.dropped,
+        cx: this.cx,
+        cy: this.cy,
+        top: this.top,
+        bot: this.bot,
+        style: this.style,
+        saved: this.saved,
+        wrapNext: this.wrapNext
+      };
+      this.lines = [];
+      for (var i = 0; i < this.rows; i++) this.lines.push(this.blank());
+      this.back = [];             // 备用屏幕的回滚缓冲跟主屏幕分开
+      this.dropped = 0;
+      this.cx = 0;
+      this.cy = 0;
+      this.top = 0;
+      this.bot = this.rows - 1;
+      this.style = termDefaultStyle();
+      this.saved = null;
+      this.wrapNext = false;
+      this.altActive = true;
+      this.dirty = true;
+    };
+
+    TermScreen.prototype.leaveAltScreen = function () {
+      if (!this.altActive) return;
+      if (this.alt) {
+        this.lines = this.alt.lines;
+        this.back = this.alt.back;
+        this.dropped = this.alt.dropped;
+        this.cx = this.alt.cx;
+        this.cy = this.alt.cy;
+        this.top = this.alt.top;
+        this.bot = this.alt.bot;
+        this.style = this.alt.style;
+        this.saved = this.alt.saved;
+        this.wrapNext = this.alt.wrapNext;
+      }
+      this.alt = null;
+      this.altActive = false;
       this.dirty = true;
     };
 
@@ -324,26 +413,61 @@
         return def;
       };
       if (priv && (final === 'h' || final === 'l')) {
-        // 只关心光标的可见性（?25）：别的模式先不管
+        var on = (final === 'h');
+        // 光标的可见性（?25）
         if (body === '25') {
-          this.cursorVisible = (final === 'h');
+          this.cursorVisible = on;
           this.dirty = true;
+          return;
+        }
+        // 自动换行（?7）：关掉以后写到最右边就停在那儿反复覆盖。
+        if (body === '7') {
+          this.autowrap = on;
+          if (!on) this.wrapNext = false;
+          this.dirty = true;
+          return;
+        }
+        // 原点模式（?6）：光标定位变成相对滚动区。
+        if (body === '6') {
+          this.origin = on;
+          this.dirty = true;
+          return;
+        }
+        // 备用屏幕（?47 / ?1047 / ?1049）：tmux 就靠它画自己的界面，
+        // 退出的时候把原来的屏幕原样还回来。
+        if (body === '47' || body === '1047' || body === '1049') {
+          if (on) this.enterAltScreen();
+          else this.leaveAltScreen();
+          return;
+        }
+        // 只存/取光标（?1048）
+        if (body === '1048') {
+          if (on) this.saveCursor();
+          else this.restoreCursor();
+          return;
         }
         return;
       }
       if (priv && final !== 'm') return;             // 私有模式：先不管
+      // 光标一动，挂着的那次换行就作废（真终端的规矩）。
+      // 不然写到最右边之后再定位一次，下一个字符会莫名其妙地换行：
+      // tmux 画满宽的绿色状态条时，整屏会被顶歪，状态条也就散了。
       switch (final) {
-        case 'A': this.cy = Math.max(this.top, this.cy - arg(0, 1)); break;
-        case 'B': this.cy = Math.min(this.bot, this.cy + arg(0, 1)); break;
-        case 'C': this.cx = Math.min(this.cols - 1, this.cx + arg(0, 1)); break;
-        case 'D': this.cx = Math.max(0, this.cx - arg(0, 1)); break;
-        case 'E': this.cy = Math.min(this.bot, this.cy + arg(0, 1)); this.cx = 0; break;
-        case 'F': this.cy = Math.max(this.top, this.cy - arg(0, 1)); this.cx = 0; break;
-        case 'G': this.cx = Math.max(0, Math.min(this.cols - 1, arg(0, 1) - 1)); break;
+        // 上下左右相对整屏挪，不是相对滚动区（滚动区只管滚不滚）。
+        case 'A': this.cy = Math.max(0, this.cy - arg(0, 1)); this.wrapNext = false; break;
+        case 'B': this.cy = Math.min(this.rows - 1, this.cy + arg(0, 1)); this.wrapNext = false; break;
+        case 'C': this.cx = Math.min(this.cols - 1, this.cx + arg(0, 1)); this.wrapNext = false; break;
+        case 'D': this.cx = Math.max(0, this.cx - arg(0, 1)); this.wrapNext = false; break;
+        case 'E': this.cy = Math.min(this.rows - 1, this.cy + arg(0, 1)); this.cx = 0; this.wrapNext = false; break;
+        case 'F': this.cy = Math.max(0, this.cy - arg(0, 1)); this.cx = 0; this.wrapNext = false; break;
+        case 'G': this.cx = Math.max(0, Math.min(this.cols - 1, arg(0, 1) - 1)); this.wrapNext = false; break;
         case 'H':
         case 'f':
-          this.cy = Math.max(0, Math.min(this.rows - 1, arg(0, 1) - 1));
+          this.cy = this.origin
+            ? Math.max(this.top, Math.min(this.bot, this.top + arg(0, 1) - 1))
+            : Math.max(0, Math.min(this.rows - 1, arg(0, 1) - 1));
           this.cx = Math.max(0, Math.min(this.cols - 1, arg(1, 1) - 1));
+          this.wrapNext = false;
           break;
         case 'J': this.eraseInDisplay(nums.length ? nums[0] : 0); break;
         case 'K': this.eraseInLine(nums.length ? nums[0] : 0); break;
@@ -354,7 +478,12 @@
         case 'S': this.scrollUp(arg(0, 1)); break;
         case 'T': this.scrollDown(arg(0, 1)); break;
         case 'X': this.eraseChars(arg(0, 1)); break;
-        case 'd': this.cy = Math.max(0, Math.min(this.rows - 1, arg(0, 1) - 1)); break;
+        case 'd':
+          this.cy = this.origin
+            ? Math.max(this.top, Math.min(this.bot, this.top + arg(0, 1) - 1))
+            : Math.max(0, Math.min(this.rows - 1, arg(0, 1) - 1));
+          this.wrapNext = false;
+          break;
         case 'm': this.sgr(nums); break;
         case 'r':
           this.top = Math.max(0, arg(0, 1) - 1);
@@ -362,6 +491,7 @@
           if (this.bot <= this.top) { this.top = 0; this.bot = this.rows - 1; }
           this.cx = 0;
           this.cy = this.top;
+          this.wrapNext = false;
           break;
         case 's': this.saveCursor(); break;
         case 'u': this.restoreCursor(); break;

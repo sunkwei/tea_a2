@@ -105,6 +105,10 @@ if (-not $SkipPython) {
     }
 }
 
+# The VT engine of the web terminal: node only, no browser and no server.
+Run-Step 'smoke_term_vt.mjs' {
+    & node (Join-Path $root 'tests\smoke_term_vt.mjs')
+}
 Run-Step 'windows autostart (tests/autostart.ps1)' {
     & pwsh -NoProfile -File (Join-Path $root 'tests\autostart.ps1') -Exe $Exe
 }

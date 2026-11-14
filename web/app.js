@@ -702,6 +702,18 @@
     steps.forEach(function (s) { panel.appendChild(trajStepView(s)); });
     panel.appendChild(trajFilesView(turn.files_changed));
   }
+  // 这一轮还在跑吗？只有服务端说它还活着才算数。
+  // 进程被杀、断电、被重启留下的那一轮，轨迹永远停在 partial（没有收尾记录），
+  // 界面不能一直给它写「进行中」——那是在骗人。
+  function trajTurnIsLive(turn) {
+    if (!turn || !turn.turn_id) return false;
+    var sid = state.session && state.session.id;
+    var live = sid && state.running ? state.running[sid] : null;
+    if (live && live.turn_id === turn.turn_id) return true;
+    // 本机正在流式输出时，最新那一轮就是正在跑的那一轮（服务端还没来得及刷新）。
+    var turns = state.trajectory || [];
+    return !!(state.streaming && turns.length && turns[0] && turns[0].turn_id === turn.turn_id);
+  }
   function trajectoryRow(turn, key) {
     var row = el('div', 'tool-row traj-row');
     row.dataset.key = key;
@@ -716,7 +728,14 @@
     line.appendChild(el('span', 'tool-summary', fmtTrajSummary(turn)));
     if (turn.cancelled) line.appendChild(el('span', 'traj-badge stop', '已中断'));
     else if (turn.repeated_output) line.appendChild(el('span', 'traj-badge', '重复输出'));
-    else if (turn.ok === false) line.appendChild(el('span', 'traj-badge', turn.partial ? '进行中' : '失败'));
+    else if (turn.ok === false) {
+      var isLive = trajTurnIsLive(turn);
+      var badge = el('span', 'traj-badge', turn.partial ? (isLive ? '进行中' : '未完成') : '失败');
+      if (turn.partial && !isLive) {
+        badge.title = '这一轮没有跑完（进程被中断、断电，或被重启）——不会再有人接着它跑了。';
+      }
+      line.appendChild(badge);
+    }
     line.appendChild(el('span', 'chev', '›'));
     row.appendChild(line);
     row.appendChild(el('div', 'tool-panel traj-panel'));
@@ -743,9 +762,13 @@
   function loadTrajectories() {
     if (!state.workspace || !state.session) { state.trajectory = []; return Promise.resolve(); }
     var sid = state.session.id;
-    return api('api/sessions/' + encodeURIComponent(sid) + '/trajectory').then(function (turns) {
-      if (state.session && state.session.id === sid) state.trajectory = turns || [];
-    }, function () { state.trajectory = []; });
+    // 顺带刷新「谁还在跑」：轨迹行要靠它分清「进行中」和「未完成」。
+    return Promise.all([
+      api('api/sessions/' + encodeURIComponent(sid) + '/trajectory').then(function (turns) {
+        if (state.session && state.session.id === sid) state.trajectory = turns || [];
+      }, function () { state.trajectory = []; }),
+      refreshRunning()
+    ]).then(function () { return null; });
   }
   // 把「第 N 轮」挂到该轮最后一条 assistant 消息上。从最新的一端对齐，
   // 这样即使早期轮次没有轨迹（比如功能上线前），最近几轮仍然能正确对应。
