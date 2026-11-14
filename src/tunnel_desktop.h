@@ -33,9 +33,10 @@ class Desktop {
   Desktop(const Desktop&) = delete;
   Desktop& operator=(const Desktop&) = delete;
 
-  /// Get ready. `max_width` and `max_height` are the biggest picture to
-  /// hand out (the screen is scaled down to fit inside, keeping its
-  /// shape); 0 means "the screen as it is".
+  /// Get ready. `max_width` and `max_height` are the size of the picture
+  /// to hand out (with both of them the screen is stretched to exactly
+  /// that, with only the width the height follows); 0 means "the screen as
+  /// it is".
   bool start(int max_width, int max_height, std::string* err);
   void stop();
   bool running() const { return running_; }
@@ -46,6 +47,10 @@ class Desktop {
   /// The size of the whole (virtual) screen: the coordinates the mouse is
   /// given are on it.
   int screen_width() const { return screen_width_; }
+  /// Where the virtual screen starts (a monitor to the left of the first
+  /// one makes this negative).
+  int screen_x() const { return screen_x_; }
+  int screen_y() const { return screen_y_; }
   int screen_height() const { return screen_height_; }
 
   /// Put the pointer where it is told.
@@ -63,6 +68,8 @@ class Desktop {
   std::unique_ptr<Impl> impl_;
   bool running_ = false;
   int screen_width_ = 0;
+  int screen_x_ = 0;
+  int screen_y_ = 0;
   int screen_height_ = 0;
 };
 

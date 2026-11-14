@@ -284,6 +284,8 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
     // ask for them in a second request.
     res.set_header("X-Screen-Width", std::to_string(impl_->desktop.screen_width()));
     res.set_header("X-Screen-Height", std::to_string(impl_->desktop.screen_height()));
+    res.set_header("X-Screen-X", std::to_string(impl_->desktop.screen_x()));
+    res.set_header("X-Screen-Y", std::to_string(impl_->desktop.screen_y()));
     res.set_header("X-Frame-Width", std::to_string(frame_width));
     res.set_header("X-Frame-Height", std::to_string(frame_height));
     res.set_content(pack_pictures(wanted), "application/octet-stream");
@@ -295,6 +297,8 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
     body["ok"] = true;
     body["screen_width"] = impl_->desktop.screen_width();
     body["screen_height"] = impl_->desktop.screen_height();
+    body["screen_x"] = impl_->desktop.screen_x();
+    body["screen_y"] = impl_->desktop.screen_y();
     body["frame_width"] = impl_->frame_width;
     body["frame_height"] = impl_->frame_height;
     body["fps"] = impl_->fps;
@@ -322,6 +326,9 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
     }
     int applied = 0;
     int failed = 0;
+    int last_x = 0;
+    int last_y = 0;
+    bool moved = false;
     std::string why;
     if (body.contains("events") && body["events"].is_array()) {
       for (const json& ev : body["events"]) {
@@ -329,7 +336,10 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
         const std::string type = ev.value("t", std::string());
         bool ok = true;
         if (type == "move") {
-          ok = impl_->desktop.move_mouse(ev.value("x", 0), ev.value("y", 0), &why);
+          last_x = ev.value("x", 0);
+          last_y = ev.value("y", 0);
+          moved = true;
+          ok = impl_->desktop.move_mouse(last_x, last_y, &why);
         } else if (type == "down" || type == "up") {
           const int button = ev.value("b", 0);
           ok = impl_->desktop.mouse_button(button, type == "down", &why);
@@ -357,6 +367,11 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
     out["ok"] = failed == 0;
     out["applied"] = applied;
     out["failed"] = failed;
+    if (moved) {
+      // Where the mouse ended up (the screen's own coordinates ✓).
+      out["x"] = last_x;
+      out["y"] = last_y;
+    }
     if (failed > 0) out["error"] = why;
     send_json(res, out, failed > 0 ? 409 : 200);
   });

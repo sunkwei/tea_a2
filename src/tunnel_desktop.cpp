@@ -55,18 +55,15 @@ struct VirtualScreen {
   int height = 0;
 };
 
+/// The primary display (the one the user looks at). Its top left is always
+/// (0,0) in the virtual screen's coordinates, and the mouse is placed
+/// relative to it.
 VirtualScreen virtual_screen() {
   VirtualScreen out;
-  out.x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-  out.y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-  out.width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-  out.height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-  if (out.width <= 0 || out.height <= 0) {
-    out.x = 0;
-    out.y = 0;
-    out.width = GetSystemMetrics(SM_CXSCREEN);
-    out.height = GetSystemMetrics(SM_CYSCREEN);
-  }
+  out.x = 0;
+  out.y = 0;
+  out.width = GetSystemMetrics(SM_CXSCREEN);
+  out.height = GetSystemMetrics(SM_CYSCREEN);
   return out;
 }
 
@@ -162,6 +159,8 @@ bool Desktop::start(int max_width, int max_height, std::string* err) {
     return false;
   }
   screen_width_ = impl_->area.width;
+  screen_x_ = impl_->area.x;
+  screen_y_ = impl_->area.y;
   screen_height_ = impl_->area.height;
   impl_->max_width = max_width > 0 ? max_width : impl_->area.width;
   impl_->max_height = max_height > 0 ? max_height : 0;
@@ -199,19 +198,17 @@ bool Desktop::grab(ScreenFrame* out, std::string* err) {
     return false;
   }
 
-  // The picture we hand out: the screen, scaled down to fit inside the size
-  // that was asked for (--resize WxH). The shape is kept, so nothing is
-  // stretched, and the sides are even (the H.264 encoder wants that).
+  // The picture we hand out: the screen, scaled to the size that was asked
+  // for (--resize WxH stretches it, --width only limits the width). The
+  // sides are even (the H.264 encoder wants that).
   int width = area.width;
   int height = area.height;
   if (impl_->max_width > 0 && impl_->max_height > 0 && area.width > 0 && area.height > 0) {
-    const double by_width = static_cast<double>(impl_->max_width) / area.width;
-    const double by_height = static_cast<double>(impl_->max_height) / area.height;
-    const double scale = by_width < by_height ? by_width : by_height;
-    if (scale < 1.0) {
-      width = static_cast<int>(area.width * scale);
-      height = static_cast<int>(area.height * scale);
-    }
+    // --resize: exactly that size. The picture is stretched if the shape
+    // is different (the mouse coordinates are scaled on each side, so it
+    // still lines up).
+    width = impl_->max_width;
+    height = impl_->max_height;
   } else if (impl_->max_width > 0 && area.width > impl_->max_width) {
     // Only a width was asked for: the height follows.
     width = impl_->max_width;
@@ -256,7 +253,9 @@ bool Desktop::move_mouse(int x, int y, std::string* err) {
   input.type = INPUT_MOUSE;
   input.mi.dx = nx;
   input.mi.dy = ny;
-  input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+  // Without MOUSEEVENTF_VIRTUALDESK the position is relative to the
+  // primary display - that is the one we are showing.
+  input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
   if (::SendInput(1, &input, sizeof(input)) != 1) {
     if (err) *err = "the mouse did not move";
     return false;

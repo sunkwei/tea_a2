@@ -68,6 +68,8 @@ struct ControlService::Impl {
   int frame_height = 0;
   int screen_width = 0;
   int screen_height = 0;
+  int screen_x = 0;
+  int screen_y = 0;
   int64_t frame_at_ms = 0;
   int64_t frames = 0;
   int64_t decoded = 0;
@@ -167,6 +169,8 @@ bool ControlService::start(const std::string& proxy_host, int proxy_port, int vi
     body["frame_height"] = impl_->frame_height;
     body["screen_width"] = impl_->screen_width;
     body["screen_height"] = impl_->screen_height;
+    body["screen_x"] = impl_->screen_x;
+    body["screen_y"] = impl_->screen_y;
     body["frames"] = impl_->frames;
     body["codec"] = "h264";
     body["decoded"] = impl_->decoded;
@@ -196,12 +200,16 @@ bool ControlService::start(const std::string& proxy_host, int proxy_port, int vi
     int frame_height = 0;
     int screen_width = 0;
     int screen_height = 0;
+    int screen_x = 0;
+    int screen_y = 0;
     {
       std::lock_guard<std::mutex> lock(impl_->mu);
       frame_width = impl_->frame_width;
       frame_height = impl_->frame_height;
       screen_width = impl_->screen_width;
       screen_height = impl_->screen_height;
+      screen_x = impl_->screen_x;
+      screen_y = impl_->screen_y;
     }
     const double scale_x =
         (frame_width > 0 && screen_width > 0) ? static_cast<double>(screen_width) / frame_width : 1.0;
@@ -214,8 +222,10 @@ bool ControlService::start(const std::string& proxy_host, int proxy_port, int vi
         if (!ev.is_object()) continue;
         json out = ev;
         if (ev.contains("x") && ev.contains("y")) {
-          out["x"] = static_cast<int>(ev.value("x", 0) * scale_x);
-          out["y"] = static_cast<int>(ev.value("y", 0) * scale_y);
+          // The picture's pixels -> the screen's pixels. The screen may
+          // start left of (0,0) (a second monitor), so the origin counts.
+          out["x"] = screen_x + static_cast<int>(ev.value("x", 0) * scale_x);
+          out["y"] = screen_y + static_cast<int>(ev.value("y", 0) * scale_y);
         }
         events.push_back(out);
       }
@@ -303,6 +313,8 @@ void ControlService::pull_loop() {
       int height = 0;
       int screen_width = 0;
       int screen_height = 0;
+      int screen_x = 0;
+      int screen_y = 0;
       if (res->has_header("X-Frame-Width")) {
         width = std::atoi(res->get_header_value("X-Frame-Width").c_str());
       }
@@ -314,6 +326,12 @@ void ControlService::pull_loop() {
       }
       if (res->has_header("X-Screen-Height")) {
         screen_height = std::atoi(res->get_header_value("X-Screen-Height").c_str());
+      }
+      if (res->has_header("X-Screen-X")) {
+        screen_x = std::atoi(res->get_header_value("X-Screen-X").c_str());
+      }
+      if (res->has_header("X-Screen-Y")) {
+        screen_y = std::atoi(res->get_header_value("X-Screen-Y").c_str());
       }
       std::vector<StreamPicture> pictures;
       if (!unpack_pictures(res->body, &pictures) || pictures.empty()) {
@@ -331,6 +349,8 @@ void ControlService::pull_loop() {
         impl_->frame_height = height;
         if (screen_width > 0) impl_->screen_width = screen_width;
         if (screen_height > 0) impl_->screen_height = screen_height;
+        impl_->screen_x = screen_x;
+        impl_->screen_y = screen_y;
         impl_->frame_at_ms = now_ms();
         impl_->frames++;
         impl_->decoded += static_cast<int64_t>(pictures.size());

@@ -278,6 +278,16 @@ def main():
                                                 "text": "a"}]})
         check("the input reaches the other side",
               answer.get("ok") and answer.get("applied", 0) >= 2, json.dumps(answer))
+        # The mouse coordinates: the picture's pixels become the screen's
+        # pixels. The picture may be scaled down, and the screen may start
+        # left of (0,0) when there is a second monitor.
+        want_x = info.get("screen_x", 0) + int(
+            10 * info.get("screen_width", 0) / max(1, info.get("frame_width", 1)))
+        want_y = info.get("screen_y", 0) + int(
+            20 * info.get("screen_height", 0) / max(1, info.get("frame_height", 1)))
+        check("the mouse lands where the picture says",
+              answer.get("x") == want_x and answer.get("y") == want_y,
+              "want %s,%s got %s,%s" % (want_x, want_y, answer.get("x"), answer.get("y")))
 
         # ---- 隧道自己的端口（设备端那个）要说清楚，不该是 404 --------------
         # 外面那台如果把浏览器开在隧道端口上（横幅以前就指那个），请求会
