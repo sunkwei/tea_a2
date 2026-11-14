@@ -153,7 +153,10 @@ build/bin/tea_agent --workspace . --open
 
 ## License
 
-本项目代码采用 **MIT** 许可证，见 [`LICENSE`](LICENSE)；`3rd/` 下的依赖各按其原许可
+本项目代码采用 **GPL-3.0-or-later** 许可证，见 [`LICENSE`](LICENSE)；`3rd/` 下的依赖各按其原许可
 （细节见 [docs/license.md](docs/license.md)）。
+
+> 2026-11-14 之前本项目以 **MIT** 发布，那份声明保留在 `LICENSE` 里。
+> 改成 GPL 是因为远程桌面的 H.264 编码器用的是 x264（GPL-2.0-or-later）。
 
 Copyright (c) 2026 sunkwei
