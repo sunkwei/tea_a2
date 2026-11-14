@@ -33,9 +33,10 @@ class Desktop {
   Desktop(const Desktop&) = delete;
   Desktop& operator=(const Desktop&) = delete;
 
-  /// Get ready. `max_width` is the widest picture to hand out (the screen
-  /// is scaled down to that); 0 means "the screen as it is".
-  bool start(int max_width, std::string* err);
+  /// Get ready. `max_width` and `max_height` are the biggest picture to
+  /// hand out (the screen is scaled down to fit inside, keeping its
+  /// shape); 0 means "the screen as it is".
+  bool start(int max_width, int max_height, std::string* err);
   void stop();
   bool running() const { return running_; }
 

@@ -51,12 +51,12 @@ class DesktopService {
   DesktopService(const DesktopService&) = delete;
   DesktopService& operator=(const DesktopService&) = delete;
 
-  /// Start the service. `max_width` is the widest picture (0 = the screen
-  /// as it is), `fps` how many pictures a second, `quality` the JPEG
-  /// quality (0 = the default), `bitrate` the bits per second the H.264
-  /// encoder may use (0 = the default), `keyint_seconds` how often a key
-  /// frame comes (0 = every picture is one).
-  bool start(int max_width, int fps, int quality, int bitrate, int keyint_seconds,
+  /// Start the service. `max_width` and `max_height` are the biggest
+  /// picture (0 = the screen as it is), `fps` how many pictures a second,
+  /// `bitrate` the bits per second the encoder may use (0 = the default),
+  /// `keyint_seconds` how often a key frame comes (0 = every picture is
+  /// one).
+  bool start(int max_width, int max_height, double fps, int bitrate, int keyint_seconds,
              std::string* err);
   void stop();
 
@@ -68,7 +68,6 @@ class DesktopService {
   static const char* frame_path() { return "/api/desktop/frame"; }
   static const char* frames_path() { return "/api/desktop/frames"; }
   static const char* info_path() { return "/api/desktop/info"; }
-  static const char* codec_path() { return "/api/desktop/codec"; }
   static const char* input_path() { return "/api/desktop/input"; }
 
  private:

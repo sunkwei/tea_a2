@@ -442,7 +442,7 @@ struct H264Encoder::Impl {
 H264Encoder::H264Encoder() : impl_(new Impl()) {}
 H264Encoder::~H264Encoder() { stop(); }
 
-bool H264Encoder::start(int width, int height, int fps, int bitrate, int keyint_seconds,
+bool H264Encoder::start(int width, int height, double fps, int bitrate, int keyint_seconds,
                          std::string* err) {
   if (impl_->encoder != nullptr) return true;
   if (width <= 0 || height <= 0 || (width % 2) != 0 || (height % 2) != 0) {
@@ -462,8 +462,13 @@ bool H264Encoder::start(int width, int height, int fps, int bitrate, int keyint_
   param.vui.b_fullrange = 1;   // the whole range, not the narrow one
   param.i_width = width;
   param.i_height = height;
-  param.i_fps_num = fps > 0 ? fps : 2;
-  param.i_fps_den = 1;
+  // The frame rate as a fraction: 2.5 becomes 5/2 ✓.
+  int fps_num = static_cast<int>(std::lround((fps > 0.0 ? fps : 2.0) * 1000.0));
+  int fps_den = 1000;
+  while (fps_num % 2 == 0 && fps_den % 2 == 0) { fps_num /= 2; fps_den /= 2; }
+  while (fps_num % 5 == 0 && fps_den % 5 == 0) { fps_num /= 5; fps_den /= 5; }
+  param.i_fps_num = fps_num;
+  param.i_fps_den = fps_den;
   param.i_timebase_num = 1;
   param.i_timebase_den = 1000;   // the timestamps are milliseconds
   // x264 wants the bitrate in kilobits per second.
@@ -479,7 +484,8 @@ bool H264Encoder::start(int width, int height, int fps, int bitrate, int keyint_
   // picture is one, which is what the tunnel needs when it cannot keep
   // the order of the pictures).
   const int seconds = keyint_seconds > 0 ? keyint_seconds : 1;
-  param.i_keyint_max = (fps > 0 ? fps : 2) * seconds;
+  param.i_keyint_max = static_cast<int>(std::lround((fps > 0.0 ? fps : 2.0) * seconds));
+  if (param.i_keyint_max < 1) param.i_keyint_max = 1;
   param.b_repeat_headers = 1;
   param.b_annexb = 1;            // the NAL units carry their own start codes
   param.i_threads = 1;           // the pictures come one at a time

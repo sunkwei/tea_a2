@@ -559,6 +559,35 @@ int dial_tcp(const std::string& host, uint16_t port) {
 
 }  // namespace
 
+
+// "100k", "500K", "2M", "1000000": how many bits per second.
+namespace {
+
+int parse_bitrate(const std::string& text) {
+  if (text.empty()) return 0;
+  std::size_t at = 0;
+  while (at < text.size() && (std::isdigit(static_cast<unsigned char>(text[at])) ||
+                              text[at] == '.')) {
+    at++;
+  }
+  const double value = std::atof(text.substr(0, at).c_str());
+  if (value <= 0.0) return 0;
+  double scale = 1000.0;   // the default is kilobits
+  if (at < text.size()) {
+    const char suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(text[at])));
+    if (suffix == 'k') {
+      scale = 1000.0;
+    } else if (suffix == 'm') {
+      scale = 1000000.0;
+    } else if (suffix == 'b') {
+      scale = 1.0;         // already bits
+    }
+  }
+  return static_cast<int>(value * scale);
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   std::string role = "client";
   // The broker's address. It can come from three places, in this order:
@@ -626,9 +655,10 @@ int main(int argc, char** argv) {
   // is. The default is the screen as it is (the whole desktop, at its real
   // pixels); --width caps it when the bandwidth matters.
   int desktop_max_width = 0;
+  int desktop_max_height = 0;
   int desktop_bitrate = 100000;    // bits per second for the H.264 picture
   int desktop_keyint = 10;         // a key frame every this many seconds
-  int desktop_fps = 2;
+  double desktop_fps = 2.0;
   int desktop_quality = 50;
   // The port the browser opens (the control side only).
   int viewer_port = 9932;
@@ -667,12 +697,15 @@ int main(int argc, char** argv) {
           "  --width <n>       the widest picture the desktop role hands out\n"
           "                     (default 0 = the screen as it is, at its real\n"
           "                     pixels; a smaller number scales it down)\n"
-          "  --bitrate <kbps>  the bits per second the H.264 picture may use\n"
-          "                     (default 100; that is about 6 KB a picture at\n"
-          "                     2560x1440 and two pictures a second - the\n"
-          "                     picture is soft, the mouse and the keyboard\n"
-          "                     are not affected.  --width 1280 makes it\n"
-          "                     much clearer for the same bitrate)\n"
+          "  --resize <WxH>    the biggest picture the desktop role hands out\n"
+          "                     (for example 1280x720; the shape is kept, so\n"
+          "                     nothing is stretched)\n"
+          "  --bitrate <rate>  how many bits per second the H.264 picture may\n"
+          "                     use (100k, 500k, 2M; default 100k).  At 100k a\n"
+          "                     2560x1440 picture is about 6 KB and the text\n"
+          "                     on it is soft - the mouse and the keyboard are\n"
+          "                     not affected.  --resize 1280x720 makes it much\n"
+          "                     clearer for the same bitrate\n"
           "  --keyint <seconds> how often a key frame comes (default 10).  The\n"
           "                     pictures in between are much smaller (a quiet\n"
           "                     screen: a few KB), but they need the ones\n"
@@ -705,15 +738,33 @@ int main(int argc, char** argv) {
     } else if (a == "--viewer-port") {
       viewer_port = std::atoi(next().c_str());
     } else if (a == "--fps") {
-      desktop_fps = std::atoi(next().c_str());
+      desktop_fps = std::atof(next().c_str());
+      if (desktop_fps <= 0.0) desktop_fps = 2.0;
     } else if (a == "--quality") {
       desktop_quality = std::atoi(next().c_str());
     } else if (a == "--width") {
       desktop_max_width = std::atoi(next().c_str());
     } else if (a == "--bitrate") {
-      desktop_bitrate = std::atoi(next().c_str()) * 1000;
+      desktop_bitrate = parse_bitrate(next().c_str());
     } else if (a == "--keyint") {
       desktop_keyint = std::atoi(next().c_str());
+    } else if (a == "--resize") {
+      const std::string size = next().c_str();
+      const std::size_t cross = size.find('x');
+      if (cross == std::string::npos) {
+        std::fprintf(stderr, "sidecar: --resize wants something like 1280x720\n");
+        return 1;
+      }
+      desktop_max_width = std::atoi(size.substr(0, cross).c_str());
+      desktop_max_height = std::atoi(size.substr(cross + 1).c_str());
+      if (desktop_max_width <= 0 || desktop_max_height <= 0) {
+        std::fprintf(stderr, "sidecar: --resize wants something like 1280x720\n");
+        return 1;
+      }
+      // --resize also sets the width: the picture is scaled to fit inside.
+      if (desktop_max_width <= desktop_max_height) {
+        // keep the width, but the height is the limit now
+      }
     } else if (a == "--broker") {
       std::string hp = next();
       split_hostport(hp, broker_host, broker_port);
@@ -837,8 +888,8 @@ int main(int argc, char** argv) {
   tea_tunnel::ControlService control_service;
   if (is_desktop) {
     std::string desktop_err;
-    if (!desktop_service.start(desktop_max_width, desktop_fps, desktop_quality, desktop_bitrate,
-                               desktop_keyint, &desktop_err)) {
+    if (!desktop_service.start(desktop_max_width, desktop_max_height, desktop_fps,
+                               desktop_bitrate, desktop_keyint, &desktop_err)) {
       log_line("sidecar: cannot start the desktop: %s\n", desktop_err.c_str());
       return 1;
     }

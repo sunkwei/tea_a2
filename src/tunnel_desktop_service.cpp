@@ -54,14 +54,12 @@ struct DesktopService::Impl {
   std::string picture;          // the newest picture (as it is encoded)
   std::deque<StreamPicture> stream;   // the last pictures, in order
   uint32_t next_seq = 1;               // the number the next picture gets
-  std::string codec = "h264";   // "h264" or "jpeg"
   int frame_width = 0;
   int frame_height = 0;
   int64_t frame_at_ms = 0;
   int64_t frames = 0;
 
-  int fps = 2;
-  int quality = 0;
+  double fps = 2.0;
   int bitrate = 2000000;        // bits per second
   int keyint_seconds = 10;      // a key frame every this many seconds
   H264Encoder encoder;          // the H.264 encoder (x264)
@@ -76,24 +74,16 @@ struct DesktopService::Impl {
 
 bool DesktopService::Impl::encode(const ScreenFrame& frame, std::string* out,
                                    std::string* err) {
-  std::string codec;
-  int fps = 2;
-  int quality = 0;
+  double fps = 2.0;
   int bitrate = 2000000;
   int keyint = 10;
   {
     std::lock_guard<std::mutex> lock(mu);
-    codec = this->codec;
     fps = this->fps;
-    quality = this->quality;
     bitrate = this->bitrate;
     keyint = this->keyint_seconds;
   }
-  if (codec == "jpeg") {
-    return jpeg_encode(frame.bgra.data(), frame.width, frame.height, frame.width * 4, quality,
-                       out, err);
-  }
-  // H.264: the screen is BGRA, x264 wants I420.
+  // H.264 (x264): the screen is BGRA, x264 wants I420.
   if (!encoder.running() || frame.width != encoder_width || frame.height != encoder_height) {
     encoder.stop();
     if (!encoder.start(frame.width, frame.height, fps, bitrate, keyint, err)) return false;
@@ -190,14 +180,14 @@ DesktopService::DesktopService() : impl_(new Impl()) {}
 
 DesktopService::~DesktopService() { stop(); }
 
-bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
+bool DesktopService::start(int max_width, int max_height, double fps, int bitrate,
                             int keyint_seconds, std::string* err) {
   if (running_) return true;
-  impl_->fps = fps > 0 ? fps : 2;
-  impl_->quality = quality;
+  (void)max_height;
+  impl_->fps = fps > 0.0 ? fps : 2.0;
   impl_->bitrate = bitrate > 0 ? bitrate : 2000000;
   impl_->keyint_seconds = keyint_seconds > 0 ? keyint_seconds : 10;
-  if (!impl_->desktop.start(max_width, err)) return false;
+  if (!impl_->desktop.start(max_width, max_height, err)) return false;
 
   // The pictures: take one right now so the first request does not wait.
   ScreenFrame frame;
@@ -257,37 +247,8 @@ bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
     res.set_header("X-Frame-Width", std::to_string(impl_->frame_width));
     res.set_header("X-Frame-Height", std::to_string(impl_->frame_height));
     // Which codec the bytes are in: the other side has to know.
-    res.set_header("X-Codec", impl_->codec);
-    res.set_content(impl_->picture,
-                    impl_->codec == "jpeg" ? "image/jpeg" : "video/h264");
-  });
-
-  // The other side may ask for JPEG instead (a browser that cannot decode
-  // H.264 by itself).
-  server.Post(DesktopService::codec_path(), [this](const httplib::Request& req,
-                                                    httplib::Response& res) {
-    std::string codec;
-    try {
-      json body = json::parse(req.body);
-      codec = body.value("codec", std::string());
-    } catch (const std::exception&) {
-      codec.clear();
-    }
-    if (codec != "jpeg" && codec != "h264") {
-      json out = json::object();
-      out["ok"] = false;
-      out["error"] = "the codec must be h264 or jpeg";
-      send_json(res, out, 400);
-      return;
-    }
-    {
-      std::lock_guard<std::mutex> lock(impl_->mu);
-      impl_->codec = codec;
-    }
-    json out = json::object();
-    out["ok"] = true;
-    out["codec"] = codec;
-    send_json(res, out);
+    res.set_header("X-Codec", "h264");
+    res.set_content(impl_->picture, "video/h264");
   });
 
   // The pictures of the stream: everything after the number the other
@@ -301,12 +262,10 @@ bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
           std::strtoul(req.get_param_value("since").c_str(), nullptr, 10));
     }
     std::vector<StreamPicture> wanted;
-    std::string codec;
     int frame_width = 0;
     int frame_height = 0;
     {
       std::lock_guard<std::mutex> lock(impl_->mu);
-      codec = impl_->codec;
       frame_width = impl_->frame_width;
       frame_height = impl_->frame_height;
       for (const StreamPicture& picture : impl_->stream) {
@@ -320,7 +279,7 @@ bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
     res.status = 200;
     res.set_header("Cache-Control", "no-store");
     res.set_header("Access-Control-Allow-Origin", "*");
-    res.set_header("X-Codec", codec);
+    res.set_header("X-Codec", "h264");
     // The sizes travel with the pictures: the other side does not have to
     // ask for them in a second request.
     res.set_header("X-Screen-Width", std::to_string(impl_->desktop.screen_width()));
@@ -339,7 +298,7 @@ bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
     body["frame_width"] = impl_->frame_width;
     body["frame_height"] = impl_->frame_height;
     body["fps"] = impl_->fps;
-    body["codec"] = impl_->codec;
+    body["codec"] = "h264";
     body["bitrate"] = impl_->bitrate;
     body["keyint"] = impl_->keyint_seconds;
     body["frames"] = impl_->frames;
@@ -417,7 +376,8 @@ bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
 }
 
 void DesktopService::capture_loop() {
-  const int interval = 1000 / (impl_->fps > 0 ? impl_->fps : 2);
+  int interval = static_cast<int>(1000.0 / (impl_->fps > 0.0 ? impl_->fps : 2.0));
+  if (interval < 1) interval = 1;
   while (!impl_->stopping.load()) {
     const int64_t started = now_ms();
     ScreenFrame frame;

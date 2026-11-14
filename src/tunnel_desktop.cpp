@@ -148,12 +148,13 @@ struct Desktop::Impl {
   Dib scaled;           // the picture we hand out
   VirtualScreen area;
   int max_width = 0;
+  int max_height = 0;
 };
 
 Desktop::Desktop() : impl_(new Impl()) {}
 Desktop::~Desktop() { stop(); }
 
-bool Desktop::start(int max_width, std::string* err) {
+bool Desktop::start(int max_width, int max_height, std::string* err) {
   make_dpi_aware();
   impl_->area = virtual_screen();
   if (impl_->area.width <= 0 || impl_->area.height <= 0) {
@@ -163,6 +164,7 @@ bool Desktop::start(int max_width, std::string* err) {
   screen_width_ = impl_->area.width;
   screen_height_ = impl_->area.height;
   impl_->max_width = max_width > 0 ? max_width : impl_->area.width;
+  impl_->max_height = max_height > 0 ? max_height : 0;
 
   if (!impl_->scratch.create(impl_->area.width, impl_->area.height)) {
     if (err) *err = "cannot make a bitmap for the screen";
@@ -197,14 +199,26 @@ bool Desktop::grab(ScreenFrame* out, std::string* err) {
     return false;
   }
 
-  // The picture we hand out: the screen, scaled down if it is too wide.
+  // The picture we hand out: the screen, scaled down to fit inside the size
+  // that was asked for (--resize WxH). The shape is kept, so nothing is
+  // stretched, and the sides are even (the H.264 encoder wants that).
   int width = area.width;
   int height = area.height;
-  if (impl_->max_width > 0 && area.width > impl_->max_width) {
+  if (impl_->max_width > 0 && impl_->max_height > 0 && area.width > 0 && area.height > 0) {
+    const double by_width = static_cast<double>(impl_->max_width) / area.width;
+    const double by_height = static_cast<double>(impl_->max_height) / area.height;
+    const double scale = by_width < by_height ? by_width : by_height;
+    if (scale < 1.0) {
+      width = static_cast<int>(area.width * scale);
+      height = static_cast<int>(area.height * scale);
+    }
+  } else if (impl_->max_width > 0 && area.width > impl_->max_width) {
+    // Only a width was asked for: the height follows.
     width = impl_->max_width;
     height = static_cast<int>(static_cast<long long>(area.height) * impl_->max_width / area.width);
-    height = std::max(1, (height / 2) * 2);   // even numbers please
   }
+  width = std::max(2, (width / 2) * 2);    // even numbers please
+  height = std::max(2, (height / 2) * 2);
   if (impl_->scaled.width() != width || impl_->scaled.height() != height) {
     if (!impl_->scaled.create(width, height)) {
       if (err) *err = "cannot make a bitmap for the picture";
@@ -331,8 +345,9 @@ struct Desktop::Impl {};
 Desktop::Desktop() : impl_(new Impl()) {}
 Desktop::~Desktop() { stop(); }
 
-bool Desktop::start(int max_width, std::string* err) {
+bool Desktop::start(int max_width, int max_height, std::string* err) {
   (void)max_width;
+  (void)max_height;
   if (err) *err = "there is no desktop on this platform";
   return false;
 }

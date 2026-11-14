@@ -32,7 +32,6 @@
   var decoder = null;
   var decoderCodec = '';
   var avcInfoCache = null;     // the SPS/PPS of the last key frame
-  var askedForJpeg = false;
   var frameNo = 0;
   var lastSeq = 0;             // the last picture number we have
 
@@ -138,34 +137,10 @@
     return out;
   }
 
-  function askForJpeg() {
-    if (askedForJpeg) return;
-    askedForJpeg = true;
-    fetch('api/control/codec', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ codec: 'jpeg' })
-    });
-    setDot('wait');
-  }
-
-  function drawJpeg(bytes) {
-    return createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }))
-      .then(function (bmp) {
-        if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
-          canvas.width = bmp.width;
-          canvas.height = bmp.height;
-        }
-        ctx.drawImage(bmp, 0, 0);
-        bmp.close();
-        lastFrameAt = Date.now();
-        setDot('ok');
-      });
-  }
-
   function feedH264(picture) {
     if (!canDecodeH264()) {
-      askForJpeg();
+      say('这个浏览器不会解 H.264（要用 WebCodecs：Chrome / Edge / Firefox 都行）');
+      setDot('bad');
       return;
     }
     var units = annexBUnits(picture.bytes);
@@ -255,11 +230,7 @@
         }
         batch.pictures.forEach(function (picture) {
           lastSeq = picture.seq;
-          if (batch.codec === 'h264') {
-            feedH264(picture);
-          } else {
-            drawJpeg(picture.bytes);
-          }
+          feedH264(picture);
         });
       }).catch(function () { setDot('bad'); });
   }
