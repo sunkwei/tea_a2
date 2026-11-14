@@ -90,6 +90,16 @@ def wait_for_log(path, pattern, seconds=15.0):
     return ""
 
 
+def find_binary(build, name):
+    """The binary, with or without the .exe the Windows build gives it."""
+    for folder in (os.path.join(build, "bin"), os.path.join(build, "tunnel", "bin")):
+        for candidate in (name, name + ".exe"):
+            path = os.path.join(folder, candidate)
+            if os.path.exists(path):
+                return path
+    return ""
+
+
 def find_build(argument):
     """Where the tunnel binaries are.
 
@@ -112,9 +122,9 @@ def find_build(argument):
 
 def main():
     build = find_build(sys.argv[1] if len(sys.argv) > 1 else "")
-    broker = os.path.join(build, "bin", "a2_broker")
-    sidecar = os.path.join(build, "bin", "a2_tunnel")
-    if not os.path.exists(broker) or not os.path.exists(sidecar):
+    broker = find_binary(build, "a2_broker")
+    sidecar = find_binary(build, "a2_tunnel")
+    if not broker or not sidecar:
         print("skip  (no a2_broker / a2_tunnel in %s)" % build)
         return 0
 
@@ -127,6 +137,7 @@ def main():
     client_port = free_port()
     env = dict(os.environ)
     env["HOME"] = home
+    env["TEA_AGENT_HOME"] = home   # Windows 上用的是这个（不是 HOME）
 
     procs = []
 
