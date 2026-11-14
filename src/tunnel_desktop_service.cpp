@@ -50,7 +50,8 @@ struct DesktopService::Impl {
   std::thread server_thread;
 
   std::mutex mu;
-  std::string jpeg;             // the newest picture
+  std::string picture;          // the newest picture (as it is encoded)
+  std::string codec = "h264";   // "h264" or "jpeg"
   int frame_width = 0;
   int frame_height = 0;
   int64_t frame_at_ms = 0;
@@ -58,17 +59,61 @@ struct DesktopService::Impl {
 
   int fps = 2;
   int quality = 0;
+  int bitrate = 2000000;        // bits per second
+  H264Encoder encoder;          // the H.264 encoder (x264)
+  int encoder_width = 0;
+  int encoder_height = 0;
   std::atomic<bool> stopping{false};
+
+  /// Encode one picture the way the other side asked for it.
+  bool encode(const ScreenFrame& frame, std::string* out, std::string* err);
 };
+
+
+bool DesktopService::Impl::encode(const ScreenFrame& frame, std::string* out,
+                                   std::string* err) {
+  std::string codec;
+  int fps = 2;
+  int quality = 0;
+  int bitrate = 2000000;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    codec = this->codec;
+    fps = this->fps;
+    quality = this->quality;
+    bitrate = this->bitrate;
+  }
+  if (codec == "jpeg") {
+    return jpeg_encode(frame.bgra.data(), frame.width, frame.height, frame.width * 4, quality,
+                       out, err);
+  }
+  // H.264: the screen is BGRA, x264 wants I420.
+  if (!encoder.running() || frame.width != encoder_width || frame.height != encoder_height) {
+    encoder.stop();
+    if (!encoder.start(frame.width, frame.height, fps, bitrate, err)) return false;
+    encoder_width = frame.width;
+    encoder_height = frame.height;
+  }
+  const int64_t started = now_ms();
+  YuvFrame yuv;
+  bgra_to_yuv(frame.bgra.data(), frame.width, frame.height, frame.width * 4, &yuv);
+  const bool ok = encoder.encode(yuv, started, out, err);
+  std::fprintf(stderr, "desktop: the picture is %zu bytes (%.2f MB/s at %d a second)\n",
+               out->size(), out->size() * static_cast<double>(fps) / 1048576.0, fps);
+  std::fflush(stderr);
+  return ok;
+}
 
 DesktopService::DesktopService() : impl_(new Impl()) {}
 
 DesktopService::~DesktopService() { stop(); }
 
-bool DesktopService::start(int max_width, int fps, int quality, std::string* err) {
+bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
+                            std::string* err) {
   if (running_) return true;
   impl_->fps = fps > 0 ? fps : 2;
   impl_->quality = quality;
+  impl_->bitrate = bitrate > 0 ? bitrate : 2000000;
   if (!impl_->desktop.start(max_width, err)) return false;
 
   // The pictures: take one right now so the first request does not wait.
@@ -79,16 +124,15 @@ bool DesktopService::start(int max_width, int fps, int quality, std::string* err
     impl_->desktop.stop();
     return false;
   }
-  std::string jpeg;
-  if (!jpeg_encode(frame.bgra.data(), frame.width, frame.height, frame.width * 4, impl_->quality,
-                   &jpeg, &why)) {
+  std::string encoded;
+  if (!impl_->encode(frame, &encoded, &why)) {
     if (err) *err = why;
     impl_->desktop.stop();
     return false;
   }
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
-    impl_->jpeg.swap(jpeg);
+    impl_->picture.swap(encoded);
     impl_->frame_width = frame.width;
     impl_->frame_height = frame.height;
     impl_->frame_at_ms = now_ms();
@@ -116,7 +160,7 @@ bool DesktopService::start(int max_width, int fps, int quality, std::string* err
 
   server.Get(DesktopService::frame_path(), [this](const httplib::Request&, httplib::Response& res) {
     std::lock_guard<std::mutex> lock(impl_->mu);
-    if (impl_->jpeg.empty()) {
+    if (impl_->picture.empty()) {
       res.status = 204;
       return;
     }
@@ -129,7 +173,38 @@ bool DesktopService::start(int max_width, int fps, int quality, std::string* err
     res.set_header("X-Screen-Height", std::to_string(impl_->desktop.screen_height()));
     res.set_header("X-Frame-Width", std::to_string(impl_->frame_width));
     res.set_header("X-Frame-Height", std::to_string(impl_->frame_height));
-    res.set_content(impl_->jpeg, "image/jpeg");
+    // Which codec the bytes are in: the other side has to know.
+    res.set_header("X-Codec", impl_->codec);
+    res.set_content(impl_->picture,
+                    impl_->codec == "jpeg" ? "image/jpeg" : "video/h264");
+  });
+
+  // The other side may ask for JPEG instead (a browser that cannot decode
+  // H.264 by itself).
+  server.Post(DesktopService::codec_path(), [this](const httplib::Request& req,
+                                                    httplib::Response& res) {
+    std::string codec;
+    try {
+      json body = json::parse(req.body);
+      codec = body.value("codec", std::string());
+    } catch (const std::exception&) {
+      codec.clear();
+    }
+    if (codec != "jpeg" && codec != "h264") {
+      json out = json::object();
+      out["ok"] = false;
+      out["error"] = "the codec must be h264 or jpeg";
+      send_json(res, out, 400);
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(impl_->mu);
+      impl_->codec = codec;
+    }
+    json out = json::object();
+    out["ok"] = true;
+    out["codec"] = codec;
+    send_json(res, out);
   });
 
   server.Get(DesktopService::info_path(), [this](const httplib::Request&, httplib::Response& res) {
@@ -141,7 +216,8 @@ bool DesktopService::start(int max_width, int fps, int quality, std::string* err
     body["frame_width"] = impl_->frame_width;
     body["frame_height"] = impl_->frame_height;
     body["fps"] = impl_->fps;
-    body["codec"] = "jpeg";
+    body["codec"] = impl_->codec;
+    body["bitrate"] = impl_->bitrate;
     body["frames"] = impl_->frames;
     body["frame_at_ms"] = impl_->frame_at_ms;
     send_json(res, body);
@@ -223,11 +299,10 @@ void DesktopService::capture_loop() {
     ScreenFrame frame;
     std::string why;
     if (impl_->desktop.grab(&frame, &why)) {
-      std::string jpeg;
-      if (jpeg_encode(frame.bgra.data(), frame.width, frame.height, frame.width * 4, impl_->quality,
-                      &jpeg, &why)) {
+      std::string encoded;
+      if (impl_->encode(frame, &encoded, &why)) {
         std::lock_guard<std::mutex> lock(impl_->mu);
-        impl_->jpeg.swap(jpeg);
+        impl_->picture.swap(encoded);
         impl_->frame_width = frame.width;
         impl_->frame_height = frame.height;
         impl_->frame_at_ms = now_ms();

@@ -7,8 +7,10 @@
 // the bytes like everything else, so the browser on the other side reaches
 // this service through the tunnel:
 //
-//   GET  /api/desktop/frame.jpg  the newest picture (JPEG)
+//   GET  /api/desktop/frame      the newest picture (H.264, or JPEG if the
+//                                 other side asks for it)
 //   GET  /api/desktop/info       the size of the screen and of the picture
+//   POST /api/desktop/codec      "h264" or "jpeg": which one to send
 //   POST /api/desktop/input      the mouse and the keyboard
 //
 // The pictures are taken a few times a second (two by default): a screen
@@ -31,8 +33,9 @@ class DesktopService {
 
   /// Start the service. `max_width` is the widest picture (0 = the screen
   /// as it is), `fps` how many pictures a second, `quality` the JPEG
-  /// quality (0 = the default).
-  bool start(int max_width, int fps, int quality, std::string* err);
+  /// quality (0 = the default), `bitrate` the bits per second the H.264
+  /// encoder may use (0 = the default).
+  bool start(int max_width, int fps, int quality, int bitrate, std::string* err);
   void stop();
 
   bool running() const { return running_; }
@@ -40,8 +43,9 @@ class DesktopService {
 
   /// The paths the other side calls. They are part of the contract between
   /// the two halves, so both of them use these names.
-  static const char* frame_path() { return "/api/desktop/frame.jpg"; }
+  static const char* frame_path() { return "/api/desktop/frame"; }
   static const char* info_path() { return "/api/desktop/info"; }
+  static const char* codec_path() { return "/api/desktop/codec"; }
   static const char* input_path() { return "/api/desktop/input"; }
 
  private:

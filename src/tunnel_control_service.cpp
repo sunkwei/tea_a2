@@ -60,7 +60,8 @@ struct ControlService::Impl {
   int proxy_port = 0;
 
   std::mutex mu;
-  std::string jpeg;             // the newest picture (as it came)
+  std::string picture;          // the newest picture (as it came)
+  std::string codec = "h264";   // "h264" or "jpeg"
   int frame_width = 0;
   int frame_height = 0;
   int screen_width = 0;
@@ -112,17 +113,33 @@ bool ControlService::start(const std::string& proxy_host, int proxy_port, int vi
     res.set_content(std::string(asset->data, asset->size), "application/javascript; charset=utf-8");
   });
 
-  // The newest picture.
-  server.Get("/api/control/frame.jpg", [this](const httplib::Request&, httplib::Response& res) {
+  // The newest picture. It is handed over as it came: the browser knows
+  // how to read H.264 by itself (WebCodecs), and JPEG when it cannot.
+  server.Get("/api/control/frame", [this](const httplib::Request&, httplib::Response& res) {
     std::lock_guard<std::mutex> lock(impl_->mu);
-    if (impl_->jpeg.empty()) {
+    if (impl_->picture.empty()) {
       res.status = 204;
       return;
     }
     res.status = 200;
     res.set_header("Cache-Control", "no-store");
     res.set_header("Access-Control-Allow-Origin", "*");
-    res.set_content(impl_->jpeg, "image/jpeg");
+    res.set_header("X-Codec", impl_->codec);
+    res.set_content(impl_->picture,
+                    impl_->codec == "jpeg" ? "image/jpeg" : "video/h264");
+  });
+  // The old name still answers (it is only the JPEG).
+  server.Get("/api/control/frame.jpg", [this](const httplib::Request& req,
+                                              httplib::Response& res) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (impl_->picture.empty() || impl_->codec != "jpeg") {
+      res.status = 204;
+      return;
+    }
+    res.status = 200;
+    res.set_header("Cache-Control", "no-store");
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_content(impl_->picture, "image/jpeg");
   });
 
   // What the browser needs to know: the size of the picture and the size of
@@ -136,10 +153,53 @@ bool ControlService::start(const std::string& proxy_host, int proxy_port, int vi
     body["screen_width"] = impl_->screen_width;
     body["screen_height"] = impl_->screen_height;
     body["frames"] = impl_->frames;
+    body["codec"] = impl_->codec;
     body["decoded"] = impl_->decoded;
     body["frame_at_ms"] = impl_->frame_at_ms;
     if (!impl_->last_error.empty()) body["error"] = impl_->last_error;
     send_json(res, body);
+  });
+
+  // "Give me JPEG instead": the browser cannot read H.264 by itself.
+  server.Post("/api/control/codec", [this](const httplib::Request& req,
+                                            httplib::Response& res) {
+    std::string codec;
+    try {
+      json body = json::parse(req.body);
+      codec = body.value("codec", std::string());
+    } catch (const std::exception&) {
+      codec.clear();
+    }
+    if (codec != "jpeg" && codec != "h264") {
+      json out = json::object();
+      out["ok"] = false;
+      out["error"] = "the codec must be h264 or jpeg";
+      send_json(res, out, 400);
+      return;
+    }
+    // Through the tunnel: the local proxy carries it to the other side.
+    httplib::Client cli(impl_->proxy_host, impl_->proxy_port);
+    cli.set_connection_timeout(5, 0);
+    cli.set_read_timeout(10, 0);
+    cli.set_keep_alive(false);
+    json forward = json::object();
+    forward["codec"] = codec;
+    auto res2 = cli.Post(DesktopService::codec_path(), forward.dump(), "application/json");
+    json out = json::object();
+    if (!res2 || res2->status != 200) {
+      out["ok"] = false;
+      out["error"] = res2 ? ("the other side answered " + std::to_string(res2->status))
+                          : std::string("the other side did not answer");
+      send_json(res, out, 502);
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(impl_->mu);
+      impl_->codec = codec;
+    }
+    out["ok"] = true;
+    out["codec"] = codec;
+    send_json(res, out);
   });
 
   // The mouse and the keyboard: they go back to the other side.
@@ -255,36 +315,39 @@ void ControlService::pull_loop() {
       std::fflush(stderr);
     }
     if (res && res->status == 200 && !res->body.empty()) {
-      // The decode: the picture becomes pixels, and we learn how big it is.
-      std::vector<uint8_t> pixels;
+      // The picture is handed over as it is: the sizes and the codec come
+      // with it in the headers, so nothing has to be decoded here.
       int width = 0;
       int height = 0;
-      std::string why;
-      if (jpeg_decode(reinterpret_cast<const uint8_t*>(res->body.data()), res->body.size(), &pixels,
-                      &width, &height, &why)) {
-        // The sizes of the screen come with the picture (the headers).
-        int screen_width = 0;
-        int screen_height = 0;
-        if (res->has_header("X-Screen-Width")) {
-          screen_width = std::atoi(res->get_header_value("X-Screen-Width").c_str());
-        }
-        if (res->has_header("X-Screen-Height")) {
-          screen_height = std::atoi(res->get_header_value("X-Screen-Height").c_str());
-        }
-        std::lock_guard<std::mutex> lock(impl_->mu);
-        impl_->jpeg = res->body;
-        impl_->frame_width = width;
-        impl_->frame_height = height;
-        if (screen_width > 0) impl_->screen_width = screen_width;
-        if (screen_height > 0) impl_->screen_height = screen_height;
-        impl_->frame_at_ms = now_ms();
-        impl_->frames++;
-        impl_->decoded++;
-        impl_->last_error.clear();
-      } else {
-        std::lock_guard<std::mutex> lock(impl_->mu);
-        impl_->last_error = why;
+      int screen_width = 0;
+      int screen_height = 0;
+      std::string codec = "h264";
+      if (res->has_header("X-Frame-Width")) {
+        width = std::atoi(res->get_header_value("X-Frame-Width").c_str());
       }
+      if (res->has_header("X-Frame-Height")) {
+        height = std::atoi(res->get_header_value("X-Frame-Height").c_str());
+      }
+      if (res->has_header("X-Screen-Width")) {
+        screen_width = std::atoi(res->get_header_value("X-Screen-Width").c_str());
+      }
+      if (res->has_header("X-Screen-Height")) {
+        screen_height = std::atoi(res->get_header_value("X-Screen-Height").c_str());
+      }
+      if (res->has_header("X-Codec")) {
+        codec = res->get_header_value("X-Codec");
+      }
+      std::lock_guard<std::mutex> lock(impl_->mu);
+      impl_->picture = res->body;
+      impl_->codec = codec;
+      impl_->frame_width = width;
+      impl_->frame_height = height;
+      if (screen_width > 0) impl_->screen_width = screen_width;
+      if (screen_height > 0) impl_->screen_height = screen_height;
+      impl_->frame_at_ms = now_ms();
+      impl_->frames++;
+      impl_->decoded++;
+      impl_->last_error.clear();
     }
     // The sizes of the screen come with the picture (its headers), so
     // there is no second request to make.

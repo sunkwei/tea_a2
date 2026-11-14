@@ -99,6 +99,12 @@ if(NOT WIN32 AND NOT APPLE AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(tea_sqlite3 PRIVATE -fno-pie)
 endif()
 
+# --- x264 (the H.264 encoder) ------------------------------------------------
+# The remote desktop sends H.264: one JPEG of a 2560x1440 screen is ~200 KB,
+# one H.264 picture is ~30 KB. x264 is GPL-2.0-or-later, so the whole project
+# is GPL-3.0-or-later (see the LICENSE at the root).
+add_subdirectory(${TEA_3RD}/x264 ${CMAKE_BINARY_DIR}/x264 EXCLUDE_FROM_ALL)
+
 # --- the two binaries --------------------------------------------------------
 add_executable(a2_broker ${TEA_ROOT}/src/tunnel_broker.cpp)
 if(WIN32)
@@ -171,7 +177,8 @@ target_include_directories(a2_tunnel PRIVATE
 # The HTTP server runs its own threads; a small pool is enough (one browser
 # at a time is the normal case).
 target_compile_definitions(a2_tunnel PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=16)
-target_link_libraries(a2_tunnel PRIVATE datachannel-static MbedTLS::MbedTLS Threads::Threads)
+target_link_libraries(a2_tunnel PRIVATE datachannel-static MbedTLS::MbedTLS Threads::Threads
+  x264)
 if(WIN32)
   # The desktop role: the screen (GDI), the mouse and the keyboard
   # (SendInput), the JPEG codec (GDI+) and the H.264 codecs (Media

@@ -626,6 +626,7 @@ int main(int argc, char** argv) {
   // is. The default is the screen as it is (the whole desktop, at its real
   // pixels); --width caps it when the bandwidth matters.
   int desktop_max_width = 0;
+  int desktop_bitrate = 2000000;   // bits per second for the H.264 picture
   int desktop_fps = 2;
   int desktop_quality = 50;
   // The port the browser opens (the control side only).
@@ -665,6 +666,9 @@ int main(int argc, char** argv) {
           "  --width <n>       the widest picture the desktop role hands out\n"
           "                     (default 0 = the screen as it is, at its real\n"
           "                     pixels; a smaller number scales it down)\n"
+          "  --bitrate <kbps>  the bits per second the H.264 picture may use\n"
+          "                     (default 2000; the picture of a 2560x1440 screen\n"
+          "                     is then about 30 KB instead of 200 KB as JPEG)\n"
           "  --fps <n>         how many pictures a second (default 2)\n"
           "  --quality <n>     the JPEG quality, 1..100 (default 50)\n"
           "\n"
@@ -697,6 +701,8 @@ int main(int argc, char** argv) {
       desktop_quality = std::atoi(next().c_str());
     } else if (a == "--width") {
       desktop_max_width = std::atoi(next().c_str());
+    } else if (a == "--bitrate") {
+      desktop_bitrate = std::atoi(next().c_str()) * 1000;
     } else if (a == "--broker") {
       std::string hp = next();
       split_hostport(hp, broker_host, broker_port);
@@ -820,7 +826,8 @@ int main(int argc, char** argv) {
   tea_tunnel::ControlService control_service;
   if (is_desktop) {
     std::string desktop_err;
-    if (!desktop_service.start(desktop_max_width, desktop_fps, desktop_quality, &desktop_err)) {
+    if (!desktop_service.start(desktop_max_width, desktop_fps, desktop_quality, desktop_bitrate,
+                               &desktop_err)) {
       log_line("sidecar: cannot start the desktop: %s\n", desktop_err.c_str());
       return 1;
     }

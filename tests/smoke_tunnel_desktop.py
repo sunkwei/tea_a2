@@ -11,7 +11,7 @@
 
   1. desktop 侧载真的起了桌面的服务（127.0.0.1 上的一个 HTTP 服务）；
   2. control 侧载起了看图的页面（本地端口，浏览器打开它）；
-  3. 画面**穿过隧道**到了 control 那头（是张 JPEG，大小对得上屏幕）；
+  3. 画面**穿过隧道**到了 control 那头（是 H.264，大小对得上屏幕）；
   4. 鼠标键盘事件**穿回去**到了对面（对面说它收下了几个事件）；
   5. 页面和脚本都在二进制里（设备上没有文件可读）。
 
@@ -191,14 +191,14 @@ def main():
         check("the page pulls in its script", "tunnel_desktop.js" in page, page[:200])
         status, raw, headers = http(base + "/tunnel_desktop.js", timeout=10)
         check("the page script is served",
-              status == 200 and b"api/control/frame.jpg" in raw, str(status))
+              status == 200 and b"api/control/frame" in raw, str(status))
 
         # ---- 画面穿过隧道 ------------------------------------------------
         picture = b""
         deadline = time.time() + 30
         while time.time() < deadline:
             try:
-                status, raw, headers = http(base + "/api/control/frame.jpg", timeout=10)
+                status, raw, headers = http(base + "/api/control/frame", timeout=10)
                 if status == 200 and raw:
                     picture = raw
                     break
@@ -206,7 +206,20 @@ def main():
                 pass
             time.sleep(0.5)
         check("a picture comes through the tunnel", bool(picture), "no picture in 30s")
-        check("the picture is a JPEG", picture[:2] == b"\xff\xd8", repr(picture[:8]))
+        # H.264 in Annex-B: the NAL units carry their own start codes, and
+        # every picture is a key frame (so it stands on its own).
+        check("the picture is H.264",
+              picture[:3] == b"\x00\x00\x01" or picture[:4] == b"\x00\x00\x00\x01",
+              repr(picture[:8]))
+        types = set()
+        at = 0
+        while at + 3 < len(picture) and len(types) < 12:
+            if picture[at:at + 3] == b"\x00\x00\x01":
+                types.add(picture[at + 3] & 0x1f)
+                at += 4
+            else:
+                at += 1
+        check("the picture carries the SPS and the PPS", 7 in types and 8 in types, str(types))
         check("the picture is not empty", len(picture) > 1000, "len=%d" % len(picture))
         print("     (the picture is %d bytes; at two a second that is %.0f KB/s)" % (
             len(picture), len(picture) * 2 / 1024.0))
@@ -231,7 +244,9 @@ def main():
         check("the viewer knows the size of the screen",
               info.get("screen_width", 0) > 0 and info.get("screen_height", 0) > 0,
               json.dumps(info))
-        check("the pictures were decoded", info.get("decoded", 0) > 0, json.dumps(info))
+        check("the control side hands the pictures on", info.get("decoded", 0) > 0,
+              json.dumps(info))
+        check("the codec is H.264", info.get("codec") == "h264", json.dumps(info))
 
         # ---- 鼠标键盘穿回去 ------------------------------------------------
         status, answer = post_json(base + "/api/control/input",

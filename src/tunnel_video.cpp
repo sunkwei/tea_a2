@@ -12,6 +12,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <stdint.h>
+
+#include "x264.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -373,11 +376,14 @@ void bgra_to_yuv(const uint8_t* bgra, int width, int height, int stride, YuvFram
       const int b = row[i * 4 + 0];
       const int g = row[i * 4 + 1];
       const int r = row[i * 4 + 2];
-      y[static_cast<std::size_t>(j) * width + i] = clamp_u8((66 * r + 129 * g + 25 * b + 128) >> 8);
+      // BT.709, the whole range: that is what a screen is, and what the
+      // H.264 encoder wants. The U and the V need the +128 (without it
+      // the colours come out wrong - a green screen).
+      y[static_cast<std::size_t>(j) * width + i] = clamp_u8((54 * r + 183 * g + 19 * b + 128) >> 8);
       if ((j % 2) == 0 && (i % 2) == 0) {
         const std::size_t at = static_cast<std::size_t>(j / 2) * cw + i / 2;
-        u[at] = clamp_u8((-38 * r - 74 * g + 112 * b + 128) >> 8);
-        v[at] = clamp_u8((112 * r - 94 * g - 18 * b + 128) >> 8);
+        u[at] = clamp_u8(((-29 * r - 99 * g + 128 * b + 128) >> 8) + 128);
+        v[at] = clamp_u8(((128 * r - 116 * g - 12 * b + 128) >> 8) + 128);
       }
     }
   }
@@ -415,77 +421,148 @@ void yuv_to_bgra(const YuvFrame& in, BgraFrame* out) {
 }
 
 // ---------------------------------------------------------------------------
-// The H.264 path (Media Foundation)
+// The H.264 path (x264)
 // ---------------------------------------------------------------------------
+// x264 is GPL-2.0-or-later and the project as a whole is GPL-3.0-or-later
+// (see the LICENSE at the root). It is the encoder on every platform, not
+// just Windows: one picture of a 2560x1440 screen is about 200 KB as a JPEG
+// and about 30 KB as H.264.
+//
+// Every picture is its own key frame (i_keyint_max = 1): the tunnel carries
+// the pictures one by one, and a picture that leans on the one before it
+// would arrive without it. The price is a bigger stream than a real video
+// would be -- and it is still far smaller than the JPEG.
 struct H264Encoder::Impl {
-#ifdef _WIN32
-  MfGuard mf;
-  IMFTransform* transform = nullptr;
+  x264_t* encoder = nullptr;
   int width = 0;
   int height = 0;
-  int fps = 2;
-#endif
+  int64_t frames = 0;
 };
 
 H264Encoder::H264Encoder() : impl_(new Impl()) {}
 H264Encoder::~H264Encoder() { stop(); }
 
+bool H264Encoder::start(int width, int height, int fps, int bitrate, std::string* err) {
+  if (impl_->encoder != nullptr) return true;
+  if (width <= 0 || height <= 0 || (width % 2) != 0 || (height % 2) != 0) {
+    if (err) *err = "the H.264 encoder wants even width and height";
+    return false;
+  }
+  x264_param_t param;
+  x264_param_default_preset(&param, "veryfast", nullptr);
+  param.i_csp = X264_CSP_I420;
+  // BT.709, the whole range: the picture comes from a screen (sRGB), and
+  // that is how it is converted. x264 would otherwise guess from the size
+  // (and guess wrong for a small window). The VUI tells the decoder how
+  // to read the colours - without it the picture comes out too dark.
+  param.vui.i_colmatrix = 1;   // BT.709
+  param.vui.i_colorprim = 1;   // BT.709
+  param.vui.i_transfer = 1;    // BT.709
+  param.vui.b_fullrange = 1;   // the whole range, not the narrow one
+  param.i_width = width;
+  param.i_height = height;
+  param.i_fps_num = fps > 0 ? fps : 2;
+  param.i_fps_den = 1;
+  param.i_timebase_num = 1;
+  param.i_timebase_den = 1000;   // the timestamps are milliseconds
+  // x264 wants the bitrate in kilobits per second.
+  const int kbps = bitrate > 0 ? bitrate / 1000 : 2000;
+  param.rc.i_bitrate = kbps;
+  param.rc.i_vbv_max_bitrate = kbps;
+  param.rc.i_vbv_buffer_size = kbps;
+  // No looking ahead: the picture has to be out right now, and waiting for
+  // the next one would add a frame of delay to the mouse.
+  param.rc.i_lookahead = 0;
+  param.i_sync_lookahead = 0;
+  // Every picture stands on its own.
+  param.i_keyint_max = 1;
+  param.b_repeat_headers = 1;
+  param.b_annexb = 1;            // the NAL units carry their own start codes
+  param.i_threads = 1;           // the pictures come one at a time
+  x264_t* encoder = x264_encoder_open(&param);
+  if (encoder == nullptr) {
+    if (err) *err = "x264 would not start";
+    return false;
+  }
+  impl_->encoder = encoder;
+  impl_->width = width;
+  impl_->height = height;
+  impl_->frames = 0;
+  running_ = true;
+  return true;
+}
+
+bool H264Encoder::encode(const YuvFrame& frame, int64_t timestamp_ms, std::string* out,
+                          std::string* err) {
+  if (impl_->encoder == nullptr) {
+    if (err) *err = "the H.264 encoder is not running";
+    return false;
+  }
+  if (frame.width != impl_->width || frame.height != impl_->height) {
+    if (err) *err = "the picture is not the size the encoder was started with";
+    return false;
+  }
+  const std::size_t luma = static_cast<std::size_t>(frame.width) * frame.height;
+  const std::size_t chroma = luma / 4;
+  if (frame.data.size() < luma + chroma * 2) {
+    if (err) *err = "the picture is too small";
+    return false;
+  }
+  x264_picture_t in;
+  x264_picture_init(&in);
+  in.img.i_csp = X264_CSP_I420;
+  in.img.i_plane = 3;
+  in.img.plane[0] = const_cast<uint8_t*>(frame.data.data());
+  in.img.plane[1] = const_cast<uint8_t*>(frame.data.data() + luma);
+  in.img.plane[2] = const_cast<uint8_t*>(frame.data.data() + luma + chroma);
+  in.img.i_stride[0] = frame.width;
+  in.img.i_stride[1] = frame.width / 2;
+  in.img.i_stride[2] = frame.width / 2;
+  in.i_pts = timestamp_ms;
+  in.i_type = X264_TYPE_AUTO;
+
+  x264_picture_t encoded;
+  x264_picture_init(&encoded);
+  x264_nal_t* nals = nullptr;
+  int count = 0;
+  const int size =
+      x264_encoder_encode(impl_->encoder, &nals, &count, &in, &encoded);
+  if (size < 0) {
+    if (err) *err = "x264 refused the picture";
+    return false;
+  }
+  if (size == 0 || nals == nullptr) {
+    // Nothing came out yet: the encoder holds the picture back until the
+    // rate control has settled (that is the first picture). The next one
+    // brings it.
+    return true;
+  }
+  // The bytes are Annex-B: the NAL units carry their own start codes, and
+  // in that mode the whole picture is in the first NAL's payload (this is
+  // what x264's own example does).
+  out->append(reinterpret_cast<const char*>(nals[0].p_payload),
+              static_cast<std::size_t>(size));
+  impl_->frames++;
+  return true;
+}
+
+void H264Encoder::stop() {
+  if (impl_ && impl_->encoder != nullptr) {
+    x264_encoder_close(impl_->encoder);
+    impl_->encoder = nullptr;
+  }
+  running_ = false;
+}
+
 #ifdef _WIN32
 
 namespace {
-
-/// Configure one candidate encoder for NV12 in and H.264 out.
-bool configure_encoder(IMFTransform* transform, int width, int height, int bitrate,
-                       std::string* err) {
-  // The rate control lives on the transform: a constant bitrate is what the
-  // tunnel wants - the point of the whole thing is a small, predictable
-  // stream.
-  IMFAttributes* attrs = nullptr;
-  if (FAILED(transform->GetAttributes(&attrs)) || attrs == nullptr) {
-    if (err) *err = "the encoder has no attributes";
-    return false;
-  }
-  attrs->SetUINT32(CODECAPI_AVEncCommonRateControlMode,
-                   static_cast<UINT32>(eAVEncCommonRateControlMode_CBR));
-  attrs->SetUINT32(CODECAPI_AVEncCommonMeanBitRate, static_cast<UINT32>(bitrate));
-  attrs->Release();
-
-  IMFMediaType* in = nullptr;
-  MFCreateMediaType(&in);
-  in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-  in->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-  set_frame_size(in, width, height);
-  in->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-  in->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-  in->SetUINT32(MF_MT_SAMPLE_SIZE, static_cast<UINT32>(width * height * 3 / 2));
-
-  IMFMediaType* out = nullptr;
-  MFCreateMediaType(&out);
-  out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-  out->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-  set_frame_size(out, width, height);
-  out->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-
-  // The order differs between the Windows versions, so try both.
-  HRESULT hr = transform->SetInputType(0, in, 0);
-  if (SUCCEEDED(hr)) hr = transform->SetOutputType(0, out, 0);
-  if (FAILED(hr)) {
-    hr = transform->SetOutputType(0, out, 0);
-    if (SUCCEEDED(hr)) hr = transform->SetInputType(0, in, 0);
-  }
-  safe_release(in);
-  safe_release(out);
-  if (FAILED(hr)) {
-    if (err) *err = "the encoder refused NV12 in / H.264 out";
-    return false;
-  }
-  return true;
-}
 
 /// What came out of the transform.
 enum class Pull { kSample, kNeedMore, kError };
 
 /// Pull one output sample. The caller owns the sample when it gets one.
+/// (The decoder below needs this too.)
 Pull pull_sample(IMFTransform* transform, IMFSample** sample) {
   *sample = nullptr;
   MFT_OUTPUT_DATA_BUFFER buffer;
@@ -500,168 +577,7 @@ Pull pull_sample(IMFTransform* transform, IMFSample** sample) {
   return Pull::kSample;
 }
 
-/// The bytes of one output sample, in one piece.
-bool sample_bytes(IMFSample* sample, std::string* out) {
-  IMFMediaBuffer* media = nullptr;
-  if (FAILED(sample->ConvertToContiguousBuffer(&media)) || media == nullptr) return false;
-  BYTE* bytes = nullptr;
-  DWORD len = 0;
-  DWORD max_len = 0;
-  bool ok = false;
-  if (SUCCEEDED(media->Lock(&bytes, &max_len, &len)) && bytes != nullptr && len > 0) {
-    out->append(reinterpret_cast<const char*>(bytes), len);
-    media->Unlock();
-    ok = true;
-  }
-  media->Release();
-  return ok;
-}
-
 }  // namespace
-
-bool H264Encoder::start(int width, int height, int fps, int bitrate, std::string* err) {
-  if (running_) return true;
-  if (!impl_->mf.ok) {
-    if (err) *err = "Media Foundation did not start";
-    return false;
-  }
-  if (width <= 0 || height <= 0 || (width % 2) != 0 || (height % 2) != 0) {
-    if (err) *err = "the picture size must be even";
-    return false;
-  }
-
-  MFT_REGISTER_TYPE_INFO in_type;
-  in_type.guidMajorType = MFMediaType_Video;
-  in_type.guidSubtype = MFVideoFormat_NV12;
-  MFT_REGISTER_TYPE_INFO out_type;
-  out_type.guidMajorType = MFMediaType_Video;
-  out_type.guidSubtype = MFVideoFormat_H264;
-
-  IMFActivate** activates = nullptr;
-  UINT32 count = 0;
-  // Every encoder, not just the hardware ones: the software encoder is
-  // the one that is everywhere.
-  HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, 0, &in_type, &out_type, &activates,
-                          &count);
-  if (FAILED(hr) || activates == nullptr || count == 0) {
-    if (err) *err = "this Windows has no H.264 encoder";
-    return false;
-  }
-
-  std::string last_error = "no encoder accepted the picture size";
-  for (UINT32 i = 0; i < count; i++) {
-    IMFTransform* transform = nullptr;
-    if (FAILED(activates[i]->ActivateObject(IID_IMFTransform, reinterpret_cast<void**>(&transform))) ||
-        transform == nullptr) {
-      continue;
-    }
-    std::string why;
-    if (configure_encoder(transform, width, height, bitrate, &why)) {
-      impl_->transform = transform;
-      impl_->width = width;
-      impl_->height = height;
-      impl_->fps = fps > 0 ? fps : 2;
-      running_ = true;
-      CoTaskMemFree(activates);
-      return true;
-    }
-    last_error = why;
-    transform->Release();
-  }
-  CoTaskMemFree(activates);
-  if (err) *err = last_error;
-  return false;
-}
-
-bool H264Encoder::encode(const YuvFrame& frame, int64_t timestamp_ms, std::string* out,
-                         std::string* err) {
-  if (!running_ || impl_->transform == nullptr) {
-    if (err) *err = "the encoder is not running";
-    return false;
-  }
-  if (frame.width != impl_->width || frame.height != impl_->height ||
-      frame.data.size() < static_cast<std::size_t>(frame.width) * frame.height * 3 / 2) {
-    if (err) *err = "the picture does not match the encoder";
-    return false;
-  }
-
-  IMFMediaBuffer* buffer = nullptr;
-  const std::size_t size = frame.data.size();
-  HRESULT hr = MFCreateMemoryBuffer(static_cast<DWORD>(size), &buffer);
-  if (FAILED(hr) || buffer == nullptr) {
-    if (err) *err = "cannot allocate the picture";
-    return false;
-  }
-  BYTE* dst = nullptr;
-  DWORD max_len = 0;
-  DWORD cur_len = 0;
-  if (FAILED(buffer->Lock(&dst, &max_len, &cur_len)) || dst == nullptr) {
-    buffer->Release();
-    if (err) *err = "cannot lock the picture";
-    return false;
-  }
-  std::memcpy(dst, frame.data.data(), size);
-  buffer->Unlock();
-
-  IMFSample* sample = nullptr;
-  hr = MFCreateSample(&sample);
-  if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer);
-  if (SUCCEEDED(hr)) {
-    // Media Foundation counts in 100-nanosecond units.
-    sample->SetSampleTime(timestamp_ms * 10000LL);
-    sample->SetSampleDuration(10000000LL / impl_->fps);
-    hr = impl_->transform->ProcessInput(0, sample, 0);
-  }
-  buffer->Release();
-  if (sample) sample->Release();
-  if (FAILED(hr)) {
-    if (err) *err = "the encoder refused the picture";
-    return false;
-  }
-
-  for (;;) {
-    IMFSample* out_sample = nullptr;
-    const Pull what = pull_sample(impl_->transform, &out_sample);
-    if (what == Pull::kNeedMore) break;
-    if (what == Pull::kError) {
-      if (err) *err = "the encoder failed while producing the bitstream";
-      return false;
-    }
-    sample_bytes(out_sample, out);
-    out_sample->Release();
-  }
-  return true;
-}
-
-void H264Encoder::stop() {
-  if (impl_ && impl_->transform) {
-    impl_->transform->Release();
-    impl_->transform = nullptr;
-  }
-  running_ = false;
-}
-
-#else  // !_WIN32
-
-bool H264Encoder::start(int width, int height, int fps, int bitrate, std::string* err) {
-  (void)width;
-  (void)height;
-  (void)fps;
-  (void)bitrate;
-  if (err) *err = "there is no H.264 encoder on this platform";
-  return false;
-}
-
-bool H264Encoder::encode(const YuvFrame& frame, int64_t timestamp_ms, std::string* out,
-                         std::string* err) {
-  (void)frame;
-  (void)timestamp_ms;
-  (void)out;
-  if (err) *err = "there is no H.264 encoder on this platform";
-  return false;
-}
-
-void H264Encoder::stop() { running_ = false; }
 
 #endif  // _WIN32
 

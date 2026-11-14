@@ -434,15 +434,16 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 设备                                    外面
 ┌────────────────────────────┐        ┌──────────────────────────────┐
 │ DesktopService（127.0.0.1）│        │ ControlService（127.0.0.1）  │
-│  抓屏线程 → JPEG            │        │  拉流线程 → 解码 → 浏览器    │
-│  /api/desktop/frame.jpg     │◀─隧道─▶│  /api/control/frame.jpg      │
+│  抓屏线程 → H.264 (x264)   │        │  拉流线程 → 原样转手        │
+│  /api/desktop/frame         │◀─隧道─▶│  /api/control/frame         │
+│  /api/desktop/codec         │        │  /api/control/codec         │
 │  /api/desktop/input         │        │  /api/control/input          │
 └────────────────────────────┘        └──────────────────────────────┘
 ```
 
 **关键的几点**：
 
-- **隧道没有变**：还是字节透明的数据通道。画面是 JPEG 字节，穿过隧道；外面那台
+- **隧道没有变**：还是字节透明的数据通道。画面是 H.264 字节，穿过隧道；外面那台
   的控制侧再通过**自己的本地代理**（就是 9931 那个）去对面取 —— 也就是说外面那台
   跟设备之间的唯一通路还是隧道。
 - **控制侧站在中间**：浏览器跟控制侧说话（本地），控制侧跟设备说话（穿过隧道）。
@@ -455,15 +456,17 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
   线程池（16 个）会被占满。
 - **JPEG 编码器是按 MIME 找的**（`image/jpeg`）：写死 CLSID 在这台机器上认成了 PNG，
   一张 1 MB 的图把数据通道塞爆了，后面全卡住。
-- **编码器/解码器**：JPEG 走 GDI+（`GdipSaveImageToStream`）；H.264 那条路也在
-  （Media Foundation 的 H.264 编码器/解码器 MFT，`src/tunnel_video.cpp`），
+- **编码器/解码器**：H.264 走 **x264**（`3rd/x264/`，GPL-2.0-or-later ✓，
+  `src/tunnel_video.cpp`）；JPEG 走 GDI+（`GdipSaveImageToStream` ✓，当退路
+  用 ✓：浏览器没有 WebCodecs 的时候会回头要 JPEG ✓）。解码在**浏览器**里
+  （WebCodecs ✓），控制端不再自己解 ✓。
   等码率真的成为问题再切。
 
 **代码**：
 
 | 文件 | 干什么 |
 | --- | --- |
-| `src/tunnel_video.{h,cpp}` | JPEG 编解码（GDI+）、H.264 编解码（Media Foundation）、颜色转换 |
+| `src/tunnel_video.{h,cpp}` | H.264 编码（x264）、JPEG 编解码（GDI+）、颜色转换（BT.709 全范围 ✓） |
 | `src/tunnel_desktop.{h,cpp}` | 抓屏（GDI）与键鼠注入（SendInput） |
 | `src/tunnel_desktop_service.{h,cpp}` | 设备端的服务：抓屏线程、画面的接口、事件接口 |
 | `src/tunnel_control_service.{h,cpp}` | 控制侧的服务：拉流解码、出画、转发事件、伺服页面 |
