@@ -159,8 +159,8 @@ def main():
         text = wait_for_log(agent_log, r"the desktop is listening on 127\.0\.0\.1:\d+")
         check("the desktop side starts the screen service", "the desktop is listening" in text,
               text[-400:])
-        match = re.search(r"a2_tunnel --role client --session ([0-9a-f]+)", text)
-        check("the desktop side prints a session code", bool(match),
+        match = re.search(r"a2_tunnel --role control --session ([0-9a-f]+)", text)
+        check("the desktop side prints the command for the control side", bool(match),
               text[-300:] if not match else "")
         if not match:
             return 1
@@ -178,6 +178,8 @@ def main():
               text[-400:])
         text = wait_for_log(client_log, r"the viewer is on http://127\.0\.0\.1:\d+/", seconds=20)
         check("the control side starts the viewer", "the viewer is on" in text, text[-400:])
+        check("the control side says which address to open",
+              "open this in a browser" in text, text[-400:])
         check("the control side knows the far end is a desktop",
               "the other end is a desktop" in text, text[-400:])
 
@@ -237,9 +239,11 @@ def main():
         check("the input reaches the other side",
               answer.get("ok") and answer.get("applied", 0) >= 2, json.dumps(answer))
 
-        # ---- 隧道是字节透明的（页面本身不是本地生成的）----------------------
-        # desktop 那头没有页面：control 头才是伺服页面的那一个。
+        # ---- 隧道自己的端口（设备端那个）要说清楚，不该是 404 --------------
+        # 外面那台如果把浏览器开在隧道端口上（横幅以前就指那个），请求会
+        # 穿到设备端去 —— 那边要有一句话说明「画面在控制端」。
         desktop_page = ""
+        desktop_status = 0
         match = re.search(r"the desktop is listening on 127\.0\.0\.1:(\d+)", text)
         if not match:
             with open(agent_log, encoding="utf-8", errors="replace") as handle:
@@ -247,12 +251,15 @@ def main():
                                   handle.read())
         if match:
             try:
-                status, raw, _ = http("http://127.0.0.1:%s/" % match.group(1), timeout=5)
+                desktop_status, raw, _ = http("http://127.0.0.1:%s/" % match.group(1), timeout=5)
                 desktop_page = raw.decode("utf-8", "replace")
             except Exception as error:
                 desktop_page = str(error)
         check("the desktop side has no page of its own", "远程桌面" not in desktop_page,
               desktop_page[:120])
+        check("the desktop side explains itself instead of 404",
+              desktop_status == 200 and "control side" in desktop_page,
+              "status=%s %s" % (desktop_status, desktop_page[:120]))
     finally:
         for proc, _ in procs:
             try:

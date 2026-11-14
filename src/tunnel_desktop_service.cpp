@@ -99,6 +99,19 @@ bool DesktopService::start(int max_width, int fps, int quality, std::string* err
   // every picture. The pool would be full of idle connections.
   server.set_keep_alive_max_count(1);
 
+  // Somebody opened this service in a browser (it is the tunnel's own
+  // address, so that is easy to do). Say what this is instead of a 404.
+  server.Get("/", [this](const httplib::Request&, httplib::Response& res) {
+    res.status = 200;
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(
+        "This is the desktop side of the tunnel: this machine's screen.\n"
+        "\n"
+        "The picture is decoded and shown on the control side - open the\n"
+        "viewer's address (the control side prints it when it starts).\n",
+        "text/plain; charset=utf-8");
+  });
+
   server.Get(DesktopService::frame_path(), [this](const httplib::Request&, httplib::Response& res) {
     std::lock_guard<std::mutex> lock(impl_->mu);
     if (impl_->jpeg.empty()) {

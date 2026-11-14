@@ -1404,7 +1404,9 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "  target        : %s\n", target.c_str());
     }
     std::fprintf(stderr, "  give this to whoever connects from the outside:\n");
-    std::fprintf(stderr, "      a2_tunnel --role client --session %s",
+    // The desktop role needs the control side: the picture is decoded there.
+    std::fprintf(stderr, "      a2_tunnel --role %s --session %s",
+                 is_desktop ? "control" : "client",
                  session.empty() ? token.c_str() : session.c_str());
     // The fingerprint goes along: it is what lets the other side check that
     // it is talking to the same broker, without a certificate to install.
@@ -1419,12 +1421,28 @@ int main(int argc, char** argv) {
     if (target_is_terminal) {
       std::fprintf(stderr, "  (it is a terminal: whoever connects from the outside opens\n"
                            "   http://127.0.0.1:<their port>/ in a browser)\n");
+    } else if (is_desktop) {
+      std::fprintf(stderr, "  (it is this machine's screen: the other side opens\n"
+                           "   http://127.0.0.1:<their viewer port>/ to watch it)\n");
     } else {
       std::fprintf(stderr, "  (it will listen locally and be reachable through the tunnel)\n");
     }
     if (wait_timeout > 0) {
       std::fprintf(stderr, "  giving up in %d seconds if nobody connects.\n", wait_timeout);
     }
+  } else if (is_control) {
+    // The control role: the browser watches the picture on the viewer's
+    // port. The tunnel's own port is still the proxy towards the other
+    // side - opening that one in a browser gets you nothing (the far end
+    // has no page).
+    log_line("sidecar: ready. The picture is on the viewer's port.\n");
+    std::fprintf(stderr, "  open this in a browser:\n");
+    std::fprintf(stderr, "      http://%s:%u/\n",
+                 listen_host.empty() ? "127.0.0.1" : listen_host.c_str(),
+                 control_service.port());
+    std::fprintf(stderr, "  (the tunnel's own port %u is the proxy to the other side;\n"
+                         "   it is not a web page)\n",
+                 listen_port);
   } else {
     log_line("sidecar: ready. To reach it from the outside:\n");
     std::fprintf(stderr, "  add this to the settings.peers of the a2 that drives it:\n");
