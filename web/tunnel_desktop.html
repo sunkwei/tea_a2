@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>远程桌面</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0e1116; color: #d7dce3;
+    font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 14px; padding: 8px 12px;
+    border-bottom: 1px solid #23272e; background: #14181e; flex: none; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #5b6472; }
+  .dot.ok { background: #4ed17e; }
+  .dot.wait { background: #f7ad31; }
+  .dot.bad { background: #f25a5a; }
+  #meta { color: #8b949e; }
+  #stage { flex: 1 1 auto; overflow: auto; display: flex; align-items: flex-start;
+    justify-content: center; padding: 8px; }
+  canvas { background: #05070a; image-rendering: pixelated; max-width: 100%; }
+  footer { flex: none; padding: 6px 12px; border-top: 1px solid #23272e; color: #8b949e;
+    background: #14181e; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>远程桌面</h1>
+  <span id="meta">等待画面…</span>
+</header>
+<div id="stage"><canvas id="screen" width="16" height="9"></canvas></div>
+<footer>鼠标和键盘会送到对面的机器上。画面每 0.5 秒取一次。</footer>
+<script src="tunnel_desktop.js"></script>
+</body>
+</html>

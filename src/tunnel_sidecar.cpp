@@ -69,6 +69,8 @@ using json = nlohmann::json;
 
 #include "tunnel_net.h"
 #include "tunnel_paths.h"
+#include "tunnel_control_service.h"
+#include "tunnel_desktop_service.h"
 #include "tunnel_term.h"
 #include "tunnel_tls.h"
 #include "tunnel_turn_db.h"
@@ -614,11 +616,23 @@ int main(int argc, char** argv) {
   // registers the room, the client side is the one that connects from the
   // outside.
   bool is_agent = (role == "agent");
+  // The desktop role is the agent side with a screen instead of a service;
+  // the control role is the client side with a viewer in front of it.
+  bool is_desktop = (role == "desktop");
+  bool is_control = (role == "control");
+  // The picture: how wide it may be, how many a second, how good the JPEG
+  // is. The defaults are a quiet stream: two pictures a second, at most 1280
+  // pixels wide.
+  int desktop_max_width = 1280;
+  int desktop_fps = 2;
+  int desktop_quality = 50;
+  // The port the browser opens (the control side only).
+  int viewer_port = 9932;
 
   auto usage = [&](const char* why) {
     if (why) std::fprintf(stderr, "sidecar: %s\n", why);
     std::fprintf(stderr,
-          "a2_tunnel --role agent|client [--session <code>]\n"
+          "a2_tunnel --role agent|client|desktop|control [--session <code>]\n"
           "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
           "          [--listen <host:port>] [--host <addr>] [--port <n>] [--target <host:port>]\n"
           "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
@@ -644,6 +658,12 @@ int main(int argc, char** argv) {
           "                   option is kept so old command lines still work.\n"
           "  --wait-timeout    how long the agent side waits for the peer before giving\n"
           "                   up (default 300 seconds; 0 = wait forever)\n"
+          "  --viewer-port <n> the port the browser opens on the control side\n"
+          "                     (default 9932)\n"
+          "  --width <n>       the widest picture the desktop role hands out\n"
+          "                     (default 1280; 0 = the screen as it is)\n"
+          "  --fps <n>         how many pictures a second (default 2)\n"
+          "  --quality <n>     the JPEG quality, 1..100 (default 50)\n"
           "\n"
           "  The broker's address (and its fingerprint, if you want to watch it)\n"
           "  can also be put in %s:\n"
@@ -663,7 +683,17 @@ int main(int argc, char** argv) {
     };
     if (a == "--role") {
       role = next();
-      is_agent = (role == "agent");
+      is_agent = (role == "agent" || role == "desktop");
+      is_desktop = (role == "desktop");
+      is_control = (role == "control");
+    } else if (a == "--viewer-port") {
+      viewer_port = std::atoi(next().c_str());
+    } else if (a == "--fps") {
+      desktop_fps = std::atoi(next().c_str());
+    } else if (a == "--quality") {
+      desktop_quality = std::atoi(next().c_str());
+    } else if (a == "--width") {
+      desktop_max_width = std::atoi(next().c_str());
     } else if (a == "--broker") {
       std::string hp = next();
       split_hostport(hp, broker_host, broker_port);
@@ -779,6 +809,23 @@ int main(int argc, char** argv) {
     log_line("sidecar: the terminal is listening on 127.0.0.1:%u\n", terminal.port());
   }
 
+  // ---- a desktop instead of an address -------------------------------------
+  // "--role desktop" means: this machine shows its screen and takes the
+  // mouse and the keyboard. The service listens on the loopback only - the
+  // tunnel carries it, like everything else.
+  tea_tunnel::DesktopService desktop_service;
+  tea_tunnel::ControlService control_service;
+  if (is_desktop) {
+    std::string desktop_err;
+    if (!desktop_service.start(desktop_max_width, desktop_fps, desktop_quality, &desktop_err)) {
+      log_line("sidecar: cannot start the desktop: %s\n", desktop_err.c_str());
+      return 1;
+    }
+    target = "127.0.0.1:" + std::to_string(desktop_service.port());
+    log_line("sidecar: the desktop is listening on 127.0.0.1:%u\n",
+             static_cast<unsigned>(desktop_service.port()));
+  }
+
   rtc::Configuration cfg;
   if (relay_only) {
     // Ask ICE for relay candidates only: the connection then has to go
@@ -856,6 +903,9 @@ int main(int argc, char** argv) {
     std::string payload;
     put_u32(payload, id);
     send_frame(kClose, payload);
+    // The socket is closed here: the other side is done writing, and this
+    // thread has just seen it (the read returned nothing).
+    tea_net_close(fd);
   };
 
   Signal signal;
@@ -870,6 +920,7 @@ int main(int argc, char** argv) {
   // when the tunnel opens (and again when the client asks), and the client
   // tells the operator which address to open.
   std::atomic<bool> peer_is_terminal{false};
+  std::atomic<bool> peer_is_desktop{false};
   std::atomic<bool> terminal_announced{false};
   auto announce_terminal = [&]() {
     if (!peer_is_terminal.load()) return;
@@ -920,7 +971,11 @@ int main(int argc, char** argv) {
       // Say what is on the other end: the client side asks (it may have
       // arrived after the agent announced it), the agent side answers.
       if (is_agent) {
-        if (target_is_terminal) signal.send_line({{"type", "target"}, {"kind", "terminal"}});
+        if (target_is_terminal) {
+          signal.send_line({{"type", "target"}, {"kind", "terminal"}});
+        } else if (is_desktop) {
+          signal.send_line({{"type", "target"}, {"kind", "desktop"}});
+        }
       } else {
         signal.send_line({{"type", "ask-target"}});
       }
@@ -997,7 +1052,12 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lock(mu);
         auto it = conns.find(id);
         if (it == conns.end()) return;
-        tea_net_close(it->second);
+        // The far end is done writing. Do NOT close the socket: whatever is
+        // still in the buffer belongs to the reader, and closing it would
+        // throw the answer away (the reader would see a reset instead of
+        // the last bytes). Half-close it: the reader drains the buffer and
+        // then sees the end of the stream.
+        ::shutdown(it->second, SD_SEND);   // Windows 的名字（POSIX 那边叫 SHUT_WR）
         conns.erase(it);
       }
     });
@@ -1149,6 +1209,8 @@ int main(int argc, char** argv) {
       // The client wants to know what is on the other end.
       if (target_is_terminal) {
         signal.send_line({{"type", "target"}, {"kind", "terminal"}});
+      } else if (is_desktop) {
+        signal.send_line({{"type", "target"}, {"kind", "desktop"}});
       }
       return;
     }
@@ -1158,6 +1220,9 @@ int main(int argc, char** argv) {
         peer_is_terminal.store(true);
         log_line("sidecar: the other end is a terminal\n");
         announce_terminal();
+      } else if (kind == "desktop") {
+        peer_is_desktop.store(true);
+        log_line("sidecar: the other end is a desktop\n");
       }
       return;
     }
@@ -1307,6 +1372,18 @@ int main(int argc, char** argv) {
 
   if (!is_agent) {
     start_listener();  // the local proxy is up even before the tunnel
+    if (is_control) {
+      // The viewer: the browser talks to it, and it talks to the other side
+      // through the local proxy (the same one the browser's own requests
+      // would go through).
+      std::string control_err;
+      if (!control_service.start("127.0.0.1", listen_port, viewer_port, &control_err)) {
+        log_line("sidecar: cannot start the viewer: %s\n", control_err.c_str());
+        return 1;
+      }
+      log_line("sidecar: the viewer is on http://127.0.0.1:%u/\n",
+               static_cast<unsigned>(control_service.port()));
+    }
   } else if (!listen_host_override.empty()) {
     log_line("sidecar: --host only matters on the client side (the agent side has no "
              "local proxy)\n");

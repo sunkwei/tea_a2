@@ -140,6 +140,10 @@ set(TEA_TUNNEL_ASSETS_DIR "" CACHE PATH "The directory with the generated web as
 add_executable(a2_tunnel
   ${TEA_ROOT}/src/tunnel_sidecar.cpp
   ${TEA_ROOT}/src/tunnel_term.cpp
+  ${TEA_ROOT}/src/tunnel_video.cpp
+  ${TEA_ROOT}/src/tunnel_desktop.cpp
+  ${TEA_ROOT}/src/tunnel_desktop_service.cpp
+  ${TEA_ROOT}/src/tunnel_control_service.cpp
   ${TEA_ROOT}/src/shell.cpp
   ${TEA_ROOT}/src/util.cpp
   ${TEA_ROOT}/src/platform_fs.cpp
@@ -166,8 +170,15 @@ target_include_directories(a2_tunnel PRIVATE
   ${TEA_3RD}/cpp-httplib)
 # The HTTP server runs its own threads; a small pool is enough (one browser
 # at a time is the normal case).
-target_compile_definitions(a2_tunnel PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=8)
+target_compile_definitions(a2_tunnel PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=16)
 target_link_libraries(a2_tunnel PRIVATE datachannel-static MbedTLS::MbedTLS Threads::Threads)
+if(WIN32)
+  # The desktop role: the screen (GDI), the mouse and the keyboard
+  # (SendInput), the JPEG codec (GDI+) and the H.264 codecs (Media
+  # Foundation). All of them are in Windows itself - nothing to install.
+  target_link_libraries(a2_tunnel PRIVATE gdi32 user32 ole32 uuid gdiplus mfplat mf
+    mfreadwrite mfuuid)
+endif()
 # The sidecar reads the same account book: it has to use one of the accounts
 # the broker accepts.
 target_link_libraries(a2_tunnel PRIVATE tea_sqlite3)

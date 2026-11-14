@@ -109,6 +109,12 @@ if (-not $SkipPython) {
 Run-Step 'smoke_term_vt.mjs' {
     & node (Join-Path $root 'tests\smoke_term_vt.mjs')
 }
+
+# The desktop tunnel (--role desktop / --role control): needs the tunnel
+# binaries, and skips itself when they are not built.
+Run-Step 'smoke_tunnel_desktop.py' {
+    & python (Join-Path $root 'tests\smoke_tunnel_desktop.py') $Exe
+}
 Run-Step 'windows autostart (tests/autostart.ps1)' {
     & pwsh -NoProfile -File (Join-Path $root 'tests\autostart.ps1') -Exe $Exe
 }
