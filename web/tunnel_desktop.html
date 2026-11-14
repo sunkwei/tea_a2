@@ -17,9 +17,14 @@
   .dot.wait { background: #f7ad31; }
   .dot.bad { background: #f25a5a; }
   #meta { color: #8b949e; }
-  #stage { flex: 1 1 auto; overflow: auto; display: flex; align-items: flex-start;
+  /* The picture is scaled to fit: the whole desktop is always visible,
+     never a cropped corner. The browser keeps the ratio (the canvas knows
+     the picture's own size), and the mouse coordinates are mapped back
+     through the same ratio. */
+  #stage { flex: 1 1 auto; overflow: hidden; display: flex; align-items: center;
     justify-content: center; padding: 8px; }
-  canvas { background: #05070a; image-rendering: pixelated; max-width: 100%; }
+  canvas { background: #05070a; max-width: 100%; max-height: 100%; width: auto;
+    height: auto; }
   footer { flex: none; padding: 6px 12px; border-top: 1px solid #23272e; color: #8b949e;
     background: #14181e; }
 </style>

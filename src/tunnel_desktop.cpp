@@ -22,6 +22,27 @@ namespace tea_tunnel {
 
 namespace {
 
+/// Windows hands a process that is not DPI aware the **logical** pixels of
+/// the screen: on a 150% screen 2194x1234 becomes 1463x823, and the picture
+/// we take has only that many pixels — it looks like a cropped desktop.
+/// Saying "I am DPI aware" gets the real pixels.
+void make_dpi_aware() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+  using SetContextFn = BOOL(WINAPI*)(HANDLE);
+  HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+  if (user32 != nullptr) {
+    SetContextFn set_context = reinterpret_cast<SetContextFn>(
+        reinterpret_cast<void*>(::GetProcAddress(user32, "SetProcessDpiAwarenessContext")));
+    if (set_context != nullptr) {
+      // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4
+      if (set_context(reinterpret_cast<HANDLE>(static_cast<LONG_PTR>(-4)))) return;
+    }
+  }
+  ::SetProcessDPIAware();
+}
+
 /// The area the pointer is given in: the whole virtual screen, with its
 /// origin (a second monitor to the left of the first one has negative
 /// coordinates).
@@ -131,6 +152,7 @@ Desktop::Desktop() : impl_(new Impl()) {}
 Desktop::~Desktop() { stop(); }
 
 bool Desktop::start(int max_width, std::string* err) {
+  make_dpi_aware();
   impl_->area = virtual_screen();
   if (impl_->area.width <= 0 || impl_->area.height <= 0) {
     if (err) *err = "this machine has no screen";

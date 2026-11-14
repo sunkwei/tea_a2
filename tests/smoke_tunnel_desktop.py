@@ -208,6 +208,8 @@ def main():
         check("a picture comes through the tunnel", bool(picture), "no picture in 30s")
         check("the picture is a JPEG", picture[:2] == b"\xff\xd8", repr(picture[:8]))
         check("the picture is not empty", len(picture) > 1000, "len=%d" % len(picture))
+        print("     (the picture is %d bytes; at two a second that is %.0f KB/s)" % (
+            len(picture), len(picture) * 2 / 1024.0))
 
         # ---- 画面会一直来 -------------------------------------------------
         # 之前有个毛病：第一张能取到，之后就卡住了（连接太多，设备端的

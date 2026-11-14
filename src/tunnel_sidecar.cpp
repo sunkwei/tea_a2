@@ -621,9 +621,9 @@ int main(int argc, char** argv) {
   bool is_desktop = (role == "desktop");
   bool is_control = (role == "control");
   // The picture: how wide it may be, how many a second, how good the JPEG
-  // is. The defaults are a quiet stream: two pictures a second, at most 1280
-  // pixels wide.
-  int desktop_max_width = 1280;
+  // is. The default is the screen as it is (the whole desktop, at its real
+  // pixels); --width caps it when the bandwidth matters.
+  int desktop_max_width = 0;
   int desktop_fps = 2;
   int desktop_quality = 50;
   // The port the browser opens (the control side only).
@@ -661,7 +661,8 @@ int main(int argc, char** argv) {
           "  --viewer-port <n> the port the browser opens on the control side\n"
           "                     (default 9932)\n"
           "  --width <n>       the widest picture the desktop role hands out\n"
-          "                     (default 1280; 0 = the screen as it is)\n"
+          "                     (default 0 = the screen as it is, at its real\n"
+          "                     pixels; a smaller number scales it down)\n"
           "  --fps <n>         how many pictures a second (default 2)\n"
           "  --quality <n>     the JPEG quality, 1..100 (default 50)\n"
           "\n"
