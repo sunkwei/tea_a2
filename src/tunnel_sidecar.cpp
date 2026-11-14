@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_sidecar.cpp -- the piece that sits next to a tea_a2 and gives it a
 // way out.
 //

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // src/main.cpp -- appstub: a tray host for other programs.
 //
 // appstub does one thing: it starts the programs listed in its configuration

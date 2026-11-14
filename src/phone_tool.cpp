@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // phone_tool.cpp -- the phone bridge tool (Android builds only).
 //
 // The agent runs inside the APK (liba2.so). The Android app runs a small

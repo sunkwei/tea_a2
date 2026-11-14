@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_desktop.h -- this machine's screen, and the mouse and keyboard on it.
 //
 // The desktop role of the tunnel hands out two things: pictures of the

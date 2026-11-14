@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // errors.cpp -- the catalog itself.
 //
 // One entry per (code, status) pair. The wording is for a **caller**: what

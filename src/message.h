@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // message.h -- conversation model shared by the agent loop, the session store
 // and the HTTP API.
 #pragma once

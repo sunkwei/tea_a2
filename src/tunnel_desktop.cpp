@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_desktop.cpp -- the screen of this machine (Windows).
 //
 // The picture: GDI. The whole virtual screen (all the monitors) is copied

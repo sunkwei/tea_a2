@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // env.h -- probe the machine the agent is actually running on.
 //
 // The system prompt must describe the real device, not a hard-coded guess: the

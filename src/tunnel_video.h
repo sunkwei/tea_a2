@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_video.h -- the pictures that travel through the tunnel.
 //
 // The first version encodes the screen as JPEG: Windows has the encoder and

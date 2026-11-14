@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // trajectory.h -- the structured, machine-readable record of ONE agent turn.
 //
 // A trajectory answers "what did the agent actually do this turn?" without

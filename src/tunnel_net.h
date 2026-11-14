@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_net.h -- the few socket calls the tunnel needs, on both platforms.
 //
 // The tunnel binaries are built for Windows as well as for POSIX, so the

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // log.h -- tiny thread-safe logger with a global sink plus tagged extra sinks
 // (used to keep a per-workspace log alongside the global one).
 #pragma once

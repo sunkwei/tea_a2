@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // workspace.h -- multi-workspace support.
 //
 // * Every workspace owns a `.tea_agent_run/` directory that holds its buffer,

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // html_export.h -- turn a session into one self-contained HTML file.
 //
 // The file has to outlive the machine it was exported from: no server, no

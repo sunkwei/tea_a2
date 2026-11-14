@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_tls.h -- the TLS bits the broker and the sidecar share.
 //
 // Two things live here:

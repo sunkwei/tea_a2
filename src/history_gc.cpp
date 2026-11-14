@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // history_gc.cpp -- the report the cleaner hands back, and the disk accounting
 // it needs to decide whether the run_dir is over its budget.
 #include "history_gc.h"

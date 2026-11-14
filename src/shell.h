@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // shell.h -- an interactive shell (a real terminal) that the browser drives.
 //
 // This is deliberately independent of the agent: no model, no tools, no

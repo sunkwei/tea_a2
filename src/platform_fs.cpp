@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // platform_fs.cpp -- path handling and file I/O built directly on the platform
 // APIs. Every std::string here is UTF-8, including paths.
 //

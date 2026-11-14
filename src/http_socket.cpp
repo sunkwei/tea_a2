@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // http_socket.cpp -- portable plain-HTTP/1.1 backend (TCP sockets).
 #include "http.h"
 

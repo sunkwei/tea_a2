@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // android_jni.cpp -- the Android entry point.
 //
 // The APK loads liba2.so and starts the agent from Java:

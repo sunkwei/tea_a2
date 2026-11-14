@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // version.h -- the accessors the binary reports its version with.
 //
 // The version STRING is not here: it lives in version.cpp, next to the

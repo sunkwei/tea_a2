@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // gzip_stream.h -- a gzip stream that can be fed in pieces.
 //
 // gzip_compress() (gzip.h) compresses a whole buffer in one go: that is what

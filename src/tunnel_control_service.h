@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_control_service.h -- the service the outside side of the desktop
 // tunnel hands out.
 //

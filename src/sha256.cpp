@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // sha256.cpp -- the algorithm, written out.
 
 #include "sha256.h"

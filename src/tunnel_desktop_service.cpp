@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_desktop_service.cpp -- the device side of the desktop tunnel.
 //
 // A thread takes pictures of the screen a few times a second and hands the

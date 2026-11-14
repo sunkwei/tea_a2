@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // usage.h -- query a provider's quota endpoint ("how much of my subscription
 // is left").
 //

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_video.cpp -- the pictures that travel through the tunnel.
 //
 // JPEG: GDI+ (the JPEG codec is in Windows; WIC's copy of it is not

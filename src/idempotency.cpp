@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // idempotency.cpp -- the store of remembered answers.
 
 #include "idempotency.h"

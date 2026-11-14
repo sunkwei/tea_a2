@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // http_gzip.h -- when an answer may be compressed, and with what.
 //
 // The tunnel (a2_tunnel) carries these very HTTP bytes over a link that is

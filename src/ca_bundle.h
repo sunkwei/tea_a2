@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // ca_bundle.h -- the TLS roots compiled into the binary.
 //
 // For single-file deployment the trusted roots must not live in a sidecar file:

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // agent_main.h -- the agent's entry point, callable without a `main()`.
 //
 // The CLI is `main()` in main.cpp. The Android build is the same code loaded

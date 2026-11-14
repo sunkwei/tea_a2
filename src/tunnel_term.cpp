@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_term.cpp -- the HTTP terminal that the tunnel can carry.
 //
 // The sidecar normally forwards bytes between the two ends of a tunnel. This

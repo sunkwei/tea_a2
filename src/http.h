@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // http.h -- minimal HTTP/1.1 client.
 //
 // Two interchangeable backends:

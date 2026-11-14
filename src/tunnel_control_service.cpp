@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_control_service.cpp -- the outside side of the desktop tunnel.
 //
 // The browser talks to this service on the loopback. This service talks to

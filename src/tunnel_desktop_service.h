@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_desktop_service.h -- the service the device side of the desktop
 // tunnel hands out.
 //

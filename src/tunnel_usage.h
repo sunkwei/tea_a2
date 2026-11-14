@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_usage.h -- who used the TURN relay, and how much.
 //
 // libjuice tells us when a relay session starts and ends, and how many bytes

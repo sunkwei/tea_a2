@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // prompt_queue.h -- prompts the user typed while a turn is already running.
 //
 // A turn can run for minutes: a long tool call, several model iterations. The
