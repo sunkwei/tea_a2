@@ -221,7 +221,7 @@ struct Child {
   // The flag(s) that ask the program for its version. The default is
   // "--version"; an empty list switches the question off.
   std::vector<std::string> version_args;
-  // What the program said about itself ("tea_agent 1.3.0"). Empty when the
+  // What the program said about itself ("tea_agent 1.4.1"). Empty when the
   // program does not answer that question.
   std::string version;
   // Whether the question was already asked, and for which build: a newer file
@@ -345,7 +345,7 @@ std::wstring build_environment(const std::vector<std::pair<std::string, std::str
 const ULONGLONG kVersionTimeoutMs = 5000;
 
 // The first line of what the program printed, without the whitespace around
-// it. That line is the version ("tea_agent 1.3.0").
+// it. That line is the version ("tea_agent 1.4.1").
 std::string first_line(const std::string& text) {
   size_t start = 0;
   while (start < text.size() &&

@@ -76,12 +76,12 @@ appstub.exe [--config <文件>] [--no-autostart] [--version]
 托盘菜单里，每个程序后面都写着它自己报的版本号：
 
 ```
-tea_a2 agent  —  运行中 (pid 19664)  ·  tea_agent 1.3.0
-tea_a2 任务队列  —  运行中 (pid 17644)  ·  tea-task-server 1.3.0
+tea_a2 agent  —  运行中 (pid 19664)  ·  tea_agent 1.4.1
+tea_a2 任务队列  —  运行中 (pid 17644)  ·  tea-task-server 1.4.1
 ```
 
 问法是把它平常的参数再加上 `--version` 跑一遍，输出的第一行就是版本号
-（`tea_agent 1.3.0`）。**程序不认识这个参数，就什么都不显示** —— 瞎编一个
+（`tea_agent 1.4.1`）。**程序不认识这个参数，就什么都不显示** —— 瞎编一个
 版本号比没有版本号更糟。
 
 * 启动时问一次；程序文件被重新编译过（就是被盯着改的那个文件）就再问一次。
