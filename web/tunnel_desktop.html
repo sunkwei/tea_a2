@@ -18,13 +18,14 @@
   .dot.bad { background: #f25a5a; }
   #meta { color: #8b949e; }
   /* The picture is scaled to fit: the whole desktop is always visible,
-     never a cropped corner. The browser keeps the ratio (the canvas knows
-     the picture's own size), and the mouse coordinates are mapped back
-     through the same ratio. */
+     never a cropped corner - a small window shows a small desktop, a big
+     one a big desktop. The browser keeps the ratio (the canvas knows the
+     picture's own size), and the mouse coordinates are mapped back through
+     the same ratio, so the mouse lands where the picture says. */
   #stage { flex: 1 1 auto; overflow: hidden; display: flex; align-items: center;
     justify-content: center; padding: 8px; }
   canvas { background: #05070a; max-width: 100%; max-height: 100%; width: auto;
-    height: auto; }
+    height: auto; object-fit: contain; }
   footer { flex: none; padding: 6px 12px; border-top: 1px solid #23272e; color: #8b949e;
     background: #14181e; }
 </style>
