@@ -442,7 +442,8 @@ struct H264Encoder::Impl {
 H264Encoder::H264Encoder() : impl_(new Impl()) {}
 H264Encoder::~H264Encoder() { stop(); }
 
-bool H264Encoder::start(int width, int height, int fps, int bitrate, std::string* err) {
+bool H264Encoder::start(int width, int height, int fps, int bitrate, int keyint_seconds,
+                         std::string* err) {
   if (impl_->encoder != nullptr) return true;
   if (width <= 0 || height <= 0 || (width % 2) != 0 || (height % 2) != 0) {
     if (err) *err = "the H.264 encoder wants even width and height";
@@ -474,8 +475,11 @@ bool H264Encoder::start(int width, int height, int fps, int bitrate, std::string
   // the next one would add a frame of delay to the mouse.
   param.rc.i_lookahead = 0;
   param.i_sync_lookahead = 0;
-  // Every picture stands on its own.
-  param.i_keyint_max = 1;
+  // The key frames: one every `keyint_seconds` seconds (0 = every
+  // picture is one, which is what the tunnel needs when it cannot keep
+  // the order of the pictures).
+  const int seconds = keyint_seconds > 0 ? keyint_seconds : 1;
+  param.i_keyint_max = (fps > 0 ? fps : 2) * seconds;
   param.b_repeat_headers = 1;
   param.b_annexb = 1;            // the NAL units carry their own start codes
   param.i_threads = 1;           // the pictures come one at a time
@@ -493,7 +497,8 @@ bool H264Encoder::start(int width, int height, int fps, int bitrate, std::string
 }
 
 bool H264Encoder::encode(const YuvFrame& frame, int64_t timestamp_ms, std::string* out,
-                          std::string* err) {
+                          bool* is_key, std::string* err) {
+  if (is_key != nullptr) *is_key = false;
   if (impl_->encoder == nullptr) {
     if (err) *err = "the H.264 encoder is not running";
     return false;
@@ -542,6 +547,7 @@ bool H264Encoder::encode(const YuvFrame& frame, int64_t timestamp_ms, std::strin
   // what x264's own example does).
   out->append(reinterpret_cast<const char*>(nals[0].p_payload),
               static_cast<std::size_t>(size));
+  if (is_key != nullptr) *is_key = encoded.b_keyframe != 0;
   impl_->frames++;
   return true;
 }

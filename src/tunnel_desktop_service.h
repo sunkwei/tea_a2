@@ -21,8 +21,28 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace tea_tunnel {
+
+/// One picture of the stream: its number, whether it is a key frame, and
+/// the bytes.
+struct StreamPicture {
+  uint32_t seq = 0;
+  bool key = false;
+  std::string bytes;
+};
+
+/// The pictures of the stream, packed into one body (this is what travels
+/// through the tunnel):
+///
+///   4 bytes   how many pictures
+///   per picture: 4 bytes the number, 1 byte (1 = a key frame),
+///                4 bytes the length, then the bytes
+std::string pack_pictures(const std::vector<StreamPicture>& pictures);
+
+/// Unpack what pack_pictures wrote. False when the body is broken.
+bool unpack_pictures(const std::string& body, std::vector<StreamPicture>* out);
 
 class DesktopService {
  public:
@@ -34,8 +54,10 @@ class DesktopService {
   /// Start the service. `max_width` is the widest picture (0 = the screen
   /// as it is), `fps` how many pictures a second, `quality` the JPEG
   /// quality (0 = the default), `bitrate` the bits per second the H.264
-  /// encoder may use (0 = the default).
-  bool start(int max_width, int fps, int quality, int bitrate, std::string* err);
+  /// encoder may use (0 = the default), `keyint_seconds` how often a key
+  /// frame comes (0 = every picture is one).
+  bool start(int max_width, int fps, int quality, int bitrate, int keyint_seconds,
+             std::string* err);
   void stop();
 
   bool running() const { return running_; }
@@ -44,6 +66,7 @@ class DesktopService {
   /// The paths the other side calls. They are part of the contract between
   /// the two halves, so both of them use these names.
   static const char* frame_path() { return "/api/desktop/frame"; }
+  static const char* frames_path() { return "/api/desktop/frames"; }
   static const char* info_path() { return "/api/desktop/info"; }
   static const char* codec_path() { return "/api/desktop/codec"; }
   static const char* input_path() { return "/api/desktop/input"; }

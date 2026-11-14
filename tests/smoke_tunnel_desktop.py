@@ -194,35 +194,58 @@ def main():
               status == 200 and b"api/control/frame" in raw, str(status))
 
         # ---- 画面穿过隧道 ------------------------------------------------
-        picture = b""
+        # The pictures travel as a stream: a key frame and the P frames
+        # after it. They have to arrive in order and without gaps.
+        body = b""
         deadline = time.time() + 30
         while time.time() < deadline:
             try:
-                status, raw, headers = http(base + "/api/control/frame", timeout=10)
+                status, raw, headers = http(base + "/api/control/frames?since=0", timeout=10)
                 if status == 200 and raw:
-                    picture = raw
-                    break
+                    body = raw
+                    # Wait until there is a picture with content in it.
+                    if len(raw) > 13 and int.from_bytes(raw[5:9], "big") > 0:
+                        break
             except Exception:
                 pass
             time.sleep(0.5)
-        check("a picture comes through the tunnel", bool(picture), "no picture in 30s")
-        # H.264 in Annex-B: the NAL units carry their own start codes, and
-        # every picture is a key frame (so it stands on its own).
+        check("pictures come through the tunnel", bool(body), "no pictures in 30s")
+        pictures = []
+        if body:
+            count = int.from_bytes(body[0:4], "big")
+            at = 4
+            for _ in range(count):
+                if at + 9 > len(body):
+                    break
+                seq = int.from_bytes(body[at:at + 4], "big")
+                key = body[at + 4] != 0
+                length = int.from_bytes(body[at + 5:at + 9], "big")
+                pictures.append((seq, key, body[at + 9:at + 9 + length]))
+                at += 9 + length
+        numbers = [p[0] for p in pictures]
+        check("the pictures are in order", numbers == sorted(numbers), str(numbers))
+        check("the pictures are numbered one by one",
+              numbers == list(range(numbers[0], numbers[0] + len(numbers))) if numbers else False,
+              str(numbers))
+        first = pictures[0][2] if pictures else b""
+        # H.264 in Annex-B: the NAL units carry their own start codes.
         check("the picture is H.264",
-              picture[:3] == b"\x00\x00\x01" or picture[:4] == b"\x00\x00\x00\x01",
-              repr(picture[:8]))
+              first[:3] == b"\x00\x00\x01" or first[:4] == b"\x00\x00\x00\x01",
+              repr(first[:8]))
         types = set()
         at = 0
-        while at + 3 < len(picture) and len(types) < 12:
-            if picture[at:at + 3] == b"\x00\x00\x01":
-                types.add(picture[at + 3] & 0x1f)
+        while at + 3 < len(first) and len(types) < 12:
+            if first[at:at + 3] == b"\x00\x00\x01":
+                types.add(first[at + 3] & 0x1f)
                 at += 4
             else:
                 at += 1
-        check("the picture carries the SPS and the PPS", 7 in types and 8 in types, str(types))
-        check("the picture is not empty", len(picture) > 1000, "len=%d" % len(picture))
-        print("     (the picture is %d bytes; at two a second that is %.0f KB/s)" % (
-            len(picture), len(picture) * 2 / 1024.0))
+        check("the first picture is a key frame with the SPS and the PPS",
+              7 in types and 8 in types, str(types))
+        total = sum(len(p[2]) for p in pictures)
+        check("the pictures are not empty", total > 1000, "total=%d" % total)
+        print("     (%d pictures, %d bytes in all; at two a second that is %.0f KB/s)" % (
+            len(pictures), total, total * 2 / 1024.0))
 
         # ---- 画面会一直来 -------------------------------------------------
         # 之前有个毛病：第一张能取到，之后就卡住了（连接太多，设备端的

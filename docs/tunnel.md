@@ -435,7 +435,8 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 ┌────────────────────────────┐        ┌──────────────────────────────┐
 │ DesktopService（127.0.0.1）│        │ ControlService（127.0.0.1）  │
 │  抓屏线程 → H.264 (x264)   │        │  拉流线程 → 原样转手        │
-│  /api/desktop/frame         │◀─隧道─▶│  /api/control/frame         │
+│  /api/desktop/frames        │◀─隧道─▶│  /api/control/frames        │
+│  /api/desktop/frame         │        │  /api/control/frame         │
 │  /api/desktop/codec         │        │  /api/control/codec         │
 │  /api/desktop/input         │        │  /api/control/input          │
 └────────────────────────────┘        └──────────────────────────────┘
@@ -443,6 +444,9 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 
 **关键的几点**：
 
+- **画面成流**：关键帧（每 10 秒一个，`--keyint`）加上中间的 P 帧。P 帧要靠前面
+  的帧，所以两边都要**按顺序、一张不缺**地送（设备留最近 32 张，浏览器问「从第几张
+  开始」）。少了帧，解码器要等下一个关键帧。
 - **隧道没有变**：还是字节透明的数据通道。画面是 H.264 字节，穿过隧道；外面那台
   的控制侧再通过**自己的本地代理**（就是 9931 那个）去对面取 —— 也就是说外面那台
   跟设备之间的唯一通路还是隧道。

@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -51,6 +52,8 @@ struct DesktopService::Impl {
 
   std::mutex mu;
   std::string picture;          // the newest picture (as it is encoded)
+  std::deque<StreamPicture> stream;   // the last pictures, in order
+  uint32_t next_seq = 1;               // the number the next picture gets
   std::string codec = "h264";   // "h264" or "jpeg"
   int frame_width = 0;
   int frame_height = 0;
@@ -60,6 +63,7 @@ struct DesktopService::Impl {
   int fps = 2;
   int quality = 0;
   int bitrate = 2000000;        // bits per second
+  int keyint_seconds = 10;      // a key frame every this many seconds
   H264Encoder encoder;          // the H.264 encoder (x264)
   int encoder_width = 0;
   int encoder_height = 0;
@@ -76,12 +80,14 @@ bool DesktopService::Impl::encode(const ScreenFrame& frame, std::string* out,
   int fps = 2;
   int quality = 0;
   int bitrate = 2000000;
+  int keyint = 10;
   {
     std::lock_guard<std::mutex> lock(mu);
     codec = this->codec;
     fps = this->fps;
     quality = this->quality;
     bitrate = this->bitrate;
+    keyint = this->keyint_seconds;
   }
   if (codec == "jpeg") {
     return jpeg_encode(frame.bgra.data(), frame.width, frame.height, frame.width * 4, quality,
@@ -90,18 +96,94 @@ bool DesktopService::Impl::encode(const ScreenFrame& frame, std::string* out,
   // H.264: the screen is BGRA, x264 wants I420.
   if (!encoder.running() || frame.width != encoder_width || frame.height != encoder_height) {
     encoder.stop();
-    if (!encoder.start(frame.width, frame.height, fps, bitrate, err)) return false;
+    if (!encoder.start(frame.width, frame.height, fps, bitrate, keyint, err)) return false;
     encoder_width = frame.width;
     encoder_height = frame.height;
   }
   const int64_t started = now_ms();
   YuvFrame yuv;
   bgra_to_yuv(frame.bgra.data(), frame.width, frame.height, frame.width * 4, &yuv);
-  const bool ok = encoder.encode(yuv, started, out, err);
+  bool is_key = true;
+  const bool ok = encoder.encode(yuv, started, out, &is_key, err);
+  // x264 holds the first picture back until the rate control has settled:
+  // that one comes out empty. An empty picture must not go into the stream
+  // (the browser would try to decode it).
+  if (ok && !out->empty()) {
+    std::lock_guard<std::mutex> lock(mu);
+    StreamPicture picture;
+    picture.seq = next_seq++;
+    picture.key = is_key;
+    picture.bytes = *out;
+    stream.push_back(picture);
+    // Keep the last ones only: the other side may be away for a while.
+    while (stream.size() > 32) stream.pop_front();
+  }
   std::fprintf(stderr, "desktop: the picture is %zu bytes (%.2f MB/s at %d a second)\n",
                out->size(), out->size() * static_cast<double>(fps) / 1048576.0, fps);
   std::fflush(stderr);
   return ok;
+}
+
+
+// ---------------------------------------------------------------------------
+// The stream: the pictures, packed
+// ---------------------------------------------------------------------------
+namespace {
+
+void put_u32(std::string* out, uint32_t value) {
+  out->push_back(static_cast<char>((value >> 24) & 0xff));
+  out->push_back(static_cast<char>((value >> 16) & 0xff));
+  out->push_back(static_cast<char>((value >> 8) & 0xff));
+  out->push_back(static_cast<char>(value & 0xff));
+}
+
+bool get_u32(const std::string& body, std::size_t at, uint32_t* value) {
+  if (at + 4 > body.size()) return false;
+  *value = (static_cast<uint32_t>(static_cast<unsigned char>(body[at])) << 24) |
+           (static_cast<uint32_t>(static_cast<unsigned char>(body[at + 1])) << 16) |
+           (static_cast<uint32_t>(static_cast<unsigned char>(body[at + 2])) << 8) |
+           static_cast<uint32_t>(static_cast<unsigned char>(body[at + 3]));
+  return true;
+}
+
+}  // namespace
+
+std::string pack_pictures(const std::vector<StreamPicture>& pictures) {
+  std::string out;
+  put_u32(&out, static_cast<uint32_t>(pictures.size()));
+  for (const StreamPicture& picture : pictures) {
+    put_u32(&out, picture.seq);
+    out.push_back(picture.key ? 1 : 0);
+    put_u32(&out, static_cast<uint32_t>(picture.bytes.size()));
+    out.append(picture.bytes);
+  }
+  return out;
+}
+
+bool unpack_pictures(const std::string& body, std::vector<StreamPicture>* out) {
+  if (out == nullptr) return false;
+  out->clear();
+  uint32_t count = 0;
+  if (!get_u32(body, 0, &count)) return false;
+  std::size_t at = 4;
+  for (uint32_t i = 0; i < count; i++) {
+    uint32_t seq = 0;
+    uint32_t length = 0;
+    if (!get_u32(body, at, &seq)) return false;
+    at += 4;
+    if (at >= body.size()) return false;
+    const bool key = body[at++] != 0;
+    if (!get_u32(body, at, &length)) return false;
+    at += 4;
+    if (at + length > body.size()) return false;
+    StreamPicture picture;
+    picture.seq = seq;
+    picture.key = key;
+    picture.bytes = body.substr(at, length);
+    at += length;
+    out->push_back(picture);
+  }
+  return true;
 }
 
 DesktopService::DesktopService() : impl_(new Impl()) {}
@@ -109,11 +191,12 @@ DesktopService::DesktopService() : impl_(new Impl()) {}
 DesktopService::~DesktopService() { stop(); }
 
 bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
-                            std::string* err) {
+                            int keyint_seconds, std::string* err) {
   if (running_) return true;
   impl_->fps = fps > 0 ? fps : 2;
   impl_->quality = quality;
   impl_->bitrate = bitrate > 0 ? bitrate : 2000000;
+  impl_->keyint_seconds = keyint_seconds > 0 ? keyint_seconds : 10;
   if (!impl_->desktop.start(max_width, err)) return false;
 
   // The pictures: take one right now so the first request does not wait.
@@ -207,6 +290,46 @@ bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
     send_json(res, out);
   });
 
+  // The pictures of the stream: everything after the number the other
+  // side already has. They have to arrive in order and without gaps (a
+  // missing picture means the decoder has to wait for the next key frame).
+  server.Get(DesktopService::frames_path(), [this](const httplib::Request& req,
+                                                   httplib::Response& res) {
+    uint32_t since = 0;
+    if (req.has_param("since")) {
+      since = static_cast<uint32_t>(
+          std::strtoul(req.get_param_value("since").c_str(), nullptr, 10));
+    }
+    std::vector<StreamPicture> wanted;
+    std::string codec;
+    int frame_width = 0;
+    int frame_height = 0;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mu);
+      codec = impl_->codec;
+      frame_width = impl_->frame_width;
+      frame_height = impl_->frame_height;
+      for (const StreamPicture& picture : impl_->stream) {
+        if (picture.seq > since) wanted.push_back(picture);
+      }
+    }
+    if (wanted.empty()) {
+      res.status = 204;
+      return;
+    }
+    res.status = 200;
+    res.set_header("Cache-Control", "no-store");
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_header("X-Codec", codec);
+    // The sizes travel with the pictures: the other side does not have to
+    // ask for them in a second request.
+    res.set_header("X-Screen-Width", std::to_string(impl_->desktop.screen_width()));
+    res.set_header("X-Screen-Height", std::to_string(impl_->desktop.screen_height()));
+    res.set_header("X-Frame-Width", std::to_string(frame_width));
+    res.set_header("X-Frame-Height", std::to_string(frame_height));
+    res.set_content(pack_pictures(wanted), "application/octet-stream");
+  });
+
   server.Get(DesktopService::info_path(), [this](const httplib::Request&, httplib::Response& res) {
     std::lock_guard<std::mutex> lock(impl_->mu);
     json body = json::object();
@@ -218,6 +341,7 @@ bool DesktopService::start(int max_width, int fps, int quality, int bitrate,
     body["fps"] = impl_->fps;
     body["codec"] = impl_->codec;
     body["bitrate"] = impl_->bitrate;
+    body["keyint"] = impl_->keyint_seconds;
     body["frames"] = impl_->frames;
     body["frame_at_ms"] = impl_->frame_at_ms;
     send_json(res, body);

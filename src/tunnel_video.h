@@ -60,11 +60,16 @@ class H264Encoder {
   H264Encoder& operator=(const H264Encoder&) = delete;
 
   /// Get ready to encode pictures of this size. `bitrate` is in bits per
-  /// second, `fps` the number of pictures a second.
-  bool start(int width, int height, int fps, int bitrate, std::string* err);
+  /// second, `fps` the number of pictures a second, `keyint_seconds` how
+  /// often a key frame comes (0 = every picture is one).
+  bool start(int width, int height, int fps, int bitrate, int keyint_seconds,
+             std::string* err);
 
-  /// Encode one picture. The Annex-B bytes are appended to `out`.
-  bool encode(const YuvFrame& frame, int64_t timestamp_ms, std::string* out, std::string* err);
+  /// Encode one picture. The Annex-B bytes are appended to `out`. `is_key`
+  /// says whether this picture is a key frame (a decoder that missed one
+  /// has to wait for the next one).
+  bool encode(const YuvFrame& frame, int64_t timestamp_ms, std::string* out, bool* is_key,
+              std::string* err);
 
   void stop();
   bool running() const { return running_; }

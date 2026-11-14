@@ -31,8 +31,10 @@
   /* ---- H.264: the browser decodes it by itself (WebCodecs) ---- */
   var decoder = null;
   var decoderCodec = '';
+  var avcInfoCache = null;     // the SPS/PPS of the last key frame
   var askedForJpeg = false;
   var frameNo = 0;
+  var lastSeq = 0;             // the last picture number we have
 
   function canDecodeH264() {
     return typeof window.VideoDecoder !== 'undefined' &&
@@ -115,6 +117,83 @@
     return out;
   }
 
+  /* The pictures of the stream come in one body:
+       4 bytes  how many
+       per picture: 4 bytes the number, 1 byte (1 = a key frame),
+                    4 bytes the length, then the bytes */
+  function unpackPictures(buffer) {
+    var view = new DataView(buffer);
+    var count = view.getUint32(0);
+    var at = 4;
+    var out = [];
+    for (var i = 0; i < count; i++) {
+      if (at + 9 > buffer.byteLength) break;
+      var seq = view.getUint32(at); at += 4;
+      var key = view.getUint8(at) !== 0; at += 1;
+      var length = view.getUint32(at); at += 4;
+      if (at + length > buffer.byteLength) break;
+      out.push({ seq: seq, key: key, bytes: new Uint8Array(buffer, at, length) });
+      at += length;
+    }
+    return out;
+  }
+
+  function askForJpeg() {
+    if (askedForJpeg) return;
+    askedForJpeg = true;
+    fetch('api/control/codec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codec: 'jpeg' })
+    });
+    setDot('wait');
+  }
+
+  function drawJpeg(bytes) {
+    return createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }))
+      .then(function (bmp) {
+        if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+          canvas.width = bmp.width;
+          canvas.height = bmp.height;
+        }
+        ctx.drawImage(bmp, 0, 0);
+        bmp.close();
+        lastFrameAt = Date.now();
+        setDot('ok');
+      });
+  }
+
+  function feedH264(picture) {
+    if (!canDecodeH264()) {
+      askForJpeg();
+      return;
+    }
+    var units = annexBUnits(picture.bytes);
+    var info = avcInfo(units);
+    if (info) {
+      avcInfoCache = info;
+    } else {
+      info = avcInfoCache;   // a delta frame has no SPS of its own
+    }
+    if (!info) return;
+    if (picture.key) {
+      // A key frame stands on its own: the decoder can start over here.
+      if (decoder) {
+        try { decoder.close(); } catch (e) { /* it is already gone */ }
+        decoder = null;
+      }
+      frameNo = 0;
+    }
+    if (!ensureDecoder(info)) return;
+    // Too far behind: skip this one rather than pile up.
+    if (decoder.decodeQueueSize > 8) return;
+    decoder.decode(new EncodedVideoChunk({
+      type: picture.key ? 'key' : 'delta',
+      timestamp: (frameNo++) * 500000,
+      data: toLengthPrefixed(units)
+    }));
+  }
+
   function ensureDecoder(info) {
     if (decoder && decoderCodec === info.codec) return true;
     if (decoder) {
@@ -162,57 +241,27 @@
       }
     }).catch(function () { setDot('bad'); });
 
-    fetch('api/control/frame', { cache: 'no-store' }).then(function (r) {
-      if (r.status !== 200) return null;
-      var codec = r.headers.get('X-Codec') || 'jpeg';
-      return r.arrayBuffer().then(function (buf) {
-        return { codec: codec, bytes: new Uint8Array(buf) };
-      });
-    }).then(function (frame) {
-      if (!frame) {
-        setDot('wait');
-        return;
-      }
-      if (frame.codec === 'h264') {
-        if (!canDecodeH264()) {
-          // This browser cannot read H.264: ask for JPEG instead.
-          if (!askedForJpeg) {
-            askedForJpeg = true;
-            fetch('api/control/codec', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ codec: 'jpeg' })
-            });
-          }
-          setDot('wait');
-          return;
-        }
-        var units = annexBUnits(frame.bytes);
-        var info = avcInfo(units);
-        if (!info || !ensureDecoder(info)) {
-          setDot('wait');
-          return;
-        }
-        decoder.decode(new EncodedVideoChunk({
-          type: 'key',
-          timestamp: (frameNo++) * 500000,
-          data: toLengthPrefixed(units)
-        }));
-        return;
-      }
-      // JPEG (the browser reads it without any help).
-      return createImageBitmap(new Blob([frame.bytes], { type: 'image/jpeg' }))
-        .then(function (bmp) {
-          if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
-            canvas.width = bmp.width;
-            canvas.height = bmp.height;
-          }
-          ctx.drawImage(bmp, 0, 0);
-          bmp.close();
-          lastFrameAt = Date.now();
-          setDot('ok');
+    fetch('api/control/frames?since=' + lastSeq, { cache: 'no-store' })
+      .then(function (r) {
+        if (r.status !== 200) return null;
+        var codec = r.headers.get('X-Codec') || 'jpeg';
+        return r.arrayBuffer().then(function (buf) {
+          return { codec: codec, pictures: unpackPictures(buf) };
         });
-    }).catch(function () { setDot('bad'); });
+      }).then(function (batch) {
+        if (!batch) {
+          setDot('wait');
+          return;
+        }
+        batch.pictures.forEach(function (picture) {
+          lastSeq = picture.seq;
+          if (batch.codec === 'h264') {
+            feedH264(picture);
+          } else {
+            drawJpeg(picture.bytes);
+          }
+        });
+      }).catch(function () { setDot('bad'); });
   }
 
   /* ---- 坐标：浏览器的位置 -> 画面里的像素 ---- */

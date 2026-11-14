@@ -626,7 +626,8 @@ int main(int argc, char** argv) {
   // is. The default is the screen as it is (the whole desktop, at its real
   // pixels); --width caps it when the bandwidth matters.
   int desktop_max_width = 0;
-  int desktop_bitrate = 2000000;   // bits per second for the H.264 picture
+  int desktop_bitrate = 100000;    // bits per second for the H.264 picture
+  int desktop_keyint = 10;         // a key frame every this many seconds
   int desktop_fps = 2;
   int desktop_quality = 50;
   // The port the browser opens (the control side only).
@@ -667,8 +668,16 @@ int main(int argc, char** argv) {
           "                     (default 0 = the screen as it is, at its real\n"
           "                     pixels; a smaller number scales it down)\n"
           "  --bitrate <kbps>  the bits per second the H.264 picture may use\n"
-          "                     (default 2000; the picture of a 2560x1440 screen\n"
-          "                     is then about 30 KB instead of 200 KB as JPEG)\n"
+          "                     (default 100; that is about 6 KB a picture at\n"
+          "                     2560x1440 and two pictures a second - the\n"
+          "                     picture is soft, the mouse and the keyboard\n"
+          "                     are not affected.  --width 1280 makes it\n"
+          "                     much clearer for the same bitrate)\n"
+          "  --keyint <seconds> how often a key frame comes (default 10).  The\n"
+          "                     pictures in between are much smaller (a quiet\n"
+          "                     screen: a few KB), but they need the ones\n"
+          "                     before them - the pictures travel as a\n"
+          "                     stream and none of them may be lost\n"
           "  --fps <n>         how many pictures a second (default 2)\n"
           "  --quality <n>     the JPEG quality, 1..100 (default 50)\n"
           "\n"
@@ -703,6 +712,8 @@ int main(int argc, char** argv) {
       desktop_max_width = std::atoi(next().c_str());
     } else if (a == "--bitrate") {
       desktop_bitrate = std::atoi(next().c_str()) * 1000;
+    } else if (a == "--keyint") {
+      desktop_keyint = std::atoi(next().c_str());
     } else if (a == "--broker") {
       std::string hp = next();
       split_hostport(hp, broker_host, broker_port);
@@ -827,7 +838,7 @@ int main(int argc, char** argv) {
   if (is_desktop) {
     std::string desktop_err;
     if (!desktop_service.start(desktop_max_width, desktop_fps, desktop_quality, desktop_bitrate,
-                               &desktop_err)) {
+                               desktop_keyint, &desktop_err)) {
       log_line("sidecar: cannot start the desktop: %s\n", desktop_err.c_str());
       return 1;
     }

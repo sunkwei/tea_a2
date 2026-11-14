@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -61,6 +62,8 @@ struct ControlService::Impl {
 
   std::mutex mu;
   std::string picture;          // the newest picture (as it came)
+  std::deque<StreamPicture> stream;   // the pictures, in order
+  uint32_t last_seq = 0;               // the last number the other side sent
   std::string codec = "h264";   // "h264" or "jpeg"
   int frame_width = 0;
   int frame_height = 0;
@@ -111,6 +114,34 @@ bool ControlService::start(const std::string& proxy_host, int proxy_port, int vi
     res.status = 200;
     res.set_header("Cache-Control", "no-store");
     res.set_content(std::string(asset->data, asset->size), "application/javascript; charset=utf-8");
+  });
+
+  // The pictures of the stream, from the number the browser already has.
+  server.Get("/api/control/frames", [this](const httplib::Request& req,
+                                            httplib::Response& res) {
+    uint32_t since = 0;
+    if (req.has_param("since")) {
+      since = static_cast<uint32_t>(
+          std::strtoul(req.get_param_value("since").c_str(), nullptr, 10));
+    }
+    std::vector<StreamPicture> wanted;
+    std::string codec;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mu);
+      codec = impl_->codec;
+      for (const StreamPicture& picture : impl_->stream) {
+        if (picture.seq > since) wanted.push_back(picture);
+      }
+    }
+    if (wanted.empty()) {
+      res.status = 204;
+      return;
+    }
+    res.status = 200;
+    res.set_header("Cache-Control", "no-store");
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_header("X-Codec", codec);
+    res.set_content(pack_pictures(wanted), "application/octet-stream");
   });
 
   // The newest picture. It is handed over as it came: the browser knows
@@ -304,19 +335,28 @@ void ControlService::pull_loop() {
   cli.set_keep_alive(false);
   int64_t last_info = 0;
   while (!impl_->stopping.load()) {
-    // The picture. It comes through the tunnel, so it is the other machine's
-    // screen that is on it.
-    auto res = cli.Get(DesktopService::frame_path());
+    // The pictures. They come through the tunnel, so it is the other
+    // machine's screen that is on it. They have to keep their order and
+    // come without gaps: a missing picture means the decoder has to wait
+    // for the next key frame.
+    uint32_t since = 0;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mu);
+      since = impl_->last_seq;
+    }
+    std::string url = std::string(DesktopService::frames_path()) + "?since=" +
+                      std::to_string(since);
+    auto res = cli.Get(url);
     if (!res) {
-      std::fprintf(stderr, "desktop: the picture did not come through\n");
+      std::fprintf(stderr, "desktop: the pictures did not come through\n");
       std::fflush(stderr);
     } else if (res->status != 200) {
-      std::fprintf(stderr, "desktop: the picture came back with %d\n", res->status);
+      std::fprintf(stderr, "desktop: the pictures came back with %d\n", res->status);
       std::fflush(stderr);
     }
     if (res && res->status == 200 && !res->body.empty()) {
-      // The picture is handed over as it is: the sizes and the codec come
-      // with it in the headers, so nothing has to be decoded here.
+      // The pictures are handed over as they are: the sizes and the codec
+      // come with them in the headers, so nothing has to be decoded here.
       int width = 0;
       int height = 0;
       int screen_width = 0;
@@ -337,17 +377,28 @@ void ControlService::pull_loop() {
       if (res->has_header("X-Codec")) {
         codec = res->get_header_value("X-Codec");
       }
-      std::lock_guard<std::mutex> lock(impl_->mu);
-      impl_->picture = res->body;
-      impl_->codec = codec;
-      impl_->frame_width = width;
-      impl_->frame_height = height;
-      if (screen_width > 0) impl_->screen_width = screen_width;
-      if (screen_height > 0) impl_->screen_height = screen_height;
-      impl_->frame_at_ms = now_ms();
-      impl_->frames++;
-      impl_->decoded++;
-      impl_->last_error.clear();
+      std::vector<StreamPicture> pictures;
+      if (!unpack_pictures(res->body, &pictures) || pictures.empty()) {
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        impl_->last_error = "the pictures from the other side could not be read";
+      } else {
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        for (const StreamPicture& picture : pictures) {
+          impl_->stream.push_back(picture);
+          impl_->last_seq = picture.seq;
+        }
+        while (impl_->stream.size() > 64) impl_->stream.pop_front();
+        impl_->picture = impl_->stream.back().bytes;
+        impl_->codec = codec;
+        impl_->frame_width = width;
+        impl_->frame_height = height;
+        if (screen_width > 0) impl_->screen_width = screen_width;
+        if (screen_height > 0) impl_->screen_height = screen_height;
+        impl_->frame_at_ms = now_ms();
+        impl_->frames++;
+        impl_->decoded += static_cast<int64_t>(pictures.size());
+        impl_->last_error.clear();
+      }
     }
     // The sizes of the screen come with the picture (its headers), so
     // there is no second request to make.
