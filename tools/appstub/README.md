@@ -24,12 +24,14 @@ LocalSystem 会把这些全搞坏（`git` 还会因为 "dubious ownership" 拒�
 ## 用法
 
 ```
-appstub.exe [--config <文件>] [--no-autostart]
+appstub.exe [--config <文件>] [--no-autostart] [--version]
 ```
 
 * `--config`：配置文件。默认找 `<exe 同目录>\config.json`，没有就找
   `%LOCALAPPDATA%\appstub\config.json`。
 * `--no-autostart`：起来了，但先把配置里 `autostart` 的程序都不启动。
+* `--version`：打印自己的版本和它托管的各个程序的版本，然后退出（不启动
+  托盘图标）。
 
 ## 配置
 
@@ -67,6 +69,25 @@ appstub.exe [--config <文件>] [--no-autostart]
 | `restart` | `on-failure`（退出码非 0 就重启，默认）或 `never` |
 | `restart_delay_ms` | 重启前等多久（默认 3000） |
 | `watch_file` | 盯哪个文件（默认就是 `command`）。脚本型程序盯脚本：`"watch_file": "…\\task_server.py"` |
+| `version_args` | 用什么参数问程序要版本号（默认 `["--version"]`）。空的数组 = 不问 |
+
+## 版本
+
+托盘菜单里，每个程序后面都写着它自己报的版本号：
+
+```
+tea_a2 agent  —  运行中 (pid 19664)  ·  tea_agent 1.3.0
+tea_a2 任务队列  —  运行中 (pid 17644)  ·  tea-task-server 1.3.0
+```
+
+问法是把它平常的参数再加上 `--version` 跑一遍，输出的第一行就是版本号
+（`tea_agent 1.3.0`）。**程序不认识这个参数，就什么都不显示** —— 瞎编一个
+版本号比没有版本号更糟。
+
+* 启动时问一次；程序文件被重新编译过（就是被盯着改的那个文件）就再问一次。
+* 问的动作最多等 5 秒：万一有程序不理这个参数、自己跑起来了，就把它停掉。
+* `version_args` 可以换问法（`["-V"]` 之类）；写成 `[]` 就不问了。
+* 命令行上：`appstub --version` 打印同样的内容。
 
 ## 构建
 

@@ -27,6 +27,9 @@ Usage:
   # what is in the queue
   curl http://127.0.0.1:8283/api/tasks
 
+  # the version
+  python3 sched/task_server.py --version
+
 Standard library only: this runs on the device, next to the agent, where a pip
 install is not an option.
 """
@@ -5248,7 +5251,16 @@ def main(argv=None):
                         help="the wall clock of this turn, in ms (0 = no limit)")
     parser.add_argument("--no-serve", action="store_true",
                         help="do not serve; only run the scheduler (for a cron-style setup)")
+    parser.add_argument("--version", action="store_true",
+                        help="show the version and exit")
     args = parser.parse_args(argv)
+
+    # The version, and nothing else: the tray host asks every program it
+    # hosts for its version, and the answer has to come without a queue, an
+    # agent or a data directory.
+    if args.version:
+        print("tea-task-server %s" % QUEUE_VERSION)
+        return 0
 
     app = App(args)
 

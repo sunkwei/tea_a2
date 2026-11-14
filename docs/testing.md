@@ -67,6 +67,7 @@ node tests/ui_shell.mjs                                  # 网页终端：入口
 python3 tests/smoke_prompt_queue.py                       # 消息插队：采纳 / 取消 / 退回
 python3 tests/smoke_concurrency.py                        # 并发写：锁 + 原子替换，一个事件都不能丢
 python3 tests/smoke_task_server.py                         # 任务队列（Python 服务）+ 额度闸门 + 进度/结果/串行/幂等/事件/导出 + 模型参数/本地定时/生成物下载
+python3 tests/smoke_appstub_version.py                      # 托盘宿主（appstub）问托管的程序要版本号：认 --version 的显示、不认的什么都不显示
 python3 tests/smoke_turn_budget.py                         # 一轮的预算：默认 300 轮 / 请求只能收紧 / 到点正常结束（stop_reason=budget）
                                                           # + 工具调用预算 + 轨迹记 task_id 与预算
 python3 tests/smoke_turn_handle.py                         # 回合句柄：异步提交（202 + turn_id）/ 查状态 / 回放事件 / 精确停这一轮

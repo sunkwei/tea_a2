@@ -92,7 +92,7 @@ Run-Step 'end-to-end (tests/e2e.ps1)' {
 
 if (-not $SkipPython) {
     $smokes = @('smoke_config_quickstart.py', 'smoke_concurrency.py', 'smoke_task_runner.py',
-                 'smoke_artifacts.py', 'smoke_task_server.py',
+                 'smoke_artifacts.py', 'smoke_task_server.py', 'smoke_appstub_version.py',
                  'smoke_agent_doc.py', 'smoke_prompt_queue.py', 'smoke_system_prompt.py',
                  'smoke_todo.py', 'smoke_tool_images.py', 'smoke_usage_cache.py',
                  'smoke_provider_usage.py', 'smoke_console_level.py', 'smoke_vision.py',

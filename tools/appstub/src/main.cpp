@@ -25,6 +25,7 @@
 //         "env": {"TEA_AGENT_HOME": "C:\\Users\\Hetin\\.tea_agent"},
 //         "port": 8383,
 //         "url": "http://127.0.0.1:8383/",
+//         "version_args": ["--version"],
 //         "autostart": true,
 //         "restart": "on-failure",
 //         "restart_delay_ms": 3000
@@ -70,6 +71,14 @@ std::wstring widen(const std::string& utf8) {
   return out;
 }
 
+std::wstring utf8_to_wide(const std::string& utf8) {
+  if (utf8.empty()) return std::wstring();
+  int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), nullptr, 0);
+  std::wstring out(static_cast<size_t>(n), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), &out[0], n);
+  return out;
+}
+
 std::string narrow(const std::wstring& utf16) {
   if (utf16.empty()) return std::string();
   int n = WideCharToMultiByte(CP_UTF8, 0, utf16.c_str(), static_cast<int>(utf16.size()), nullptr, 0,
@@ -83,6 +92,10 @@ std::string narrow(const std::wstring& utf16) {
 // --- logging ---------------------------------------------------------------
 
 std::string g_log_file;
+
+// The version of this program. It lives here (and not in a header) because
+// only one file needs it.
+const char* const kAppstubVersion = "1.0.0";
 
 void logf(const char* fmt, ...) {
   char buffer[2048];
@@ -205,6 +218,16 @@ struct Child {
   // program was rebuilt and the child is restarted to pick up the new code.
   bool watch = true;
   std::string watch_file;  // empty = the command itself
+  // The flag(s) that ask the program for its version. The default is
+  // "--version"; an empty list switches the question off.
+  std::vector<std::string> version_args;
+  // What the program said about itself ("tea_agent 1.3.0"). Empty when the
+  // program does not answer that question.
+  std::string version;
+  // Whether the question was already asked, and for which build: a newer file
+  // on disk means a new program, and the answer has to be asked again.
+  bool version_asked = false;
+  ULONGLONG version_image_time = 0;
 
   // state
   HANDLE process = nullptr;
@@ -314,6 +337,146 @@ std::wstring build_environment(const std::vector<std::pair<std::string, std::str
   return out;
 }
 
+// --- asking a program for its version --------------------------------------
+
+// How long the probe may take. A program that knows the flag answers at
+// once; a program that ignores it and starts serving anyway is killed after
+// this.
+const ULONGLONG kVersionTimeoutMs = 5000;
+
+// The first line of what the program printed, without the whitespace around
+// it. That line is the version ("tea_agent 1.3.0").
+std::string first_line(const std::string& text) {
+  size_t start = 0;
+  while (start < text.size() &&
+         (text[start] == '\r' || text[start] == '\n' || text[start] == ' ' ||
+          text[start] == '\t')) {
+    ++start;
+  }
+  const size_t end = text.find_first_of("\r\n", start);
+  std::string line =
+      (end == std::string::npos) ? text.substr(start) : text.substr(start, end - start);
+  while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+  if (line.size() > 64) line.resize(64);
+  return line;
+}
+
+// Ask the program for its version and keep the answer.
+//
+// The question is asked the way the program is normally run - the same
+// arguments, the same environment, the same working directory - plus the
+// version flag. A program that does not know the flag says so by failing,
+// and then nothing is shown: a made up version is worse than no version.
+bool ask_version(Child& child) {
+  if (child.version_args.empty()) return false;
+
+  std::string command_line = quote_argument(child.command);
+  for (const auto& a : child.args) command_line += " " + quote_argument(a);
+  for (const auto& a : child.version_args) command_line += " " + quote_argument(a);
+
+  SECURITY_ATTRIBUTES sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  HANDLE read_end = nullptr;
+  HANDLE write_end = nullptr;
+  if (!CreatePipe(&read_end, &write_end, &sa, 0)) return false;
+  // The read end must not be inherited: the child would keep it open, and the
+  // read below would never see the end of the output.
+  SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+  // An empty stdin: the program must not wait for somebody to type.
+  HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                           OPEN_EXISTING, 0, nullptr);
+
+  STARTUPINFOW si;
+  std::memset(&si, 0, sizeof(si));
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = nul;
+  si.hStdOutput = write_end;
+  si.hStdError = write_end;
+
+  PROCESS_INFORMATION pi;
+  std::memset(&pi, 0, sizeof(pi));
+  std::wstring wcmd = widen(command_line);
+  std::wstring wcwd = widen(child.cwd);
+  std::wstring env = build_environment(child.env);
+  const DWORD flags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+  const BOOL ok = CreateProcessW(nullptr, &wcmd[0], nullptr, nullptr, TRUE, flags,
+                                 env.empty() ? nullptr : &env[0],
+                                 wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
+  if (nul && nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+  CloseHandle(write_end);
+  if (!ok) {
+    CloseHandle(read_end);
+    return false;
+  }
+
+  // Read while it runs: a program that writes more than the pipe holds
+  // would block, and then it would never end.
+  std::string output;
+  const ULONGLONG deadline = GetTickCount64() + kVersionTimeoutMs;
+  bool timed_out = false;
+  for (;;) {
+    DWORD available = 0;
+    if (PeekNamedPipe(read_end, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
+      char buffer[1024];
+      DWORD got = 0;
+      if (ReadFile(read_end, buffer, sizeof(buffer), &got, nullptr) && got > 0) {
+        output.append(buffer, got);
+      }
+    }
+    if (WaitForSingleObject(pi.hProcess, 50) == WAIT_OBJECT_0) break;
+    if (GetTickCount64() > deadline) {
+      timed_out = true;
+      TerminateProcess(pi.hProcess, 1);
+      WaitForSingleObject(pi.hProcess, 1000);
+      break;
+    }
+  }
+  // Whatever is left in the pipe.
+  for (;;) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(read_end, nullptr, 0, nullptr, &available, nullptr) ||
+        available == 0) {
+      break;
+    }
+    char buffer[1024];
+    DWORD got = 0;
+    if (!ReadFile(read_end, buffer, sizeof(buffer), &got, nullptr) || got == 0) break;
+    output.append(buffer, got);
+  }
+
+  DWORD code = 0;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  CloseHandle(read_end);
+
+  if (timed_out || code != 0) return false;  // the program does not answer
+  const std::string line = first_line(output);
+  if (line.empty()) return false;
+  child.version = line;
+  return true;
+}
+
+// Ask the program for its version - but only when the answer can have
+// changed: the file on disk is newer than the one the question was asked
+// about.
+void refresh_version(Child& child) {
+  const std::string watched = child.watch_file.empty() ? child.command : child.watch_file;
+  const ULONGLONG mtime = file_modified_time(watched);
+  if (child.version_asked && mtime == child.version_image_time) return;
+  child.version_asked = true;
+  child.version_image_time = mtime;
+  child.version.clear();
+  if (ask_version(child)) {
+    logf("[%s] version: %s", child.id.c_str(), child.version.c_str());
+  } else {
+    logf("[%s] no version: the program does not answer --version", child.id.c_str());
+  }
+}
+
 bool start_child(Child& child) {
   if (child.running) return true;
   if (!file_exists(child.command)) {
@@ -366,6 +529,8 @@ bool start_child(Child& child) {
          child.id.c_str(), GetLastError());
   }
   logf("[%s] started (pid %lu): %s", child.id.c_str(), child.pid, command_line.c_str());
+  // The program on disk may be a new build: ask it for its version again.
+  refresh_version(child);
   return true;
 }
 
@@ -641,8 +806,10 @@ void show_menu() {
   for (size_t i = 0; i < g_children.size(); ++i) {
     const Child& c = g_children[i];
     const std::string status = status_text(c);
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, id++,
-                widen(c.name + "  —  " + status).c_str());
+    std::string label = c.name + "  —  " + status;
+    // The version the program reports about itself, when it reports one.
+    if (!c.version.empty()) label += "  ·  " + c.version;
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, id++, widen(label).c_str());
     toggle_ids.push_back(id);
     AppendMenuW(menu, MF_STRING, id++, widen(c.running ? ("停止 " + c.name) : ("启动 " + c.name)).c_str());
     if (!c.url.empty()) {
@@ -733,6 +900,15 @@ bool load_config(const std::string& path, std::string* error) {
     child.restart_delay_ms = item.value("restart_delay_ms", 3000);
     child.watch = item.value("watch", true);
     child.watch_file = expand_env(item.value("watch_file", std::string()));
+    // How to ask the program for its version. The default is "--version";
+    // an empty list switches the question off.
+    child.version_args.push_back("--version");
+    if (item.contains("version_args") && item["version_args"].is_array()) {
+      child.version_args.clear();
+      for (const json& a : item["version_args"]) {
+        child.version_args.push_back(expand_env(a.get<std::string>()));
+      }
+    }
     const std::string restart = item.value("restart", std::string("on-failure"));
     child.restart_on_failure = (restart != "never");
     if (item.contains("env") && item["env"].is_object()) {
@@ -849,7 +1025,55 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
 }
 
 void print_usage() {
-  OutputDebugStringA("appstub [--config <file>] [--no-autostart]\n");
+  OutputDebugStringA("appstub [--config <file>] [--no-autostart] [--version]\n");
+}
+
+// A GUI program has no console of its own. Where the text goes depends on
+// how it was started:
+//   * a console (started from cmd): the text goes there, as Unicode;
+//   * a redirected stdout (a script): the text goes into the pipe, as UTF-8;
+//   * neither (started from the desktop): a message box is the only way to
+//     show it.
+void print_to_operator(const std::string& utf8_text) {
+  const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (out && out != INVALID_HANDLE_VALUE) {
+    DWORD mode = 0;
+    if (GetConsoleMode(out, &mode)) {
+      // A console: WriteConsoleW takes Unicode, so no code page games.
+      const std::wstring wide = utf8_to_wide(utf8_text);
+      DWORD written = 0;
+      if (WriteConsoleW(out, wide.c_str(), static_cast<DWORD>(wide.size()), &written, nullptr)) {
+        return;
+      }
+    } else {
+      // A pipe or a file: the bytes go out as they are.
+      std::fwrite(utf8_text.data(), 1, utf8_text.size(), stdout);
+      std::fflush(stdout);
+      return;
+    }
+  }
+  // No stdout at all: borrow the console of whoever started us.
+  if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+    FILE* console = nullptr;
+    if (freopen_s(&console, "CONOUT$", "w", stdout) == 0 && console) {
+      std::fputs(utf8_text.c_str(), stdout);
+      std::fflush(stdout);
+      return;
+    }
+  }
+  MessageBoxW(nullptr, widen(utf8_text).c_str(), L"appstub --version", MB_OK | MB_ICONINFORMATION);
+}
+
+// "appstub --version": what this program is, and what the programs it hosts
+// say about themselves.
+void print_versions() {
+  std::string text = std::string("appstub ") + kAppstubVersion + "\n";
+  for (Child& child : g_children) {
+    refresh_version(child);
+    text += child.id + "  " + child.name + "  " +
+            (child.version.empty() ? std::string("(no version)") : child.version) + "\n";
+  }
+  print_to_operator(text);
 }
 
 }  // namespace
@@ -861,6 +1085,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
 
   std::string config_path;
   bool no_autostart = false;
+  bool want_version = false;
   for (int i = 1; i < __argc; ++i) {
     const std::string arg = narrow(__wargv[i]);
     if (arg == "--icon" && i + 1 < __argc) {
@@ -877,6 +1102,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
       config_path = narrow(__wargv[++i]);
     } else if (arg == "--no-autostart") {
       no_autostart = true;
+    } else if (arg == "--version" || arg == "-V") {
+      want_version = true;
     } else if (arg == "--help" || arg == "-h") {
       print_usage();
       return 0;
@@ -898,6 +1125,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     WSACleanup();
     return 1;
   }
+  if (want_version) {
+    print_versions();
+    WSACleanup();
+    return 0;
+  }
   if (no_autostart) {
     for (Child& child : g_children) child.autostart = false;
   }
@@ -912,6 +1144,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     WSACleanup();
     return 0;
   }
+
+  // What do the hosted programs say about themselves? The tray menu shows
+  // it, and it is asked before the icon appears: the answer is what the
+  // menu is about.
+  for (Child& child : g_children) refresh_version(child);
 
   g_icon = make_tray_icon();
   g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
