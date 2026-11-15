@@ -419,7 +419,7 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 
 ---
 
-## 远程桌面：两个新角色（2026-11-14）
+## 远程桌面：两个新角色（2026-11-14；2026-11-15 改成两条通道 + Linux 后端）
 
 侧载除了「终端」那条路，还能当**远程桌面**：
 
@@ -428,56 +428,86 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 | `--role desktop` | 设备那边（跟 agent 侧一样） | 抓屏、编码、接鼠标键盘 |
 | `--role control` | 外面那边（跟 client 侧一样） | 解码、出画、把鼠标键盘送回去 |
 
-**怎么摆的**：
+**怎么摆的**（2026-11-15 改成**两条通道**）：
 
 ```
-设备                                    外面
-┌────────────────────────────┐        ┌──────────────────────────────┐
-│ DesktopService（127.0.0.1）│        │ ControlService（127.0.0.1）  │
-│  抓屏线程 → H.264 (x264)   │        │  拉流线程 → 原样转手        │
-│  /api/desktop/frames        │◀─隧道─▶│  /api/control/frames        │
-│  /api/desktop/frame         │        │  /api/control/frame         │
-│  /api/desktop/codec         │        │  /api/control/codec         │
-│  /api/desktop/input         │        │  /api/control/input          │
-└────────────────────────────┘        └──────────────────────────────┘
+设备                                          外面
+┌──────────────────────────────┐            ┌──────────────────────────────┐
+│ DesktopService                │            │ ControlService                │
+│  抓屏线程 → H.264 (x264)     │            │  收画面 → 存着给浏览器        │
+│      │                       │            │      ▲                       │
+│      │ 推                    │            │      │                       │
+├──────┼───────────────────────┤            ├──────┼───────────────────────┤
+│ 隧道 │ 通道 "a2"             │            │ 9931 │ 代理到远端那个 a2       │
+│      │   （a2 自己的字节）   │◀─隧道─▶    │      │  （SSE/API）             │
+│      │ 通道 "screen"         │            │ 9932 │ 浏览器看画面              │
+│      │   （H.264 + 键鼠）    │◀─隧道─▶    │      │                       │
+└──────┴───────────────────────┘            └──────┴───────────────────────┘
 ```
 
-**关键的几点**：
+**为什么拆成两条**：
 
-- **画面成流**：关键帧（每 10 秒一个，`--keyint`）加上中间的 P 帧。P 帧要靠前面
-  的帧，所以两边都要**按顺序、一张不缺**地送（设备留最近 32 张，浏览器问「从第几张
-  开始」）。少了帧，解码器要等下一个关键帧。
-- **隧道没有变**：还是字节透明的数据通道。画面是 H.264 字节，穿过隧道；外面那台
-  的控制侧再通过**自己的本地代理**（就是 9931 那个）去对面取 —— 也就是说外面那台
-  跟设备之间的唯一通路还是隧道。
-- **控制侧站在中间**：浏览器跟控制侧说话（本地），控制侧跟设备说话（穿过隧道）。
-  浏览器拿到的画面是**解码之后**的（解码在控制侧，正如要求的那样）。
-- **尺寸跟着画面走**（响应的 `X-Screen-*` 头）：另外单开一个请求去问尺寸，那条
-  连接在代理里活不久 → 请求失败 → 后面整条链路都卡住。跟着画面走就一次请求够了。
-- **连接不能复用**：代理那条连接对端会收掉，httplib 的客户端不会自己重连 →
-  每个请求都用新连接（`set_keep_alive(false)`），设备端那边一个连接只做一个请求
-  （`set_keep_alive_max_count(1)`），否则 keep-alive 会把工作线程占住几秒钟，
-  线程池（16 个）会被占满。
-- **JPEG 编码器是按 MIME 找的**（`image/jpeg`）：写死 CLSID 在这台机器上认成了 PNG，
-  一张 1 MB 的图把数据通道塞爆了，后面全卡住。
-- **编码器/解码器**：H.264 走 **x264**（`3rd/x264/`，GPL-2.0-or-later ✓，
-  `src/tunnel_video.cpp`）；JPEG 走 GDI+（`GdipSaveImageToStream` ✓，当退路
-  用 ✓：浏览器没有 WebCodecs 的时候会回头要 JPEG ✓）。解码在**浏览器**里
-  （WebCodecs ✓），控制端不再自己解 ✓。
-  等码率真的成为问题再切。
+- 原来画面是**塞进 HTTP 里绕一圈**的：设备端把 H.264 存进一个 web 服务，外面那边
+  通过隧道去轮询 `/api/desktop/frames?since=N` 拉。慢的画面会占着隧道那条河，
+  而且多了一次「存进去再取出来」的拷贝。
+- 现在隧道上开**两条数据通道**，靠 DCEP 的 OPEN 消息里的**标签**分开：
+  - `a2` —— a2 自己的字节（隧道一直在走的那条，协议一个字没改）
+  - `screen` —— 画面（设备推给外面）+ 鼠标键盘（外面推给设备）
+- 画面**成流**：设备编好一张就推一张，外面收到就存着；浏览器问「从第几张开始」
+  （`/api/control/frames?since=N`），少了帧解码器就得等下一个关键帧。
+- **尺寸跟着画面走**（同一个消息里带着 `ScreenGeometry`）：另外单开一个请求去问
+  尺寸，那条连接在代理里活不久 → 请求失败 → 后面整条链路都卡住。
+- **输入有回音**：浏览器的点击走 `screen` 通道出去，设备那边执行完把结果**顺着同
+  一条通道送回来**（带一个 id，两边对得上）。这样浏览器知道自己的点击到了没有。
+- **隧道没有变**：还是字节透明的数据通道，只是多了一条。
+
+**桌面的后端**（抓屏和键鼠）：
+
+| 平台 | 抓屏 | 键鼠 |
+| --- | --- | --- |
+| Windows | GDI | `SendInput`（按目标桌面的坐标） |
+| Linux | 合成器自带的工具（`spectacle` / `grim` / `gnome-screenshot` / `maim`，装了哪个用哪个） | `/dev/uinput` 的虚拟设备 |
+
+- Linux 上**没有合成器工具**就说「没有桌面」✓（跟 Windows 上没 GDI 一个样）。
+- Linux 的截图程序需要知道跟哪个合成器说话（`WAYLAND_DISPLAY`）：从服务里启动时
+  这个变量常常没有，**侧载会自己从 `XDG_RUNTIME_DIR` 里找 `wayland-N` 补上** ✓
+  （不补的话截图程序会直接崩）。
+- 截图程序不一定返回 0（有的会 abort），所以**以「文件写出来了没有」为准** ✓。
 
 **代码**：
 
 | 文件 | 干什么 |
 | --- | --- |
-| `src/tunnel_video.{h,cpp}` | H.264 编码（x264）、JPEG 编解码（GDI+）、颜色转换（BT.709 全范围 ✓） |
-| `src/tunnel_desktop.{h,cpp}` | 抓屏（GDI）与键鼠注入（SendInput） |
-| `src/tunnel_desktop_service.{h,cpp}` | 设备端的服务：抓屏线程、画面的接口、事件接口 |
-| `src/tunnel_control_service.{h,cpp}` | 控制侧的服务：拉流解码、出画、转发事件、伺服页面 |
-| `web/tunnel_desktop.html` / `.js` | 看画面的页面（canvas + 键鼠事件） |
+| `src/tunnel_screen.{h,cpp}` | 屏幕通道的协议：标签、消息类型、画面的打包、尺寸的 JSON |
+| `src/tunnel_video.{h,cpp}` | H.264 编码（x264）、颜色转换（BT.709 全范围 ✓） |
+| `src/tunnel_desktop.{h,cpp}` | 按平台分发的桌面后端接口 |
+| `src/tunnel_desktop_win.cpp` | Windows：抓屏（GDI）与键鼠注入（SendInput） |
+| `src/tunnel_desktop_linux.cpp` | Linux/Wayland：合成器工具抓屏 + uinput 注入 |
+| `src/tunnel_png.{h,cpp}` | 自带的 PNG 解码器（读截图工具写出来的 PNG，用 miniz） |
+| `src/tunnel_desktop_service.{h,cpp}` | 设备端的服务：抓屏线程、把画面推给通道、接键鼠 |
+| `src/tunnel_control_service.{h,cpp}` | 控制侧的服务：收画面、出画、转发事件、伺服页面 |
+| `web/tunnel_desktop.html` / `.js` | 看画面的页面（canvas + 键鼠事件，WebCodecs 解 H.264） |
 
-**回归**：`tests/smoke_tunnel_desktop.py`（18 项：broker → 桌面 → 隧道 → 画面 →
-键鼠回去）。
+**回归**：
+
+- `tests/smoke_tunnel_desktop.py`（28 项：broker → 桌面 → 隧道 → **两条通道分开** →
+  9931 带 a2 的字节 → 9932 出画面 → 键鼠回去）。
+- `tests/ui_tunnel_desktop.mjs`（13 项：**真的浏览器**里打开看图页面 → WebCodecs
+  解 H.264 → 画布上真的有东西 → 画面一直在来 → 尺寸对 → 点一下鼠标真的动）。
+
+**踩过的坑**（都修了，但值得记着）：
+
+- **画面打包的数字是大端**（`put_u32be`），而网页里原来写的是 `getUint32(0)`（**小端**）
+  —— 浏览器解出来的是乱码，画面永远出不来。这个错一直在，直到画面第一次真的走通。
+- **长度要放在最后**：屏幕通道里画面和尺寸放一起，长度写在**末尾**（四字节），
+  读的时候才不用猜画面到哪儿为止。写在前面对不上。
+- **两个 data channel 不需要两次协商**：libdatachannel 的 `createDataChannel` 只在
+  `signalingState == Stable` 且**还没有 application 段**时才产出 offer —— 建好第一个
+  通道后描述里已经有 application 段了，第二个通道直接挂上去，靠 **DCEP OPEN 里的
+  label** 分流 ✓。
+- **截图程序不一定返回 0**（有的会 abort），所以判断成功要看**文件写出来了没有** ✓。
+- **截图程序需要 `WAYLAND_DISPLAY`**：从服务里启动时这个变量常常没有，不补上的话
+  合成器工具会直接崩 ✓（侧载会自己从 `XDG_RUNTIME_DIR` 里找 `wayland-N` 补上）。
 
 ## 十一、已经跑通的（2026-11-09 实测）
 
@@ -486,7 +516,7 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 | 组件 | 源码 | 部署 |
 | --- | --- | --- |
 | **broker**（STUN + 信令 + TURN，一个进程） | `src/tunnel_broker.cpp` | VPS：`~/.tea_agent/tunnel/a2_broker`（用户级 systemd 单元 `a2_broker.service`） |
-| **侧载**（agent / client 两种角色） | `src/tunnel_sidecar.cpp` | 内网侧（zonekey）与外网侧各一份 |
+| **侧载**（agent / client / desktop / control 四种角色） | `src/tunnel_sidecar.cpp` | 内网侧（zonekey）与外网侧各一份 |
 
 **实测路径**（客户侧是家用宽带出口 + 对称 NAT）：
 
@@ -673,7 +703,7 @@ cmake --preset win64-mingw-cross && cmake --build build-win64 -j8
 | 二进制 | 作用 | 链接 |
 | --- | --- | --- |
 | `a2_broker` | 公网 broker（STUN + TURN 中继 + 信令） | 静态（Linux/macOS） |
-| `a2_tunnel` | 侧载（agent / client 两种角色） | 静态（Linux/macOS） |
+| `a2_tunnel` | 侧载（agent / client / desktop / control 四种角色） | 静态（Linux/macOS） |
 
 - **Windows 的 .exe 是自包含的**：只依赖系统 DLL（KERNEL32 / WS2_32 / BCRYPT /
   IPHLPAPI + UCRT），和 a2 本体一个待遇——不需要在目标机器上装
