@@ -111,6 +111,35 @@ def post_json(url, payload, timeout=20):
     return status, json.loads(raw.decode("utf-8"))
 
 
+def write_png(path, width, height, left_color, right_color):
+    """A picture that looks like two screens side by side: the left half
+    in one colour, the right half in another. The desktop backend cuts
+    the primary screen out of it, so the test can see which half it
+    picked."""
+    import struct
+    import zlib
+
+    rows = []
+    for _ in range(height):
+        row = bytearray([0])          # the filter type (none)
+        for x in range(width):
+            blue, green, red = left_color if x < width // 2 else right_color
+            row += bytes((blue, green, red, 255))
+        rows.append(bytes(row))
+
+    def chunk(kind, data):
+        body = kind + data
+        return (struct.pack(">I", len(data)) + body +
+                struct.pack(">I", zlib.crc32(body) & 0xffffffff))
+
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
+    png += chunk(b"IEND", b"")
+    with open(path, "wb") as handle:
+        handle.write(png)
+
+
 class FakeA2:
     """一台假的 a2：只说一句话。
 
@@ -402,6 +431,97 @@ def main():
                 desktop_page = str(error)
         check("the desktop side has no page of its own", "远程桌面" not in desktop_page,
               desktop_page[:120])
+
+        # ---- 多块屏幕：只显示主屏幕 ---------------------------------------
+        # 假的截图工具给一张「两块屏拼起来」的图（左半蓝、右半红），假的
+        # xrandr 说主屏幕是右边那块。侧载应该只把右边那块裁出来 —— 画面
+        # 应该是红的，而且比虚拟桌面窄。
+        fake = os.path.join(work, "fakebin")
+        os.makedirs(fake, exist_ok=True)
+        wide = os.path.join(work, "wide.png")
+        write_png(wide, 3840, 1080, (255, 0, 0), (0, 0, 255))   # 左半红、右半蓝
+        # The fake tools bring what they need with them: the folders with
+        # the real screenshot programs are taken out of the PATH, and
+        # those folders may also hold the ordinary commands.
+        for tool in ("sh", "cp"):
+            source = os.path.join("/bin", tool)
+            if not os.path.exists(source):
+                source = os.path.join("/usr/bin", tool)
+            if os.path.exists(source):
+                link = os.path.join(fake, tool)
+                if not os.path.exists(link):
+                    os.symlink(source, link)
+        with open(os.path.join(fake, "scrot"), "w") as handle:
+            handle.write("#!%s\n"
+                         "for last; do :; done\n"
+                         "%s %s \"$last\"\n" % (os.path.join(fake, "sh"),
+                                                  os.path.join(fake, "cp"), wide))
+        os.chmod(os.path.join(fake, "scrot"), 0o755)
+        with open(os.path.join(fake, "xrandr"), "w") as handle:
+            handle.write("#!%s\n"
+                         "echo 'eDP-1 connected 1920x1080+0+0 (normal)'\n"
+                         "echo 'HDMI-1 connected primary 1920x1080+1920+0 (normal)'\n"
+                         % os.path.join(fake, "sh"))
+        os.chmod(os.path.join(fake, "xrandr"), 0o755)
+
+        real_tools = ("spectacle", "gnome-screenshot", "grim", "maim", "scrot")
+        multi_env = dict(env)
+        keep = []
+        for folder in env.get("PATH", "").split(os.pathsep):
+            if not folder:
+                continue
+            if any(os.path.exists(os.path.join(folder, tool)) for tool in real_tools):
+                continue        # a real screenshot program lives here
+            keep.append(folder)
+        multi_env["PATH"] = fake + os.pathsep + os.pathsep.join(keep)
+        multi_env["A2_DESKTOP_DEBUG"] = "1"
+        multi_log = os.path.join(work, "multi.log")
+        handle = open(multi_log, "wb")
+        multi = subprocess.Popen(
+            [sidecar, "--role", "desktop", "--broker", "127.0.0.1:%d" % signal_port,
+             "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
+             "--tls-pin", pin, "--wait-timeout", "30"],
+            stdout=handle, stderr=subprocess.STDOUT, cwd=work, env=multi_env)
+        procs.append((multi, multi_log))
+        text = wait_for_log(multi_log, r"the primary screen", seconds=30)
+        check("the desktop side looks for the primary screen",
+              "the primary screen" in text, text[-300:])
+
+        # 让它跟控制侧连上，看控制侧拿到的是不是只有主屏幕那么大
+        # （整块虚拟桌面是 3840 宽，主屏幕只有 1920）。
+        multi_port = free_port()
+        multi_viewer = free_port()
+        client_log2 = os.path.join(work, "control2.log")
+        spawn([sidecar, "--role", "control", "--session", session,
+               "--broker", "127.0.0.1:%d" % signal_port,
+               "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
+               "--tls-pin", pin, "--port", str(multi_port),
+               "--viewer-port", str(multi_viewer)], "control2.log")
+        wait_for_log(client_log2, r"the data channel is open", seconds=40)
+        info = {}
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            try:
+                status, raw, _ = http("http://127.0.0.1:%d/api/control/info" % multi_viewer,
+                                      timeout=5)
+                if status == 200:
+                    info = json.loads(raw.decode("utf-8", "replace"))
+                    if info.get("frame_width"):
+                        break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        check("only the primary screen is shown",
+              info.get("frame_width") == 1920 and info.get("frame_height") == 1080,
+              json.dumps(info))
+        check("the mouse is relative to the primary screen",
+              info.get("screen_width") == 1920 and info.get("screen_height") == 1080,
+              json.dumps(info))
+        try:
+            multi.terminate()
+            multi.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            multi.kill()
         check("the desktop side explains itself instead of 404",
               desktop_status == 200 and "control side" in desktop_page,
               "status=%s %s" % (desktop_status, desktop_page[:120]))
