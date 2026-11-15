@@ -110,17 +110,22 @@ SessionState query_session_state() {
 
   // The flags: 0 = locked, 1 = unlocked. (On Windows 7 the two are the
   // other way round - a documented defect in the OS.)
-  PWTSINFOEXW info = nullptr;
+  // The types (WTSINFOEXW, WTSSessionInfoEx, WTS_SESSIONSTATE_LOCK) came with
+  // Windows 7; MinGW-w64's headers from before 2023 do not have them, so the
+  // query goes through the raw buffer. The logic is the same either way: the
+  // session flags sit at offset 16 of WTSINFOEXW, and the info class
+  // WTSSessionInfoEx is 25 (the enum continues after WTSSessionInfo = 24).
+  void* info = nullptr;
   DWORD bytes = 0;
   if (::WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
-                                   WTSSessionInfoEx, reinterpret_cast<LPWSTR*>(&info),
-                                   &bytes)) {
+                                   static_cast<WTS_INFO_CLASS>(25 /* WTSSessionInfoEx */),
+                                   reinterpret_cast<LPWSTR*>(&info), &bytes)) {
     out.known = true;
     const unsigned char* raw = reinterpret_cast<const unsigned char*>(info);
     if (bytes >= 20) {
       uint32_t flags = 0;
       std::memcpy(&flags, raw + 16, sizeof(flags));
-      if (flags == WTS_SESSIONSTATE_LOCK) out.locked = true;
+      if (flags == 0x8 /* WTS_SESSIONSTATE_LOCK */) out.locked = true;
     }
     ::WTSFreeMemory(info);
   }
