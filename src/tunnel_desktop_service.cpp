@@ -52,8 +52,9 @@ struct DesktopService::Impl {
 
   std::mutex mu;
   std::string picture;          // the newest picture (as it is encoded)
-  std::deque<StreamPicture> stream;   // the last pictures, in order
+  std::deque<ScreenPicture> stream;   // the last pictures, in order
   uint32_t next_seq = 1;               // the number the next picture gets
+  bool last_key = false;               // whether the last picture was a key frame
   int frame_width = 0;
   int frame_height = 0;
   int64_t frame_at_ms = 0;
@@ -66,6 +67,11 @@ struct DesktopService::Impl {
   int encoder_width = 0;
   int encoder_height = 0;
   std::atomic<bool> stopping{false};
+
+  /// Where the new pictures go (the tunnel's screen channel).
+  PictureSink sink;
+  /// The input events from the tunnel.
+  InputHandler input_handler;
 
   /// Encode one picture the way the other side asked for it.
   bool encode(const ScreenFrame& frame, std::string* out, std::string* err);
@@ -100,81 +106,24 @@ bool DesktopService::Impl::encode(const ScreenFrame& frame, std::string* out,
   // (the browser would try to decode it).
   if (ok && !out->empty()) {
     std::lock_guard<std::mutex> lock(mu);
-    StreamPicture picture;
+    ScreenPicture picture;
     picture.seq = next_seq++;
     picture.key = is_key;
     picture.bytes = *out;
     stream.push_back(picture);
+    last_key = is_key;
     // Keep the last ones only: the other side may be away for a while.
     while (stream.size() > 32) stream.pop_front();
   }
-  std::fprintf(stderr, "desktop: the picture is %zu bytes (%.2f MB/s at %d a second)\n",
+  // The number of pictures a second is a double: it must not be printed
+  // as an int (that is undefined behaviour and it showed up as a wild
+  // number in the log).
+  std::fprintf(stderr, "desktop: the picture is %zu bytes (%.2f MB/s at %.1f a second)\n",
                out->size(), out->size() * static_cast<double>(fps) / 1048576.0, fps);
   std::fflush(stderr);
   return ok;
 }
 
-
-// ---------------------------------------------------------------------------
-// The stream: the pictures, packed
-// ---------------------------------------------------------------------------
-namespace {
-
-void put_u32(std::string* out, uint32_t value) {
-  out->push_back(static_cast<char>((value >> 24) & 0xff));
-  out->push_back(static_cast<char>((value >> 16) & 0xff));
-  out->push_back(static_cast<char>((value >> 8) & 0xff));
-  out->push_back(static_cast<char>(value & 0xff));
-}
-
-bool get_u32(const std::string& body, std::size_t at, uint32_t* value) {
-  if (at + 4 > body.size()) return false;
-  *value = (static_cast<uint32_t>(static_cast<unsigned char>(body[at])) << 24) |
-           (static_cast<uint32_t>(static_cast<unsigned char>(body[at + 1])) << 16) |
-           (static_cast<uint32_t>(static_cast<unsigned char>(body[at + 2])) << 8) |
-           static_cast<uint32_t>(static_cast<unsigned char>(body[at + 3]));
-  return true;
-}
-
-}  // namespace
-
-std::string pack_pictures(const std::vector<StreamPicture>& pictures) {
-  std::string out;
-  put_u32(&out, static_cast<uint32_t>(pictures.size()));
-  for (const StreamPicture& picture : pictures) {
-    put_u32(&out, picture.seq);
-    out.push_back(picture.key ? 1 : 0);
-    put_u32(&out, static_cast<uint32_t>(picture.bytes.size()));
-    out.append(picture.bytes);
-  }
-  return out;
-}
-
-bool unpack_pictures(const std::string& body, std::vector<StreamPicture>* out) {
-  if (out == nullptr) return false;
-  out->clear();
-  uint32_t count = 0;
-  if (!get_u32(body, 0, &count)) return false;
-  std::size_t at = 4;
-  for (uint32_t i = 0; i < count; i++) {
-    uint32_t seq = 0;
-    uint32_t length = 0;
-    if (!get_u32(body, at, &seq)) return false;
-    at += 4;
-    if (at >= body.size()) return false;
-    const bool key = body[at++] != 0;
-    if (!get_u32(body, at, &length)) return false;
-    at += 4;
-    if (at + length > body.size()) return false;
-    StreamPicture picture;
-    picture.seq = seq;
-    picture.key = key;
-    picture.bytes = body.substr(at, length);
-    at += length;
-    out->push_back(picture);
-  }
-  return true;
-}
 
 DesktopService::DesktopService() : impl_(new Impl()) {}
 
@@ -261,14 +210,14 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
       since = static_cast<uint32_t>(
           std::strtoul(req.get_param_value("since").c_str(), nullptr, 10));
     }
-    std::vector<StreamPicture> wanted;
+    std::vector<ScreenPicture> wanted;
     int frame_width = 0;
     int frame_height = 0;
     {
       std::lock_guard<std::mutex> lock(impl_->mu);
       frame_width = impl_->frame_width;
       frame_height = impl_->frame_height;
-      for (const StreamPicture& picture : impl_->stream) {
+      for (const ScreenPicture& picture : impl_->stream) {
         if (picture.seq > since) wanted.push_back(picture);
       }
     }
@@ -288,7 +237,7 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
     res.set_header("X-Screen-Y", std::to_string(impl_->desktop.screen_y()));
     res.set_header("X-Frame-Width", std::to_string(frame_width));
     res.set_header("X-Frame-Height", std::to_string(frame_height));
-    res.set_content(pack_pictures(wanted), "application/octet-stream");
+    res.set_content(pack_screen_pictures(wanted), "application/octet-stream");
   });
 
   server.Get(DesktopService::info_path(), [this](const httplib::Request&, httplib::Response& res) {
@@ -312,68 +261,22 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
 
   server.Post(DesktopService::input_path(), [this](const httplib::Request& req,
                                                    httplib::Response& res) {
-    json body;
+    // The same work the tunnel's screen channel does: the events are put
+    // into this machine's input either way.
+    const std::string answer = apply_input(req.body);
+    json out;
     try {
-      body = json::parse(req.body);
-    } catch (const std::exception& e) {
+      out = json::parse(answer);
+    } catch (const std::exception&) {
       json error = json::object();
       error["code"] = "bad_request";
-      error["message"] = std::string("not JSON: ") + e.what();
-      json out = json::object();
+      error["message"] = "the events are not JSON";
+      out = json::object();
       out["error"] = error;
       send_json(res, out, 400);
       return;
     }
-    int applied = 0;
-    int failed = 0;
-    int last_x = 0;
-    int last_y = 0;
-    bool moved = false;
-    std::string why;
-    if (body.contains("events") && body["events"].is_array()) {
-      for (const json& ev : body["events"]) {
-        if (!ev.is_object()) continue;
-        const std::string type = ev.value("t", std::string());
-        bool ok = true;
-        if (type == "move") {
-          last_x = ev.value("x", 0);
-          last_y = ev.value("y", 0);
-          moved = true;
-          ok = impl_->desktop.move_mouse(last_x, last_y, &why);
-        } else if (type == "down" || type == "up") {
-          const int button = ev.value("b", 0);
-          ok = impl_->desktop.mouse_button(button, type == "down", &why);
-          if (ok && ev.contains("x") && ev.contains("y")) {
-            ok = impl_->desktop.move_mouse(ev.value("x", 0), ev.value("y", 0), &why);
-          }
-        } else if (type == "wheel") {
-          ok = impl_->desktop.wheel(ev.value("d", 0), &why);
-        } else if (type == "key") {
-          const bool down = ev.value("down", true);
-          const int vk = ev.value("vk", 0);
-          const std::string text = ev.value("text", std::string());
-          ok = impl_->desktop.key(vk, text, down, &why);
-        } else {
-          continue;
-        }
-        if (ok) {
-          applied++;
-        } else {
-          failed++;
-        }
-      }
-    }
-    json out = json::object();
-    out["ok"] = failed == 0;
-    out["applied"] = applied;
-    out["failed"] = failed;
-    if (moved) {
-      // Where the mouse ended up (the screen's own coordinates ✓).
-      out["x"] = last_x;
-      out["y"] = last_y;
-    }
-    if (failed > 0) out["error"] = why;
-    send_json(res, out, failed > 0 ? 409 : 200);
+    send_json(res, out, out.value("failed", 0) > 0 ? 409 : 200);
   });
 
   // The port: the loopback, a free one.
@@ -390,6 +293,84 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
   return true;
 }
 
+/// Put the events of a body into this machine's input and say what
+/// happened. The body is the JSON the other side sends
+/// ({"events": [...]}), the answer is the same JSON the HTTP interface
+/// returns.
+std::string DesktopService::apply_input(const std::string& body) {
+  json parsed;
+  try {
+    parsed = json::parse(body);
+  } catch (const std::exception& e) {
+    json error = json::object();
+    error["code"] = "bad_request";
+    error["message"] = std::string("not JSON: ") + e.what();
+    json out = json::object();
+    out["error"] = error;
+    return out.dump();
+  }
+  int applied = 0;
+  int failed = 0;
+  int last_x = 0;
+  int last_y = 0;
+  bool moved = false;
+  std::string why;
+  if (parsed.contains("events") && parsed["events"].is_array()) {
+    for (const json& ev : parsed["events"]) {
+      if (!ev.is_object()) continue;
+      const std::string type = ev.value("t", std::string());
+      bool ok = true;
+      if (type == "move") {
+        last_x = ev.value("x", 0);
+        last_y = ev.value("y", 0);
+        moved = true;
+        ok = impl_->desktop.move_mouse(last_x, last_y, &why);
+      } else if (type == "down" || type == "up") {
+        const int button = ev.value("b", 0);
+        ok = impl_->desktop.mouse_button(button, type == "down", &why);
+        if (ok && ev.contains("x") && ev.contains("y")) {
+          ok = impl_->desktop.move_mouse(ev.value("x", 0), ev.value("y", 0), &why);
+        }
+      } else if (type == "wheel") {
+        ok = impl_->desktop.wheel(ev.value("d", 0), &why);
+      } else if (type == "key") {
+        const bool down = ev.value("down", true);
+        const int vk = ev.value("vk", 0);
+        const std::string text = ev.value("text", std::string());
+        ok = impl_->desktop.key(vk, text, down, &why);
+      } else {
+        continue;
+      }
+      if (ok) {
+        applied++;
+      } else {
+        failed++;
+      }
+    }
+  }
+  json out = json::object();
+  out["ok"] = failed == 0;
+  out["applied"] = applied;
+  out["failed"] = failed;
+  if (moved) {
+    // Where the mouse ended up (the screen's own coordinates ✓).
+    out["x"] = last_x;
+    out["y"] = last_y;
+  }
+  if (failed > 0) out["error"] = why;
+  return out.dump();
+}
+
+void DesktopService::set_picture_sink(PictureSink sink) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  impl_->sink = std::move(sink);
+}
+
+void DesktopService::set_input_handler(InputHandler handler) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  impl_->input_handler = std::move(handler);
+}
+
 void DesktopService::capture_loop() {
   int interval = static_cast<int>(1000.0 / (impl_->fps > 0.0 ? impl_->fps : 2.0));
   if (interval < 1) interval = 1;
@@ -400,12 +381,35 @@ void DesktopService::capture_loop() {
     if (impl_->desktop.grab(&frame, &why)) {
       std::string encoded;
       if (impl_->encode(frame, &encoded, &why)) {
-        std::lock_guard<std::mutex> lock(impl_->mu);
-        impl_->picture.swap(encoded);
-        impl_->frame_width = frame.width;
-        impl_->frame_height = frame.height;
-        impl_->frame_at_ms = now_ms();
-        impl_->frames++;
+        // The picture that was just made is handed to the tunnel (the
+        // screen channel). The sink is called outside the lock: it writes
+        // to the channel, and that must not hold up the next picture.
+        PictureSink sink;
+        ScreenGeometry geometry;
+        ScreenPicture picture;
+        {
+          std::lock_guard<std::mutex> lock(impl_->mu);
+          impl_->picture.swap(encoded);
+          impl_->frame_width = frame.width;
+          impl_->frame_height = frame.height;
+          impl_->frame_at_ms = now_ms();
+          impl_->frames++;
+          sink = impl_->sink;
+          picture.seq = impl_->next_seq - 1;
+          picture.key = impl_->last_key;
+          picture.bytes = impl_->picture;
+          geometry.frame_width = impl_->frame_width;
+          geometry.frame_height = impl_->frame_height;
+          geometry.screen_width = impl_->desktop.screen_width();
+          geometry.screen_height = impl_->desktop.screen_height();
+          geometry.screen_x = impl_->desktop.screen_x();
+          geometry.screen_y = impl_->desktop.screen_y();
+        }
+        if (sink) {
+          std::vector<ScreenPicture> pictures;
+          pictures.push_back(picture);
+          sink(pictures, geometry);
+        }
       }
     }
     // Sleep the rest of the interval (a picture that takes long does not

@@ -99,6 +99,17 @@ if(NOT WIN32 AND NOT APPLE AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(tea_sqlite3 PRIVATE -fno-pie)
 endif()
 
+# --- miniz (the zlib inside a PNG) ---------------------------------------------
+# The Linux desktop takes its pictures from the compositor's screenshot
+# program, which writes a PNG. Reading it needs zlib, and miniz is already
+# in the tree (the agent uses it for the ZIP writer).
+add_library(tea_tunnel_miniz STATIC ${TEA_3RD}/miniz/miniz.c)
+target_include_directories(tea_tunnel_miniz PUBLIC ${TEA_3RD}/miniz)
+target_compile_options(tea_tunnel_miniz PRIVATE -w)
+if(NOT WIN32 AND NOT APPLE AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(tea_tunnel_miniz PRIVATE -fno-pie)
+endif()
+
 # --- x264 (the H.264 encoder) ------------------------------------------------
 # The remote desktop sends H.264: one JPEG of a 2560x1440 screen is ~200 KB,
 # one H.264 picture is ~30 KB. x264 is GPL-2.0-or-later, so the whole project
@@ -148,6 +159,8 @@ add_executable(a2_tunnel
   ${TEA_ROOT}/src/tunnel_term.cpp
   ${TEA_ROOT}/src/tunnel_video.cpp
   ${TEA_ROOT}/src/tunnel_desktop.cpp
+  ${TEA_ROOT}/src/tunnel_png.cpp
+  ${TEA_ROOT}/src/tunnel_screen.cpp
   ${TEA_ROOT}/src/tunnel_desktop_service.cpp
   ${TEA_ROOT}/src/tunnel_control_service.cpp
   ${TEA_ROOT}/src/shell.cpp
@@ -157,9 +170,13 @@ add_executable(a2_tunnel
 if(WIN32)
   # The shell runs on a ConPTY (a pseudo console) here ...
   target_sources(a2_tunnel PRIVATE ${TEA_ROOT}/src/shell_win32.cpp)
+  # ... and the screen is taken with GDI.
+  target_sources(a2_tunnel PRIVATE ${TEA_ROOT}/src/tunnel_desktop_win.cpp)
 else()
   # ... and on a pty everywhere else.
   target_sources(a2_tunnel PRIVATE ${TEA_ROOT}/src/shell_posix.cpp)
+  # The screen is taken with the compositor's own program.
+  target_sources(a2_tunnel PRIVATE ${TEA_ROOT}/src/tunnel_desktop_linux.cpp)
 endif()
 if(TEA_TUNNEL_ASSETS_DIR)
   target_sources(a2_tunnel PRIVATE ${TEA_TUNNEL_ASSETS_DIR}/web_assets.cpp)
@@ -178,7 +195,7 @@ target_include_directories(a2_tunnel PRIVATE
 # at a time is the normal case).
 target_compile_definitions(a2_tunnel PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=16)
 target_link_libraries(a2_tunnel PRIVATE datachannel-static MbedTLS::MbedTLS Threads::Threads
-  x264)
+  x264 tea_tunnel_miniz)
 if(WIN32)
   # The desktop role: the screen (GDI), the mouse and the keyboard
   # (SendInput), the JPEG codec (GDI+) and the H.264 codecs (Media
