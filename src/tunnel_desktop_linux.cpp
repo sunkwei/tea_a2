@@ -26,6 +26,8 @@
 // compositor), and the named keys are translated one by one.
 #include "tunnel_desktop.h"
 
+#include <nlohmann/json.hpp>
+
 #ifndef _WIN32
 
 #include <fcntl.h>
@@ -38,10 +40,13 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "tunnel_png.h"
@@ -50,7 +55,20 @@ namespace tea_tunnel {
 
 namespace linux_backend {
 
+using json = nlohmann::json;
+
 // --- the screenshot programs ----------------------------------------------
+
+/// How long a screenshot program may take. Longer than that and it is
+/// killed: a program that waits for something must not hold the tunnel
+/// up.
+constexpr int64_t kScreenshotTimeoutMs = 15000;
+
+int64_t now_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 struct ScreenshotTool {
   const char* program;
@@ -59,11 +77,15 @@ struct ScreenshotTool {
 
 // The first one that is installed wins. Every program writes the file
 // where it is told to, so the name goes at the end of the arguments.
+//
+// The order matters a little: the ones that work on both X11 and Wayland
+// come first, then the Wayland-only ones, then the X11-only ones. A
+// program that is not installed is simply skipped.
 const ScreenshotTool kTools[] = {
-    {"spectacle", "-b -n -f -p -o"},            // KDE: background, no notice, full screen
-    {"grim", "-"},                               // wlroots
-    {"gnome-screenshot", "-f -o"},               // GNOME
-    {"maim", "-"},                               // the ones that have it
+    {"spectacle", "-b -n -f -p -o"},            // KDE: X11 and Wayland
+    {"gnome-screenshot", "-f -o"},               // GNOME: X11 and Wayland
+    {"grim", "-"},                               // wlroots: Wayland only
+    {"maim", "-"},                               // X11
     {"scrot", "-o"},                             // X11
 };
 
@@ -142,12 +164,35 @@ bool take_picture(const ScreenshotTool& tool, const std::string& path, std::stri
     ::_exit(127);
   }
 
+  // The program is given a **deadline**: one that waits for something
+  // (a picture of a window that is not there, a tool that asks a
+  // question) must not hold the whole tunnel up.
+  const int64_t deadline = now_ms() + kScreenshotTimeoutMs;
   int status = 0;
-  while (::waitpid(child, &status, 0) < 0) {
-    if (errno != EINTR) {
-      if (err) *err = "the screenshot program did not finish";
+  bool finished = false;
+  while (true) {
+    const pid_t done = ::waitpid(child, &status, WNOHANG);
+    if (done == child) {
+      finished = true;
+      break;
+    }
+    if (done < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (now_ms() > deadline) {
+      ::kill(child, SIGKILL);
+      ::waitpid(child, &status, 0);
+      if (err) {
+        *err = std::string("the screenshot program (") + tool.program + ") did not finish in time";
+      }
       return false;
     }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  if (!finished) {
+    if (err) *err = "the screenshot program did not finish";
+    return false;
   }
   // Some of these programs abort (a core dump) when they cannot talk to
   // the compositor, so the exit code alone does not tell whether there is
@@ -160,6 +205,411 @@ bool take_picture(const ScreenshotTool& tool, const std::string& path, std::stri
       }
       return false;
     }
+  }
+  return true;
+}
+
+// --- the primary screen ----------------------------------------------------
+
+/// A rectangle on the screen, in the **physical** pixels of the picture
+/// (the pixels the screenshot program writes).
+struct ScreenRect {
+  int x = 0;
+  int y = 0;
+  int width = 0;
+  int height = 0;
+};
+
+/// Run a program and take what it writes to stdout. False when the
+/// program could not be run or did not finish well.
+bool run_capture(std::vector<std::string> words, std::string* out) {
+  out->clear();
+  int pipe_fds[2];
+  if (::pipe(pipe_fds) != 0) return false;
+  pid_t child = ::fork();
+  if (child < 0) {
+    ::close(pipe_fds[0]);
+    ::close(pipe_fds[1]);
+    return false;
+  }
+  if (child == 0) {
+    ::close(pipe_fds[0]);
+    ::dup2(pipe_fds[1], STDOUT_FILENO);
+    ::close(pipe_fds[1]);
+    ::freopen("/dev/null", "w", stderr);
+    std::vector<char*> argv;
+    for (std::string& word : words) argv.push_back(&word[0]);
+    argv.push_back(nullptr);
+    ::execvp(argv[0], argv.data());
+    ::_exit(127);
+  }
+  ::close(pipe_fds[1]);
+  char buffer[4096];
+  ssize_t n = 0;
+  while ((n = ::read(pipe_fds[0], buffer, sizeof(buffer))) > 0) {
+    out->append(buffer, static_cast<std::size_t>(n));
+    if (out->size() > 256 * 1024) break;   // more than we need
+  }
+  ::close(pipe_fds[0]);
+  // The same deadline as for the screenshot programs: a tool that hangs
+  // (it waits for a window that never comes) must not hold the tunnel up.
+  const int64_t deadline = now_ms() + kScreenshotTimeoutMs;
+  int status = 0;
+  while (true) {
+    const pid_t done = ::waitpid(child, &status, WNOHANG);
+    if (done == child) break;
+    if (done < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (now_ms() > deadline) {
+      ::kill(child, SIGKILL);
+      ::waitpid(child, &status, 0);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/// The colour codes are in the way when the output is parsed.
+std::string strip_ansi(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  for (std::size_t i = 0; i < text.size(); i++) {
+    if (text[i] == '\x1b' && i + 1 < text.size() && text[i + 1] == '[') {
+      i += 2;
+      while (i < text.size() && text[i] != 'm') i++;
+      continue;
+    }
+    out.push_back(text[i]);
+  }
+  return out;
+}
+
+/// The primary screen on a Plasma (Wayland or X11) desktop.
+///
+/// `kscreen-doctor -o --json` says, per output, where it sits, how big
+/// it is and how much it is scaled. The **size** in it is already the
+/// physical size (it comes from the mode), and the **position** is
+/// logical, so it is multiplied by the scale to get the offset in the
+/// picture's pixels.
+///
+/// The primary output is the one with the lowest priority (that is how
+/// Plasma picks it), and the one that is enabled and connected.
+bool detect_kde_primary(ScreenRect* out) {
+  if (!program_exists("kscreen-doctor")) return false;
+  std::string text;
+  if (!run_capture({"kscreen-doctor", "-o", "--json"}, &text)) return false;
+  // The JSON is followed by the same information in colours; only the
+  // JSON part is taken (the braces are counted).
+  const std::size_t start = text.find('{');
+  if (start == std::string::npos) return false;
+  int depth = 0;
+  bool in_string = false;
+  std::size_t end = std::string::npos;
+  for (std::size_t i = start; i < text.size(); i++) {
+    const char c = text[i];
+    if (in_string) {
+      if (c == '\\') {
+        i++;
+      } else if (c == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+    } else if (c == '{') {
+      depth++;
+    } else if (c == '}') {
+      depth--;
+      if (depth == 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  if (end == std::string::npos) return false;
+
+  json parsed;
+  try {
+    parsed = json::parse(text.substr(start, end - start));
+  } catch (const std::exception&) {
+    return false;
+  }
+  if (!parsed.is_object() || !parsed.contains("outputs") || !parsed["outputs"].is_array()) {
+    return false;
+  }
+  const json& outputs = parsed["outputs"];
+  bool have = false;
+  int best_priority = 0;
+  for (const json& output : outputs) {
+    if (!output.is_object()) continue;
+    if (!output.value("enabled", false)) continue;
+    if (!output.value("connected", false)) continue;
+    if (!output.contains("size") || !output["size"].is_object()) continue;
+    const int width = output["size"].value("width", 0);
+    const int height = output["size"].value("height", 0);
+    if (width <= 0 || height <= 0) continue;
+    const int priority = output.value("priority", 1000);
+    if (have && priority >= best_priority) continue;
+    const double scale = output.value("scale", 1.0);
+    const double factor = scale > 0.0 ? scale : 1.0;
+    int x = 0;
+    int y = 0;
+    if (output.contains("pos") && output["pos"].is_object()) {
+      // **Down**, not to the nearest: the logical position multiplied by
+      // the scale can be a bit over the real one (1746 * 1.1 = 1920.6),
+      // and rounding up would put the screen one pixel past the edge of
+      // the picture - the picture would then not fit and the whole
+      // virtual desktop would be shown instead of the one screen.
+      x = static_cast<int>(std::floor(output["pos"].value("x", 0.0) * factor));
+      y = static_cast<int>(std::floor(output["pos"].value("y", 0.0) * factor));
+    }
+    out->x = x;
+    out->y = y;
+    out->width = width;
+    out->height = height;
+    best_priority = priority;
+    have = true;
+  }
+  return have;
+}
+
+/// The primary screen on a Plasma desktop, read from the text output.
+/// Used when the JSON is not there.
+bool detect_kde_primary_text(ScreenRect* out) {
+  std::string text;
+  if (!run_capture({"kscreen-doctor", "-o"}, &text)) return false;
+  text = strip_ansi(text);
+
+  // The output is in blocks: "Output: <id> <name> <uuid>" starts one.
+  struct Block {
+    int priority = 1000;
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    double scale = 1.0;
+    bool enabled = false;
+    bool connected = false;
+  };
+  std::vector<Block> blocks;
+  bool in_block = false;
+  std::size_t at = 0;
+  while (at <= text.size()) {
+    const std::size_t end = text.find('\n', at);
+    const std::string line =
+        text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+    if (line.rfind("Output:", 0) == 0) {
+      blocks.push_back(Block());
+      in_block = true;
+    } else if (in_block && !blocks.empty()) {
+      Block& block = blocks.back();
+      const std::string trimmed = [&]() {
+        std::size_t start = line.find_first_not_of(" \t\r");
+        if (start == std::string::npos) return std::string();
+        std::size_t stop = line.find_last_not_of(" \t\r");
+        return line.substr(start, stop - start + 1);
+      }();
+      if (trimmed == "enabled") {
+        block.enabled = true;
+      } else if (trimmed == "connected") {
+        block.connected = true;
+      } else if (trimmed.rfind("priority ", 0) == 0) {
+        block.priority = std::atoi(trimmed.c_str() + 9);
+      } else if (trimmed.rfind("Scale:", 0) == 0) {
+        block.scale = std::atof(trimmed.c_str() + 6);
+      } else if (trimmed.rfind("Geometry:", 0) == 0) {
+        // "Geometry: 0,0 1746x982"
+        int gx = 0, gy = 0, gw = 0, gh = 0;
+        if (std::sscanf(trimmed.c_str() + 9, "%d,%d %dx%d", &gx, &gy, &gw, &gh) == 4) {
+          block.x = gx;
+          block.y = gy;
+          block.width = gw;
+          block.height = gh;
+        }
+      }
+    }
+    if (end == std::string::npos) break;
+    at = end + 1;
+  }
+
+  const Block* best = nullptr;
+  for (const Block& block : blocks) {
+    if (!block.enabled || !block.connected) continue;
+    if (block.width <= 0 || block.height <= 0) continue;
+    if (best == nullptr || block.priority < best->priority) best = &block;
+  }
+  if (best == nullptr) return false;
+  const double scale = best->scale > 0.0 ? best->scale : 1.0;
+  out->x = static_cast<int>(std::floor(best->x * scale));
+  out->y = static_cast<int>(std::floor(best->y * scale));
+  out->width = static_cast<int>(std::lround(best->width * scale));
+  out->height = static_cast<int>(std::lround(best->height * scale));
+  return out->width > 0 && out->height > 0;
+}
+
+
+/// The primary screen on an X11 desktop.
+///
+/// `xrandr --current` says, per output, where it sits. There is no
+/// scaling in X11 (the applications do that themselves), so the numbers
+/// are already the pixels of the picture.
+bool detect_x11_primary(ScreenRect* out) {
+  if (!program_exists("xrandr")) return false;
+  if (std::getenv("DISPLAY") == nullptr) return false;
+  std::string text;
+  if (!run_capture({"xrandr", "--current"}, &text)) return false;
+
+  bool have_primary = false;
+  bool have_any = false;
+  ScreenRect primary{};
+  ScreenRect any{};
+  std::size_t at = 0;
+  while (at <= text.size()) {
+    const std::size_t end = text.find('\n', at);
+    const std::string line =
+        text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+    // "eDP-1 connected primary 1920x1080+0+0 (normal left ...)"
+    std::size_t pos = line.find(" connected ");
+    if (pos != std::string::npos) {
+      const bool is_primary = line.find(" primary ") != std::string::npos;
+      int width = 0, height = 0, x = 0, y = 0;
+      // The geometry is the first "WxH+X+Y" after the name.
+      std::size_t geom = line.find_first_of("0123456789", pos);
+      if (geom != std::string::npos) {
+        if (std::sscanf(line.c_str() + geom, "%dx%d+%d+%d", &width, &height, &x, &y) == 4 &&
+            width > 0 && height > 0) {
+          ScreenRect rect{x, y, width, height};
+          if (is_primary && !have_primary) {
+            primary = rect;
+            have_primary = true;
+          }
+          if (!have_any) {
+            any = rect;
+            have_any = true;
+          }
+        }
+      }
+    }
+    if (end == std::string::npos) break;
+    at = end + 1;
+  }
+  if (have_primary) {
+    *out = primary;
+    return true;
+  }
+  if (have_any) {
+    *out = any;
+    return true;
+  }
+  return false;
+}
+
+/// The primary screen, in the pixels of the picture.
+///
+/// When nothing can be said (a compositor we do not know, a nested
+/// session), the whole picture is the screen: that is what a single
+/// screen is anyway.
+ScreenRect primary_screen() {
+  ScreenRect rect;
+  if (std::getenv("A2_DESKTOP_DEBUG") != nullptr) {
+    ScreenRect kde;
+    ScreenRect x11;
+    const bool have_kde = detect_kde_primary(&kde);
+    const bool have_x11 = detect_x11_primary(&x11);
+    std::fprintf(stderr, "desktop: the primary screen: kde=%d", have_kde ? 1 : 0);
+    if (have_kde) {
+      std::fprintf(stderr, " (%d,%d %dx%d)", kde.x, kde.y, kde.width, kde.height);
+    }
+    std::fprintf(stderr, ", x11=%d", have_x11 ? 1 : 0);
+    if (have_x11) {
+      std::fprintf(stderr, " (%d,%d %dx%d)", x11.x, x11.y, x11.width, x11.height);
+    }
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+  }
+  // The JSON of kscreen-doctor first (the sizes in it are exact), then
+  // its text, then X11.
+  if (detect_kde_primary(&rect)) return rect;
+  if (detect_kde_primary_text(&rect)) return rect;
+  if (detect_x11_primary(&rect)) return rect;
+  // Nothing could be said: the whole picture is the screen (that is
+  // what a single screen is anyway).
+  return ScreenRect{};
+}
+
+/// Cut a part out of a picture. The rectangle is in the picture's own
+/// pixels.
+/// Cut a part out of a picture. The rectangle is in the picture's own
+/// pixels.
+///
+/// When the rectangle does not fit, the two do not speak the same
+/// pixels: the picture is one screen only (the tool took that one), or
+/// the picture is in logical pixels while the rectangle is in physical
+/// ones (or the other way round). In that case the rectangle is scaled
+/// onto the picture by the ratio of the sizes - that is what the two
+/// mean when the picture is one screen.
+bool crop_image(const PngImage& image, ScreenRect rect, PngImage* out) {
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  // A pixel over the edge is not a reason to give up: the rectangle is
+  // pulled back into the picture (a pixel of rounding must not cost the
+  // whole screen).
+  if (rect.width <= image.width && rect.height <= image.height) {
+    if (rect.x < 0) rect.x = 0;
+    if (rect.y < 0) rect.y = 0;
+    if (rect.x + rect.width > image.width) rect.x = image.width - rect.width;
+    if (rect.y + rect.height > image.height) rect.y = image.height - rect.height;
+  }
+  if (rect.x < 0 || rect.y < 0 || rect.x + rect.width > image.width ||
+      rect.y + rect.height > image.height) {
+    // The picture is not the whole virtual desktop, or the two are in
+    // different pixels. Try the ratio: the picture is the primary
+    // screen, just counted in other pixels.
+    const double factor_x = static_cast<double>(image.width) / rect.width;
+    const double factor_y = static_cast<double>(image.height) / rect.height;
+    if (factor_x > 0.05 && factor_x < 20.0 && factor_y > 0.05 && factor_y < 20.0) {
+      ScreenRect scaled;
+      scaled.x = static_cast<int>(std::lround(rect.x * factor_x));
+      scaled.y = static_cast<int>(std::lround(rect.y * factor_y));
+      scaled.width = static_cast<int>(std::lround(rect.width * factor_x));
+      scaled.height = static_cast<int>(std::lround(rect.height * factor_y));
+      if (scaled.x >= 0 && scaled.y >= 0 && scaled.x + scaled.width <= image.width &&
+          scaled.y + scaled.height <= image.height && scaled.width > 0 && scaled.height > 0) {
+        std::fprintf(stderr,
+                     "desktop: the primary screen (%d,%d %dx%d) does not fit the picture "
+                     "(%dx%d): it is scaled onto it (%.2f)\n",
+                     rect.x, rect.y, rect.width, rect.height, image.width, image.height,
+                     factor_x);
+        std::fflush(stderr);
+        rect = scaled;
+      } else {
+        std::fprintf(stderr,
+                     "desktop: the primary screen (%d,%d %dx%d) does not fit the picture "
+                     "(%dx%d): the whole picture is used\n",
+                     rect.x, rect.y, rect.width, rect.height, image.width, image.height);
+        std::fflush(stderr);
+        return false;
+      }
+    } else {
+      std::fprintf(stderr,
+                   "desktop: the primary screen (%d,%d %dx%d) does not fit the picture "
+                   "(%dx%d): the whole picture is used\n",
+                   rect.x, rect.y, rect.width, rect.height, image.width, image.height);
+      std::fflush(stderr);
+      return false;
+    }
+  }
+  out->width = rect.width;
+  out->height = rect.height;
+  out->bgra.resize(static_cast<std::size_t>(rect.width) * static_cast<std::size_t>(rect.height) * 4);
+  for (int y = 0; y < rect.height; y++) {
+    const std::size_t from = (static_cast<std::size_t>(rect.y + y) * image.width + rect.x) * 4;
+    const std::size_t to = static_cast<std::size_t>(y) * rect.width * 4;
+    std::memcpy(&out->bgra[to], &image.bgra[from],
+                static_cast<std::size_t>(rect.width) * 4);
   }
   return true;
 }
@@ -384,6 +834,9 @@ using linux_backend::VirtualDevice;
 struct Desktop::Impl {
   int max_width = 0;
   int max_height = 0;
+  // The primary screen inside the picture (the picture is the whole
+  // virtual desktop when there is more than one screen).
+  linux_backend::ScreenRect primary;
   int screen_width = 0;
   int screen_height = 0;
   linux_backend::ScreenshotTool tool{};
@@ -407,7 +860,8 @@ bool Desktop::start(int max_width, int max_height, std::string* err) {
   if (!impl_->have_tool) {
     if (err) {
       *err = "there is no desktop on this platform (no screenshot program found: "
-             "spectacle, grim, gnome-screenshot or maim)";
+             "spectacle, gnome-screenshot, grim, maim or scrot - on X11 install "
+             "scrot or maim)";
     }
     return false;
   }
@@ -423,6 +877,20 @@ bool Desktop::start(int max_width, int max_height, std::string* err) {
       !png_read_file(impl_->picture_path, &probe, &why)) {
     if (err) *err = why.empty() ? "cannot take a picture of the screen" : why;
     return false;
+  }
+  // Only the **primary** screen is shown, even when there are more. The
+  // screenshot program takes the whole virtual desktop, so the part that
+  // belongs to the primary screen is cut out of it.
+  impl_->primary = linux_backend::primary_screen();
+  if (impl_->primary.width > 0 && impl_->primary.height > 0) {
+    PngImage cut;
+    if (linux_backend::crop_image(probe, impl_->primary, &cut)) {
+      probe = std::move(cut);
+    } else {
+      // The rectangle does not fit the picture (the tool took something
+      // else than the whole desktop): the whole picture is used.
+      impl_->primary = linux_backend::ScreenRect{};
+    }
   }
   impl_->screen_width = probe.width;
   impl_->screen_height = probe.height;
@@ -472,6 +940,11 @@ bool Desktop::grab(ScreenFrame* out, std::string* err) {
   if (!png_read_file(impl_->picture_path, &image, &why)) {
     if (err) *err = why;
     return false;
+  }
+  // Only the primary screen (the picture is the whole virtual desktop).
+  if (impl_->primary.width > 0 && impl_->primary.height > 0) {
+    PngImage cut;
+    if (linux_backend::crop_image(image, impl_->primary, &cut)) image = std::move(cut);
   }
 
   // The picture we hand out: the screen, scaled to the size that was
