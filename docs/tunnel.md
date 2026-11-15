@@ -468,7 +468,16 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 | Windows | GDI | `SendInput`（按目标桌面的坐标） |
 | Linux | 合成器自带的工具（`spectacle` / `grim` / `gnome-screenshot` / `maim`，装了哪个用哪个） | `/dev/uinput` 的虚拟设备 |
 
-- Linux 上**没有合成器工具**就说「没有桌面」✓（跟 Windows 上没 GDI 一个样）。
+- Linux 上**没有截图工具**就说「没有桌面」✓（跟 Windows 上没 GDI 一个样）。
+  支持：`spectacle`（KDE）、`gnome-screenshot`（GNOME）、`grim`（wlroots）、
+  `maim` / `scrot`（X11）—— 装了哪个用哪个。纯 X11 的机器装 `scrot` 就行。
+- **多块屏幕只显示主屏幕** ✓：主屏幕由系统说了算（KDE 按 priority，X11 按
+  `primary`），从整张截图里裁出来，鼠标坐标也只相对那一块。
+  KDE 用 `kscreen-doctor -o --json`（尺寸是物理像素，位置是逻辑的要乘缩放比），
+  X11 用 `xrandr --current`（两边一致）。都看不出来就显示整张。
+  排查用 `A2_DESKTOP_DEBUG=1`。
+- **截图程序有 15 秒的期限** ✓：一个卡住的工具（它等着一个不会来的窗口）
+  不能把整条隧道卡住。
 - **HiDPI 没问题** ✓：整条链用**物理像素**（截图给的就是物理像素，uinput 的
   绝对范围也按物理像素声明）。合成器把设备的绝对坐标按比例映射到屏幕的逻辑
   尺寸 —— 声明的范围就是物理尺寸，比例正好抵消，落点还是物理像素 ✓。

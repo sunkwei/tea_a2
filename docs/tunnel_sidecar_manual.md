@@ -215,6 +215,25 @@ a2_tunnel --role control --session <码>
   `maim`，装了就用第一个）✓，键鼠走 **`/dev/uinput`** 的虚拟设备 ✓（需要
   `/dev/uinput` 的写权限 —— 通常是把用户加进 `input` 组，或者给 udev 规则）。
   Wayland 和 X11 都能用 ✓。合成器工具找不到时会说「没有桌面」✓。
+  支持的截图工具（装了哪个用哪个）：
+
+  | 工具 | 用在哪 |
+  | --- | --- |
+  | `spectacle` | KDE（X11 和 Wayland 都行） |
+  | `gnome-screenshot` | GNOME（X11 和 Wayland 都行） |
+  | `grim` | wlroots（只有 Wayland） |
+  | `maim` / `scrot` | X11 |
+
+  **纯 X11 的机器上装 `scrot` 或 `maim` 就行** ✓（`apt install scrot`）。
+- **多块屏幕只显示「主屏幕」** ✓：哪块是主屏幕由系统说了算（KDE 按
+  priority，X11 按 `primary` 标记），那一块被从整张截图里裁出来，
+  **鼠标的坐标也只相对那一块** ✓。
+  - KDE：`kscreen-doctor -o --json`（它给的尺寸是物理像素，位置是逻辑的，
+    要乘缩放比）。
+  - X11：`xrandr --current`（X11 没有物理/逻辑之分，两边一致）。
+  - 别的桌面（wayland 上没有 KDE 也没有 X11）：看不出来就显示整张，
+    也就是整块虚拟桌面 —— 这时鼠标坐标也是相对整块桌面的。
+  - 排查时设 `A2_DESKTOP_DEBUG=1`，日志里会写出「主屏幕是哪个、多大」。
 - **HiDPI（缩放不是 100%）是可以的** ✓：整条链用的都是**物理像素** ——
   合成器截图给的就是物理像素（spectacle / grim / gnome-screenshot / maim
   都是），uinput 的绝对坐标范围也按物理像素声明。
