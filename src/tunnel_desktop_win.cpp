@@ -477,10 +477,20 @@ bool Desktop::key(int vk, const std::string& text, bool down, std::string* err) 
   if (vk > 0) {
     // A named key (Enter, Tab, an arrow...): the virtual key code is what
     // the keyboard driver wants.
+    //
+    // The scan code also says whether the key is an **extended** one (the
+    // ones that come with the 0xE0 prefix: the arrows, the navigation
+    // block, the right-hand modifiers, the Windows key). Putting the prefix
+    // on a key that does not have it makes the driver **drop the key**:
+    // Esc, Enter, Tab and Backspace would never arrive. So the flag has to
+    // follow the key, and MAPVK_VK_TO_VSC_EX puts the prefix into the high
+    // byte (0xE0xx) - that is where it can be told apart.
     input.ki.wVk = static_cast<WORD>(vk);
-    input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC));
-    input.ki.dwFlags = down ? (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY)
-                             : (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+    const UINT scan = ::MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC_EX);
+    input.ki.wScan = static_cast<WORD>(scan);
+    const bool extended = scan > 0xFF;
+    input.ki.dwFlags = KEYEVENTF_SCANCODE | (extended ? KEYEVENTF_EXTENDEDKEY : 0);
+    if (!down) input.ki.dwFlags |= KEYEVENTF_KEYUP;
     if (input.ki.wScan == 0) input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
   } else {
     // A character: the text itself goes in (this is how you type a letter
