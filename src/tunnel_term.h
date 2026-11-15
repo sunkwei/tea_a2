@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_term.h -- the terminal that the tunnel can carry.
 //
 // The sidecar is normally a pipe: it forwards raw bytes between the two ends.

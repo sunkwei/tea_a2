@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // shell_win32.cpp -- the Windows half of the interactive shell.
 //
 // Windows gets a ConPTY (a "pseudo console"): conhost runs the program on a

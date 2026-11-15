@@ -90,6 +90,16 @@ def wait_for_log(path, pattern, seconds=15.0):
     return ""
 
 
+def find_binary(build, name):
+    """The binary, with or without the .exe the Windows build gives it."""
+    for folder in (os.path.join(build, "bin"), os.path.join(build, "tunnel", "bin")):
+        for candidate in (name, name + ".exe"):
+            path = os.path.join(folder, candidate)
+            if os.path.exists(path):
+                return path
+    return ""
+
+
 def find_build(argument):
     """Where the tunnel binaries are.
 
@@ -112,9 +122,9 @@ def find_build(argument):
 
 def main():
     build = find_build(sys.argv[1] if len(sys.argv) > 1 else "")
-    broker = os.path.join(build, "bin", "a2_broker")
-    sidecar = os.path.join(build, "bin", "a2_tunnel")
-    if not os.path.exists(broker) or not os.path.exists(sidecar):
+    broker = find_binary(build, "a2_broker")
+    sidecar = find_binary(build, "a2_tunnel")
+    if not broker or not sidecar:
         print("skip  (no a2_broker / a2_tunnel in %s)" % build)
         return 0
 
@@ -127,6 +137,7 @@ def main():
     client_port = free_port()
     env = dict(os.environ)
     env["HOME"] = home
+    env["TEA_AGENT_HOME"] = home   # Windows 上用的是这个（不是 HOME）
 
     procs = []
 
@@ -192,10 +203,11 @@ def main():
 
         # ---- client 侧载 ------------------------------------------------
         client_log = os.path.join(work, "client.log")
-        spawn([sidecar, "--role", "client", "--session", session,
-               "--broker", "127.0.0.1:%d" % signal_port,
-               "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
-               "--tls-pin", pin, "--port", str(client_port)], "client.log")
+        good_client, _ = spawn([sidecar, "--role", "client", "--session", session,
+                                "--broker", "127.0.0.1:%d" % signal_port,
+                                "--stun", "127.0.0.1:%d" % stun_port,
+                                "--turn", "127.0.0.1:%d" % stun_port,
+                                "--tls-pin", pin, "--port", str(client_port)], "client.log")
         text = wait_for_log(client_log, r"the data channel is open", seconds=40)
         check("the client opens the data channel", "the data channel is open" in text,
               text[-400:])
@@ -214,19 +226,43 @@ def main():
         check("the answer comes through the tunnel", "fake-a2" in answer, answer)
 
         # ---- 指纹不对的进不来 -------------------------------------------
-        bad_log = os.path.join(work, "badpin.log")
         # A fingerprint that does not match is reported, but it does not
         # break the tunnel: the room token is what gates the room.
+        #
+        # The good client goes first: a room holds ONE client (the broker
+        # replaces the older one of the same role - a restarted sidecar),
+        # so two clients at once would push each other out and race for
+        # the room. That race has nothing to do with the fingerprint.
+        good_client.send_signal(signal.SIGTERM)
+        try:
+            good_client.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            good_client.kill()
+        time.sleep(1.0)
         bad_pin = "a" * 64
+        bad_port = free_port()
         _, bad_log = spawn([sidecar, "--role", "client", "--session", session,
                             "--broker", "127.0.0.1:%d" % signal_port, "--tls-pin", bad_pin,
-                            "--port", str(free_port()), "--wait-timeout", "5"], "badpin.log")
+                            "--port", str(bad_port), "--wait-timeout", "30"], "badpin.log")
         text = wait_for_log(bad_log, r"not the one that was pinned", seconds=20)
         check("a wrong fingerprint is reported",
               "not the one that was pinned" in text, text[-300:])
-        text = wait_for_log(bad_log, r"the data channel is open", seconds=20)
+        text = wait_for_log(bad_log, r"the data channel is open", seconds=30)
         check("a wrong fingerprint does not break the tunnel",
               "the data channel is open" in text, text[-300:])
+        # ... and the bytes really go through it.
+        answer = ""
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:%d/api/health" % bad_port,
+                                            timeout=3) as response:
+                    answer = response.read().decode("utf-8", "replace")
+                break
+            except Exception:
+                time.sleep(0.5)
+        check("the answer comes through the tunnel of the wrong fingerprint",
+              "fake-a2" in answer, answer)
 
         # ---- 指纹在重启之后不变 -----------------------------------------
         broker_procs = [p for p, path in procs if "a2_broker" in " ".join(p.args)]

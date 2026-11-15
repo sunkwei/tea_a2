@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // shell_posix.cpp -- the POSIX half of the interactive shell.
 //
 // Linux (and macOS) get a real pseudo terminal: posix_openpt() + fork() +

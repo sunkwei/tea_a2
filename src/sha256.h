@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // sha256.h -- a small SHA-256, so the code can hash without a dependency.
 //
 // The only thing the project needs a hash for is telling two requests apart

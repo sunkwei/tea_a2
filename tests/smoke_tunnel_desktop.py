@@ -1,0 +1,590 @@
+#!/usr/bin/env python3
+"""隧道桌面（--role desktop / --role control）的端到端测试。
+
+    python3 tests/smoke_tunnel_desktop.py [build-dir]
+
+它在一台机器上把整条链路摆出来：
+
+    broker ──TLS──▶ 侧载(desktop，抓屏+编码) ──隧道──▶ 侧载(control，解码+出画) ──▶ 浏览器
+
+检查的是：
+
+  1. desktop 侧载真的起了桌面的服务（127.0.0.1 上的一个 HTTP 服务）；
+  2. control 侧载起了看图的页面（本地端口，浏览器打开它）；
+  3. 画面**穿过隧道**到了 control 那头（是 H.264，大小对得上屏幕）；
+  4. 鼠标键盘事件**穿回去**到了对面（对面说它收下了几个事件）；
+  5. 页面和脚本都在二进制里（设备上没有文件可读）；
+  6. **机器不会在看的时候睡觉或锁屏**（远程桌面的本意）。
+
+二进制不在就跳过（不是每个环境都编了隧道）。
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CHECKS = []
+
+
+def check(name, ok, detail=""):
+    CHECKS.append((name, bool(ok), detail))
+    print("%s %s%s" % ("ok  " if ok else "FAIL", name,
+                       "" if ok else "  [%s]" % detail[:400]))
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def wait_for_port(port, seconds=10.0):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def wait_for_log(path, pattern, seconds=15.0):
+    deadline = time.time() + seconds
+    rx = re.compile(pattern)
+    while time.time() < deadline:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+            if rx.search(text):
+                return text
+        except OSError:
+            pass
+        time.sleep(0.2)
+    return ""
+
+
+def find_binary(build, name):
+    """The binary, with or without the .exe the Windows build gives it."""
+    for folder in (os.path.join(build, "bin"), os.path.join(build, "tunnel", "bin")):
+        for candidate in (name, name + ".exe"):
+            path = os.path.join(folder, candidate)
+            if os.path.exists(path):
+                return path
+    return ""
+
+
+def find_build(argument):
+    """Where the tunnel binaries are (same rule as smoke_tunnel.py)."""
+    env = os.environ.get("TEA_TUNNEL_BUILD", "")
+    if env:
+        return env
+    if argument:
+        if os.path.isdir(argument):
+            return argument
+        parent = os.path.dirname(os.path.abspath(argument))
+        if os.path.basename(parent) == "bin":
+            return os.path.dirname(parent)
+    return os.path.join(ROOT, "build")
+
+
+def http(url, method="GET", body=None, ctype=None, timeout=10):
+    request = urllib.request.Request(url, method=method, data=body)
+    if ctype:
+        request.add_header("Content-Type", ctype)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.status, response.read(), dict(response.headers)
+
+
+def post_json(url, payload, timeout=20):
+    data = json.dumps(payload).encode("utf-8")
+    status, raw, _ = http(url, "POST", data, "application/json", timeout)
+    return status, json.loads(raw.decode("utf-8"))
+
+
+def write_png(path, width, height, left_color, right_color):
+    """A picture that looks like two screens side by side: the left half
+    in one colour, the right half in another. The desktop backend cuts
+    the primary screen out of it, so the test can see which half it
+    picked."""
+    import struct
+    import zlib
+
+    rows = []
+    for _ in range(height):
+        row = bytearray([0])          # the filter type (none)
+        for x in range(width):
+            blue, green, red = left_color if x < width // 2 else right_color
+            row += bytes((blue, green, red, 255))
+        rows.append(bytes(row))
+
+    def chunk(kind, data):
+        body = kind + data
+        return (struct.pack(">I", len(data)) + body +
+                struct.pack(">I", zlib.crc32(body) & 0xffffffff))
+
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
+    png += chunk(b"IEND", b"")
+    with open(path, "wb") as handle:
+        handle.write(png)
+
+
+class FakeA2:
+    """一台假的 a2：只说一句话。
+
+    桌面的那条通道（"a2"）带的是 a2 自己的字节，画面走的是另一条
+    通道（"screen"）。这里放一个说得清自己是谁的服务，就能看出外面
+    那一台的 9931 到底带回了什么。
+    """
+
+    def __init__(self, port):
+        self.port = port
+        self.sock = None
+        self.thread = None
+        self.stopping = False
+
+    def start(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", self.port))
+        self.sock.listen(8)
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        while not self.stopping:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(4096)
+                body = b"this is the a2 on the other side"
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                    b"Connection: close\r\n\r\n" + body)
+            except OSError:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+    def stop(self):
+        self.stopping = True
+        try:
+            if self.sock:
+                self.sock.close()
+        except OSError:
+            pass
+
+
+def main():
+    build = find_build(sys.argv[1] if len(sys.argv) > 1 else "")
+    broker = find_binary(build, "a2_broker")
+    sidecar = find_binary(build, "a2_tunnel")
+    if not broker or not sidecar:
+        print("skip  (no a2_broker / a2_tunnel in %s)" % build)
+        return 0
+
+    work = tempfile.mkdtemp(prefix="smoke-tunnel-desktop-")
+    home = os.path.join(work, "home")
+    os.makedirs(home)
+    signal_port = free_port()
+    stun_port = free_port()
+    client_port = free_port()
+    viewer_port = free_port()
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["TEA_AGENT_HOME"] = home   # Windows 上用的是这个（不是 HOME）
+
+    procs = []
+    a2 = None
+
+    def spawn(args, log_name):
+        path = os.path.join(work, log_name)
+        handle = open(path, "wb")
+        proc = subprocess.Popen(args, stdout=handle, stderr=subprocess.STDOUT, env=env,
+                                cwd=work)
+        procs.append((proc, path))
+        return proc, path
+
+    try:
+        # ---- broker ---------------------------------------------------
+        broker_log = os.path.join(work, "broker.log")
+        spawn([broker, "--stun-port", str(stun_port), "--signal-port", str(signal_port),
+               "--signal-bind", "127.0.0.1", "--cert-name", "test-broker"], "broker.log")
+        text = wait_for_log(broker_log, r"fingerprint \(sha256\): [0-9a-f]{64}")
+        match = re.search(r"fingerprint \(sha256\): ([0-9a-f]{64})", text)
+        check("the broker starts", bool(match), text[-300:] if not match else "")
+        if not match:
+            return 1
+        pin = match.group(1)
+
+        # ---- 一台假的 a2（设备那边）------------------------------------
+        # 桌面的那条通道带的是 a2 自己的字节（不是画面），所以这里放一
+        # 个说得清自己是谁的小服务：外面那台的 9931 应该能穿过隧道把
+        # 它的话带回来。
+        a2_port = free_port()
+        a2 = FakeA2(a2_port)
+        a2.start()
+
+        # ---- desktop 侧载（设备那边）------------------------------------
+        agent_log = os.path.join(work, "desktop.log")
+        spawn([sidecar, "--role", "desktop", "--broker", "127.0.0.1:%d" % signal_port,
+               "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
+               "--tls-pin", pin, "--target", "127.0.0.1:%d" % a2_port,
+               "--wait-timeout", "120"], "desktop.log")
+        text = wait_for_log(agent_log,
+                            r"the desktop is listening on 127\.0\.0\.1:\d+|"
+                            r"there is no desktop on this platform", seconds=30)
+        if "there is no desktop on this platform" in text:
+            # The screen capture is a Windows thing (GDI). Everywhere else
+            # the sidecar says so and stops - that is not a failure, the
+            # feature simply does not exist on this platform.
+            print("skip  (no desktop on this platform)")
+            return 0
+        check("the desktop side starts the screen service", "the desktop is listening" in text,
+              text[-400:])
+        # 那行命令是「就绪」的时候才打的，比「桌面起来了」晚一点，所以
+        # 单独等它。
+        text = wait_for_log(agent_log, r"a2_tunnel --role control --session [0-9a-f]+",
+                            seconds=20)
+        match = re.search(r"a2_tunnel --role control --session ([0-9a-f]+)", text)
+        check("the desktop side prints the command for the control side", bool(match),
+              text[-300:] if not match else "")
+        if not match:
+            return 1
+        session = match.group(1)
+
+        # ---- control 侧载（外面那边）------------------------------------
+        client_log = os.path.join(work, "control.log")
+        spawn([sidecar, "--role", "control", "--session", session,
+               "--broker", "127.0.0.1:%d" % signal_port,
+               "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
+               "--tls-pin", pin, "--port", str(client_port),
+               "--viewer-port", str(viewer_port)], "control.log")
+        text = wait_for_log(client_log, r"the data channel is open", seconds=40)
+        check("the control side opens the data channel", "the data channel is open" in text,
+              text[-400:])
+        text = wait_for_log(client_log, r"the viewer is on http://127\.0\.0\.1:\d+/", seconds=20)
+        check("the control side starts the viewer", "the viewer is on" in text, text[-400:])
+        check("the control side says which address to open",
+              "open this in a browser" in text, text[-400:])
+        check("the control side knows the far end is a desktop",
+              "the other end is a desktop" in text, text[-400:])
+
+        # ---- 两条通道是分开的 -------------------------------------------
+        # 画面走 "screen"，a2 自己的字节走 "a2"。标签是 DCEP 的 OPEN
+        # 消息里带的，所以对端分得清。
+        text = wait_for_log(client_log, r'the data channel "screen" arrived',
+                            seconds=20)
+        check("the screen channel is a channel of its own",
+              'the data channel "screen" arrived' in text, text[-400:])
+        text = wait_for_log(client_log, r'the data channel "a2" arrived', seconds=20)
+        check("the a2's own bytes are on another channel",
+              'the data channel "a2" arrived' in text, text[-400:])
+
+        # ---- 9931 带的是 a2 自己的字节 ----------------------------------
+        # 隧道的那个端口是到远端那个地址的代理。远端是 a2，所以外面这
+        # 边拿到的应该是 a2 的话，而不是画面。
+        status, raw, _ = http("http://127.0.0.1:%d/" % client_port, timeout=15)
+        check("the tunnel's own port brings the a2's bytes through",
+              status == 200 and b"the a2 on the other side" in raw,
+              "status=%s %s" % (status, raw[:120]))
+
+        # ---- 页面 ------------------------------------------------------
+        base = "http://127.0.0.1:%d" % viewer_port
+        status, raw, headers = http(base + "/", timeout=10)
+        page = raw.decode("utf-8", "replace")
+        check("the viewer page is served", status == 200 and "远程桌面" in page, page[:200])
+        check("the page pulls in its script", "tunnel_desktop.js" in page, page[:200])
+        status, raw, headers = http(base + "/tunnel_desktop.js", timeout=10)
+        check("the page script is served",
+              status == 200 and b"api/control/frame" in raw, str(status))
+
+        # ---- 画面穿过隧道 ------------------------------------------------
+        # The pictures travel as a stream: a key frame and the P frames
+        # after it. They have to arrive in order and without gaps.
+        body = b""
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                status, raw, headers = http(base + "/api/control/frames?since=0", timeout=10)
+                if status == 200 and raw:
+                    body = raw
+                    # Wait until there is a picture with content in it.
+                    if len(raw) > 13 and int.from_bytes(raw[5:9], "big") > 0:
+                        break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        check("pictures come through the tunnel", bool(body), "no pictures in 30s")
+        pictures = []
+        if body:
+            count = int.from_bytes(body[0:4], "big")
+            at = 4
+            for _ in range(count):
+                if at + 9 > len(body):
+                    break
+                seq = int.from_bytes(body[at:at + 4], "big")
+                key = body[at + 4] != 0
+                length = int.from_bytes(body[at + 5:at + 9], "big")
+                pictures.append((seq, key, body[at + 9:at + 9 + length]))
+                at += 9 + length
+        numbers = [p[0] for p in pictures]
+        check("the pictures are in order", numbers == sorted(numbers), str(numbers))
+        check("the pictures are numbered one by one",
+              numbers == list(range(numbers[0], numbers[0] + len(numbers))) if numbers else False,
+              str(numbers))
+        first = pictures[0][2] if pictures else b""
+        # H.264 in Annex-B: the NAL units carry their own start codes.
+        check("the picture is H.264",
+              first[:3] == b"\x00\x00\x01" or first[:4] == b"\x00\x00\x00\x01",
+              repr(first[:8]))
+        types = set()
+        at = 0
+        while at + 3 < len(first) and len(types) < 12:
+            if first[at:at + 3] == b"\x00\x00\x01":
+                types.add(first[at + 3] & 0x1f)
+                at += 4
+            else:
+                at += 1
+        check("the first picture is a key frame with the SPS and the PPS",
+              7 in types and 8 in types, str(types))
+        total = sum(len(p[2]) for p in pictures)
+        check("the pictures are not empty", total > 1000, "total=%d" % total)
+        print("     (%d pictures, %d bytes in all; at two a second that is %.0f KB/s)" % (
+            len(pictures), total, total * 2 / 1024.0))
+
+        # ---- 画面会一直来 -------------------------------------------------
+        # 之前有个毛病：第一张能取到，之后就卡住了（连接太多，设备端的
+        # 线程池被占满）。所以这里再等几秒，看画面是不是还在来。
+        status, raw, _ = http(base + "/api/control/info", timeout=10)
+        first = json.loads(raw.decode("utf-8")).get("frames", 0)
+        time.sleep(3)
+        status, raw, _ = http(base + "/api/control/info", timeout=10)
+        later = json.loads(raw.decode("utf-8")).get("frames", 0)
+        check("the pictures keep coming", later > first,
+              "frames went from %s to %s" % (first, later))
+
+        # ---- 尺寸 -------------------------------------------------------
+        status, raw, _ = http(base + "/api/control/info", timeout=10)
+        info = json.loads(raw.decode("utf-8"))
+        check("the viewer knows the size of the picture",
+              info.get("frame_width", 0) > 0 and info.get("frame_height", 0) > 0,
+              json.dumps(info))
+        check("the viewer knows the size of the screen",
+              info.get("screen_width", 0) > 0 and info.get("screen_height", 0) > 0,
+              json.dumps(info))
+        check("the control side hands the pictures on", info.get("decoded", 0) > 0,
+              json.dumps(info))
+        check("the codec is H.264", info.get("codec") == "h264", json.dumps(info))
+
+        # ---- 锁屏状态要说话 ---------------------------------
+        # 对面锁屏了就拿不到画面（Windows 把自己的密码桌面放了过来，
+        # GDI 看不到）。那时必须说话，而不是让人看一帧不动的画面。
+        check("the viewer knows whether the far side is locked",
+              "locked" in info, json.dumps(info))
+        check("the far side is not locked (the machine is awake)",
+              info.get("locked") is False, json.dumps(info))
+
+        # ---- 鼠标键盘穿回去 ------------------------------------------------
+        status, answer = post_json(base + "/api/control/input",
+                                   {"events": [{"t": "move", "x": 10, "y": 20},
+                                               {"t": "key", "down": True, "vk": 0,
+                                                "text": "a"}]})
+        check("the input reaches the other side",
+              answer.get("ok") and answer.get("applied", 0) >= 2, json.dumps(answer))
+        # The mouse coordinates: the picture's pixels become the screen's
+        # pixels. The picture may be scaled down, and the screen may start
+        # left of (0,0) when there is a second monitor.
+        want_x = info.get("screen_x", 0) + int(
+            10 * info.get("screen_width", 0) / max(1, info.get("frame_width", 1)))
+        want_y = info.get("screen_y", 0) + int(
+            20 * info.get("screen_height", 0) / max(1, info.get("frame_height", 1)))
+        check("the mouse lands where the picture says",
+              answer.get("x") == want_x and answer.get("y") == want_y,
+              "want %s,%s got %s,%s" % (want_x, want_y, answer.get("x"), answer.get("y")))
+
+        # ---- 隧道自己的端口（设备端那个）要说清楚，不该是 404 --------------
+        # 外面那台如果把浏览器开在隧道端口上（横幅以前就指那个），请求会
+        # 穿到设备端去 —— 那边要有一句话说明「画面在控制端」。
+        desktop_page = ""
+        desktop_status = 0
+        match = re.search(r"the desktop is listening on 127\.0\.0\.1:(\d+)", text)
+        if not match:
+            with open(agent_log, encoding="utf-8", errors="replace") as handle:
+                match = re.search(r"the desktop is listening on 127\.0\.0\.1:(\d+)",
+                                  handle.read())
+        if match:
+            try:
+                desktop_status, raw, _ = http("http://127.0.0.1:%s/" % match.group(1), timeout=5)
+                desktop_page = raw.decode("utf-8", "replace")
+            except Exception as error:
+                desktop_page = str(error)
+        check("the desktop side has no page of its own", "远程桌面" not in desktop_page,
+              desktop_page[:120])
+
+        # ---- 设备那边自己的 info（它也说锁屏状态）-------------------
+        if match:
+            try:
+                status, raw, _ = http("http://127.0.0.1:%s/api/desktop/info" % match.group(1),
+                                      timeout=5)
+                device_info = json.loads(raw.decode("utf-8", "replace"))
+            except Exception as error:
+                device_info = {"error": str(error)}
+        else:
+            device_info = {}
+        check("the device side says whether it is locked",
+              "locked" in device_info, json.dumps(device_info))
+        check("the device side is not locked",
+              device_info.get("locked") is False, json.dumps(device_info))
+
+        # ---- 多块屏幕：只显示主屏幕 ---------------------------------------
+        # 假的截图工具给一张「两块屏拼起来」的图（左半蓝、右半红），假的
+        # xrandr 说主屏幕是右边那块。侧载应该只把右边那块裁出来 —— 画面
+        # 应该是红的，而且比虚拟桌面窄。
+        fake = os.path.join(work, "fakebin")
+        os.makedirs(fake, exist_ok=True)
+        wide = os.path.join(work, "wide.png")
+        write_png(wide, 3840, 1080, (255, 0, 0), (0, 0, 255))   # 左半红、右半蓝
+        # The fake tools bring what they need with them: the folders with
+        # the real screenshot programs are taken out of the PATH, and
+        # those folders may also hold the ordinary commands.
+        for tool in ("sh", "cp"):
+            source = os.path.join("/bin", tool)
+            if not os.path.exists(source):
+                source = os.path.join("/usr/bin", tool)
+            if os.path.exists(source):
+                link = os.path.join(fake, tool)
+                if not os.path.exists(link):
+                    os.symlink(source, link)
+        with open(os.path.join(fake, "scrot"), "w") as handle:
+            handle.write("#!%s\n"
+                         "for last; do :; done\n"
+                         "%s %s \"$last\"\n" % (os.path.join(fake, "sh"),
+                                                  os.path.join(fake, "cp"), wide))
+        os.chmod(os.path.join(fake, "scrot"), 0o755)
+        with open(os.path.join(fake, "xrandr"), "w") as handle:
+            handle.write("#!%s\n"
+                         "echo 'eDP-1 connected 1920x1080+0+0 (normal)'\n"
+                         "echo 'HDMI-1 connected primary 1920x1080+1920+0 (normal)'\n"
+                         % os.path.join(fake, "sh"))
+        os.chmod(os.path.join(fake, "xrandr"), 0o755)
+
+        real_tools = ("spectacle", "gnome-screenshot", "grim", "maim", "scrot")
+        multi_env = dict(env)
+        keep = []
+        for folder in env.get("PATH", "").split(os.pathsep):
+            if not folder:
+                continue
+            if any(os.path.exists(os.path.join(folder, tool)) for tool in real_tools):
+                continue        # a real screenshot program lives here
+            keep.append(folder)
+        multi_env["PATH"] = fake + os.pathsep + os.pathsep.join(keep)
+        # The desktop backend only asks X11 for the screens when there is
+        # an X server to ask. The xrandr here is a fake one, so the
+        # address does not have to be a real one.
+        multi_env["DISPLAY"] = ":99"
+        multi_env["A2_DESKTOP_DEBUG"] = "1"
+        multi_log = os.path.join(work, "multi.log")
+        handle = open(multi_log, "wb")
+        # A room of its own: the first pair is still sitting in the other
+        # room, and swapping a client in a room means the old connection
+        # is closed while the new one is being set up (that races).
+        multi = subprocess.Popen(
+            [sidecar, "--role", "desktop",
+             "--broker", "127.0.0.1:%d" % signal_port,
+             "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
+             "--tls-pin", pin, "--wait-timeout", "60"],
+            stdout=handle, stderr=subprocess.STDOUT, cwd=work, env=multi_env)
+        procs.append((multi, multi_log))
+        # The session code comes at the end of the "ready" block, so it
+        # is waited for first; the note about the primary screen is
+        # written before that.
+        text = wait_for_log(multi_log, r"a2_tunnel --role control --session [0-9a-f]+",
+                            seconds=30)
+        check("the desktop side looks for the primary screen",
+              "the primary screen" in text, text[-300:])
+        match = re.search(r"a2_tunnel --role control --session ([0-9a-f]+)", text)
+        check("the second desktop side prints a session code", bool(match), text[-300:])
+        multi_session = match.group(1) if match else session
+
+        # 让它跟控制侧连上，看控制侧拿到的是不是只有主屏幕那么大
+        # （整块虚拟桌面是 3840 宽，主屏幕只有 1920）。
+        multi_port = free_port()
+        multi_viewer = free_port()
+        client_log2 = os.path.join(work, "control2.log")
+        spawn([sidecar, "--role", "control", "--session", multi_session,
+               "--broker", "127.0.0.1:%d" % signal_port,
+               "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
+               "--tls-pin", pin, "--port", str(multi_port),
+               "--viewer-port", str(multi_viewer)], "control2.log")
+        wait_for_log(client_log2, r"the data channel is open", seconds=40)
+        info = {}
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            try:
+                status, raw, _ = http("http://127.0.0.1:%d/api/control/info" % multi_viewer,
+                                      timeout=5)
+                if status == 200:
+                    info = json.loads(raw.decode("utf-8", "replace"))
+                    if info.get("frame_width"):
+                        break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        check("only the primary screen is shown",
+              info.get("frame_width") == 1920 and info.get("frame_height") == 1080,
+              json.dumps(info))
+        check("the mouse is relative to the primary screen",
+              info.get("screen_width") == 1920 and info.get("screen_height") == 1080,
+              json.dumps(info))
+        try:
+            multi.terminate()
+            multi.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            multi.kill()
+        check("the desktop side explains itself instead of 404",
+              desktop_status == 200 and "control side" in desktop_page,
+              "status=%s %s" % (desktop_status, desktop_page[:120]))
+    finally:
+        try:
+            a2.stop()
+        except Exception:
+            pass
+        for proc, _ in procs:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        time.sleep(0.5)
+        for proc, _ in procs:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    failed = [c for c in CHECKS if not c[1]]
+    print("\n%d/%d checks passed" % (len(CHECKS) - len(failed), len(CHECKS)))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

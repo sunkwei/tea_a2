@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "version.h"
 
 #include "util.h"
@@ -14,7 +16,7 @@ namespace {
 /// included by six translation units, and a constant in a header is pulled
 /// into every one of them - a version bump would rebuild all six
 /// (server.cpp among them) instead of this single file.
-const char* const kVersionString = "1.4.0";
+const char* const kVersionString = "1.5.1";
 
 /// The commit recorded in tea_agent.buildinfo next to the executable.
 ///

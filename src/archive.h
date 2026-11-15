@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // archive.h -- build a ZIP archive in memory (miniz underneath).
 //
 // One purpose: hand a whole directory of this device to the browser as a single

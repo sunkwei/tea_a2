@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // shell.cpp -- the portable half of the interactive shell: the output buffer,
 // the session registry and the capability probe.
 //

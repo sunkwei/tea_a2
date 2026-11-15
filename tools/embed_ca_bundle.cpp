@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // embed_ca_bundle.cpp -- build-time helper that turns a PEM bundle into a C++
 // translation unit, so the TLS roots live inside the binary.
 //

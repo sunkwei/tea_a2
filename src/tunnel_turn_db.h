@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_turn_db.h -- the TURN account book (a sqlite file a person edits).
 //
 // The broker's TURN relay accepts the accounts in this file. The point of

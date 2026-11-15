@@ -75,6 +75,16 @@ def wait_for_log(path, pattern, seconds=15.0):
     return ""
 
 
+def find_binary(build, name):
+    """The binary, with or without the .exe the Windows build gives it."""
+    for folder in (os.path.join(build, "bin"), os.path.join(build, "tunnel", "bin")):
+        for candidate in (name, name + ".exe"):
+            path = os.path.join(folder, candidate)
+            if os.path.exists(path):
+                return path
+    return ""
+
+
 def find_build(argument):
     """Where the tunnel binaries are (same rule as smoke_tunnel.py)."""
     env = os.environ.get("TEA_TUNNEL_BUILD", "")
@@ -105,9 +115,9 @@ def post_json(url, payload, timeout=15):
 
 def main():
     build = find_build(sys.argv[1] if len(sys.argv) > 1 else "")
-    broker = os.path.join(build, "bin", "a2_broker")
-    sidecar = os.path.join(build, "bin", "a2_tunnel")
-    if not os.path.exists(broker) or not os.path.exists(sidecar):
+    broker = find_binary(build, "a2_broker")
+    sidecar = find_binary(build, "a2_tunnel")
+    if not broker or not sidecar:
         print("skip  (no a2_broker / a2_tunnel in %s)" % build)
         return 0
 
@@ -119,6 +129,7 @@ def main():
     client_port = free_port()
     env = dict(os.environ)
     env["HOME"] = home
+    env["TEA_AGENT_HOME"] = home   # Windows 上用的是这个（不是 HOME）
 
     procs = []
 
@@ -214,7 +225,7 @@ def main():
         # ---- 打字，看它回显 ----------------------------------------------
         marker = "TEA_TERMINAL_%d" % int(time.time())
         post_json(base + "/api/term/session/%s/input" % session_id,
-                  {"data": "echo %s\n" % marker})
+                  {"data": "echo %s\r" % marker})
 
         text = ""
         deadline = time.time() + 25
@@ -232,7 +243,7 @@ def main():
 
         # 真的 shell（不是回显）：让远端算一个数
         post_json(base + "/api/term/session/%s/input" % session_id,
-                  {"data": "echo $((6*7))\n"})
+                  {"data": "echo $((6*7))\r"})
         deadline = time.time() + 25
         while time.time() < deadline:
             status, raw, _ = http(

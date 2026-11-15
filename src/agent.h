@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // agent.h -- the multi-turn tool-calling loop.
 #pragma once
 

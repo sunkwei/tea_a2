@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // http_winhttp.cpp -- Windows backend built on WinHTTP (schannel).
 //
 // Used for every https:// request and, when forced with --http-engine winhttp,

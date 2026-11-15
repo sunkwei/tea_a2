@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // net_compat.h -- socket compatibility shims that must be included *after* the
 // platform socket headers.
 //

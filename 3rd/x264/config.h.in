@@ -1,0 +1,72 @@
+/* config.h -- what x264's `configure` would put in config.h, written by hand.
+ *
+ * Only the values that matter for this build are set; everything x264 does
+ * not know about is 0 (that is what configure does too).
+ *
+ * The one thing that is left out on purpose: HAVE_X86ASM. The assembler
+ * version of x264 needs nasm, and we do not want a build tool that is not
+ * there. Without it x264 uses its C versions of the MMX/SSE2 functions -
+ * a little slower, but it builds with nothing but a compiler.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later   (this is x264's own licence)
+ */
+#ifndef X264_BUILD_CONFIG_H
+#define X264_BUILD_CONFIG_H
+
+#define HAVE_X86_INLINE_ASM @X264_INLINE_ASM@
+#define HAVE_MMX @X264_MMX@
+#define ARCH_X86_64 @X264_ARCH_X86_64@
+#define SYS_WINDOWS @X264_SYS_WINDOWS@
+#define STACK_ALIGNMENT 16
+#define HAVE_WIN32THREAD @X264_WIN32THREAD@
+#define HAVE_THREAD 1
+#define HAVE_SYNC_FETCH_AND_ADD 1
+#define HAVE_LOG2F 1
+#define HAVE_STRTOK_R 1
+#define HAVE_CLOCK_GETTIME @X264_CLOCK_GETTIME@
+#define HAVE_VECTOREXT @X264_VECTOREXT@
+
+#define HAVE_BITDEPTH8 1
+#define HAVE_BITDEPTH10 0
+#define HAVE_GPL 1
+#define HAVE_INTERLACED 1
+
+#define HAVE_MALLOC_H 0
+#define HAVE_ALTIVEC 0
+#define HAVE_ALTIVEC_H 0
+#define HAVE_ARMV6 0
+#define HAVE_ARMV6T2 0
+#define HAVE_NEON 0
+#define HAVE_AARCH64 0
+#define HAVE_BEOSTHREAD 0
+#define HAVE_POSIXTHREAD 0
+#define HAVE_SWSCALE 0
+#define HAVE_LAVF 0
+#define HAVE_FFMS 0
+#define HAVE_GPAC 0
+#define HAVE_AVS 0
+#define HAVE_CPU_COUNT 0
+#define HAVE_OPENCL 0
+#define HAVE_THP 0
+#define HAVE_LSMASH 0
+#define HAVE_AS_FUNC 0
+#define HAVE_INTEL_DISPATCHER 0
+#define HAVE_MSA 0
+#define HAVE_LSX 0
+#define HAVE_MMAP 0
+#define HAVE_WINRT 0
+#define HAVE_VSX 0
+#define HAVE_ARM_INLINE_ASM 0
+#define HAVE_ELF_AUX_INFO 0
+#define HAVE_GETAUXVAL 0
+#define HAVE_SYSCONF 0
+#define HAVE_DOTPROD 0
+#define HAVE_I8MM 0
+#define HAVE_SVE 0
+#define HAVE_SVE2 0
+#define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 0
+#define HAVE_AS_ARCHEXT_I8MM_DIRECTIVE 0
+#define HAVE_AS_ARCHEXT_SVE_DIRECTIVE 0
+#define HAVE_AS_ARCHEXT_SVE2_DIRECTIVE 0
+
+#endif  /* X264_BUILD_CONFIG_H */

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // phone_tool.h -- the phone bridge tool (Android builds only).
 #pragma once
 

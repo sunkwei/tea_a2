@@ -2826,3 +2826,163 @@ video_analyse 那一轮：08:25:54 / 08:27:59 / 08:30:38，每一次的轨迹都
 - **`/cron` 这类只在一台机器上写过的代码，仓库不会知道** → 发版前拿两台机器上的
   `sched/` 跟仓库对一遍 diff（本次差了两处，都是「机器上有、仓库里没有」）。
 - 微信的 CDN 推送要**IPv4 优先**（`http_open()`）：不然「prepare failed」。
+
+---
+
+## web terminal 里跑 tmux：绿色的状态条会被弄坏（2026-11-14）
+
+**现象**：web terminal（浏览器里的那个终端）里起了 tmux 之后，tmux 底下那条绿色的
+状态条有时候会散掉——不是整行绿的了，只剩右下角一小截，或者整条跑到屏幕中间
+去了；屏幕上的内容还会多出一份重复的。**跟窗口缩放有关**：一缩放，tmux 重画整屏，
+就更容易坏。
+
+**根因**（都在 `web/term.js` 这个 VT 引擎里）：
+
+1. **「挂着的那次换行」没有在光标移动时作废**。真终端的规矩：字符写到最后一列
+   的时候，光标停在最后一列，**挂着**一次换行——下一个字符来了才换行；
+   **任何挪动光标的操作（CR/BS/TAB/CUP/CUU/…）都把这口气作废**。引擎没作废 →
+   tmux 画完满宽的状态条（正好写到最后一列）之后，下一个字符就莫名其妙地换行 →
+   换行发生在最后一行 → **整屏往上滚一行** → 状态条被顶掉；要是滚到一半，
+   状态条就只画了一半 → 就是截图里那个「右下角一小截」。
+   （这就是为什么它跟缩放有关：缩放让 tmux 重画，重画就会撞上这个坑。）
+2. **没有备用屏幕**（DECSET 1049）。tmux 启动时切到备用屏幕画自己的界面，退出时
+   切回来。没有这块，tmux 的界面会把 shell 的屏幕冲掉，退出 tmux 以后连提示符
+   都找不回来。
+3. **光标上下移动被滚动区卡住**（`CSI A/B` 停在 `top`/`bot`）——真终端里上下左右
+   是相对**整屏**挪的，滚动区只管「滚不滚」。
+4. **resize 处理不对**：变高时把回滚缓冲里的历史又拉回屏幕；变矮时最上面几行直接
+   没了（应该进回滚缓冲）；光标不跟着内容走；宽度变了以后还留着「挂着的换行」。
+
+**改法**（`web/term.js`）：
+
+- 任何挪光标的操作都清掉 `wrapNext`（`CSI A/B/C/D/E/F/G/H/f/d`、`ESC D/E/M`、
+  `CR`/`BS`/`TAB`/`LF`、存/取光标）。
+- 加**备用屏幕**（`?47`/`?1047`/`?1049`，`?1048` 存/取光标）：主屏幕整套存起来，
+  退出时原样还回来，回滚缓冲各算各的。
+- 光标上下左右相对整屏；`?6`（原点模式）时相对滚动区。
+- `?7`（自动换行）关掉时，写到最后一列就停在那儿反复覆盖。
+- resize：变高→下面补空白行（历史留在回滚缓冲里）；变矮→最上面几行进回滚缓冲、
+  光标跟着内容上移；宽度变了每行裁一下；宽度变了以后 `wrapNext` 作废。
+
+**怎么验的**：
+
+- `tests/smoke_term_vt.mjs`（node，不用浏览器、不用服务端）：把 tmux 的画法
+  （满宽状态条、`CSI H`、`CSI K`、`?1049h/l`）喂进引擎，钉住上面每一条。
+- 真机对照：Edge + CDP 打开终端、起 tmux、连续改视口大小，量「状态条是不是还
+  整行绿」。**旧引擎 26/26 次采样全坏（永久错位），新引擎最多 1/26**——剩下那
+  一下是缩放后、tmux 重画之前的 ~150ms 抖动，真终端也是这样。
+
+**顺手记的两条**：
+
+- 这台机器上的 tmux 是 WinGet 装的 **psmux 3.4.0**（原生 Windows 版）。
+- 想抓 tmux 的真输出：走 agent 自己的 `/api/shell/session`（ConPTY 里跑 tmux，
+  再用 `/output?cursor=N` 把字节一段段读出来），比在浏览器里截屏有用得多——
+  能直接看到 tmux 是怎么画状态条的（`CSI 30m` `CSI 42m` + 文字 + `CSI K`）。
+
+---
+
+## 轨迹行的「进行中」骗人（2026-11-14）
+
+**现象**：一轮明明跑完了，轨迹那一行还挂着「进行中」；被中断的那一轮更是永远
+「进行中」。
+
+**根因**：轨迹是「一轮一行、写在同一处反复改写」的文件（`<run>/trajectories/
+<session>.jsonl`）。**只有最后一笔才会盖上 `finished_at` / `ok`、把 `partial`
+去掉**（`TrajectoryRecorder::finish()` → `flush()`）。进程在中途没了，这一笔就
+永远盖不上 → 记录停在 `partial: true` → 前端把 `ok === false && partial` 画成
+「进行中」。
+
+**什么时候会中途没了**：appstub 看管的 agent 在**二进制被换掉之后会自动重启**
+（appstub.log 里写着 `the program file is newer than the running instance`）。
+所以「改完代码 build 一遍」= 把正在跑的那一轮掐掉 → 那一轮的轨迹永远停在
+「进行中」。手工 `taskkill` 掉 agent 也一样。
+
+**改法**（`web/app.js`）：徽标不再只看记录里的 `partial`，还要问服务端「这一轮
+还在跑吗」——`GET /api/chat/turns` 返回正在跑的轮次和它们的 `turn_id`，而
+`turn_id` 就是轨迹那一行的 id（`make_id("t_")`，HTTP 层把它同时当审计 id 用）：
+
+- 服务端说它还活着 → 「进行中」；
+- 没人管了 → 「**未完成**」（鼠标停上去有说明：进程被中断、断电，或被重启；
+  不会再有人接着它跑了）。
+
+记录里的 `partial` 字段照旧留着——它是审计信息，不是给人看的状态。
+
+**顺带记住的工作流坑**：
+
+- **在跑着的 agent 旁边 build = 掐断当前这一轮**（appstub 会重启它）。要避开就
+  用另一个 build 目录/端口起一个实例做验证，或者先把要验证的东西做完再 build。
+- 那一轮被掐断后，界面上的轨迹行会留一个「未完成」（修好之前是「进行中」）。
+
+---
+
+## 隧道多了一个角色：远程桌面（2026-11-14）
+
+`a2_tunnel` 多了两个角色（`--role desktop` / `--role control`）：设备那边抓屏、
+外面那边看画面并把鼠标键盘送回去。做法与细节在 `docs/tunnel.md`（「远程桌面：
+两个新角色」那一节）与 `docs/tunnel_sidecar_manual.md`（第五节）。
+
+**这一版走 JPEG，不是 H.264**：H.264 那条路也写好了（Media Foundation 的
+H.264 编码器/解码器 MFT，`src/tunnel_video.cpp`），但本机的编码器不接
+NV12→H.264 的类型组合，所以第一个版本用 GDI+ 的 JPEG（2 帧/秒、质量 50、
+最宽 1280）。要切 H.264 只需要换 `tunnel_video` 里那层。
+
+**踩出来的几件事（换机器也会遇到）**：
+
+- **WIC 的 JPEG 编解码器不一定在**（本机就没有：`CreateDecoderFromFilename`
+  直接失败），**GDI+ 的在**（`GdipSaveImageToStream` ✓）。找 JPEG 编码器要
+  **按 MIME（image/jpeg）找**，别写死 CLSID —— 写死的那个在本机认成了 PNG，
+  一张 1 MB 的图把数据通道塞爆了，后面全卡住。
+- **别让客户端复用穿过代理的连接**：代理那条连接对端会收掉，httplib 的客户端
+  不会自己重连 → 从那以后每个请求都失败。`set_keep_alive(false)`（每个请求
+  一条连接）+ 设备端 `set_keep_alive_max_count(1)`（一个连接一个请求，
+  keep-alive 会把工作线程占住几秒，线程池会被占满）。
+- **尺寸跟着画面走**（响应的 `X-Screen-*` 头）：另外单开一个请求去问尺寸，
+  那条连接在代理里活不久 → 失败 → 后面整条链路都卡住。
+- **隧道关连接时别直接 close**：socket 缓冲区里还没被读走的字节会被丢掉 →
+  读的人看到「连接被重置」。半关（`shutdown(SD_SEND)`，Windows 的名字）→
+  读的人先把剩下的字节读完，再看到 EOF。
+- **这版 MinGW 的 COM/MF 头跟 MSDN 不一样**：`IStream` 是老版
+  （ISequentialStream 形状，`Read`/`Write` 三个参数）、`IMFTransform` 没有
+  `GetOutput`（用 `ProcessOutput`）、`IMFMediaBuffer::Lock` 三个参数、
+  `IWICBitmapEncoder::CreateNewFrame` 两个参数、GDI+ 的扁平 API 在
+  `Gdiplus::DllExports` 里、状态码是 `Gdiplus::Ok`。照着 MSDN 写会编不过。
+
+### 远程桌面：为什么必须禁止锁屏、睡眠、关屏（2026-11-15）
+
+用户问了一个问题：“Windows 锁屏了，a2_tunnel 抓屏会有问题吧”——有，
+且不是小问题：**锁屏后 GDI 拿不到画面**（Windows 把密码桌面换了，
+GDI 只看得见用户自己的桌面），**键鼠也送不进去**（输入去了安全桌面）。
+所以服务一起来就把机器“持醒”着：
+
+| 平台 | 怎么做 |
+| --- | --- |
+| Windows | 专用线程反复调 `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED \| ES_DISPLAY_REQUIRED)` |
+| Linux | 起 `systemd-inhibit --what=idle:sleep sleep infinity` 子进程（`PR_SET_PDEATHSIG` 让它跟着走） |
+
+**几个跟换机器也会遇到的点（都是实测确认的）：
+
+- **`SetThreadExecutionState` 只对调用它的那个线程有效**：线程一死就失效。
+  所以必须单独一个线程常驻。在主线程里调一次是没用的。
+- **请求会被别人拿走**（媒体播放器、演示程序），所以每 20 秒重申请一次。
+- **停掉时要把机器还回去**：`SetThreadExecutionState(ES_CONTINUOUS)`（不带其他标志）。
+  Linux 那边是杀掉子进程。
+- **锁屏不能只靠“不睡觉”解决**：锁屏是独立的事（用户手动按 Win+L 也会锁）。
+  所以还要**能判断出锁屏并告诉看图的人**，不能让他看一帧不动的画面自己猜。
+
+**Windows 怎么判锁屏**（两个来源，任一个说“锁了”就算）：
+
+1. **会话标志**：`WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+   WTSSessionInfoEx, ...)` 里的 `SessionFlags`（**0 = 锁了，1 = 没锁**）。
+   注意 **MinGW 的 `wtsapi32.h` 和 MS SDK 的结构体不一样**（MinGW 的是单会话版，
+   MS SDK 的是数组版）——所以字段按**固定偏移**手读：
+   `Level 0 / SessionId 8 / SessionState 12 / SessionFlags 16`。实测过（本机未锁：`flags=0x1`）。
+   还要链 `wtsapi32`（MinGW 里有 `libwtsapi32.a`）。
+2. **输入桌面的名字**：`OpenInputDesktop` + `GetUserObjectInformation(UOI_NAME)`；
+   锁屏时是 `Winlogon`（安全的那个），而不是 `Default`。
+
+**注意 Windows 7 的老错**：MSDN 写明“Windows 7 / Server 2008 R2 上这两个标志的意义是反的”，
+项目目标是 Windows 10，不受影响。
+
+**状态怎么传到看图的人那边**：`ScreenGeometry` 的 JSON 里带 `locked` + `note`，
+设备那边用已经定义好但**从来没用过**的 `kScreenInfo` 消息发出去，
+控制端收到后写进 `/api/control/info`（`locked` / `note`），页面直接写。

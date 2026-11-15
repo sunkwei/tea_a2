@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // state_lock.h -- the process-wide lock for the on-disk state files.
 //
 // The runtime runs one worker thread per in-flight turn, so several sessions of

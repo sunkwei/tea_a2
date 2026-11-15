@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // llm.h -- OpenAI-compatible chat completions client with streaming and tool
 // calling.
 #pragma once

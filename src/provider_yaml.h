@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // provider_yaml.h -- rewrite one provider's `models:` block inside
 // provider.yaml, leaving the rest of the file alone.
 //

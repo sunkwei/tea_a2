@@ -92,7 +92,7 @@ Run-Step 'end-to-end (tests/e2e.ps1)' {
 
 if (-not $SkipPython) {
     $smokes = @('smoke_config_quickstart.py', 'smoke_concurrency.py', 'smoke_task_runner.py',
-                 'smoke_artifacts.py', 'smoke_task_server.py',
+                 'smoke_artifacts.py', 'smoke_task_server.py', 'smoke_appstub_version.py',
                  'smoke_agent_doc.py', 'smoke_prompt_queue.py', 'smoke_system_prompt.py',
                  'smoke_todo.py', 'smoke_tool_images.py', 'smoke_usage_cache.py',
                  'smoke_provider_usage.py', 'smoke_console_level.py', 'smoke_vision.py',
@@ -105,6 +105,16 @@ if (-not $SkipPython) {
     }
 }
 
+# The VT engine of the web terminal: node only, no browser and no server.
+Run-Step 'smoke_term_vt.mjs' {
+    & node (Join-Path $root 'tests\smoke_term_vt.mjs')
+}
+
+# The desktop tunnel (--role desktop / --role control): needs the tunnel
+# binaries, and skips itself when they are not built.
+Run-Step 'smoke_tunnel_desktop.py' {
+    & python (Join-Path $root 'tests\smoke_tunnel_desktop.py') $Exe
+}
 Run-Step 'windows autostart (tests/autostart.ps1)' {
     & pwsh -NoProfile -File (Join-Path $root 'tests\autostart.ps1') -Exe $Exe
 }

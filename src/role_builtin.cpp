@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // role_builtin.cpp -- the roles that ship with the agent.
 //
 // Five stages of a project, each one a way of working: 需求分析 / 项目设计 /

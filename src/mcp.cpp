@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcp.cpp -- the MCP client: start a server, speak JSON-RPC to it, call its
 // tools.
 //

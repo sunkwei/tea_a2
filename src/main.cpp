@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // main.cpp -- command line entry point for tea_agent.
 #include <atomic>
 #include <chrono>

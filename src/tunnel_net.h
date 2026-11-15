@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_net.h -- the few socket calls the tunnel needs, on both platforms.
 //
 // The tunnel binaries are built for Windows as well as for POSIX, so the
@@ -18,6 +20,9 @@ using tea_socket_t = SOCKET;
 constexpr tea_socket_t kTeaInvalidSocket = INVALID_SOCKET;
 // Windows has no MSG_NOSIGNAL (it has no SIGPIPE to block).
 constexpr int kTeaNoSignal = 0;
+// Half-close: Windows calls it SD_SEND, POSIX calls it SHUT_WR (the values
+// are the same, but the names are not).
+constexpr int kTeaShutdownSend = SD_SEND;
 
 /// Bring up Winsock. Must be called once before any socket call.
 inline int tea_net_init() {
@@ -65,6 +70,8 @@ inline int tea_net_recv(tea_socket_t s, void* data, std::size_t len) {
 using tea_socket_t = int;
 constexpr tea_socket_t kTeaInvalidSocket = -1;
 constexpr int kTeaNoSignal = MSG_NOSIGNAL;
+// Half-close: the POSIX name for what Windows calls SD_SEND.
+constexpr int kTeaShutdownSend = SHUT_WR;
 
 inline int tea_net_init() { return 0; }
 
@@ -93,6 +100,12 @@ inline int tea_net_recv(tea_socket_t s, void* data, std::size_t len) {
 }
 
 #endif
+
+/// Shut down the writing side only: the reader drains what is still in the
+/// buffer and then sees the end of the stream.
+inline int tea_net_shutdown_send(tea_socket_t s) {
+  return ::shutdown(s, kTeaShutdownSend);
+}
 
 /// The last socket error, as a message.
 inline std::string tea_net_error_text() {

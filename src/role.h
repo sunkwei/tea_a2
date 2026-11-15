@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // role.h -- the workspace's stage profiles ("roles").
 //
 // A role is a named way of working: a persona, the stage's standing rules and

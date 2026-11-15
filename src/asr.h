@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // asr.h -- speech to text: forward a recorded clip to an ASR service.
 //
 // The service speaks the OpenAI transcription API

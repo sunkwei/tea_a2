@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // util.h -- small cross-platform helpers shared by every module.
 //
 // Paths and file I/O are implemented directly on top of the platform APIs

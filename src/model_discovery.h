@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // model_discovery.h -- ask a provider which models it offers, and work out the
 // default configuration for each of them.
 //

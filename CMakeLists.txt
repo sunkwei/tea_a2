@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"1.4.0\"")
+    "  const char* const kVersionString = \"1.5.1\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -360,7 +360,9 @@ file(MAKE_DIRECTORY ${TEA_TUNNEL_GEN_DIR})
 set(TEA_TUNNEL_ASSET_SPECS
     tunnel_terminal.html=web/tunnel_terminal.html
     term.js=web/term.js
-    tunnel_terminal.js=web/tunnel_terminal.js)
+    tunnel_terminal.js=web/tunnel_terminal.js
+    tunnel_desktop.html=web/tunnel_desktop.html
+    tunnel_desktop.js=web/tunnel_desktop.js)
 set(TEA_TUNNEL_ASSET_FILES "")
 foreach(_spec ${TEA_TUNNEL_ASSET_SPECS})
   string(REPLACE "=" ";" _pair ${_spec})

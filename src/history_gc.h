@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // history_gc.h -- what the history cleaner is allowed to do, and what it did.
 //
 // The history of a workspace (session transcripts + turn trajectories) is the

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_sidecar.cpp -- the piece that sits next to a tea_a2 and gives it a
 // way out.
 //
@@ -51,6 +53,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
@@ -69,6 +72,9 @@ using json = nlohmann::json;
 
 #include "tunnel_net.h"
 #include "tunnel_paths.h"
+#include "tunnel_control_service.h"
+#include "tunnel_desktop_service.h"
+#include "tunnel_screen.h"
 #include "tunnel_term.h"
 #include "tunnel_tls.h"
 #include "tunnel_turn_db.h"
@@ -555,6 +561,35 @@ int dial_tcp(const std::string& host, uint16_t port) {
 
 }  // namespace
 
+
+// "100k", "500K", "2M", "1000000": how many bits per second.
+namespace {
+
+int parse_bitrate(const std::string& text) {
+  if (text.empty()) return 0;
+  std::size_t at = 0;
+  while (at < text.size() && (std::isdigit(static_cast<unsigned char>(text[at])) ||
+                              text[at] == '.')) {
+    at++;
+  }
+  const double value = std::atof(text.substr(0, at).c_str());
+  if (value <= 0.0) return 0;
+  double scale = 1000.0;   // the default is kilobits
+  if (at < text.size()) {
+    const char suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(text[at])));
+    if (suffix == 'k') {
+      scale = 1000.0;
+    } else if (suffix == 'm') {
+      scale = 1000000.0;
+    } else if (suffix == 'b') {
+      scale = 1.0;         // already bits
+    }
+  }
+  return static_cast<int>(value * scale);
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   std::string role = "client";
   // The broker's address. It can come from three places, in this order:
@@ -614,11 +649,26 @@ int main(int argc, char** argv) {
   // registers the room, the client side is the one that connects from the
   // outside.
   bool is_agent = (role == "agent");
+  // The desktop role is the agent side with a screen instead of a service;
+  // the control role is the client side with a viewer in front of it.
+  bool is_desktop = (role == "desktop");
+  bool is_control = (role == "control");
+  // The picture: how wide it may be, how many a second, how good the JPEG
+  // is. The default is the screen as it is (the whole desktop, at its real
+  // pixels); --width caps it when the bandwidth matters.
+  int desktop_max_width = 0;
+  int desktop_max_height = 0;
+  int desktop_bitrate = 100000;    // bits per second for the H.264 picture
+  int desktop_keyint = 10;         // a key frame every this many seconds
+  double desktop_fps = 2.0;
+  int desktop_quality = 50;
+  // The port the browser opens (the control side only).
+  int viewer_port = 9932;
 
   auto usage = [&](const char* why) {
     if (why) std::fprintf(stderr, "sidecar: %s\n", why);
     std::fprintf(stderr,
-          "a2_tunnel --role agent|client [--session <code>]\n"
+          "a2_tunnel --role agent|client|desktop|control [--session <code>]\n"
           "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
           "          [--listen <host:port>] [--host <addr>] [--port <n>] [--target <host:port>]\n"
           "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
@@ -644,6 +694,27 @@ int main(int argc, char** argv) {
           "                   option is kept so old command lines still work.\n"
           "  --wait-timeout    how long the agent side waits for the peer before giving\n"
           "                   up (default 300 seconds; 0 = wait forever)\n"
+          "  --viewer-port <n> the port the browser opens on the control side\n"
+          "                     (default 9932)\n"
+          "  --width <n>       the widest picture the desktop role hands out\n"
+          "                     (default 0 = the screen as it is, at its real\n"
+          "                     pixels; a smaller number scales it down)\n"
+          "  --resize <WxH>    the biggest picture the desktop role hands out\n"
+          "                     (for example 1280x720; the shape is kept, so\n"
+          "                     nothing is stretched)\n"
+          "  --bitrate <rate>  how many bits per second the H.264 picture may\n"
+          "                     use (100k, 500k, 2M; default 100k).  At 100k a\n"
+          "                     2560x1440 picture is about 6 KB and the text\n"
+          "                     on it is soft - the mouse and the keyboard are\n"
+          "                     not affected.  --resize 1280x720 makes it much\n"
+          "                     clearer for the same bitrate\n"
+          "  --keyint <seconds> how often a key frame comes (default 10).  The\n"
+          "                     pictures in between are much smaller (a quiet\n"
+          "                     screen: a few KB), but they need the ones\n"
+          "                     before them - the pictures travel as a\n"
+          "                     stream and none of them may be lost\n"
+          "  --fps <n>         how many pictures a second (default 2)\n"
+          "  --quality <n>     the JPEG quality, 1..100 (default 50)\n"
           "\n"
           "  The broker's address (and its fingerprint, if you want to watch it)\n"
           "  can also be put in %s:\n"
@@ -663,7 +734,39 @@ int main(int argc, char** argv) {
     };
     if (a == "--role") {
       role = next();
-      is_agent = (role == "agent");
+      is_agent = (role == "agent" || role == "desktop");
+      is_desktop = (role == "desktop");
+      is_control = (role == "control");
+    } else if (a == "--viewer-port") {
+      viewer_port = std::atoi(next().c_str());
+    } else if (a == "--fps") {
+      desktop_fps = std::atof(next().c_str());
+      if (desktop_fps <= 0.0) desktop_fps = 2.0;
+    } else if (a == "--quality") {
+      desktop_quality = std::atoi(next().c_str());
+    } else if (a == "--width") {
+      desktop_max_width = std::atoi(next().c_str());
+    } else if (a == "--bitrate") {
+      desktop_bitrate = parse_bitrate(next().c_str());
+    } else if (a == "--keyint") {
+      desktop_keyint = std::atoi(next().c_str());
+    } else if (a == "--resize") {
+      const std::string size = next().c_str();
+      const std::size_t cross = size.find('x');
+      if (cross == std::string::npos) {
+        std::fprintf(stderr, "sidecar: --resize wants something like 1280x720\n");
+        return 1;
+      }
+      desktop_max_width = std::atoi(size.substr(0, cross).c_str());
+      desktop_max_height = std::atoi(size.substr(cross + 1).c_str());
+      if (desktop_max_width <= 0 || desktop_max_height <= 0) {
+        std::fprintf(stderr, "sidecar: --resize wants something like 1280x720\n");
+        return 1;
+      }
+      // --resize also sets the width: the picture is scaled to fit inside.
+      if (desktop_max_width <= desktop_max_height) {
+        // keep the width, but the height is the limit now
+      }
     } else if (a == "--broker") {
       std::string hp = next();
       split_hostport(hp, broker_host, broker_port);
@@ -779,6 +882,27 @@ int main(int argc, char** argv) {
     log_line("sidecar: the terminal is listening on 127.0.0.1:%u\n", terminal.port());
   }
 
+  // ---- a desktop instead of an address -------------------------------------
+  // "--role desktop" means: this machine shows its screen and takes the
+  // mouse and the keyboard. The service listens on the loopback only - the
+  // tunnel carries it, like everything else.
+  tea_tunnel::DesktopService desktop_service;
+  tea_tunnel::ControlService control_service;
+  if (is_desktop) {
+    std::string desktop_err;
+    if (!desktop_service.start(desktop_max_width, desktop_max_height, desktop_fps,
+                               desktop_bitrate, desktop_keyint, &desktop_err)) {
+      log_line("sidecar: cannot start the desktop: %s\n", desktop_err.c_str());
+      return 1;
+    }
+    // The picture no longer travels through the tunnel's HTTP: it goes on
+    // the screen channel. The HTTP service stays on the loopback (it is
+    // handy on the machine itself, and it is what the tunnel's own port
+    // answers with), but it is not what the other side reads.
+    log_line("sidecar: the desktop is listening on 127.0.0.1:%u\n",
+             static_cast<unsigned>(desktop_service.port()));
+  }
+
   rtc::Configuration cfg;
   if (relay_only) {
     // Ask ICE for relay candidates only: the connection then has to go
@@ -811,7 +935,11 @@ int main(int argc, char** argv) {
   std::vector<std::string> local_candidates;
   std::string local_description;
   std::string local_description_type;
-  std::shared_ptr<rtc::DataChannel> dc;
+  // The two channels. "a2" carries the a2's own bytes (the SSE stream),
+  // "screen" carries the picture. The label travels in the DCEP OPEN
+  // message, so the receiving side knows which is which.
+  std::shared_ptr<rtc::DataChannel> dc;         // the target channel
+  std::shared_ptr<rtc::DataChannel> screen_dc;   // the screen channel
   std::shared_ptr<rtc::PeerConnection> pc;
   // One offer per peer arrival: the broker tells us twice (peer_joined and
   // the peer's need-offer), and offering twice leaves the peer answering a
@@ -824,6 +952,18 @@ int main(int argc, char** argv) {
   // answer into the new negotiation - which is how one side ends up
   // answering a description the other side never asked for.
   int pc_gen = 0;
+  // The mouse and the keyboard: the control side sends them and waits
+  // for the answer, so the answers are collected here until they are
+  // picked up.
+  std::mutex input_mu;
+  std::condition_variable input_cv;
+  std::map<uint64_t, std::string> input_answers;
+  uint64_t next_input_id = 1;
+
+  // The sizes of the picture and of the screen: the device side sends
+  // them next to the picture.
+  std::mutex control_geometry_mu;
+  tea_tunnel::ScreenGeometry control_geometry;
   std::function<void()> start_listener;
   // Set once setup_pc() exists: the channel's close handler needs to start
   // a fresh negotiation, and setup_pc() is defined further down.
@@ -842,6 +982,21 @@ int main(int argc, char** argv) {
     }
   };
 
+  // The screen channel: the picture goes one way, the mouse and the
+  // keyboard the other.
+  auto send_screen_frame = [&](unsigned char type, const std::string& payload) {
+    if (!screen_dc) return;
+    const std::string bytes = frame(type, payload);
+    rtc::binary out;
+    out.reserve(bytes.size());
+    for (char c : bytes) out.push_back(static_cast<std::byte>(c));
+    try {
+      screen_dc->send(out);
+    } catch (const std::exception& e) {
+      log_line("sidecar: the screen send failed: %s\n", e.what());
+    }
+  };
+
   // The pump that copies bytes out of a local socket into the tunnel.
   auto pump = [&](unsigned int id, int fd) {
     char buf[16384];
@@ -856,6 +1011,9 @@ int main(int argc, char** argv) {
     std::string payload;
     put_u32(payload, id);
     send_frame(kClose, payload);
+    // The socket is closed here: the other side is done writing, and this
+    // thread has just seen it (the read returned nothing).
+    tea_net_close(fd);
   };
 
   Signal signal;
@@ -870,6 +1028,7 @@ int main(int argc, char** argv) {
   // when the tunnel opens (and again when the client asks), and the client
   // tells the operator which address to open.
   std::atomic<bool> peer_is_terminal{false};
+  std::atomic<bool> peer_is_desktop{false};
   std::atomic<bool> terminal_announced{false};
   auto announce_terminal = [&]() {
     if (!peer_is_terminal.load()) return;
@@ -881,6 +1040,141 @@ int main(int argc, char** argv) {
     std::fflush(stderr);
   };
 
+  // The screen channel: the picture goes one way, the mouse and the
+  // keyboard the other. It is a channel of its own, so a slow picture
+  // cannot hold up the chat on the other one.
+  auto attach_screen_channel = [&](std::shared_ptr<rtc::DataChannel> channel, int gen) {
+    if (gen != pc_gen) return;
+    screen_dc = channel;
+    channel->onOpen([&, gen] {
+      if (gen != pc_gen) return;
+      log_line("sidecar: the screen channel is open (%s)\n", role.c_str());
+    });
+    channel->onClosed([&, gen] {
+      if (gen != pc_gen) return;
+      log_line("sidecar: the screen channel closed (%s)\n", role.c_str());
+    });
+    channel->onMessage([&, gen](std::variant<rtc::binary, std::string> msg) {
+      if (gen != pc_gen) return;
+      if (!std::holds_alternative<rtc::binary>(msg)) return;
+      const rtc::binary& bytes = std::get<rtc::binary>(msg);
+      if (bytes.size() < 5) return;
+      const char* p = reinterpret_cast<const char*>(bytes.data());
+      const unsigned char type = static_cast<unsigned char>(p[0]);
+      const unsigned int len = get_u32(p + 1);
+      if (len + 5 > bytes.size()) return;
+      const char* payload = p + 5;
+
+      // The picture (the device side pushes it).
+      if (type == tea_tunnel::kScreenPicture) {
+        std::vector<tea_tunnel::ScreenPicture> pictures;
+        tea_tunnel::ScreenGeometry geometry;
+        if (!tea_tunnel::unpack_screen_frame(std::string(payload, len), &pictures, &geometry)) return;
+        if (pictures.empty()) return;
+        {
+          std::lock_guard<std::mutex> lock(control_geometry_mu);
+          control_geometry = geometry;
+        }
+        control_service.on_pictures(pictures, geometry);
+        return;
+      }
+
+      // The sizes of the picture and of the screen, and the state of
+      // the machine (locked or not).
+      if (type == tea_tunnel::kScreenInfo) {
+        tea_tunnel::ScreenGeometry geometry;
+        if (!tea_tunnel::ScreenGeometry::from_json(std::string(payload, len), &geometry)) return;
+        {
+          std::lock_guard<std::mutex> lock(control_geometry_mu);
+          control_geometry = geometry;
+        }
+        control_service.on_status(geometry.locked, geometry.note);
+        return;
+      }
+
+      // The answer to the mouse and the keyboard: the control side is
+      // waiting for it.
+      if (type == tea_tunnel::kScreenInputResult) {
+        const std::string answer(payload, len);
+        // The number that went out comes back with the answer.
+        uint64_t id = 0;
+        try {
+          const json parsed = json::parse(answer);
+          id = parsed.value("id", static_cast<uint64_t>(0));
+        } catch (const std::exception&) {
+          return;
+        }
+        {
+          std::lock_guard<std::mutex> lock(input_mu);
+          input_answers[id] = answer;
+        }
+        input_cv.notify_all();
+        return;
+      }
+
+      // The mouse and the keyboard (the control side sends them).
+      if (type == tea_tunnel::kScreenInput) {
+        std::string body(payload, len);
+        // The number that went out has to come back with the answer: it
+        // is how the other side knows which answer is its.
+        uint64_t id = 0;
+        json parsed = json::object();
+        try {
+          parsed = json::parse(body);
+          if (parsed.is_object()) id = parsed.value("id", static_cast<uint64_t>(0));
+        } catch (const std::exception&) {
+          parsed = json::object();
+        }
+        // The device side puts the events into this machine's input and
+        // answers; the answer goes back the same way.
+        std::string answer;
+        if (is_desktop && desktop_service.running()) {
+          answer = desktop_service.apply_input(body);
+        } else {
+          answer = "{\"ok\":false,\"error\":\"this side has no desktop\"}";
+        }
+        try {
+          json out = json::parse(answer);
+          if (!out.is_object()) out = json::object();
+          out["id"] = id;
+          answer = out.dump();
+        } catch (const std::exception&) {
+          // The answer was not JSON: it goes back as it is.
+        }
+        send_screen_frame(tea_tunnel::kScreenInputResult, answer);
+        return;
+      }
+    });
+  };
+
+  // The device side pushes the picture onto the screen channel. The
+  // service does the work (it takes the picture and encodes it); this is
+  // only the way out.
+  if (is_desktop) {
+    desktop_service.set_picture_sink(
+        [&](const std::vector<tea_tunnel::ScreenPicture>& pictures,
+            const tea_tunnel::ScreenGeometry& geometry) {
+          // The sizes travel with the picture: the other side needs them
+          // to put the mouse where the browser points, and a separate
+          // message could arrive after the picture.
+          send_screen_frame(tea_tunnel::kScreenPicture,
+                            tea_tunnel::pack_screen_frame(pictures, geometry));
+        });
+    // The state of the machine: locked (or asleep) means there is no
+    // picture to send, so the other side has to be told separately -
+    // otherwise the viewer just sees a picture that never changes.
+    desktop_service.set_status_sink(
+        [&](bool locked, const std::string& note) {
+          tea_tunnel::ScreenGeometry geometry;
+          geometry.locked = locked;
+          geometry.note = note;
+          send_screen_frame(tea_tunnel::kScreenInfo, geometry.to_json());
+        });
+  }
+
+  // The channel that carries the a2's own bytes. It is the one the
+  // tunnel has always used: the target is dialled on it and the bytes
+  // are copied back and forth.
   auto attach_channel = [&](std::shared_ptr<rtc::DataChannel> channel, int gen) {
     if (gen != pc_gen) return;
     dc = channel;
@@ -920,7 +1214,11 @@ int main(int argc, char** argv) {
       // Say what is on the other end: the client side asks (it may have
       // arrived after the agent announced it), the agent side answers.
       if (is_agent) {
-        if (target_is_terminal) signal.send_line({{"type", "target"}, {"kind", "terminal"}});
+        if (target_is_terminal) {
+          signal.send_line({{"type", "target"}, {"kind", "terminal"}});
+        } else if (is_desktop) {
+          signal.send_line({{"type", "target"}, {"kind", "desktop"}});
+        }
       } else {
         signal.send_line({{"type", "ask-target"}});
       }
@@ -997,7 +1295,14 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lock(mu);
         auto it = conns.find(id);
         if (it == conns.end()) return;
-        tea_net_close(it->second);
+        // The far end is done writing. Do NOT close the socket: whatever is
+        // still in the buffer belongs to the reader, and closing it would
+        // throw the answer away (the reader would see a reset instead of
+        // the last bytes). Half-close it: the reader drains the buffer and
+        // then sees the end of the stream.
+        // The name of the half-close differs (Windows: SD_SEND, POSIX:
+        // SHUT_WR), so the call goes through tunnel_net.h.
+        tea_net_shutdown_send(it->second);
         conns.erase(it);
       }
     });
@@ -1027,13 +1332,27 @@ int main(int argc, char** argv) {
       signal.send_line({{"type", "candidate"}, {"sdp", std::string(c)}});
     });
     pc->onDataChannel([&, gen](std::shared_ptr<rtc::DataChannel> channel) {
+      // The label tells the two apart: it travels in the DCEP OPEN
+      // message, so the receiving side knows which channel is which.
+      // The label says which channel this is: the a2's own bytes or the
+      // picture. It travels in the DCEP OPEN message.
+      log_line("sidecar: the data channel \"%s\" arrived\n", channel->label().c_str());
+      if (channel->label() == tea_tunnel::kScreenChannelLabel) {
+        attach_screen_channel(channel, gen);
+        return;
+      }
       attach_channel(channel, gen);
     });
 
     if (is_agent) {
-      // The agent creates the channel; creating it makes libdatachannel
+      // The agent creates the channels; creating them makes libdatachannel
       // produce the offer right away.
-      attach_channel(pc->createDataChannel("a2"), gen);
+      attach_channel(pc->createDataChannel(tea_tunnel::kTargetChannelLabel), gen);
+      if (is_desktop) {
+        // The desktop side has a screen to show: the picture gets a
+        // channel of its own, so it cannot hold up the chat.
+        attach_screen_channel(pc->createDataChannel(tea_tunnel::kScreenChannelLabel), gen);
+      }
     }
   };
   rebuild_tunnel = [&]() { setup_pc(); };
@@ -1149,6 +1468,8 @@ int main(int argc, char** argv) {
       // The client wants to know what is on the other end.
       if (target_is_terminal) {
         signal.send_line({{"type", "target"}, {"kind", "terminal"}});
+      } else if (is_desktop) {
+        signal.send_line({{"type", "target"}, {"kind", "desktop"}});
       }
       return;
     }
@@ -1158,6 +1479,9 @@ int main(int argc, char** argv) {
         peer_is_terminal.store(true);
         log_line("sidecar: the other end is a terminal\n");
         announce_terminal();
+      } else if (kind == "desktop") {
+        peer_is_desktop.store(true);
+        log_line("sidecar: the other end is a desktop\n");
       }
       return;
     }
@@ -1307,6 +1631,63 @@ int main(int argc, char** argv) {
 
   if (!is_agent) {
     start_listener();  // the local proxy is up even before the tunnel
+    if (is_control) {
+      // The viewer: the browser talks to it, and it talks to the other side
+      // through the local proxy (the same one the browser's own requests
+      // would go through).
+      std::string control_err;
+      if (!control_service.start(viewer_port, &control_err)) {
+        log_line("sidecar: cannot start the viewer: %s\n", control_err.c_str());
+        return 1;
+      }
+      // The picture comes in over the screen channel and is kept for the
+      // browser; the mouse and the keyboard go back the same way.
+      control_service.set_picture_source(
+          [&](const std::vector<tea_tunnel::ScreenPicture>& pictures,
+              const tea_tunnel::ScreenGeometry& geometry) {
+            control_service.on_pictures(pictures, geometry);
+          });
+      control_service.set_input_sender(
+          [&](const std::string& body) -> std::string {
+            // The answer comes back over the same channel, so the browser
+            // gets to know whether its click arrived. It is a request and
+            // an answer: the number that goes out comes back with it.
+            const uint64_t id = next_input_id++;
+            std::string payload = body;
+            // The number is put into the body (as "id"), so the device
+            // side can put it into the answer.
+            {
+              json parsed = json::object();
+              try {
+                parsed = json::parse(payload);
+              } catch (const std::exception&) {
+                parsed = json::object();
+              }
+              if (!parsed.is_object()) parsed = json::object();
+              parsed["id"] = id;
+              payload = parsed.dump();
+            }
+            send_screen_frame(tea_tunnel::kScreenInput, payload);
+            // Wait for the answer.
+            std::unique_lock<std::mutex> lock(input_mu);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (true) {
+              auto it = input_answers.find(id);
+              if (it != input_answers.end()) {
+                const std::string answer = it->second;
+                input_answers.erase(it);
+                return answer;
+              }
+              if (input_cv.wait_until(lock, deadline) == std::cv_status::timeout) break;
+            }
+            json out = json::object();
+            out["ok"] = false;
+            out["error"] = "the other side did not answer";
+            return out.dump();
+          });
+      log_line("sidecar: the viewer is on http://127.0.0.1:%u/\n",
+               static_cast<unsigned>(control_service.port()));
+    }
   } else if (!listen_host_override.empty()) {
     log_line("sidecar: --host only matters on the client side (the agent side has no "
              "local proxy)\n");
@@ -1327,7 +1708,9 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "  target        : %s\n", target.c_str());
     }
     std::fprintf(stderr, "  give this to whoever connects from the outside:\n");
-    std::fprintf(stderr, "      a2_tunnel --role client --session %s",
+    // The desktop role needs the control side: the picture is decoded there.
+    std::fprintf(stderr, "      a2_tunnel --role %s --session %s",
+                 is_desktop ? "control" : "client",
                  session.empty() ? token.c_str() : session.c_str());
     // The fingerprint goes along: it is what lets the other side check that
     // it is talking to the same broker, without a certificate to install.
@@ -1342,12 +1725,28 @@ int main(int argc, char** argv) {
     if (target_is_terminal) {
       std::fprintf(stderr, "  (it is a terminal: whoever connects from the outside opens\n"
                            "   http://127.0.0.1:<their port>/ in a browser)\n");
+    } else if (is_desktop) {
+      std::fprintf(stderr, "  (it is this machine's screen: the other side opens\n"
+                           "   http://127.0.0.1:<their viewer port>/ to watch it)\n");
     } else {
       std::fprintf(stderr, "  (it will listen locally and be reachable through the tunnel)\n");
     }
     if (wait_timeout > 0) {
       std::fprintf(stderr, "  giving up in %d seconds if nobody connects.\n", wait_timeout);
     }
+  } else if (is_control) {
+    // The control role: the browser watches the picture on the viewer's
+    // port. The tunnel's own port is still the proxy towards the other
+    // side - opening that one in a browser gets you nothing (the far end
+    // has no page).
+    log_line("sidecar: ready. The picture is on the viewer's port.\n");
+    std::fprintf(stderr, "  open this in a browser:\n");
+    std::fprintf(stderr, "      http://%s:%u/\n",
+                 listen_host.empty() ? "127.0.0.1" : listen_host.c_str(),
+                 control_service.port());
+    std::fprintf(stderr, "  (the tunnel's own port %u is the proxy to the other side;\n"
+                         "   it is not a web page)\n",
+                 listen_port);
   } else {
     log_line("sidecar: ready. To reach it from the outside:\n");
     std::fprintf(stderr, "  add this to the settings.peers of the a2 that drives it:\n");

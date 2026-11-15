@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // dc_probe -- the smallest thing that proves the idea:
 //   two peer connections in one process, ICE, one data channel,
 //   and an HTTP/1.1 request/response riding inside it.

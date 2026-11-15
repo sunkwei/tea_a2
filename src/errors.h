@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // errors.h -- the API's error codes, in one place.
 //
 // A caller should not have to read an English sentence to find out whether it

@@ -134,7 +134,7 @@ build/bin/tea_agent --workspace . --open
 | [隧道现场指引](docs/tunnel_ops.md) | 现场怎么测、怎么用、nat_probe 怎么跑 |
 | [隧道 broker 清单](docs/tunnel_broker.md) | VPS 上要开哪些端口、装什么 |
 | [broker 配置手册](docs/tunnel_broker_manual.md) | broker 怎么装、怎么起、端口怎么开、地址变了怎么办 |
-| [侧载配置手册](docs/tunnel_sidecar_manual.md) | a2_tunnel 两种角色怎么用、参数、排查 |
+| [侧载配置手册](docs/tunnel_sidecar_manual.md) | a2_tunnel 四种角色（agent/client/desktop/control）怎么用、参数、排查 |
 | **接口与内部** | |
 | [HTTP 接口](docs/api.md) | 全部接口、SSE 事件、原语层（给脚本用） |
 | [任务队列](docs/tasks.md) | 排队/调度/交互/导出、微信前端、需求逐条对照（队列自己也在 `GET /api/doc` 上服务这一页） |
@@ -153,7 +153,10 @@ build/bin/tea_agent --workspace . --open
 
 ## License
 
-本项目代码采用 **MIT** 许可证，见 [`LICENSE`](LICENSE)；`3rd/` 下的依赖各按其原许可
+本项目代码采用 **GPL-3.0-or-later** 许可证，见 [`LICENSE`](LICENSE)；`3rd/` 下的依赖各按其原许可
 （细节见 [docs/license.md](docs/license.md)）。
+
+> 2026-11-14 之前本项目以 **MIT** 发布，那份声明保留在 `LICENSE` 里。
+> 改成 GPL 是因为远程桌面的 H.264 编码器用的是 x264（GPL-2.0-or-later）。
 
 Copyright (c) 2026 sunkwei

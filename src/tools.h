@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tools.h -- the tools the agent can call.
 //
 // Minimal viable set required by the task:

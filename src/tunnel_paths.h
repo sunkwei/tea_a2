@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_paths.h -- where the tunnel programs keep their files.
 //
 // The broker and the sidecar both live in a home directory that may be given

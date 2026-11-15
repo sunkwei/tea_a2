@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_broker.cpp -- the one process in the middle: STUN + signalling + TURN.
 //
 // It is what both sides talk to:

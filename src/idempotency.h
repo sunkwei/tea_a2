@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // idempotency.h -- "the same request, asked twice, is one request".
 //
 // A caller that retries (a queue, a watchdog, a phone with a flaky link)

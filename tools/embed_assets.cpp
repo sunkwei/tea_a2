@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // embed_assets.cpp -- build-time helper that converts web/ assets into a C++
 // translation unit, so the tea_agent binary is fully self-contained.
 //

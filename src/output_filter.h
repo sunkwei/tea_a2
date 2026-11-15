@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // output_filter.h -- shrink tool output according to what it *is*, not just how
 // big it is.
 //

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 sunkwei
+// SPDX-License-Identifier: GPL-3.0-or-later
 // config.h -- loads the OpenAI-compatible provider configuration from
 // $HOME/.tea_agent/provider.yaml (same schema the existing tea_agent uses),
 // optionally refined by $HOME/.tea_agent/tea_agent.yaml.

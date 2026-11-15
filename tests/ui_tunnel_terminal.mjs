@@ -27,8 +27,18 @@ const BIN = process.argv[2] || path.join(REPO_ROOT, 'build', 'bin', 'tea_agent')
 const BUILD = path.basename(path.dirname(path.resolve(BIN))) === 'bin'
   ? path.dirname(path.dirname(path.resolve(BIN)))
   : path.join(REPO_ROOT, 'build');
-const BROKER = path.join(BUILD, 'bin', 'a2_broker');
-const SIDECAR = path.join(BUILD, 'bin', 'a2_tunnel');
+// The Windows build gives the binaries a .exe.
+const binary = (name) => {
+  for (const folder of [path.join(BUILD, 'bin'), path.join(BUILD, 'tunnel', 'bin')]) {
+    for (const candidate of [name, name + '.exe']) {
+      const p = path.join(folder, candidate);
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  return path.join(BUILD, 'bin', name);
+};
+const BROKER = binary('a2_broker');
+const SIDECAR = binary('a2_tunnel');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res) => {
