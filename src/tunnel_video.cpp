@@ -2,14 +2,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // tunnel_video.cpp -- the pictures that travel through the tunnel.
 //
+// H.264: **x264** (3rd/x264/) is the encoder on every platform, so the
+// picture looks the same on Windows and on Linux. The Windows-only
+// Media Foundation decoder is the way out for a browser that cannot
+// decode H.264 by itself.
+//
 // JPEG: GDI+ (the JPEG codec is in Windows; WIC's copy of it is not
-// everywhere, so GDI+ is the one to use).
-// H.264: Media Foundation (the encoder and the decoder MFT are in Windows).
+// everywhere, so GDI+ is the one to use). It is only the way out for a
+// browser that cannot decode H.264.
 //
 // Everything else is a stub that says "not on this platform", so the
 // service can answer with the truth instead of pretending.
 #include "tunnel_video.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <stdint.h>

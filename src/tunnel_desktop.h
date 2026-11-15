@@ -3,9 +3,21 @@
 // tunnel_desktop.h -- this machine's screen, and the mouse and keyboard on it.
 //
 // The desktop role of the tunnel hands out two things: pictures of the
-// screen (a few a second, compressed) and the ability to move the mouse and
-// press the keys. This file is the Windows half of that: GDI takes the
-// picture, SendInput moves the pointer.
+// screen (a few a second, compressed) and the ability to move the mouse
+// and press the keys.
+//
+// Two backends do that:
+//   * Windows (tunnel_desktop_win.cpp): GDI takes the picture, SendInput
+//     moves the pointer.
+//   * Linux (tunnel_desktop_linux.cpp): the compositor's own screenshot
+//     program takes the picture, a virtual device in the kernel (/dev/uinput)
+//     moves the pointer.
+//
+// The Linux one is the same way the extension layer works on Linux (see
+// sched/a2_ext_py/desktop_linux.py): a Wayland desktop only lets the
+// compositor take the picture, and the only way to reach a *native*
+// Wayland program with the keyboard is a virtual input device - XTest
+// stops at the XWayland boundary.
 //
 // Everywhere else there is no desktop here, and the service says so.
 #pragma once
