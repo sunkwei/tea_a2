@@ -53,6 +53,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
@@ -73,6 +74,7 @@ using json = nlohmann::json;
 #include "tunnel_paths.h"
 #include "tunnel_control_service.h"
 #include "tunnel_desktop_service.h"
+#include "tunnel_screen.h"
 #include "tunnel_term.h"
 #include "tunnel_tls.h"
 #include "tunnel_turn_db.h"
@@ -893,7 +895,10 @@ int main(int argc, char** argv) {
       log_line("sidecar: cannot start the desktop: %s\n", desktop_err.c_str());
       return 1;
     }
-    target = "127.0.0.1:" + std::to_string(desktop_service.port());
+    // The picture no longer travels through the tunnel's HTTP: it goes on
+    // the screen channel. The HTTP service stays on the loopback (it is
+    // handy on the machine itself, and it is what the tunnel's own port
+    // answers with), but it is not what the other side reads.
     log_line("sidecar: the desktop is listening on 127.0.0.1:%u\n",
              static_cast<unsigned>(desktop_service.port()));
   }
@@ -930,7 +935,11 @@ int main(int argc, char** argv) {
   std::vector<std::string> local_candidates;
   std::string local_description;
   std::string local_description_type;
-  std::shared_ptr<rtc::DataChannel> dc;
+  // The two channels. "a2" carries the a2's own bytes (the SSE stream),
+  // "screen" carries the picture. The label travels in the DCEP OPEN
+  // message, so the receiving side knows which is which.
+  std::shared_ptr<rtc::DataChannel> dc;         // the target channel
+  std::shared_ptr<rtc::DataChannel> screen_dc;   // the screen channel
   std::shared_ptr<rtc::PeerConnection> pc;
   // One offer per peer arrival: the broker tells us twice (peer_joined and
   // the peer's need-offer), and offering twice leaves the peer answering a
@@ -943,6 +952,18 @@ int main(int argc, char** argv) {
   // answer into the new negotiation - which is how one side ends up
   // answering a description the other side never asked for.
   int pc_gen = 0;
+  // The mouse and the keyboard: the control side sends them and waits
+  // for the answer, so the answers are collected here until they are
+  // picked up.
+  std::mutex input_mu;
+  std::condition_variable input_cv;
+  std::map<uint64_t, std::string> input_answers;
+  uint64_t next_input_id = 1;
+
+  // The sizes of the picture and of the screen: the device side sends
+  // them next to the picture.
+  std::mutex control_geometry_mu;
+  tea_tunnel::ScreenGeometry control_geometry;
   std::function<void()> start_listener;
   // Set once setup_pc() exists: the channel's close handler needs to start
   // a fresh negotiation, and setup_pc() is defined further down.
@@ -958,6 +979,21 @@ int main(int argc, char** argv) {
       dc->send(out);
     } catch (const std::exception& e) {
       log_line("sidecar: send failed: %s\n", e.what());
+    }
+  };
+
+  // The screen channel: the picture goes one way, the mouse and the
+  // keyboard the other.
+  auto send_screen_frame = [&](unsigned char type, const std::string& payload) {
+    if (!screen_dc) return;
+    const std::string bytes = frame(type, payload);
+    rtc::binary out;
+    out.reserve(bytes.size());
+    for (char c : bytes) out.push_back(static_cast<std::byte>(c));
+    try {
+      screen_dc->send(out);
+    } catch (const std::exception& e) {
+      log_line("sidecar: the screen send failed: %s\n", e.what());
     }
   };
 
@@ -1004,6 +1040,129 @@ int main(int argc, char** argv) {
     std::fflush(stderr);
   };
 
+  // The screen channel: the picture goes one way, the mouse and the
+  // keyboard the other. It is a channel of its own, so a slow picture
+  // cannot hold up the chat on the other one.
+  auto attach_screen_channel = [&](std::shared_ptr<rtc::DataChannel> channel, int gen) {
+    if (gen != pc_gen) return;
+    screen_dc = channel;
+    channel->onOpen([&, gen] {
+      if (gen != pc_gen) return;
+      log_line("sidecar: the screen channel is open (%s)\n", role.c_str());
+    });
+    channel->onClosed([&, gen] {
+      if (gen != pc_gen) return;
+      log_line("sidecar: the screen channel closed (%s)\n", role.c_str());
+    });
+    channel->onMessage([&, gen](std::variant<rtc::binary, std::string> msg) {
+      if (gen != pc_gen) return;
+      if (!std::holds_alternative<rtc::binary>(msg)) return;
+      const rtc::binary& bytes = std::get<rtc::binary>(msg);
+      if (bytes.size() < 5) return;
+      const char* p = reinterpret_cast<const char*>(bytes.data());
+      const unsigned char type = static_cast<unsigned char>(p[0]);
+      const unsigned int len = get_u32(p + 1);
+      if (len + 5 > bytes.size()) return;
+      const char* payload = p + 5;
+
+      // The picture (the device side pushes it).
+      if (type == tea_tunnel::kScreenPicture) {
+        std::vector<tea_tunnel::ScreenPicture> pictures;
+        tea_tunnel::ScreenGeometry geometry;
+        if (!tea_tunnel::unpack_screen_frame(std::string(payload, len), &pictures, &geometry)) return;
+        if (pictures.empty()) return;
+        {
+          std::lock_guard<std::mutex> lock(control_geometry_mu);
+          control_geometry = geometry;
+        }
+        control_service.on_pictures(pictures, geometry);
+        return;
+      }
+
+      // The sizes of the picture and of the screen.
+      if (type == tea_tunnel::kScreenInfo) {
+        tea_tunnel::ScreenGeometry geometry;
+        if (!tea_tunnel::ScreenGeometry::from_json(std::string(payload, len), &geometry)) return;
+        {
+          std::lock_guard<std::mutex> lock(control_geometry_mu);
+          control_geometry = geometry;
+        }
+        return;
+      }
+
+      // The answer to the mouse and the keyboard: the control side is
+      // waiting for it.
+      if (type == tea_tunnel::kScreenInputResult) {
+        const std::string answer(payload, len);
+        // The number that went out comes back with the answer.
+        uint64_t id = 0;
+        try {
+          const json parsed = json::parse(answer);
+          id = parsed.value("id", static_cast<uint64_t>(0));
+        } catch (const std::exception&) {
+          return;
+        }
+        {
+          std::lock_guard<std::mutex> lock(input_mu);
+          input_answers[id] = answer;
+        }
+        input_cv.notify_all();
+        return;
+      }
+
+      // The mouse and the keyboard (the control side sends them).
+      if (type == tea_tunnel::kScreenInput) {
+        std::string body(payload, len);
+        // The number that went out has to come back with the answer: it
+        // is how the other side knows which answer is its.
+        uint64_t id = 0;
+        json parsed = json::object();
+        try {
+          parsed = json::parse(body);
+          if (parsed.is_object()) id = parsed.value("id", static_cast<uint64_t>(0));
+        } catch (const std::exception&) {
+          parsed = json::object();
+        }
+        // The device side puts the events into this machine's input and
+        // answers; the answer goes back the same way.
+        std::string answer;
+        if (is_desktop && desktop_service.running()) {
+          answer = desktop_service.apply_input(body);
+        } else {
+          answer = "{\"ok\":false,\"error\":\"this side has no desktop\"}";
+        }
+        try {
+          json out = json::parse(answer);
+          if (!out.is_object()) out = json::object();
+          out["id"] = id;
+          answer = out.dump();
+        } catch (const std::exception&) {
+          // The answer was not JSON: it goes back as it is.
+        }
+        send_screen_frame(tea_tunnel::kScreenInputResult, answer);
+        return;
+      }
+    });
+  };
+
+  // The device side pushes the picture onto the screen channel. The
+  // service does the work (it takes the picture and encodes it); this is
+  // only the way out.
+  if (is_desktop) {
+    desktop_service.set_picture_sink(
+        [&](const std::vector<tea_tunnel::ScreenPicture>& pictures,
+            const tea_tunnel::ScreenGeometry& geometry) {
+          // The sizes travel with the picture: the other side needs them
+          // to put the mouse where the browser points, and a separate
+          // message could arrive after the picture.
+          send_screen_frame(tea_tunnel::kScreenPicture,
+                            tea_tunnel::pack_screen_frame(pictures, geometry));
+        });
+  }
+
+  // The channel that carries the a2's own bytes. It is the one the
+  // tunnel has always used: the target is dialled on it and the bytes
+  // are copied back and forth.
   auto attach_channel = [&](std::shared_ptr<rtc::DataChannel> channel, int gen) {
     if (gen != pc_gen) return;
     dc = channel;
@@ -1129,7 +1288,9 @@ int main(int argc, char** argv) {
         // throw the answer away (the reader would see a reset instead of
         // the last bytes). Half-close it: the reader drains the buffer and
         // then sees the end of the stream.
-        ::shutdown(it->second, SD_SEND);   // Windows 的名字（POSIX 那边叫 SHUT_WR）
+        // The name of the half-close differs (Windows: SD_SEND, POSIX:
+        // SHUT_WR), so the call goes through tunnel_net.h.
+        tea_net_shutdown_send(it->second);
         conns.erase(it);
       }
     });
@@ -1159,13 +1320,27 @@ int main(int argc, char** argv) {
       signal.send_line({{"type", "candidate"}, {"sdp", std::string(c)}});
     });
     pc->onDataChannel([&, gen](std::shared_ptr<rtc::DataChannel> channel) {
+      // The label tells the two apart: it travels in the DCEP OPEN
+      // message, so the receiving side knows which channel is which.
+      // The label says which channel this is: the a2's own bytes or the
+      // picture. It travels in the DCEP OPEN message.
+      log_line("sidecar: the data channel \"%s\" arrived\n", channel->label().c_str());
+      if (channel->label() == tea_tunnel::kScreenChannelLabel) {
+        attach_screen_channel(channel, gen);
+        return;
+      }
       attach_channel(channel, gen);
     });
 
     if (is_agent) {
-      // The agent creates the channel; creating it makes libdatachannel
+      // The agent creates the channels; creating them makes libdatachannel
       // produce the offer right away.
-      attach_channel(pc->createDataChannel("a2"), gen);
+      attach_channel(pc->createDataChannel(tea_tunnel::kTargetChannelLabel), gen);
+      if (is_desktop) {
+        // The desktop side has a screen to show: the picture gets a
+        // channel of its own, so it cannot hold up the chat.
+        attach_screen_channel(pc->createDataChannel(tea_tunnel::kScreenChannelLabel), gen);
+      }
     }
   };
   rebuild_tunnel = [&]() { setup_pc(); };
@@ -1449,10 +1624,55 @@ int main(int argc, char** argv) {
       // through the local proxy (the same one the browser's own requests
       // would go through).
       std::string control_err;
-      if (!control_service.start("127.0.0.1", listen_port, viewer_port, &control_err)) {
+      if (!control_service.start(viewer_port, &control_err)) {
         log_line("sidecar: cannot start the viewer: %s\n", control_err.c_str());
         return 1;
       }
+      // The picture comes in over the screen channel and is kept for the
+      // browser; the mouse and the keyboard go back the same way.
+      control_service.set_picture_source(
+          [&](const std::vector<tea_tunnel::ScreenPicture>& pictures,
+              const tea_tunnel::ScreenGeometry& geometry) {
+            control_service.on_pictures(pictures, geometry);
+          });
+      control_service.set_input_sender(
+          [&](const std::string& body) -> std::string {
+            // The answer comes back over the same channel, so the browser
+            // gets to know whether its click arrived. It is a request and
+            // an answer: the number that goes out comes back with it.
+            const uint64_t id = next_input_id++;
+            std::string payload = body;
+            // The number is put into the body (as "id"), so the device
+            // side can put it into the answer.
+            {
+              json parsed = json::object();
+              try {
+                parsed = json::parse(payload);
+              } catch (const std::exception&) {
+                parsed = json::object();
+              }
+              if (!parsed.is_object()) parsed = json::object();
+              parsed["id"] = id;
+              payload = parsed.dump();
+            }
+            send_screen_frame(tea_tunnel::kScreenInput, payload);
+            // Wait for the answer.
+            std::unique_lock<std::mutex> lock(input_mu);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (true) {
+              auto it = input_answers.find(id);
+              if (it != input_answers.end()) {
+                const std::string answer = it->second;
+                input_answers.erase(it);
+                return answer;
+              }
+              if (input_cv.wait_until(lock, deadline) == std::cv_status::timeout) break;
+            }
+            json out = json::object();
+            out["ok"] = false;
+            out["error"] = "the other side did not answer";
+            return out.dump();
+          });
       log_line("sidecar: the viewer is on http://127.0.0.1:%u/\n",
                static_cast<unsigned>(control_service.port()));
     }
