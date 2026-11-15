@@ -217,6 +217,11 @@
       if (info.error) {
         setDot('bad');
         say(info.error);
+      } else if (info.locked) {
+        // 对面锁屏了：画面不会再变。与其让人盯着一个不动的画面猜，
+        // 不如直接说清楚。
+        setDot('wait');
+        say(info.note || '对面的电脑锁屏了，等它解锁');
       }
     }).catch(function () { setDot('bad'); });
 

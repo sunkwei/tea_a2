@@ -101,6 +101,8 @@ std::string ScreenGeometry::to_json() const {
   body["screen_height"] = screen_height;
   body["screen_x"] = screen_x;
   body["screen_y"] = screen_y;
+  body["locked"] = locked;
+  body["note"] = note;
   return body.dump();
 }
 
@@ -119,6 +121,10 @@ bool ScreenGeometry::from_json(const std::string& text, ScreenGeometry* out) {
   out->screen_height = body.value("screen_height", 0);
   out->screen_x = body.value("screen_x", 0);
   out->screen_y = body.value("screen_y", 0);
+  // The state of the machine. An old peer does not send them, so they
+  // have to have a default: no lock, no note.
+  out->locked = body.value("locked", false);
+  out->note = body.value("note", std::string());
   return true;
 }
 

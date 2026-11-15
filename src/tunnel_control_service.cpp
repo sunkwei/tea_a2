@@ -64,6 +64,10 @@ struct ControlService::Impl {
   int64_t frames = 0;
   int64_t decoded = 0;
   std::string last_error;
+  // The state of the machine on the other side: locked (or asleep), and
+  // why there is no picture.
+  bool locked = false;
+  std::string note;
 
   PictureSource source;
   InputSender sender;
@@ -161,6 +165,8 @@ bool ControlService::start(int viewer_port, std::string* err) {
     body["codec"] = "h264";
     body["decoded"] = impl_->decoded;
     body["frame_at_ms"] = impl_->frame_at_ms;
+    body["locked"] = impl_->locked;
+    if (!impl_->note.empty()) body["note"] = impl_->note;
     if (!impl_->last_error.empty()) body["error"] = impl_->last_error;
     send_json(res, body);
   });
@@ -279,6 +285,12 @@ void ControlService::on_pictures(const std::vector<ScreenPicture>& pictures,
   impl_->frames++;
   impl_->decoded += static_cast<int64_t>(pictures.size());
   impl_->last_error.clear();
+}
+
+void ControlService::on_status(bool locked, const std::string& note) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  impl_->locked = locked;
+  impl_->note = note;
 }
 
 void ControlService::set_input_sender(InputSender sender) {

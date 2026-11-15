@@ -1079,7 +1079,8 @@ int main(int argc, char** argv) {
         return;
       }
 
-      // The sizes of the picture and of the screen.
+      // The sizes of the picture and of the screen, and the state of
+      // the machine (locked or not).
       if (type == tea_tunnel::kScreenInfo) {
         tea_tunnel::ScreenGeometry geometry;
         if (!tea_tunnel::ScreenGeometry::from_json(std::string(payload, len), &geometry)) return;
@@ -1087,6 +1088,7 @@ int main(int argc, char** argv) {
           std::lock_guard<std::mutex> lock(control_geometry_mu);
           control_geometry = geometry;
         }
+        control_service.on_status(geometry.locked, geometry.note);
         return;
       }
 
@@ -1157,6 +1159,16 @@ int main(int argc, char** argv) {
           // message could arrive after the picture.
           send_screen_frame(tea_tunnel::kScreenPicture,
                             tea_tunnel::pack_screen_frame(pictures, geometry));
+        });
+    // The state of the machine: locked (or asleep) means there is no
+    // picture to send, so the other side has to be told separately -
+    // otherwise the viewer just sees a picture that never changes.
+    desktop_service.set_status_sink(
+        [&](bool locked, const std::string& note) {
+          tea_tunnel::ScreenGeometry geometry;
+          geometry.locked = locked;
+          geometry.note = note;
+          send_screen_frame(tea_tunnel::kScreenInfo, geometry.to_json());
         });
   }
 

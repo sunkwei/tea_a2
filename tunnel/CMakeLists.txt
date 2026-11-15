@@ -200,8 +200,12 @@ if(WIN32)
   # The desktop role: the screen (GDI), the mouse and the keyboard
   # (SendInput), the JPEG codec (GDI+) and the H.264 codecs (Media
   # Foundation). All of them are in Windows itself - nothing to install.
+  #
+  # wtsapi32: the session's lock state (WTSQuerySessionInformation). It is
+  # what tells the viewer that the machine on the other side is locked
+  # instead of showing a picture that never changes.
   target_link_libraries(a2_tunnel PRIVATE gdi32 user32 ole32 uuid gdiplus mfplat mf
-    mfreadwrite mfuuid)
+    mfreadwrite mfuuid wtsapi32)
 endif()
 # The sidecar reads the same account book: it has to use one of the accounts
 # the broker accepts.

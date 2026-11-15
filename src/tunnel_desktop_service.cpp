@@ -59,6 +59,9 @@ struct DesktopService::Impl {
   int frame_height = 0;
   int64_t frame_at_ms = 0;
   int64_t frames = 0;
+  // The state of the machine: locked, and why.
+  bool locked = false;
+  std::string note;
 
   double fps = 2.0;
   int bitrate = 2000000;        // bits per second
@@ -70,11 +73,17 @@ struct DesktopService::Impl {
 
   /// Where the new pictures go (the tunnel's screen channel).
   PictureSink sink;
+  /// The state of the machine (locked or not) goes here.
+  StatusSink status_sink;
   /// The input events from the tunnel.
   InputHandler input_handler;
 
   /// Encode one picture the way the other side asked for it.
   bool encode(const ScreenFrame& frame, std::string* out, std::string* err);
+
+  /// Tell the tunnel that the machine is locked (or that it is not any
+  /// more). The sink is called outside the lock.
+  void report_status();
 };
 
 
@@ -137,6 +146,17 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
   impl_->bitrate = bitrate > 0 ? bitrate : 2000000;
   impl_->keyint_seconds = keyint_seconds > 0 ? keyint_seconds : 10;
   if (!impl_->desktop.start(max_width, max_height, err)) return false;
+
+  // The machine must stay awake while the screen is being watched: a
+  // sleeping machine stops drawing, and a locked one shows its own lock
+  // screen (which GDI cannot photograph at all). Not being able to do
+  // this is not fatal - the desktop still works, it just may fall asleep
+  // under the viewer.
+  std::string awake_why;
+  if (!impl_->desktop.hold_awake(&awake_why)) {
+    std::fprintf(stderr, "desktop: cannot keep the machine awake: %s\n",
+                 awake_why.c_str());
+  }
 
   // The pictures: take one right now so the first request does not wait.
   ScreenFrame frame;
@@ -256,6 +276,8 @@ bool DesktopService::start(int max_width, int max_height, double fps, int bitrat
     body["keyint"] = impl_->keyint_seconds;
     body["frames"] = impl_->frames;
     body["frame_at_ms"] = impl_->frame_at_ms;
+    body["locked"] = impl_->locked;
+    if (!impl_->note.empty()) body["note"] = impl_->note;
     send_json(res, body);
   });
 
@@ -361,9 +383,27 @@ std::string DesktopService::apply_input(const std::string& body) {
   return out.dump();
 }
 
+void DesktopService::Impl::report_status() {
+  StatusSink sink;
+  bool locked = false;
+  std::string note;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    sink = status_sink;
+    locked = this->locked;
+    note = this->note;
+  }
+  if (sink) sink(locked, note);
+}
+
 void DesktopService::set_picture_sink(PictureSink sink) {
   std::lock_guard<std::mutex> lock(impl_->mu);
   impl_->sink = std::move(sink);
+}
+
+void DesktopService::set_status_sink(StatusSink sink) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  impl_->status_sink = std::move(sink);
 }
 
 void DesktopService::set_input_handler(InputHandler handler) {
@@ -379,6 +419,19 @@ void DesktopService::capture_loop() {
     ScreenFrame frame;
     std::string why;
     if (impl_->desktop.grab(&frame, &why)) {
+      // The screen is there: the machine is awake and not locked.
+      bool was_locked = false;
+      {
+        // The state is also read by the HTTP interface, so it is written
+        // under the lock (a std::string that is being replaced while
+        // somebody reads it is a crash waiting to happen).
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        was_locked = impl_->locked;
+        impl_->locked = false;
+        impl_->note.clear();
+      }
+      // The other side is told only when the state changes.
+      if (was_locked) impl_->report_status();
       std::string encoded;
       if (impl_->encode(frame, &encoded, &why)) {
         // The picture that was just made is handed to the tunnel (the
@@ -411,6 +464,27 @@ void DesktopService::capture_loop() {
           sink(pictures, geometry);
         }
       }
+    } else {
+      // No picture. The usual reason is that the session is locked: the
+      // viewer has to be told, otherwise it just sees a picture that
+      // never changes and no explanation.
+      const bool locked = impl_->desktop.session_locked();
+      // The backend says why (it knows what it saw); when it has nothing
+      // to say, the reason of the failed grab is used, and if even that is
+      // empty, a plain sentence.
+      std::string note = locked ? impl_->desktop.unavailable_reason() : why;
+      if (note.empty() && locked) {
+        note = "this machine's screen is not available (locked)";
+      }
+      if (note.empty()) note = "cannot take a picture of the screen";
+      bool changed = false;
+      {
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        changed = (locked != impl_->locked || note != impl_->note);
+        impl_->locked = locked;
+        impl_->note = note;
+      }
+      if (changed) impl_->report_status();
     }
     // Sleep the rest of the interval (a picture that takes long does not
     // make the next one come sooner).
@@ -425,6 +499,7 @@ void DesktopService::stop() {
   if (capture_thread_.joinable()) capture_thread_.join();
   impl_->server.stop();
   if (impl_->server_thread.joinable()) impl_->server_thread.join();
+  // The machine may sleep again now that nobody is watching.
   impl_->desktop.stop();
   running_ = false;
 }

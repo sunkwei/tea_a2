@@ -50,6 +50,12 @@ class DesktopService {
   using PictureSink = std::function<void(const std::vector<ScreenPicture>&, const ScreenGeometry&)>;
   void set_picture_sink(PictureSink sink);
 
+  /// The state of the machine: is it locked, and why can there be no
+  /// picture. The tunnel sets this: it tells the other side, which shows
+  /// it instead of a picture that never changes.
+  using StatusSink = std::function<void(bool locked, const std::string& note)>;
+  void set_status_sink(StatusSink sink);
+
   /// The mouse and the keyboard, from the tunnel. The body is the JSON
   /// the other side sends ({"events": [...]}) and the answer is the same
   /// JSON the HTTP interface returns ({"ok": true, "applied": 2, ...}).

@@ -59,6 +59,11 @@ class ControlService {
   /// browser can ask for the ones it has not seen yet.
   void on_pictures(const std::vector<ScreenPicture>& pictures, const ScreenGeometry& geometry);
 
+  /// The machine on the other side is locked (or asleep), or it is not
+  /// any more. The browser has to be told: without it the viewer just
+  /// sees a picture that never changes.
+  void on_status(bool locked, const std::string& note);
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

@@ -2879,3 +2879,43 @@ NV12→H.264 的类型组合，所以第一个版本用 GDI+ 的 JPEG（2 帧/�
   `GetOutput`（用 `ProcessOutput`）、`IMFMediaBuffer::Lock` 三个参数、
   `IWICBitmapEncoder::CreateNewFrame` 两个参数、GDI+ 的扁平 API 在
   `Gdiplus::DllExports` 里、状态码是 `Gdiplus::Ok`。照着 MSDN 写会编不过。
+
+### 远程桌面：为什么必须禁止锁屏、睡眠、关屏（2026-11-15）
+
+用户问了一个问题：“Windows 锁屏了，a2_tunnel 抓屏会有问题吧”——有，
+且不是小问题：**锁屏后 GDI 拿不到画面**（Windows 把密码桌面换了，
+GDI 只看得见用户自己的桌面），**键鼠也送不进去**（输入去了安全桌面）。
+所以服务一起来就把机器“持醒”着：
+
+| 平台 | 怎么做 |
+| --- | --- |
+| Windows | 专用线程反复调 `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED \| ES_DISPLAY_REQUIRED)` |
+| Linux | 起 `systemd-inhibit --what=idle:sleep sleep infinity` 子进程（`PR_SET_PDEATHSIG` 让它跟着走） |
+
+**几个跟换机器也会遇到的点（都是实测确认的）：
+
+- **`SetThreadExecutionState` 只对调用它的那个线程有效**：线程一死就失效。
+  所以必须单独一个线程常驻。在主线程里调一次是没用的。
+- **请求会被别人拿走**（媒体播放器、演示程序），所以每 20 秒重申请一次。
+- **停掉时要把机器还回去**：`SetThreadExecutionState(ES_CONTINUOUS)`（不带其他标志）。
+  Linux 那边是杀掉子进程。
+- **锁屏不能只靠“不睡觉”解决**：锁屏是独立的事（用户手动按 Win+L 也会锁）。
+  所以还要**能判断出锁屏并告诉看图的人**，不能让他看一帧不动的画面自己猜。
+
+**Windows 怎么判锁屏**（两个来源，任一个说“锁了”就算）：
+
+1. **会话标志**：`WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+   WTSSessionInfoEx, ...)` 里的 `SessionFlags`（**0 = 锁了，1 = 没锁**）。
+   注意 **MinGW 的 `wtsapi32.h` 和 MS SDK 的结构体不一样**（MinGW 的是单会话版，
+   MS SDK 的是数组版）——所以字段按**固定偏移**手读：
+   `Level 0 / SessionId 8 / SessionState 12 / SessionFlags 16`。实测过（本机未锁：`flags=0x1`）。
+   还要链 `wtsapi32`（MinGW 里有 `libwtsapi32.a`）。
+2. **输入桌面的名字**：`OpenInputDesktop` + `GetUserObjectInformation(UOI_NAME)`；
+   锁屏时是 `Winlogon`（安全的那个），而不是 `Default`。
+
+**注意 Windows 7 的老错**：MSDN 写明“Windows 7 / Server 2008 R2 上这两个标志的意义是反的”，
+项目目标是 Windows 10，不受影响。
+
+**状态怎么传到看图的人那边**：`ScreenGeometry` 的 JSON 里带 `locked` + `note`，
+设备那边用已经定义好但**从来没用过**的 `kScreenInfo` 消息发出去，
+控制端收到后写进 `/api/control/info`（`locked` / `note`），页面直接写。

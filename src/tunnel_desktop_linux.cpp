@@ -30,9 +30,14 @@
 
 #ifndef _WIN32
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
+#include <signal.h>
+#include <sys/prctl.h>
+#include <signal.h>
+#include <sys/prctl.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -826,6 +831,77 @@ class VirtualDevice {
   std::vector<int> buttons_;
 };
 
+/// The program that keeps the machine awake.
+///
+/// systemd-inhibit takes a lock that says "do not sleep, do not blank
+/// the screen" and holds it while it runs. So the way to keep a machine
+/// awake is to start it and let it sit there:
+///
+///   systemd-inhibit --what=idle:sleep --why="a2_tunnel desktop" sleep infinity
+///
+/// PR_SET_PDEATHSIG makes the kernel kill it when we die, so a crashed
+/// sidecar does not leave the machine awake forever.
+const char* kInhibitProgram = "systemd-inhibit";
+
+/// Start the program that holds the "stay awake" lock.
+///
+/// Returns the child (so it can be waited for), or -1 when the program is
+/// not there.
+pid_t start_inhibitor(std::string* err) {
+  if (!linux_backend::program_exists(kInhibitProgram)) {
+    if (err) *err = "systemd-inhibit is not installed";
+    return -1;
+  }
+  pid_t child = ::fork();
+  if (child < 0) {
+    if (err) *err = "cannot start systemd-inhibit";
+    return -1;
+  }
+  if (child == 0) {
+    // The child: hold the lock. If we die, it dies too.
+    ::prctl(PR_SET_PDEATHSIG, SIGTERM);
+    const char* argv[] = {kInhibitProgram, "--what=idle:sleep",
+                          "--why=a2_tunnel remote desktop", "sleep", "infinity", nullptr};
+    ::execvp(kInhibitProgram, const_cast<char* const*>(argv));
+    ::_exit(127);
+  }
+  return child;
+}
+
+/// Is the session locked?
+///
+/// On Linux there is no single answer: the compositor draws its own lock
+/// screen and the screenshot program keeps working (the picture is the
+/// lock screen, not the desktop). So the only honest answer is "the
+/// screen saver is running": the usual programs are looked for in the
+/// process list.
+bool screen_saver_running() {
+  static const char* kLockers[] = {"xscreensaver", "gnome-screensaver", "swaylock",
+                                   "i3lock", "xsecurelock",  "light-locker",
+                                   "kscreenlocker", "swayidle", "xdg-screensaver", nullptr};
+  DIR* dir = ::opendir("/proc");
+  if (dir == nullptr) return false;
+  bool found = false;
+  while (struct dirent* entry = ::readdir(dir)) {
+    if (entry->d_name[0] == '.') continue;
+    for (int i = 0; kLockers[i] != nullptr && !found; ++i) {
+      const std::string name = std::string("/proc/") + entry->d_name + "/comm";
+      std::FILE* handle = std::fopen(name.c_str(), "rb");
+      if (handle == nullptr) continue;
+      char buffer[64] = {0};
+      if (std::fgets(buffer, sizeof(buffer), handle) != nullptr) {
+        std::string comm(buffer);
+        while (!comm.empty() && (comm.back() == '\n' || comm.back() == '\r')) comm.pop_back();
+        if (comm == kLockers[i]) found = true;
+      }
+      std::fclose(handle);
+    }
+    if (found) break;
+  }
+  ::closedir(dir);
+  return found;
+}
+
 }  // namespace linux_backend
 
 using linux_backend::ScreenshotTool;
@@ -844,6 +920,10 @@ struct Desktop::Impl {
   std::string picture_path;
   linux_backend::VirtualDevice pointer;
   linux_backend::VirtualDevice keyboard;
+  // The program that holds the "stay awake" lock (see hold_awake).
+  pid_t inhibitor = -1;
+  // Why the screen cannot be shown, in words for the operator.
+  std::string unavailable;
 };
 
 Desktop::Desktop() : impl_(new Impl()) {}
@@ -919,6 +999,7 @@ bool Desktop::start(int max_width, int max_height, std::string* err) {
 
 void Desktop::stop() {
   running_ = false;
+  release_awake();
   impl_->pointer = VirtualDevice();
   impl_->keyboard = VirtualDevice();
   if (!impl_->picture_path.empty()) {
@@ -926,9 +1007,43 @@ void Desktop::stop() {
   }
 }
 
+bool Desktop::hold_awake(std::string* err) {
+  if (!running_) {
+    if (err) *err = "the screen is not open";
+    return false;
+  }
+  if (impl_->inhibitor > 0) return true;   // already holding it
+  impl_->inhibitor = linux_backend::start_inhibitor(err);
+  return impl_->inhibitor > 0;
+}
+
+void Desktop::release_awake() {
+  if (impl_->inhibitor <= 0) return;
+  ::kill(impl_->inhibitor, SIGTERM);
+  int status = 0;
+  ::waitpid(impl_->inhibitor, &status, 0);
+  impl_->inhibitor = -1;
+}
+
+bool Desktop::session_locked() const {
+  return linux_backend::screen_saver_running();
+}
+
+std::string Desktop::unavailable_reason() const {
+  return impl_->unavailable;
+}
+
 bool Desktop::grab(ScreenFrame* out, std::string* err) {
   if (!running_) {
     if (err) *err = "the screen is not open";
+    return false;
+  }
+  // A locked session shows the compositor's own lock screen, not the
+  // desktop. Say so instead of handing out a picture of the lock screen.
+  impl_->unavailable.clear();
+  if (linux_backend::screen_saver_running()) {
+    impl_->unavailable = "this machine is locked (the screen saver is up)";
+    if (err) *err = impl_->unavailable;
     return false;
   }
   std::string why;

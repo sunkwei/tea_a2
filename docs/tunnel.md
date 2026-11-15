@@ -478,6 +478,22 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
   排查用 `A2_DESKTOP_DEBUG=1`。
 - **截图程序有 15 秒的期限** ✓：一个卡住的工具（它等着一个不会来的窗口）
   不能把整条隧道卡住。
+- **机器不会在被看的时候睡觉或锁屏** ✓：远程桌面的本意就是“有人在看这台机器”，
+  机器若是睡着的屏幕就不再变，锁屏了连截图都拍不到（Windows 把密码桌面放了过来，
+  GDI 只看得见用户自己的桌面）。所以远程桌面起来就把机器“持醒”着：
+  | 平台 | 怎么做 | 注意 |
+  | --- | --- | --- |
+  | Windows | 专用线程里反复调 `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED \| ES_DISPLAY_REQUIRED)` | 请求**只对调用它的那个线程有效**，所以得单独一个线程常驻；别人可以把请求拿走，所以每 20 秒重申请一次 |
+  | Linux | 起一个 `systemd-inhibit --what=idle:sleep sleep infinity` 子进程 | 用 `PR_SET_PDEATHSIG` 让它跟着我们走 —— 価子崩了不能留下一个“永远不睡”的机器 |
+  停掉时把机器“还给它自己”（`ES_CONTINUOUS` / 杀子进程）。做不到的话不是致命的：
+  桌面仍然能用，只是机器可能在你带着眼看的时候进入睡眠。
+- **锁屏了就说话** ✓：对面锁屏时拿不到画面，很容易被当成“屏幕卡住了”。现在设备那边一抬头就报告状态（`locked` +
+  `note`），经下隧道的 `kScreenInfo` 消息到控制端，看图页面直接写“对面锁屏了”。
+  Windows 侦判定锁屏用两个来源（任一个说“锁了”就算）：
+  - **会话标志**：`WTSQuerySessionInformation(WTSSessionInfoEx)` 里的 `SessionFlags`（0 = 锁了，1 = 没锁）。
+    注意这个结构在 MinGW 的头文件里和 MS SDK 里**不一样**，所以字段是按固定偏移手读的（字段偏移：
+    Level 0 / SessionId 8 / SessionState 12 / **SessionFlags 16**）。
+  - **输入桌面的名字**：锁屏时输入桌面是安全的那个（`Winlogon`），而不是 `Default`。
 - **HiDPI 没问题** ✓：整条链用**物理像素**（截图给的就是物理像素，uinput 的
   绝对范围也按物理像素声明）。合成器把设备的绝对坐标按比例映射到屏幕的逻辑
   尺寸 —— 声明的范围就是物理尺寸，比例正好抵消，落点还是物理像素 ✓。
@@ -500,8 +516,8 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 | `src/tunnel_screen.{h,cpp}` | 屏幕通道的协议：标签、消息类型、画面的打包、尺寸的 JSON |
 | `src/tunnel_video.{h,cpp}` | H.264 编码（x264）、颜色转换（BT.709 全范围 ✓） |
 | `src/tunnel_desktop.{h,cpp}` | 按平台分发的桌面后端接口 |
-| `src/tunnel_desktop_win.cpp` | Windows：抓屏（GDI）与键鼠注入（SendInput） |
-| `src/tunnel_desktop_linux.cpp` | Linux/Wayland：合成器工具抓屏 + uinput 注入 |
+| `src/tunnel_desktop_win.cpp` | Windows：抓屏（GDI）、键鼠注入（SendInput）、保持唤醒（SetThreadExecutionState）、锁屏判断（WTS） |
+| `src/tunnel_desktop_linux.cpp` | Linux/Wayland：合成器工具抓屏 + uinput 注入 + `systemd-inhibit` 保持唤醒 |
 | `src/tunnel_png.{h,cpp}` | 自带的 PNG 解码器（读截图工具写出来的 PNG，用 miniz） |
 | `src/tunnel_desktop_service.{h,cpp}` | 设备端的服务：抓屏线程、把画面推给通道、接键鼠 |
 | `src/tunnel_control_service.{h,cpp}` | 控制侧的服务：收画面、出画、转发事件、伺服页面 |
@@ -509,8 +525,8 @@ stun.l.google.com   local=0.0.0.0:0  reflexive=('39.65.223.83', 60567)  rtt=187m
 
 **回归**：
 
-- `tests/smoke_tunnel_desktop.py`（28 项：broker → 桌面 → 隧道 → **两条通道分开** →
-  9931 带 a2 的字节 → 9932 出画面 → 键鼠回去）。
+- `tests/smoke_tunnel_desktop.py`（32 项：broker → 桌面 → 隧道 → **两条通道分开** →
+  9931 带 a2 的字节 → 9932 出画面 → 键鼠回去 → **锁屏状态**）。
 - `tests/ui_tunnel_desktop.mjs`（13 项：**真的浏览器**里打开看图页面 → WebCodecs
   解 H.264 → 画布上真的有东西 → 画面一直在来 → 尺寸对 → 点一下鼠标真的动）。
 

@@ -15,6 +15,7 @@
 #include <cstring>
 
 #include <windows.h>
+#include <wtsapi32.h>
 
 #include <algorithm>
 
@@ -63,6 +64,66 @@ VirtualScreen virtual_screen() {
   out.y = 0;
   out.width = GetSystemMetrics(SM_CXSCREEN);
   out.height = GetSystemMetrics(SM_CYSCREEN);
+  return out;
+}
+
+/// The session's lock state, as Windows reports it.
+///
+/// WTSQuerySessionInformation(WTSSessionInfoEx) answers with a buffer
+/// whose layout is not the same in every SDK, so the fields are read by
+/// hand instead of through a struct. The bytes are
+///
+///   0  u32  Level (= 1)
+///   8  u32  SessionId
+///  12  u32  SessionState
+///  16  u32  SessionFlags   (0 = locked, 1 = unlocked)
+///  20  ...  WinStationName, UserName, ...
+struct SessionState {
+  bool known = false;
+  bool locked = false;
+};
+
+/// Ask Windows whether this session is locked.
+///
+/// Two sources, because neither is enough on its own:
+///
+///  * the input desktop. While the session is locked (or a UAC prompt is
+///    up) the input desktop is the secure one ("Winlogon"), not
+///    "Default";
+///  * the session flags (WTS_SESSIONSTATE_LOCK). That is the direct
+///    answer, but it only exists on Windows 8 and later.
+///
+/// Either one saying "locked" is enough.
+SessionState query_session_state() {
+  SessionState out;
+
+  HDESK input = ::OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+  if (input != nullptr) {
+    wchar_t name[256] = {0};
+    DWORD needed = 0;
+    if (::GetUserObjectInformationW(input, UOI_NAME, name, sizeof(name), &needed)) {
+      out.known = true;
+      if (::lstrcmpiW(name, L"Default") != 0) out.locked = true;
+    }
+    ::CloseDesktop(input);
+  }
+
+  // The flags: 0 = locked, 1 = unlocked. (On Windows 7 the two are the
+  // other way round - a documented defect in the OS.)
+  PWTSINFOEXW info = nullptr;
+  DWORD bytes = 0;
+  if (::WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+                                   WTSSessionInfoEx, reinterpret_cast<LPWSTR*>(&info),
+                                   &bytes)) {
+    out.known = true;
+    const unsigned char* raw = reinterpret_cast<const unsigned char*>(info);
+    if (bytes >= 20) {
+      uint32_t flags = 0;
+      std::memcpy(&flags, raw + 16, sizeof(flags));
+      if (flags == WTS_SESSIONSTATE_LOCK) out.locked = true;
+    }
+    ::WTSFreeMemory(info);
+  }
   return out;
 }
 
@@ -145,7 +206,39 @@ struct Desktop::Impl {
   VirtualScreen area;
   int max_width = 0;
   int max_height = 0;
+  // The thread that holds the "stay awake" request, and the event that
+  // tells it to stop (see hold_awake).
+  HANDLE awake_thread = nullptr;
+  HANDLE awake_stop = nullptr;
+  // Why the screen cannot be shown, in words for the operator.
+  std::string unavailable;
 };
+
+/// The thread that asks Windows to keep the machine awake.
+///
+/// SetThreadExecutionState works per thread: the request lasts only as
+/// long as the thread that made it. So it has to be a thread of its own.
+///
+/// ES_CONTINUOUS      the request stays until we say otherwise
+/// ES_SYSTEM_REQUIRED  the machine must not sleep
+/// ES_DISPLAY_REQUIRED  the screen must not go off
+///
+/// The request is asked for again every 20 seconds: another program
+/// (a media player, a presentation) can take it away, and the machine
+/// must not fall asleep under the viewer.
+DWORD WINAPI awake_thread_proc(LPVOID param) {
+  while (true) {
+    ::SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+    // Wait for the stop event, but not longer than 20 seconds: the
+    // request has to be renewed.
+    if (param != nullptr) ::WaitForSingleObject(param, 20 * 1000);
+    else ::Sleep(20 * 1000);
+    if (param != nullptr && ::WaitForSingleObject(param, 0) == WAIT_OBJECT_0) break;
+  }
+  // Let the machine sleep again when we are done.
+  ::SetThreadExecutionState(ES_CONTINUOUS);
+  return 0;
+}
 
 Desktop::Desktop() : impl_(new Impl()) {}
 Desktop::~Desktop() { stop(); }
@@ -174,8 +267,57 @@ bool Desktop::start(int max_width, int max_height, std::string* err) {
 
 void Desktop::stop() {
   running_ = false;
+  release_awake();
   impl_->scratch.release();
   impl_->scaled.release();
+}
+
+bool Desktop::hold_awake(std::string* err) {
+  if (!running_) {
+    if (err) *err = "the screen is not open";
+    return false;
+  }
+  // The event tells the thread to stop; it is closed in release_awake.
+  HANDLE stop_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (stop_event == nullptr) {
+    if (err) *err = "cannot create the event that ends the awake thread";
+    return false;
+  }
+  HANDLE thread = ::CreateThread(nullptr, 0, awake_thread_proc, stop_event, 0, nullptr);
+  if (thread == nullptr) {
+    ::CloseHandle(stop_event);
+    if (err) *err = "cannot start the thread that keeps the machine awake";
+    return false;
+  }
+  // The request itself is made **in the new thread**: it only counts
+  // for the thread that asked for it, so asking here would be pointless
+  // (it would be gone the moment this function returns).
+  impl_->awake_thread = thread;
+  impl_->awake_stop = stop_event;
+  return true;
+}
+
+void Desktop::release_awake() {
+  // The event is closed **after** the thread is gone: the thread waits on
+  // that handle, and closing it under its feet would be a race.
+  if (impl_->awake_stop != nullptr) ::SetEvent(impl_->awake_stop);
+  if (impl_->awake_thread != nullptr) {
+    ::WaitForSingleObject(impl_->awake_thread, 5000);
+    ::CloseHandle(impl_->awake_thread);
+    impl_->awake_thread = nullptr;
+  }
+  if (impl_->awake_stop != nullptr) {
+    ::CloseHandle(impl_->awake_stop);
+    impl_->awake_stop = nullptr;
+  }
+}
+
+bool Desktop::session_locked() const {
+  return query_session_state().locked;
+}
+
+std::string Desktop::unavailable_reason() const {
+  return impl_->unavailable;
 }
 
 bool Desktop::grab(ScreenFrame* out, std::string* err) {
@@ -184,6 +326,20 @@ bool Desktop::grab(ScreenFrame* out, std::string* err) {
     return false;
   }
   const VirtualScreen& area = impl_->area;
+  // A locked session cannot be photographed: Windows has put the secure
+  // desktop on the screen, and GDI can only see the user's own desktop.
+  // Say so instead of handing out a picture of nothing.
+  const SessionState state = query_session_state();
+  impl_->unavailable.clear();
+  if (state.locked) {
+    // The secure desktop is up: either the session is locked, or a system
+    // dialog (UAC) has the input. Both mean the same thing to the viewer:
+    // the screen cannot be photographed and the mouse cannot reach it.
+    impl_->unavailable =
+        "this machine's screen is not available (locked, or a system dialog has the input)";
+    if (err) *err = impl_->unavailable;
+    return false;
+  }
   HDC screen = ::GetDC(nullptr);
   if (screen == nullptr) {
     if (err) *err = "cannot reach the screen";

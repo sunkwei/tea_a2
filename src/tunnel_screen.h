@@ -76,6 +76,10 @@ struct ScreenPicture {
 
 /// The sizes: how big the picture is, and how big the screen it shows is
 /// (the mouse is placed in the screen's coordinates).
+///
+/// It also carries the **state of the machine**: a locked session cannot
+/// be photographed, and the viewer has to be told that instead of being
+/// shown a picture that never changes.
 struct ScreenGeometry {
   int frame_width = 0;
   int frame_height = 0;
@@ -83,6 +87,12 @@ struct ScreenGeometry {
   int screen_height = 0;
   int screen_x = 0;
   int screen_y = 0;
+
+  /// The machine is locked (or asleep): there is nothing to see.
+  bool locked = false;
+  /// Why there is nothing to see, in words for the operator. Empty when
+  /// everything is fine.
+  std::string note;
 
   /// The same, as the JSON that goes over the channel.
   std::string to_json() const;

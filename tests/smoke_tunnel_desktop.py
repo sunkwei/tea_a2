@@ -13,7 +13,8 @@
   2. control 侧载起了看图的页面（本地端口，浏览器打开它）；
   3. 画面**穿过隧道**到了 control 那头（是 H.264，大小对得上屏幕）；
   4. 鼠标键盘事件**穿回去**到了对面（对面说它收下了几个事件）；
-  5. 页面和脚本都在二进制里（设备上没有文件可读）。
+  5. 页面和脚本都在二进制里（设备上没有文件可读）；
+  6. **机器不会在看的时候睡觉或锁屏**（远程桌面的本意）。
 
 二进制不在就跳过（不是每个环境都编了隧道）。
 """
@@ -395,6 +396,14 @@ def main():
               json.dumps(info))
         check("the codec is H.264", info.get("codec") == "h264", json.dumps(info))
 
+        # ---- 锁屏状态要说话 ---------------------------------
+        # 对面锁屏了就拿不到画面（Windows 把自己的密码桌面放了过来，
+        # GDI 看不到）。那时必须说话，而不是让人看一帧不动的画面。
+        check("the viewer knows whether the far side is locked",
+              "locked" in info, json.dumps(info))
+        check("the far side is not locked (the machine is awake)",
+              info.get("locked") is False, json.dumps(info))
+
         # ---- 鼠标键盘穿回去 ------------------------------------------------
         status, answer = post_json(base + "/api/control/input",
                                    {"events": [{"t": "move", "x": 10, "y": 20},
@@ -431,6 +440,21 @@ def main():
                 desktop_page = str(error)
         check("the desktop side has no page of its own", "远程桌面" not in desktop_page,
               desktop_page[:120])
+
+        # ---- 设备那边自己的 info（它也说锁屏状态）-------------------
+        if match:
+            try:
+                status, raw, _ = http("http://127.0.0.1:%s/api/desktop/info" % match.group(1),
+                                      timeout=5)
+                device_info = json.loads(raw.decode("utf-8", "replace"))
+            except Exception as error:
+                device_info = {"error": str(error)}
+        else:
+            device_info = {}
+        check("the device side says whether it is locked",
+              "locked" in device_info, json.dumps(device_info))
+        check("the device side is not locked",
+              device_info.get("locked") is False, json.dumps(device_info))
 
         # ---- 多块屏幕：只显示主屏幕 ---------------------------------------
         # 假的截图工具给一张「两块屏拼起来」的图（左半蓝、右半红），假的

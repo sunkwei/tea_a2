@@ -56,6 +56,30 @@ class Desktop {
   /// Take one picture.
   bool grab(ScreenFrame* out, std::string* err);
 
+  /// Keep the machine awake: no sleep, no screen off, no lock screen.
+  ///
+  /// The whole point of the remote desktop is that somebody is looking at
+  /// this screen from the other side. If the machine sleeps or locks, the
+  /// picture stops changing (Windows locks the session and the screen goes
+  /// to the lock screen, which GDI cannot even photograph). So while the
+  /// desktop is on, the machine must stay awake.
+  ///
+  /// Returns false with a reason when the platform cannot do it - the
+  /// desktop still works, but the machine may fall asleep under it.
+  bool hold_awake(std::string* err);
+
+  /// Give the machine back to its own sleep settings (called on stop()).
+  void release_awake();
+
+  /// Is the session locked right now? A locked session cannot be
+  /// photographed and cannot be driven, so the viewer has to be told
+  /// instead of being shown a frozen picture.
+  bool session_locked() const;
+
+  /// Why the screen cannot be shown (empty when it can). This is the one
+  /// line the operator sees.
+  std::string unavailable_reason() const;
+
   /// The size of the whole (virtual) screen: the coordinates the mouse is
   /// given are on it.
   int screen_width() const { return screen_width_; }
