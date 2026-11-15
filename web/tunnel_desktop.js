@@ -122,14 +122,16 @@
                     4 bytes the length, then the bytes */
   function unpackPictures(buffer) {
     var view = new DataView(buffer);
-    var count = view.getUint32(0);
+    // The numbers are written big endian (the way the tunnel writes all
+    // of its numbers), so they are read that way here too.
+    var count = view.getUint32(0, false);
     var at = 4;
     var out = [];
     for (var i = 0; i < count; i++) {
       if (at + 9 > buffer.byteLength) break;
-      var seq = view.getUint32(at); at += 4;
+      var seq = view.getUint32(at, false); at += 4;
       var key = view.getUint8(at) !== 0; at += 1;
-      var length = view.getUint32(at); at += 4;
+      var length = view.getUint32(at, false); at += 4;
       if (at + length > buffer.byteLength) break;
       out.push({ seq: seq, key: key, bytes: new Uint8Array(buffer, at, length) });
       at += length;
@@ -182,11 +184,13 @@
           canvas.height = frame.displayHeight;
         }
         ctx.drawImage(frame, 0, 0);
+        drawnFrames++;
         frame.close();
         lastFrameAt = Date.now();
         setDot('ok');
       },
-      error: function () {
+      error: function (e) {
+        decodeError = (e && e.message) ? e.message : String(e);
         setDot('bad');
         decoder = null;
       }
@@ -311,6 +315,48 @@
     push({ t: 'key', down: false, vk: KEYS[ev.key] || 0, text: ev.key.length === 1 ? ev.key : '' });
     flush();
   });
+
+  /* ---- 给外面看一眼的状态 ---- */
+  /* 调试和自动化测试用：浏览器里跑 window.teaTunnelDesk.state() 就能看到
+     现在解了多少帧、画面多大、最后一张是什么样子。 */
+  var drawnFrames = 0;
+  var decodeError = '';
+  window.teaTunnelDesk = {
+    state: function () {
+      return {
+        frames: frameNo,
+        drawn: drawnFrames,
+        error: decodeError,
+        lastSeq: lastSeq,
+        width: canvas.width,
+        height: canvas.height,
+        codec: decoderCodec,
+        canDecode: canDecodeH264(),
+        meta: meta.textContent,
+        dot: dot ? dot.className : ''
+      };
+    },
+    /* 最后画上去的那一帧：整张画布上每隔一段取一个像素（看得出画没画
+       上东西）。 */
+    sample: function () {
+      try {
+        var ctx = canvas.getContext('2d');
+        var w = canvas.width, h = canvas.height;
+        var d = ctx.getImageData(0, 0, w, h).data;
+        var out = [];
+        var step = Math.max(1, Math.floor(Math.min(w, h) / 16));
+        for (var y = 0; y < h; y += step) {
+          for (var x = 0; x < w; x += step) {
+            var i = (y * w + x) * 4;
+            out.push(d[i], d[i + 1], d[i + 2]);
+          }
+        }
+        return out;
+      } catch (e) {
+        return [];
+      }
+    }
+  };
 
   /* ---- 走起来 ---- */
   canvas.setAttribute('tabindex', '0');

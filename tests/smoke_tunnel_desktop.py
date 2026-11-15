@@ -25,6 +25,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -110,6 +111,59 @@ def post_json(url, payload, timeout=20):
     return status, json.loads(raw.decode("utf-8"))
 
 
+class FakeA2:
+    """一台假的 a2：只说一句话。
+
+    桌面的那条通道（"a2"）带的是 a2 自己的字节，画面走的是另一条
+    通道（"screen"）。这里放一个说得清自己是谁的服务，就能看出外面
+    那一台的 9931 到底带回了什么。
+    """
+
+    def __init__(self, port):
+        self.port = port
+        self.sock = None
+        self.thread = None
+        self.stopping = False
+
+    def start(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", self.port))
+        self.sock.listen(8)
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        while not self.stopping:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(4096)
+                body = b"this is the a2 on the other side"
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                    b"Connection: close\r\n\r\n" + body)
+            except OSError:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+    def stop(self):
+        self.stopping = True
+        try:
+            if self.sock:
+                self.sock.close()
+        except OSError:
+            pass
+
+
 def main():
     build = find_build(sys.argv[1] if len(sys.argv) > 1 else "")
     broker = find_binary(build, "a2_broker")
@@ -130,6 +184,7 @@ def main():
     env["TEA_AGENT_HOME"] = home   # Windows 上用的是这个（不是 HOME）
 
     procs = []
+    a2 = None
 
     def spawn(args, log_name):
         path = os.path.join(work, log_name)
@@ -151,14 +206,35 @@ def main():
             return 1
         pin = match.group(1)
 
+        # ---- 一台假的 a2（设备那边）------------------------------------
+        # 桌面的那条通道带的是 a2 自己的字节（不是画面），所以这里放一
+        # 个说得清自己是谁的小服务：外面那台的 9931 应该能穿过隧道把
+        # 它的话带回来。
+        a2_port = free_port()
+        a2 = FakeA2(a2_port)
+        a2.start()
+
         # ---- desktop 侧载（设备那边）------------------------------------
         agent_log = os.path.join(work, "desktop.log")
         spawn([sidecar, "--role", "desktop", "--broker", "127.0.0.1:%d" % signal_port,
                "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
-               "--tls-pin", pin, "--wait-timeout", "120"], "desktop.log")
-        text = wait_for_log(agent_log, r"the desktop is listening on 127\.0\.0\.1:\d+")
+               "--tls-pin", pin, "--target", "127.0.0.1:%d" % a2_port,
+               "--wait-timeout", "120"], "desktop.log")
+        text = wait_for_log(agent_log,
+                            r"the desktop is listening on 127\.0\.0\.1:\d+|"
+                            r"there is no desktop on this platform", seconds=30)
+        if "there is no desktop on this platform" in text:
+            # The screen capture is a Windows thing (GDI). Everywhere else
+            # the sidecar says so and stops - that is not a failure, the
+            # feature simply does not exist on this platform.
+            print("skip  (no desktop on this platform)")
+            return 0
         check("the desktop side starts the screen service", "the desktop is listening" in text,
               text[-400:])
+        # 那行命令是「就绪」的时候才打的，比「桌面起来了」晚一点，所以
+        # 单独等它。
+        text = wait_for_log(agent_log, r"a2_tunnel --role control --session [0-9a-f]+",
+                            seconds=20)
         match = re.search(r"a2_tunnel --role control --session ([0-9a-f]+)", text)
         check("the desktop side prints the command for the control side", bool(match),
               text[-300:] if not match else "")
@@ -182,6 +258,25 @@ def main():
               "open this in a browser" in text, text[-400:])
         check("the control side knows the far end is a desktop",
               "the other end is a desktop" in text, text[-400:])
+
+        # ---- 两条通道是分开的 -------------------------------------------
+        # 画面走 "screen"，a2 自己的字节走 "a2"。标签是 DCEP 的 OPEN
+        # 消息里带的，所以对端分得清。
+        text = wait_for_log(client_log, r'the data channel "screen" arrived',
+                            seconds=20)
+        check("the screen channel is a channel of its own",
+              'the data channel "screen" arrived' in text, text[-400:])
+        text = wait_for_log(client_log, r'the data channel "a2" arrived', seconds=20)
+        check("the a2's own bytes are on another channel",
+              'the data channel "a2" arrived' in text, text[-400:])
+
+        # ---- 9931 带的是 a2 自己的字节 ----------------------------------
+        # 隧道的那个端口是到远端那个地址的代理。远端是 a2，所以外面这
+        # 边拿到的应该是 a2 的话，而不是画面。
+        status, raw, _ = http("http://127.0.0.1:%d/" % client_port, timeout=15)
+        check("the tunnel's own port brings the a2's bytes through",
+              status == 200 and b"the a2 on the other side" in raw,
+              "status=%s %s" % (status, raw[:120]))
 
         # ---- 页面 ------------------------------------------------------
         base = "http://127.0.0.1:%d" % viewer_port
@@ -311,6 +406,10 @@ def main():
               desktop_status == 200 and "control side" in desktop_page,
               "status=%s %s" % (desktop_status, desktop_page[:120]))
     finally:
+        try:
+            a2.stop()
+        except Exception:
+            pass
         for proc, _ in procs:
             try:
                 proc.terminate()
