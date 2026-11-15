@@ -474,25 +474,40 @@ def main():
                 continue        # a real screenshot program lives here
             keep.append(folder)
         multi_env["PATH"] = fake + os.pathsep + os.pathsep.join(keep)
+        # The desktop backend only asks X11 for the screens when there is
+        # an X server to ask. The xrandr here is a fake one, so the
+        # address does not have to be a real one.
+        multi_env["DISPLAY"] = ":99"
         multi_env["A2_DESKTOP_DEBUG"] = "1"
         multi_log = os.path.join(work, "multi.log")
         handle = open(multi_log, "wb")
+        # A room of its own: the first pair is still sitting in the other
+        # room, and swapping a client in a room means the old connection
+        # is closed while the new one is being set up (that races).
         multi = subprocess.Popen(
-            [sidecar, "--role", "desktop", "--broker", "127.0.0.1:%d" % signal_port,
+            [sidecar, "--role", "desktop",
+             "--broker", "127.0.0.1:%d" % signal_port,
              "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
-             "--tls-pin", pin, "--wait-timeout", "30"],
+             "--tls-pin", pin, "--wait-timeout", "60"],
             stdout=handle, stderr=subprocess.STDOUT, cwd=work, env=multi_env)
         procs.append((multi, multi_log))
-        text = wait_for_log(multi_log, r"the primary screen", seconds=30)
+        # The session code comes at the end of the "ready" block, so it
+        # is waited for first; the note about the primary screen is
+        # written before that.
+        text = wait_for_log(multi_log, r"a2_tunnel --role control --session [0-9a-f]+",
+                            seconds=30)
         check("the desktop side looks for the primary screen",
               "the primary screen" in text, text[-300:])
+        match = re.search(r"a2_tunnel --role control --session ([0-9a-f]+)", text)
+        check("the second desktop side prints a session code", bool(match), text[-300:])
+        multi_session = match.group(1) if match else session
 
         # 让它跟控制侧连上，看控制侧拿到的是不是只有主屏幕那么大
         # （整块虚拟桌面是 3840 宽，主屏幕只有 1920）。
         multi_port = free_port()
         multi_viewer = free_port()
         client_log2 = os.path.join(work, "control2.log")
-        spawn([sidecar, "--role", "control", "--session", session,
+        spawn([sidecar, "--role", "control", "--session", multi_session,
                "--broker", "127.0.0.1:%d" % signal_port,
                "--stun", "127.0.0.1:%d" % stun_port, "--turn", "127.0.0.1:%d" % stun_port,
                "--tls-pin", pin, "--port", str(multi_port),
