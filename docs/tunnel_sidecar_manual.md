@@ -339,6 +339,7 @@ a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c
 | `--tls-pin <sha256>` | 无 | broker 证书的指纹，**只看不拦**：对不上会说一声，但不断隧道 |
 | `--wait-timeout <秒>` | 300 | agent 侧等多久没人连就退出（0 = 一直等） |
 | `--verbose` | 关 | 打印 ICE 的详细日志 |
+| `--version` | — | 打印版本号（`a2_tunnel 1.5.2`），**和 a2 报的是同一个**（版本号只有一处真相：`src/version.cpp`） |
 
 ---
 

@@ -50,6 +50,10 @@
 #include <mbedtls/x509_crt.h>
 #include <rtc/rtc.hpp>
 
+#ifndef TEA_TUNNEL_VERSION
+#define TEA_TUNNEL_VERSION "unknown"
+#endif
+
 #include <nlohmann/json.hpp>
 
 #include <atomic>
@@ -669,6 +673,7 @@ int main(int argc, char** argv) {
     if (why) std::fprintf(stderr, "sidecar: %s\n", why);
     std::fprintf(stderr,
           "a2_tunnel --role agent|client|desktop|control [--session <code>]\n"
+          "          [--version]\n"
           "          [--broker <host:port>] [--room <name>] [--token <secret>]\n"
           "          [--listen <host:port>] [--host <addr>] [--port <n>] [--target <host:port>]\n"
           "          [--stun <host:port>] [--turn <host:port> --turn-user u --turn-pass p]\n"
@@ -802,6 +807,13 @@ int main(int argc, char** argv) {
     else if (a == "--tls") use_tls = true;
     else if (a == "--no-tls") use_tls = false;
     else if (a == "--verbose") verbose = true;
+    else if (a == "--version") {
+      // The same version the agent reports (src/version.cpp is the one
+      // truth; the build puts it in).
+      std::printf("a2_tunnel %s\n", TEA_TUNNEL_VERSION);
+      std::fflush(stdout);
+      return 0;
+    }
     else if (a == "--help" || a == "-h") usage(nullptr);
     else usage(("unknown option '" + a + "'").c_str());
   }

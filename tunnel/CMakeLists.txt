@@ -26,6 +26,25 @@ endif()
 set(TEA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(TEA_3RD ${TEA_ROOT}/3rd)
 
+# The version the tunnel binaries report --version with: the same string the
+# agent reports. src/version.cpp is the one hand-edited truth in the tree
+# (the top-level CMakeLists reads it the same way), so the two binaries can
+# never drift apart.
+set(TEA_TUNNEL_VERSION "unknown")
+if(EXISTS ${TEA_ROOT}/src/version.cpp)
+  file(READ ${TEA_ROOT}/src/version.cpp _tea_version_source)
+  string(REGEX MATCH "kVersionString[ \t]*=[ \t]*\"([^\"]*)\""
+         _tea_version_match "${_tea_version_source}")
+  if(_tea_version_match)
+    set(TEA_TUNNEL_VERSION ${CMAKE_MATCH_1})
+  endif()
+endif()
+message(STATUS "a2_tunnel/a2_broker version: ${TEA_TUNNEL_VERSION}")
+# The version file is read at configure time: a bump has to make this
+# project configure itself again.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             ${TEA_ROOT}/src/version.cpp)
+
 option(TEA_TUNNEL_STATIC_RUNTIME "Link the C++ runtime statically" ON)
 option(TEA_TUNNEL_STATIC_LIBC "Link libc statically (a self-contained file)" ON)
 
@@ -118,6 +137,9 @@ add_subdirectory(${TEA_3RD}/x264 ${CMAKE_BINARY_DIR}/x264 EXCLUDE_FROM_ALL)
 
 # --- the two binaries --------------------------------------------------------
 add_executable(a2_broker ${TEA_ROOT}/src/tunnel_broker.cpp)
+# The version the broker reports --version with (the same string the agent
+# reports: src/version.cpp is the one truth in the tree).
+target_compile_definitions(a2_broker PRIVATE TEA_TUNNEL_VERSION="${TEA_TUNNEL_VERSION}")
 if(WIN32)
   # MinGW defaults to a much older _WIN32_WINNT than MSVC, which makes
   # cpp-httplib refuse to build and hides CreateFile2(). Target Windows 10.
@@ -193,7 +215,9 @@ target_include_directories(a2_tunnel PRIVATE
   ${TEA_3RD}/cpp-httplib)
 # The HTTP server runs its own threads; a small pool is enough (one browser
 # at a time is the normal case).
-target_compile_definitions(a2_tunnel PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=16)
+target_compile_definitions(a2_tunnel PRIVATE
+  CPPHTTPLIB_THREAD_POOL_COUNT=16
+  TEA_TUNNEL_VERSION="${TEA_TUNNEL_VERSION}")
 target_link_libraries(a2_tunnel PRIVATE datachannel-static MbedTLS::MbedTLS Threads::Threads
   x264 tea_tunnel_miniz)
 if(WIN32)

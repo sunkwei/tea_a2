@@ -40,6 +40,10 @@
 #include <ctime>
 #include <nlohmann/json.hpp>
 
+#ifndef TEA_TUNNEL_VERSION
+#define TEA_TUNNEL_VERSION "unknown"
+#endif
+
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
@@ -556,7 +560,8 @@ int main(int argc, char** argv) {
   auto usage = [&](const char* why) {
     if (why) std::fprintf(stderr, "broker: %s\n", why);
     std::fprintf(stderr,
-          "a2_broker [--stun-port 3478] [--signal-port 8382] [--signal-bind 0.0.0.0]\n"
+          "a2_broker [--version] [--stun-port 3478] [--signal-port 8382]\n"
+          "          [--signal-bind 0.0.0.0]\n"
           "          [--realm a2] [--relay-begin 49160] [--relay-end 49260]\n"
           "          [--token <secret>] [--turn-user <user>] [--turn-pass <pass>]\n"
           "          [--turn-db <file>] [--usage] [--usage-days <n>]\n"
@@ -599,6 +604,13 @@ int main(int argc, char** argv) {
     else if (a == "--cert-name") cert_names.push_back(next());
     else if (a == "--no-tls") use_tls = false;
     else if (a == "--tls") use_tls = true;
+    else if (a == "--version") {
+      // The same version the agent reports (src/version.cpp is the one
+      // truth; the build puts it in).
+      std::printf("a2_broker %s\n", TEA_TUNNEL_VERSION);
+      std::fflush(stdout);
+      return 0;
+    }
     else if (a == "--help" || a == "-h") usage(nullptr);
     else usage(("unknown option '" + a + "'").c_str());
   }

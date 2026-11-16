@@ -657,6 +657,9 @@ if(TEA_AGENT_BUILD_TUNNEL)
             ${TEA_TUNNEL_CMAKE_ARGS}
     COMMAND ${CMAKE_COMMAND} --build ${TEA_TUNNEL_DIR} --config Release
     DEPENDS tunnel/CMakeLists.txt
+            # The tunnel binaries report the version too, and the version
+            # lives in src/version.cpp: a bump has to reach them.
+            ${TEA_VERSION_SOURCE}
             ${TEA_TUNNEL_SOURCES}
             ${TEA_TUNNEL_LIBMJUICE_SOURCES}
             ${TEA_TUNNEL_ASSETS_CPP}
