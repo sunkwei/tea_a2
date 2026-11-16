@@ -60,4 +60,10 @@ a2_broker.db
 a2_broker.db-shm
 a2_broker.db-wal
 
+# The output of a terminal session, written next to the repository when the
+# tunnel's shell is started from there (o<n>.txt is the output, e<n>.txt the
+# error output). They are run artifacts, not source.
+o[0-9]*.txt
+e[0-9]*.txt
+
 clean/
