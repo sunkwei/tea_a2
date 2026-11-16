@@ -27,8 +27,8 @@ cmake --build --preset arm64-linux -j"$(nproc)"
 | 构建 | 大小 | 运行库依赖 |
 | --- | --- | --- |
 | Windows x64 / MinGW-w64（0.15.1 实测，`win64-mingw-cross`） | 7.5 MB（`strip` 后 4.9 MB） | 仅 Windows 10+ 自带的 UCRT 与系统 DLL，可单文件分发 |
-| Linux x64（0.15.1 实测，`posix` preset） | 4.5 MB（`strip` 后 4.0 MB） | 动态链接目标机的 glibc；要完全静态见下一行 |
-| Linux x64（0.15.1 实测，`-DTEA_AGENT_STATIC_LIBC=ON -DTEA_AGENT_STATIC_RUNTIME=ON`） | 6.8 MB（`strip` 后 5.8 MB） | **完全静态**：不依赖目标机的 glibc 版本 |
+| Linux x64（动态，`posix` preset） | 5.4 MB（1.5.2 实测，`strip` 后） | 动态链接目标机的 glibc：目标机 glibc 比构建机老就起不来（`GLIBC_2.34 not found`） |
+| Linux x64（**全静态**，`posix-static` preset，**发版包里的 `linux_x86_64/` 就是它**） | 7.2 MB（1.5.2 实测，`strip` 后） | **完全静态**：不依赖目标机的 glibc 版本（glibc 2.31 的 Ubuntu 20.04 实测能跑） |
 | Linux aarch64（0.15.1 实测，`arm64-linux` preset） | 4.9 MB | 默认完全静态（Arm GNU 11.3 + 静态 glibc）；该工具链的 libstdc++ 自带调试信息，链接出来会大很多，部署前记得 `strip` |
 
 （发布包 `release/tea_a2-<版本>.zip` 里的三个二进制都是 `strip` 过的。语音输入的模型
@@ -47,25 +47,33 @@ cmake --build --preset arm64-linux -j"$(nproc)"
 | 平台 | 链接方式 | 目标机需要什么 |
 | --- | --- | --- |
 | Windows / MinGW-w64 | `-static-libgcc -static-libstdc++ -static`（自动） | 只有 Windows 自带的 `KERNEL32/ADVAPI32/SHELL32/WINHTTP/WS2_32` + UCRT |
-| Linux / 其它 ELF（GCC/Clang） | `-static -no-pie`（**需显式打开**，aarch64 toolchain 已默认打开） | **什么都不需要**，连 glibc 都不用 |
+| Linux / 其它 ELF（GCC/Clang） | `-static -no-pie`（**需显式打开**：aarch64 toolchain 与 `posix-static` preset 已默认打开） | **什么都不需要**，连 glibc 都不用 |
 | macOS | 不适用 | 系统不提供静态 `libc++`，自动跳过 |
 
 本机构建默认是**动态**的（能跑、编译快）；要做单文件部署就显式打开两个开关：
 
 ```bash
-cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release \
-  -DTEA_AGENT_STATIC_RUNTIME=ON -DTEA_AGENT_STATIC_LIBC=ON
-cmake --build build-static -j"$(nproc)"
+cmake --preset posix-static
+cmake --build --preset posix-static -j"$(nproc)"
 file    build-static/bin/tea_agent     # → statically linked
 readelf -d build-static/bin/tea_agent  # → There is no dynamic section in this file.
+
+# 手敲也行（等价）：
+# cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release \
+#   -DTEA_AGENT_STATIC_RUNTIME=ON -DTEA_AGENT_STATIC_LIBC=ON
 ```
+
+> **发版包里的 `linux_x86_64/` 就是这个静态版本**（2026-11-16 起）。
+> 客户的老服务器（Ubuntu 20.04 / glibc 2.31）跑动态链接的 a2 会在启动前就报
+> `version 'GLIBC_2.34' not found` 再退出；静态版跟目标机的 glibc 无关。
+> `pack_release.sh` 打包前会用 `readelf -d` 检查一遍，动态链接的包发不出去。
 
 三个相关开关：
 
 | 选项 | 默认 | 作用 |
 | --- | --- | --- |
-| `TEA_AGENT_STATIC_RUNTIME` | `OFF`（aarch64 toolchain: `ON`） | 静态链接 `libstdc++`/`libgcc` |
-| `TEA_AGENT_STATIC_LIBC` | `OFF`（aarch64 toolchain: `ON`） | 再静态链接 libc（`-static -no-pie`） |
+| `TEA_AGENT_STATIC_RUNTIME` | `OFF`（aarch64 toolchain 与 `posix-static` preset: `ON`） | 静态链接 `libstdc++`/`libgcc` |
+| `TEA_AGENT_STATIC_LIBC` | `OFF`（aarch64 toolchain 与 `posix-static` preset: `ON`） | 再静态链接 libc（`-static -no-pie`） |
 | `TEA_AGENT_USE_MBEDTLS` | `ON` | 关掉可显著减小体积，但 Linux 上就没有 `https://` 了 |
 
 #### glibc 的 NSS 陷阱（已处理）

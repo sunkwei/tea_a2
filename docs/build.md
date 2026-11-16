@@ -88,6 +88,7 @@ scripts\build-mingw.bat
 | 宿主 → 目标 | 命令 | 产物 | 状态 |
 | --- | --- | --- | --- |
 | Linux x86_64 → 本机 | `./scripts/build.sh` 或 `cmake --preset posix && cmake --build --preset posix -j"$(nproc)"` | `build/bin/tea_agent` | ✅ 实测 |
+| Linux x86_64 → 本机（**全静态**，发版包里的 `linux_x86_64` 用的就是这个） | `cmake --preset posix-static && cmake --build --preset posix-static -j"$(nproc)"` | `build-static/bin/tea_agent`（静态 ELF，不依赖目标机的 glibc） | ✅ 实测（glibc 2.31 的老机器上跑过） |
 | macOS → 本机 | 同上（`Xcode`/`Unix Makefiles`） | `build/bin/tea_agent` | ✅ 实测（10.6+） |
 | Windows → 本机（MinGW-w64） | `scripts\build-mingw.bat` 或 `cmake --preset mingw` | `build-mingw\bin\tea_agent.exe` | ✅ 实测 |
 | Linux / macOS → **Windows x64** | `cmake --preset win64-mingw-cross && cmake --build --preset win64-mingw-cross -j"$(nproc)"` | `build-win64/bin/tea_agent.exe`（PE32+，CA 已内嵌） | ✅ 产出；运行需 Windows |
@@ -140,6 +141,23 @@ cmake --preset posix
 cmake --build --preset posix -j"$(nproc)"
 ```
 
+**Linux x86_64 的全静态版**（发版包里 `linux_x86_64/` 用的就是这个）：目标机的 glibc
+比构建机老时，动态链接的那个会在启动前就报
+
+```
+a2: /lib/x86_64-linux-gnu/libstdc++.so.6: version `GLIBCXX_3.4.29' not found
+a2: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found
+```
+
+静态链接的版本跟目标机的 glibc 无关（老到 2.31 的 Ubuntu 20.04 也能跑）：
+
+```bash
+cmake --preset posix-static
+cmake --build --preset posix-static -j"$(nproc)"
+file build-static/bin/tea_agent        # → statically linked
+./scripts/build.sh --static            # 等价的快捷方式
+```
+
 ```bat
 :: Windows（只有这一条路）
 scripts\build-mingw.bat            :: MinGW-w64
@@ -189,6 +207,9 @@ CMakeLists.txt 在 configure 阶段就会拦下两种「看起来像交叉、其
 
 ```bash
 file build-win64/bin/tea_agent.exe   # PE32+ executable (console) x86-64, for MS Windows, 19 sections
+file build-static/bin/tea_agent      # ELF 64-bit LSB executable, x86-64, statically linked
+readelf -d build-static/bin/tea_agent | head -1
+                                     # There is no dynamic section in this file.   ← 全静态
 file build-arm64/bin/tea_agent       # ELF 64-bit LSB executable, ARM aarch64, version 1 (GNU/Linux),
                                      #   statically linked, for GNU/Linux 3.7.0
 readelf -d build-arm64/bin/tea_agent | head -1
@@ -205,7 +226,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 1.5.2
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 1.5.3
 ```
 
 ### 常见错误的对照表
@@ -225,8 +246,8 @@ qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 1.5.2
 | --- | --- | --- |
 | `TEA_AGENT_CXX_STANDARD` | `17` | 设成 `14` 验证「C++14 也能编」（GCC 6.5 是参照的老工具链） |
 | `TEA_AGENT_USE_MBEDTLS` | `ON` | 关掉可显著减小体积，但 Linux 上就没有 `https://` |
-| `TEA_AGENT_STATIC_RUNTIME` | `OFF`（aarch64 toolchain 置 `ON`） | 静态链接 `libstdc++`/`libgcc` |
-| `TEA_AGENT_STATIC_LIBC` | `OFF`（aarch64 toolchain 置 `ON`） | 再静态链接 libc（`-static -no-pie`） |
+| `TEA_AGENT_STATIC_RUNTIME` | `OFF`（aarch64 toolchain 与 `posix-static` preset 置 `ON`） | 静态链接 `libstdc++`/`libgcc` |
+| `TEA_AGENT_STATIC_LIBC` | `OFF`（aarch64 toolchain 与 `posix-static` preset 置 `ON`） | 再静态链接 libc（`-static -no-pie`） |
 | `TEA_AGENT_USE_HOST_ASSET_TOOL` | `= CMAKE_CROSSCOMPILING` | 强制用宿主编译器构建 embed 工具 |
 | `CMAKE_BUILD_TYPE` | `Release` | 想更小用 `MinSizeRel`，再 `strip` |
 

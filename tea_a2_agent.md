@@ -2986,3 +2986,53 @@ GDI 只看得见用户自己的桌面），**键鼠也送不进去**（输入去
 **状态怎么传到看图的人那边**：`ScreenGeometry` 的 JSON 里带 `locked` + `note`，
 设备那边用已经定义好但**从来没用过**的 `kScreenInfo` 消息发出去，
 控制端收到后写进 `/api/control/info`（`locked` / `note`），页面直接写。
+
+
+## Linux x86_64 也改成静态链接（2026-11-16）
+
+客户在他的老服务器上跑发版包里的 `linux_x86_64/tea_a2`，第一句就是：
+
+```
+a2: /lib/x86_64-linux-gnu/libstdc++.so.6: version `GLIBCXX_3.4.29' not found
+a2: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found
+```
+
+**原因**：发版包里的 x86_64 二进制是**动态链接**的（`posix` preset，默认
+`TEA_AGENT_STATIC_RUNTIME=OFF`），构建机是 Debian 12（glibc 2.36 / libstdc++ 12），
+目标机是 Ubuntu 20.04（glibc 2.31 / libstdc++ 10）——**符号版本比目标机新**，
+于是连启动横幅都打印不出来就退出了。aarch64 一直是静态的（toolchain 里默认打开），
+所以只有 x86_64 这一路漏了。
+
+**改法**（三处）：
+
+1. **`CMakePresets.json` 新增 `posix-static`**：产物在 `build-static/`，打开
+   `TEA_AGENT_STATIC_RUNTIME` + `TEA_AGENT_STATIC_LIBC`（`-static -no-pie`）。
+   `scripts/build.sh --static` 是同一个东西的快捷方式。
+2. **`pack_release.sh` 的 `linux_x86_64/` 改从 `build-static/` 取**，并且在打包前
+   用 `readelf -d` 查六个 Linux 二进制：只要有一个的动态段里还有 `NEEDED`，
+   脚本就报错退出。**「打包目录刚好是静态的那个」这种事不能靠记性**。
+3. 文档（`docs/build.md` / `docs/deploy.md`）写清哪个 preset 出哪个产物。
+
+**实测**（这次是真的在老系统上跑过，不是推断）：
+
+| 机器 | glibc | 动态版 | 静态版 |
+| --- | --- | --- | --- |
+| 构建机（Debian 12, WSL2） | 2.36 | ✅ | ✅ |
+| `cloud`（39.98.35.40, Ubuntu 20.04） | **2.31** | ❌ **报出跟客户一模一样的六行错** | ✅ `--version` 正常 |
+| `cloud2`（39.103.179.151, Ubuntu 20.04） | 2.31 | — | ✅ |
+| 客户 zonekey（Ubuntu 20.04） | 2.31 | ❌（客户报的） | ✅（预期，未直连验证） |
+
+静态版在 glibc 2.31 的机器上还跑了完整的一轮：起服务、`/api/health`、
+`POST /api/chat` 的 SSE、工具调用、写文件、读文件，全通；**DNS 也正常**
+（`http_socket.cpp` 在 `TEA_STATIC_LIBC` 下把 hosts 库钉到 `files dns`，
+绕开 `libnss_resolve.so.2` 那个会让静态二进制段错误的坑）。
+
+**几个要记住的点**：
+
+- 静态版**大一圈**：strip 后 7.2 MB（动态 5.4 MB）——换来的是「拷过去就能跑」。
+- 静态版的 DNS 走 glibc 内建的 `files dns`：**systemd-resolved 的 NSS 前端被绕开了**
+  （`/etc/resolv.conf` 指着 127.0.0.53 的 stub 的话，名字照样解析得出来）。
+  mDNS（`mdns4_minimal`）也不走了。
+- **别用 `ldd` 判断跨架构的产物**：`ldd` 对 aarch64 的静态 ELF 也回答
+  `not a dynamic executable`，看起来像通过、其实什么都没验证。用 `readelf -d`。
+- 静态 ELF **正在运行时不能覆盖写**（ETXTBSY），换二进制用 `mv` 原子替换。

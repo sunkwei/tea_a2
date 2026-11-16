@@ -27,6 +27,18 @@
       "binaryDir": "${sourceDir}/build"
     },
     {
+      "name": "posix-static",
+      "displayName": "Linux x86_64 (fully static ELF)",
+      "description": "Same as posix, but links libstdc++, libgcc and libc statically: the binary runs on hosts whose glibc is older than the build machine (no 'GLIBC_2.34 not found'). This is what the release package ships for linux_x86_64.",
+      "inherits": "base",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-static",
+      "cacheVariables": {
+        "TEA_AGENT_STATIC_RUNTIME": "ON",
+        "TEA_AGENT_STATIC_LIBC": "ON"
+      }
+    },
+    {
       "name": "arm64-linux",
       "displayName": "Linux aarch64 (cross from x86_64 host)",
       "description": "Uses cmake/toolchains/aarch64-linux-gnu.cmake; fully static binary with the CA bundle embedded. Override the toolchain with TEA_AARCH64_PREFIX.",
@@ -61,6 +73,10 @@
     {
       "name": "posix",
       "configurePreset": "posix"
+    },
+    {
+      "name": "posix-static",
+      "configurePreset": "posix-static"
     },
     {
       "name": "arm64-linux",
