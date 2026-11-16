@@ -89,6 +89,20 @@ if(X264_USE_ASM AND X264_NASM AND X264_ARCH_X86_64 AND NOT MSVC)
     set(X264_NASM_EXTRA "-w+label-redef-late")
     message(STATUS "x264: nasm 3 needs -w+label-redef-late")
   endif()
+  # The assembler has to write the object for **this** platform: the
+  # calling conventions differ (the first four arguments sit in different
+  # registers, and the fifth one is in a register on Linux/macOS but on the
+  # stack on Windows). Assembling with the wrong one gives objects that
+  # link fine and then crash at the first call - x264_cpu_cpuid() reading
+  # its fifth argument from the wrong place, for one.
+  if(APPLE)
+    set(X264_ASM_FORMAT macho64)
+  elseif(WIN32)
+    set(X264_ASM_FORMAT win64)
+  else()
+    set(X264_ASM_FORMAT elf64)
+  endif()
+  message(STATUS "x264: the assembler objects are ${X264_ASM_FORMAT}")
   set(X264_ASM_DIR ${CMAKE_CURRENT_BINARY_DIR}/asm)
   file(MAKE_DIRECTORY ${X264_ASM_DIR})
   # One helper for both kinds: the difference is the depth macros.
@@ -104,7 +118,7 @@ if(X264_USE_ASM AND X264_NASM AND X264_ARCH_X86_64 AND NOT MSVC)
       set(obj ${X264_ASM_DIR}/${stem}.o)
     endif()
     add_custom_command(OUTPUT ${obj}
-      COMMAND ${X264_NASM} -f win64
+      COMMAND ${X264_NASM} -f ${X264_ASM_FORMAT}
         -I${CMAKE_CURRENT_SOURCE_DIR}
         -I${CMAKE_CURRENT_SOURCE_DIR}/common
         -I${CMAKE_CURRENT_SOURCE_DIR}/common/x86
