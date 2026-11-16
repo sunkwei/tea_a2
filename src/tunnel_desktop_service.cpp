@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -69,6 +70,7 @@ struct DesktopService::Impl {
   H264Encoder encoder;          // the H.264 encoder (x264)
   int encoder_width = 0;
   int encoder_height = 0;
+  int64_t last_picture_log_ms = 0;   // when the frame line was printed last
   std::atomic<bool> stopping{false};
 
   /// Where the new pictures go (the tunnel's screen channel).
@@ -124,12 +126,24 @@ bool DesktopService::Impl::encode(const ScreenFrame& frame, std::string* out,
     // Keep the last ones only: the other side may be away for a while.
     while (stream.size() > 32) stream.pop_front();
   }
+  // How big the picture is and how fast it goes: that is worth knowing
+  // while setting the picture up, and it is **noise** the rest of the time
+  // (a line per frame, forever, over the top of everything else). So it
+  // only shows up when A2_DESKTOP_DEBUG is set, and then at most once
+  // every five seconds.
+  //
   // The number of pictures a second is a double: it must not be printed
   // as an int (that is undefined behaviour and it showed up as a wild
   // number in the log).
-  std::fprintf(stderr, "desktop: the picture is %zu bytes (%.2f MB/s at %.1f a second)\n",
-               out->size(), out->size() * static_cast<double>(fps) / 1048576.0, fps);
-  std::fflush(stderr);
+  if (std::getenv("A2_DESKTOP_DEBUG") != nullptr) {
+    const int64_t stamp = now_ms();
+    if (stamp - last_picture_log_ms > 5000) {
+      last_picture_log_ms = stamp;
+      std::fprintf(stderr, "desktop: the picture is %zu bytes (%.2f MB/s at %.1f a second)\n",
+                   out->size(), out->size() * static_cast<double>(fps) / 1048576.0, fps);
+      std::fflush(stderr);
+    }
+  }
   return ok;
 }
 
