@@ -216,9 +216,12 @@ def main():
               info.get("has_top_p") is False and
               info.get("has_top_k") is False and
               info.get("has_seed") is False, info)
+        # "none" is in the list: a gateway that wants "none" for "do not
+        # think" (Xiaomi's MiMo) has to be able to say so.
         check("the reasoning levels are offered",
-              body.get("reasoning_efforts") == ["auto", "off", "minimal", "low",
-                                                "medium", "high", "xhigh", "max"],
+              body.get("reasoning_efforts") == ["auto", "none", "off", "minimal",
+                                                "low", "medium", "high", "xhigh",
+                                                "max"],
               body.get("reasoning_efforts"))
         mini = providers.get("acme", {}).get("model_info", {}).get("acme-mini", {})
         check("a sampling knob that WAS set is readable",

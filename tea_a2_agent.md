@@ -3036,3 +3036,58 @@ a2: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found
 - **别用 `ldd` 判断跨架构的产物**：`ldd` 对 aarch64 的静态 ELF 也回答
   `not a dynamic executable`，看起来像通过、其实什么都没验证。用 `readelf -d`。
 - 静态 ELF **正在运行时不能覆盖写**（ETXTBSY），换二进制用 `mv` 原子替换。
+
+## 思考档位加上 `none`：小米 MiMo 的「不思考」不叫 off（2026-11-16）
+
+需求是「把模型设成不思考」，落地时发现**同一个意思有两种拼法，网关只认一种**。
+
+### 实测（直连 token-plan-cn.xiaomimimo.com，mimo-v2.6-flash）
+
+| 请求里的字段 | 结果 |
+| --- | --- |
+| 不传 | 思考：`reasoning_content` 有内容，`reasoning_tokens` ≈ 119 |
+| `reasoning_effort: "off"` | ❌ **HTTP 400**：`reasoning_effort must be one of 'none', 'low', 'medium' or 'high'` |
+| `reasoning_effort: "none"` | ✅ **不思考**：没有 `reasoning_content`，`reasoning_tokens = 0` |
+| `reasoning_effort: "low"` | ✅ 思考变短（`reasoning_tokens` 46） |
+| `enable_thinking: false` | ⚠️ **被忽略**，照样思考（这是 Qwen 一系的写法） |
+| `thinking: {"type": "disabled"}` | ✅ 有效（Anthropic 的写法），但 tea_a2 不发这个字段 |
+
+`none` 下工具调用、流式、历史里带 `reasoning_content` 全部正常（200，无报错）——
+小米要求的「思考模式下把 `reasoning_content` 带回去」和「这一轮不思考」不冲突。
+
+### 为什么以前没踩到
+
+`kEfforts`（`llm.cpp`）里的名单是 OpenAI 的那套：`auto/off/minimal/low/medium/high/xhigh/max`。
+名单只决定两件事：**日志里要不要说「这个值怪怪的」**，以及**设置页给不给这个选项**；
+值本身是原样上线的（`reasoning_effort` 不做翻译）。所以写 `none` 早就能用，
+只是会被记一条 `LOG_WARN`，在设置页的候选里也没有——**用起来像是不支持**。
+
+### 改了什么
+
+- `src/config.cpp` 的 `kReasoningEfforts`：加 `none`（`/api/providers` 的
+  `reasoning_efforts` 就是它，设置页的下拉从这份列表画）。
+- `src/llm.cpp` 的 `kEfforts`：加 `none`（不再打那条「unusual」的警告）。
+- `web/app.js`：`none` → 「关闭思考（none）」，`off` → 「关闭思考（off）」。
+- `docs/api.md` / `docs/config.md` / `provider.example.yaml`：取值表补上 `none`，
+  并写清 **「不思考」有两种拼法，网关只认一种**。
+- `tests/smoke_model_config.py`：期望的档位列表跟着改。
+
+### 验证
+
+- tea_a2 端到端（临时实例 + 真实 provider.yaml）：`/api/llm/chat` 返回
+  `knobs.reasoning_effort = "none"`、`reasoning_effort_sent = true`、`reasoning` 为空；
+  走整轮 `/api/chat` **一个 reasoning_delta 事件都没有**。
+- 写 `off` 时，tea_a2 把上游的 400 原样报出来（502 `upstream_error` + 小米原文）——
+  **不会被悄悄忽略**，这正是「值写错了要有人说话」的约定。
+- 回归：`smoke_llm_knobs` 30/30、`smoke_model_config` 57/57、
+  `smoke_provider_models` 45/45、`smoke_config_quickstart` 77/77、浏览器
+  `ui_model_config` 25/25。
+
+### 两点要注意
+
+- **改了 provider.yaml 不等于生效**：运行中的实例是启动时读的配置。
+  `POST /api/config/reload` 在有轮次跑着的时候返 409（`turn_running`），
+  所以要等空窗时 reload，或者等下次重启。
+- **不思考不等于变笨，但会飘**：同一道「9.11 和 9.9 哪个大」，`none` 下出过一次
+  答反（`medium` 一直对）。四个小题的对照（`none` / `medium`）都是 4/4。
+  干确定性的活儿用 `none` 省 token，要它推理就换 `low`/`medium`。

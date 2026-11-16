@@ -148,7 +148,7 @@ provider 卡片上的「**模型配置**」按钮打开一个对话框：这个 
 |---|---|---|
 | `max_context_tokens` | 上下文窗口 | 按 128000 估 |
 | `max_output_tokens` | 单次输出上限 | 用 provider 的默认 |
-| `reasoning_effort` | 思考强度：`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | `auto`：**不发这个字段** |
+| `reasoning_effort` | 思考强度：`none` / `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | `auto`：**不发这个字段** |
 | `temperature` | 采样温度（0–2） | 不带这个字段 |
 | `top_p` | 核采样（0–1） | 不带这个字段 |
 | `top_k` | 只取前 k 个（vLLM / Ollama 一类网关） | 不带这个字段 |
@@ -164,6 +164,10 @@ provider 卡片上的「**模型配置**」按钮打开一个对话框：这个 
 - **`auto` 的思考强度同样不发。** 只有模型自己声明了 `supports_reasoning: true`，
   而且强度不是 `auto` 时，`reasoning_effort` 才会真的进到请求里——一个不会思考的
   模型不该被要求思考。
+- **「不思考」有两种拼法，网关只认一种。** `none` 和 `off` 都表示不思考，但值是
+  原样上线的：小米 MiMo 只认 `none`（写 `off` 会 400：`reasoning_effort must be
+  one of 'none', 'low', 'medium' or 'high'`），DeepSeek 一类认 `off`。写错了会
+  报错，不会被悄悄忽略。
 - **容量可以写 `128K` / `1M`。** 界面两种都认，文件里存的是数字。
 - **第一个模型是这个 provider 的默认模型。** 对话框里的「设为默认」把它挪到第一位。
 - **改一个字段不会抹掉别的。** 请求里没带的字段保持文件里的原值；带 `null` 的字段

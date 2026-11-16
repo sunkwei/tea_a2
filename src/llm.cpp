@@ -20,7 +20,10 @@ namespace {
 /// The names are the ones OpenAI uses; gateways that spell them differently
 /// (xhigh, max) are accepted as well - the value goes on the wire unchanged,
 /// so what the provider understands is what it gets.
-const char* const kEfforts[] = {"auto", "off", "minimal", "low", "medium",
+///
+/// "none" is the spelling for "do not think" on gateways that answer 400 to
+/// "off" (Xiaomi's MiMo: none / low / medium / high).
+const char* const kEfforts[] = {"auto", "none", "off", "minimal", "low", "medium",
                                 "high", "xhigh", "max"};
 const int kEffortCount = static_cast<int>(sizeof(kEfforts) / sizeof(kEfforts[0]));
 

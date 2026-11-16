@@ -16,8 +16,13 @@ namespace tea {
 /// The reasoning levels tea_a2 offers. "auto" is the first one and means
 /// "do not send `reasoning_effort` at all" - the provider then decides, and
 /// a gateway that does not know the field never sees it.
+///
+/// "none" and "off" both mean "do not think", but they are not the same
+/// spelling: a gateway picks one. Xiaomi's MiMo answers 400 to "off" and
+/// wants "none" - so both are offered and the value goes on the wire as it
+/// is (the caller knows their gateway, tea_a2 does not).
 const char* const kReasoningEfforts[] = {
-    "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"};
+    "auto", "none", "off", "minimal", "low", "medium", "high", "xhigh", "max"};
 const int kReasoningEffortCount =
     static_cast<int>(sizeof(kReasoningEfforts) / sizeof(kReasoningEfforts[0]));
 

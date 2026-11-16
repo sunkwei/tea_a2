@@ -69,10 +69,12 @@ providers:
         supports_tools: true            # may the model call tools?
         supports_reasoning: false       # may the model think?
         supports_vision: false          # may the model look at pictures?
-        # How hard it should think: off / minimal / low / medium / high /
-        # xhigh / max. `auto` means "do not send the field at all" - the
-        # provider then uses its own default. It only reaches the provider
-        # when the model says supports_reasoning: true.
+        # How hard it should think: none / off / minimal / low / medium /
+        # high / xhigh / max. `auto` means "do not send the field at all" -
+        # the provider then uses its own default. It only reaches the
+        # provider when the model says supports_reasoning: true.
+        # `none` and `off` both mean "do not think", but the gateway picks
+        # the spelling: Xiaomi's MiMo wants `none` and answers 400 to `off`.
         reasoning_effort: auto
         # temperature: 0.7              # 0 - 2
         # top_p: 0.9                    # 0 - 1

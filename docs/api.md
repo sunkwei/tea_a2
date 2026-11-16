@@ -1330,7 +1330,7 @@ curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
 
 | 旋钮 | 取值 | 说明 |
 | --- | --- | --- |
-| `reasoning_effort` | `auto` / `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | **思考强度**。`auto`（和不传）是「**不发这个字段**」，provider 用它自己的默认；`off` 是「不思考」。值原样上线，网关认什么就是什么（`none` 这种它自己的写法也照发） |
+| `reasoning_effort` | `auto` / `none` / `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | **思考强度**。`auto`（和不传）是「**不发这个字段**」，provider 用它自己的默认；`none` / `off` 是「不思考」。值原样上线，网关认什么就是什么——小米 MiMo 只认 `none`（`off` 会 400） |
 | `temperature` | 0–2 | 采样温度 |
 | `top_p` | 0–1 | 核采样 |
 | `top_k` | 0–1000000 | 只取前 k 个（vLLM / Ollama 一类网关）；0 = 不设 |
@@ -1359,9 +1359,10 @@ curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
  "reasoning_effort": "off", "temperature": 0.2, "max_tokens": 512}
 ```
 
-> 「不思考」能不能真做到，取决于那个网关认不认 `off`：认，就关掉了；不认，它会**忽略**
-> 这个字段（模型照样思考）。响应里的 `knobs.reasoning_effort_sent` 只能证明**字段上线了**，
-> 证明不了网关照做了。要绝对不思考，只能选一个本来就不思考的模型。
+> 「不思考」能不能真做到，取决于那个网关认不认这个值：认，就关掉了；不认，它会**忽略**
+> 这个字段（模型照样思考）或者**报错**（小米 MiMo 收到 `off` 是 400：*reasoning_effort must
+> be one of 'none', 'low', 'medium' or 'high'*）。响应里的 `knobs.reasoning_effort_sent` 只能
+> 证明**字段上线了**，证明不了网关照做了。要绝对不思考，只能选一个本来就不思考的模型。
 
 `sched/tea_api.py` 是这两层接口的客户端（纯标准库，设备上跑得起来）：`Tea` 说 agent 的
 原语层，`Queue` 说任务队列（任务相关的接口住在 Python 侧的队列上，不在 agent 上）：
