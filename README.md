@@ -108,6 +108,9 @@ build/bin/tea_agent --workspace . --open
 
 ## 还能做什么
 
+[a2_demo](https://github.com/sunkwei/tea_a2_demo) 这是一大堆 a2 创建的例子
+
+
 | | |
 | --- | --- |
 | **任务队列**（`sched/task_server.py`） | 排队、调度、交互挂起、导出、事件流；微信 / Telegram 前端。见 [任务队列](docs/tasks.md) |
