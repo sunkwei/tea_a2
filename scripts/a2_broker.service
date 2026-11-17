@@ -1,0 +1,44 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# broker 自己终结 TLS（1.2.3 起）：公网 8382 就是它，nginx 不再代理这一口。
+#
+# 容量（--max-peer-pair）是**每对 peers**：一对 = 内网侧载 + 外网侧载 = 两个侧载，
+# 每个侧载在 broker 上占一个 TURN 分配和一个中继端口。所以：
+#
+#   256 对 = 512 个分配 = 512 个端口（端口池 49160-50175 有 1016 个，够用）
+#
+# 端口池必须够大：池子少于 2× 对数时 broker **启动就报错**（不会等到第一个
+# 连接失败才发现）。所有 TURN 账号共用这一个上限。
+#
+# LimitNOFILE / TasksMax 是必须的：512 个信令连接 + 512 个中继 socket 会超过
+# systemd 的默认上限（fd 1024 / 线程 1008）。
+#
+# 装：把这份文件放到 ~/.config/systemd/user/a2_broker.service，
+# 再 `systemctl --user daemon-reload && systemctl --user enable --now a2_broker`。
+[Unit]
+Description=tea_a2 tunnel broker (STUN + TURN + signalling)
+Documentation=file://%h/work/git/tea_a2/docs/tunnel_broker_manual.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=%h/.tea_agent/tunnel/a2_broker --stun-port 3478 --signal-port 8382 --signal-bind 0.0.0.0 --realm a2 --max-peer-pair 256 --relay-begin 49160 --relay-end 50175
+
+# 工作目录就是 broker 自己的目录 → 账号簿 a2_broker.db 落在它旁边。
+WorkingDirectory=%h/.tea_agent/tunnel
+Environment=HOME=%h
+Restart=always
+RestartSec=3s
+
+# 256 对 peers 时：512 条信令连接 + 512 个中继 socket + 若干（实测需要 ~1030 个 fd）。
+LimitNOFILE=2048
+# 每个信令连接一个线程（broker 的现状），512 个连接会撞上 systemd 默认的 1008。
+TasksMax=2048
+
+# 这台机器的 /etc/systemd/journald.conf 是 Storage=none，user 单元的输出
+# `journalctl --user` 读不到，所以直接 append 到文件。
+StandardOutput=append:%h/.tea_agent/logs/a2_broker.log
+StandardError=append:%h/.tea_agent/logs/a2_broker.log
+
+[Install]
+WantedBy=default.target

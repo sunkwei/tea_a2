@@ -259,7 +259,7 @@ broker 目前支持 STUN/TURN，使用 ICE 协商，以实现 a2_tunnel 功能�
 | 路径 | 是什么 |
 | --- | --- |
 | `~/.tea_agent/tunnel/a2_broker` | broker 二进制 |
-| `~/.config/systemd/user/a2_broker.service` | systemd 单元（`systemctl --user restart a2_broker`） |
+| `~/.config/systemd/user/a2_broker.service` | systemd 单元（`systemctl --user restart a2_broker`）。模板在仓库的 `scripts/a2_broker.service` |
 | `~/.tea_agent/logs/a2_broker.log` | 日志 |
 | `~/.tea_agent/tunnel/broker.crt` | broker 自己的证书（**broker 自己终结 TLS**，不用 nginx） |
 | `~/.tea_agent/tunnel/broker.key` | 它的私钥 |

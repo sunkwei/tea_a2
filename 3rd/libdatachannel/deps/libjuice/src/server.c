@@ -105,6 +105,29 @@ static void server_report_usage(juice_server_t *server, juice_turn_usage_event_t
 	server->config.cb_turn_usage(&usage, server->config.turn_usage_user_ptr);
 }
 
+// tea_a2: tell the owner that a client could not get a relay.
+static void server_report_error(juice_server_t *server, juice_turn_error_reason_t reason,
+                                 const juice_server_credentials_t *credentials,
+                                 const addr_record_t *src) {
+	if (!server->config.cb_turn_error)
+		return;
+
+	char username[128] = {0};
+	char client[128] = {0};
+
+	if (credentials)
+		snprintf(username, sizeof(username), "%s", credentials->username);
+	addr_record_to_string(src, client, sizeof(client));
+
+	juice_turn_error_t error;
+	memset(&error, 0, sizeof(error));
+	error.reason = reason;
+	error.username = username;
+	error.client = client;
+
+	server->config.cb_turn_error(&error, server->config.turn_error_user_ptr);
+}
+
 static void delete_allocation(juice_server_t *server, server_turn_alloc_t *alloc) {
 	if (alloc->state != SERVER_TURN_ALLOC_FULL)
 		return;
@@ -174,6 +197,9 @@ juice_server_t *server_create(const juice_server_config_t *config) {
 	// tea_a2: the usage callback (the config is copied field by field here)
 	server->config.cb_turn_usage = config->cb_turn_usage;
 	server->config.turn_usage_user_ptr = config->turn_usage_user_ptr;
+	// tea_a2: the error callback (same as above)
+	server->config.cb_turn_error = config->cb_turn_error;
+	server->config.turn_error_user_ptr = config->turn_error_user_ptr;
 	if (alloc_failed) {
 		JLOG_FATAL("Memory allocation for server configuration failed");
 		goto error;
@@ -891,6 +917,7 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 
 	server_turn_alloc_t *alloc = find_allocation(server->allocs, server->allocs_count, src, true);
 	if (!alloc) {
+		server_report_error(server, JUICE_TURN_ERROR_SERVER_QUOTA, credentials, src);
 		return server_answer_stun_error(server, msg->transaction_id, src, msg->msg_method,
 		                                486, // Allocation quota reached
 		                                credentials);
@@ -920,6 +947,7 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 		}
 
 		if (credentials->allocations_quota <= 0) {
+			server_report_error(server, JUICE_TURN_ERROR_ACCOUNT_QUOTA, credentials, src);
 			return server_answer_stun_error(server, msg->transaction_id, src, msg->msg_method,
 			                                486, // Allocation quota reached
 			                                credentials);
@@ -932,6 +960,7 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 		socket_config.port_end = server->config.relay_port_range_end;
 		alloc->sock = udp_create_socket(&socket_config);
 		if (alloc->sock == INVALID_SOCKET) {
+			server_report_error(server, JUICE_TURN_ERROR_RELAY_PORT, credentials, src);
 			server_answer_stun_error(server, msg->transaction_id, src, msg->msg_method, 500,
 			                         credentials);
 			return -1;

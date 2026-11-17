@@ -17,7 +17,7 @@
 | 干什么 | 端口 | 说明 |
 | --- | --- | --- |
 | STUN | UDP 3478 | 问 ICE「你看到我是谁」，拿到 srflx 候选 |
-| TURN 中继 | UDP 3478 + 49160-49260 | 打洞不通时中继（**转发的是 DTLS 密文**） |
+| TURN 中继 | UDP 3478 + 49160-50175 | 打洞不通时中继（**转发的是 DTLS 密文**） |
 | 信令 | TCP 8382（TLS） | 两边交换 SDP/ICE 候选、校验房间令牌 |
 
 > **中继是主路径**：客户那条网络（家用宽带 + 家用路由器）实测是对称 NAT，
@@ -50,7 +50,8 @@ a2_broker
 起来之后它会打印这几行：
 
 ```
-broker: STUN+TURN on udp/3478 (realm a2, relay 49160-49260)
+broker: STUN+TURN on udp/3478 (realm a2, relay 49160-50175, 1016 ports)
+broker: capacity: 256 peer pairs (512 allocations max, shared by all TURN accounts)
 broker: signalling on tcp/8382 (TLS, bound to 0.0.0.0)
 broker: certificate fingerprint (sha256): 3f9a1c...
 broker: the client can pin it with --tls-pin 3f9a1c...
@@ -88,43 +89,73 @@ a2_broker --cert-name broker.example.com
 | --- | --- | --- | --- |
 | **8382** | TCP | 信令（TLS） | ✅ 必须 |
 | **3478** | UDP | STUN + TURN | ✅ 必须 |
-| 49160-49260 | UDP | TURN 中继的端口池 | ✅ 必须 |
+| 49160-50175 | UDP | TURN 中继的端口池 | ✅ 必须 |
 
 ```bash
 # 云厂商的安全组 + 机器上的防火墙，两层都要开
 sudo ufw allow 8382/tcp
 sudo ufw allow 3478/udp
-sudo ufw allow 49160:49260/udp
+sudo ufw allow 49160:50175/udp
 ```
 
 > ⚠️ **安全组和机器内 firewall 是两层**，只开一层不通。
+
+### 这个 broker 能服务多少对 peers
+
+| 说法 | 是多少 | 换算 |
+| --- | --- | --- |
+| `--max-peer-pair N` | **N 对** | 一对 = 内网侧载 + 外网侧载 = **2 个侧载** |
+| 每个侧载 | 1 个 TURN 分配 + 1 个中继端口 + 1 条信令连接 | 侧载一启动就分配（直连也在用这个分配） |
+| 所以 N 对要 | **2N 个分配、2N 个端口、2N 条信令连接** | 默认 256 对 → 512 个分配、512 个端口 |
+| 端口池默认 | 49160-50175 = **1016 个端口** | 512 个够用，多出来的是余量（宿主机占端口也不影响承诺值） |
+
+- **所有 TURN 账号共用这一个上限**（`max_allocations`），账号簿里加账号不会抬高它。
+- 端口池装不下时**启动就报错**（不会等到第一个连接失败才发现）：
+  `the relay port pool is too small: 513 ports for 512 allocations ...`。
+- 端口范围写反（begin > end）也启动就报错：那样所有分配会抢同一个端口。
+- 想改容量：改 `--max-peer-pair` 和 `--relay-begin/--relay-end`，**两个要一起改**
+  （池子至少要 2N 个端口）。
 
 ---
 
 ## 五、systemd 单元
 
-```ini
-# ~/.config/systemd/user/a2_broker.service
-[Unit]
-Description=a2 tunnel broker (STUN + signalling + TURN)
-After=network.target
-
-[Service]
-ExecStart=%h/bin/a2_broker
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-```
+仓库里有一份现成的模板：**[`scripts/a2_broker.service`](../scripts/a2_broker.service)**
+（它带 `LimitNOFILE` / `TasksMax`，这两个不设的话 256 对 peers 会撞 systemd 的默认上限）。
 
 ```bash
+cp scripts/a2_broker.service ~/.config/systemd/user/a2_broker.service
 systemctl --user daemon-reload
 systemctl --user enable --now a2_broker
 systemctl --user status a2_broker
 ```
 
-日志在 journald：`journalctl --user -u a2_broker -f`。
+日志直接落在文件里（这台机器的 journald 是 `Storage=none`，user 单元读不到）：
+`~/.tea_agent/logs/a2_broker.log`。
+
+### 升级的顺序（不能反）
+
+1. **先**放行新端口（云安全组 + ufw，`49160:50175/udp`）；
+2. **再**换二进制；
+3. **再**换单元（带 `LimitNOFILE` / `TasksMax`）并 `systemctl --user restart a2_broker`；
+4. **再**调内核参数（见下）；
+5. 最后才灌真实流量。
+
+> ⚠️ 第 2 步早于第 1 步 = **中继静默不通**：Allocate 在本机绑端口照样成功，
+> 但数据出不去（Allocate 成功、隧道没数据），这是最难排查的故障形态。
+
+### 内核参数（256 对 peers 建议调）
+
+```bash
+cat > ~/.config/sysctl.d/99-a2-broker.conf <<'EOF'
+net.core.rmem_default = 65536
+net.core.wmem_default = 65536
+EOF
+sudo sysctl --system
+```
+
+1024 个 socket 的内核内存从 ~425 MB 降到 ~128 MB。
+**注意这是主机级的设置**，同机其它服务也会受影响（它们带宽很小，可忽略）。
 
 ---
 
@@ -135,8 +166,9 @@ systemctl --user status a2_broker
 | `--stun-port <n>` | 3478 | STUN/TURN 的 UDP 端口 |
 | `--signal-port <n>` | 8382 | 信令的 TCP 端口 |
 | `--signal-bind <addr>` | 0.0.0.0 | 信令绑在哪个地址 |
-| `--relay-begin <n>` | 49160 | TURN 中继端口池的起点 |
-| `--relay-end <n>` | 49260 | TURN 中继端口池的终点 |
+| `--relay-begin <n>` | 49160 | TURN 中继端口池的起点（必须在 49152-65535 内） |
+| `--relay-end <n>` | 50175 | TURN 中继端口池的终点 |
+| `--max-peer-pair <n>` | 256 | **能力上限**：多少对 peers。0 = 不限（端口池说了算）。所有 TURN 账号共用 |
 | `--realm <name>` | a2 | TURN 的 realm |
 | `--token <secret>` | 无 | 给所有房间定一个令牌（不设就每房间自己定） |
 | `--turn-user <name>` | 内置 | TURN 账号 |
@@ -146,6 +178,10 @@ systemctl --user status a2_broker
 | `--usage-days <n>` | 15 | 明细保留几天（0 = 一直留） |
 | `--cert-name <name>` | a2-broker | 自签证书里的名字（可给多个） |
 | `--no-tls` | 关 | 信令走明文（只在内网用） |
+
+**写法**：`--flag value` 和 `--flag=value` 都行（`--max_peer_pair` 是 `--max-peer-pair`
+的别名）。**写错不会把 broker 搞崩**：它打印原因、退出码 2，
+不会变成 systemd 的崩溃循环。
 
 ---
 
@@ -258,6 +294,7 @@ broker: the TURN accounts come from the command line (1)
 | --- | --- | --- |
 | `turn_usage` | **明细**：一次中继会话一行（谁、什么时候、多久、多少字节） | **默认 15 天**（`--usage-days` 可改），过了就自动删 |
 | `turn_usage_daily` | **汇总**：按天按账号（会话数、总时长、总字节） | 一直留着（一天一个账号一行，很小） |
+| `broker_meta` | **这次运行的容量**（多少对 peers、端口池多大、版本） | 一直留着（几行） |
 
 明细表的每一行：
 
@@ -287,8 +324,15 @@ day         account         sessions   duration      bytes in   bytes out
 2026-11-10  1hblsqt.               1      3m01s        1.2 MB       0.4 MB
 
 15 days in total: 4 sessions, 15m31s, 13.5 MB in, 4.9 MB out
+
+capacity: 256 peer pairs (512 allocations max, shared by all accounts)
+          relay pool 49160-50175 (1016 ports)
+now:      118 allocations in use (23% of 512), 118 of 1016 relay ports in use
 1 session running right now
 ```
+
+> 「现在有几个在用」是从 `turn_usage` 里数 `ended_at` 为空的行。
+> 老账本没有 `broker_meta` → 打印 `capacity: unknown`（不是错误）。
 
 看多少天：`--usage-days 30`。
 
@@ -378,3 +422,9 @@ a2_broker --help
 | `bad token` | 客户端的码是旧的 | 让设备侧重新起侧载，拿新的码 |
 | 客户端说 `not the one that was pinned` | broker 换了证书 | **只是提醒**，隧道照用（1.2.10 起不再拦） |
 | 打洞一直失败 | 客户那边是对称 NAT | **正常**，走中继（这是主路径） |
+| 日志里 `the relay is full: 512 allocations are in use` | 到了能力上限 | 加 `--max-peer-pair`（**同时**把 `--relay-begin/--relay-end` 的池子放大） |
+| 日志里 `the relay is full for the account 'xxx'` | 这个账号的配额用完了 | 账号簿里换一套账号，或把 `--max-peer-pair` 调大 |
+| 日志里 `no free relay port in 49160-50175` | 端口池真的没有空闲端口了 | 宿主机上有服务占了这个范围：`ss -lun` 查一下 |
+| 启动就报 `the relay port pool is too small` | 池子装不下 `--max-peer-pair` | 把 `--relay-begin/--relay-end` 的范围放大（要 ≥ 2×对数） |
+| 启动就报 `the relay port pool is empty` | `--relay-begin` 大于 `--relay-end` | 把两个值写对 |
+| 隧道能建但没有数据 | **新端口没在云安全组里放行** | 放行 `49160:50175/udp`（Allocate 成功 ≠ 数据能通） |

@@ -24,7 +24,7 @@
 
 | 项 | 建议 | 说明 |
 | --- | --- | --- |
-| CPU / 内存 | **1 核 / 1 GB** 起 | broker 平时闲着，中继转发是 IO 不是 CPU |
+| CPU / 内存 | **1 核 / 1 GB** 起（**256 对 peers 时**要调 socket buffer，见下） | broker 平时闲着，中继转发是 IO 不是 CPU |
 | 硬盘 | 20 GB | 只放一个二进制 + 日志 |
 | 带宽 | **按量，流量是真正的成本** | 见 §五 |
 | 操作系统 | Ubuntu 22.04 / Debian 12 | 和 a2 的构建线一致 |
@@ -53,11 +53,11 @@
 
 | 端口 | 协议 | 用途 | 必须？ |
 | --- | --- | --- | --- |
-| **443** | TCP | **信令**（HTTPS，交换 SDP/ICE 候选、令牌校验） | ✅ 必须 |
+| **8382** | TCP | **信令**（TLS，交换 SDP/ICE 候选、令牌校验）。**broker 自己终结 TLS**（1.2.3 起），不用 nginx | ✅ 必须 |
 | **3478** | UDP | **STUN**（ICE 的第一步：问「你看到我是谁」） | ✅ 必须 |
 | **443** | UDP | STUN 的备用端口 | 建议（有些网络只放行 443） |
 | **5349** | TCP | **TURN over TLS**（UDP 全被封时的救命通道） | ✅ 强烈建议 |
-| 49160–49260 | UDP | **TURN 中继端口池**（relay_port_range） | ✅ 必须（开 TURN 就要） |
+| 49160–50175 | UDP | **TURN 中继端口池**（relay_port_range，1016 个端口） | ✅ 必须（开 TURN 就要） |
 
 说明：
 
@@ -136,12 +136,19 @@ nc -z -w2 <vps-ip> 5349             # TURN over TLS
 # 2) STUN 是不是真的在应答（用我们自己的探针，当 STUN 服务器用）
 python3 tools/tunnel_probe/nat_probe.py probe --stun <vps-ip>:3478
 
-# 3) broker 健康检查
-curl -s https://<vps-ip>:443/health
+# 3) broker 的容量（它自己怎么说）
+journalctl --user -u a2_broker | grep "capacity:"
+# 期望看到：capacity: 256 peer pairs (512 allocations max, ...)
 ```
 
 第 2 步的输出里，「反射地址」应该就是那台 VPS 看到的你的公网地址；
 映射端口规律也会告诉我们**从客户那条网络看出去**是不是对称 NAT。
+
+**容量**：broker 默认 256 对 peers（512 个中继分配）。要更多就加
+`--max-peer-pair N`，**同时**把中继端口池放大到 2N 个端口以上
+（默认 49160-50175 = 1016 个）——池子装不下时 broker **启动就报错**。
+512 对 peers 时 broker 的内存约 170 MB、fd 约 1030 个（1 GB 机器够用，
+但要把 `net.core.rmem_default/wmem_default` 调到 65536）。
 
 ---
 

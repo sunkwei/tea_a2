@@ -41,6 +41,11 @@ namespace tea_tunnel {
 /// One relay session, as the recorder sees it.
 struct UsageEvent {
   bool released = false;
+  // A meta event is not a session: it writes one key into the broker_meta
+  // table (the capacity the broker was started with).
+  bool meta = false;
+  std::string meta_key;
+  std::string meta_value;
   std::string username;
   std::string client;
   std::string relayed;
@@ -54,6 +59,8 @@ struct UsageEvent {
 /// The tables the recorder needs.
 inline const char* usage_table() { return "turn_usage"; }
 inline const char* usage_daily_table() { return "turn_usage_daily"; }
+/// What the broker was started with (the capacity it runs with).
+inline const char* meta_table() { return "broker_meta"; }
 
 /// "2026-11-11" for a unix timestamp (UTC).
 inline std::string usage_day(long long when) {
@@ -134,6 +141,17 @@ class TurnUsageRecorder {
     wake_.notify_one();
   }
 
+  /// Write one key into the broker_meta table (the capacity the broker runs
+  /// with). It goes through the same queue as the sessions, so the writer
+  /// thread does the database work.
+  void write_meta(const std::string& key, const std::string& value) {
+    UsageEvent event;
+    event.meta = true;
+    event.meta_key = key;
+    event.meta_value = value;
+    on_event(event);
+  }
+
   /// How many sessions are running right now.
   size_t open_sessions() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -153,8 +171,10 @@ class TurnUsageRecorder {
   /// Read the report out of the database file. Does not need a running broker.
   static bool read_report(const std::string& db_path, int days, std::vector<DayTotal>* totals,
                            long long* sessions, long long* seconds, uint64_t* bytes_in,
-                           uint64_t* bytes_out, size_t* open_now, std::string* err) {
+                           uint64_t* bytes_out, size_t* open_now,
+                           std::map<std::string, std::string>* meta, std::string* err) {
     totals->clear();
+    if (meta) meta->clear();
     *sessions = 0;
     *seconds = 0;
     *bytes_in = 0;
@@ -217,6 +237,25 @@ class TurnUsageRecorder {
       }
       sqlite3_finalize(open_statement);
     }
+    // The capacity the broker was started with. A book from before the
+    // broker wrote it simply has no rows: that is not an error.
+    if (meta) {
+      const std::string meta_query =
+          std::string("SELECT key, value FROM ") + meta_table() + ";";
+      sqlite3_stmt* meta_statement = nullptr;
+      if (sqlite3_prepare_v2(db, meta_query.c_str(), -1, &meta_statement, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(meta_statement) == SQLITE_ROW) {
+          const unsigned char* key = sqlite3_column_text(meta_statement, 0);
+          const unsigned char* value = sqlite3_column_text(meta_statement, 1);
+          if (key) {
+            (*meta)[reinterpret_cast<const char*>(key)] =
+                value ? reinterpret_cast<const char*>(value) : "";
+          }
+        }
+        sqlite3_finalize(meta_statement);
+      }
+    }
+
     sqlite3_close(db);
     return true;
   }
@@ -255,7 +294,9 @@ class TurnUsageRecorder {
         " seconds INTEGER NOT NULL DEFAULT 0,"
         " bytes_in INTEGER NOT NULL DEFAULT 0,"
         " bytes_out INTEGER NOT NULL DEFAULT 0,"
-        " PRIMARY KEY (day, account));";
+        " PRIMARY KEY (day, account));"
+        "CREATE TABLE IF NOT EXISTS " + meta_table() +
+        " (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
     if (sqlite3_exec(db, create.c_str(), nullptr, nullptr, &message) != SQLITE_OK) {
       *err = std::string("cannot prepare the usage tables in '") + db_path_ + "': " +
              (message ? message : sqlite3_errmsg(db));
@@ -352,6 +393,18 @@ class TurnUsageRecorder {
 
   /// Write one event: a new row, or the end of an open one.
   void write_event(sqlite3* db, const UsageEvent& event) {
+    if (event.meta) {
+      const std::string sql =
+          std::string("INSERT INTO ") + meta_table() + " (key, value) VALUES (?, ?)"
+          " ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
+      sqlite3_stmt* statement = nullptr;
+      if (sqlite3_prepare_v2(db, sql.c_str(), -1, &statement, nullptr) != SQLITE_OK) return;
+      sqlite3_bind_text(statement, 1, event.meta_key.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(statement, 2, event.meta_value.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_step(statement);
+      sqlite3_finalize(statement);
+      return;
+    }
     if (!event.released) {
       const std::string sql = std::string("INSERT INTO ") + usage_table() +
                               " (account, client, relayed, started_at, bytes_in, bytes_out,"

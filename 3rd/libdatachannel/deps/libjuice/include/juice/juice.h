@@ -176,6 +176,27 @@ typedef struct juice_turn_usage {
 
 typedef void (*juice_cb_turn_usage_t)(const juice_turn_usage_t *usage, void *user_ptr);
 
+// --- tea_a2: TURN error reporting -----------------------------------------
+// The server tells its owner when a client could not get a relay: the
+// account has no allocation left, the server has no allocation left, or the
+// relay port range has no free port. Without this the owner sees nothing
+// (the client only gets a STUN error code).
+//
+// The callback is called from the server's own thread, so it must not block.
+typedef enum juice_turn_error_reason {
+	JUICE_TURN_ERROR_SERVER_QUOTA = 0, // 486: the server has no allocation left
+	JUICE_TURN_ERROR_ACCOUNT_QUOTA,     // 486: the account has no allocation left
+	JUICE_TURN_ERROR_RELAY_PORT         // 500: no free port in the relay range
+} juice_turn_error_reason_t;
+
+typedef struct juice_turn_error {
+	juice_turn_error_reason_t reason;
+	const char *username; // the account that was used (may be NULL)
+	const char *client;   // the client address, "ip:port"
+} juice_turn_error_t;
+
+typedef void (*juice_cb_turn_error_t)(const juice_turn_error_t *error, void *user_ptr);
+
 typedef struct juice_server_config {
 	juice_server_credentials_t *credentials;
 	int credentials_count;
@@ -195,6 +216,10 @@ typedef struct juice_server_config {
 	// tea_a2: the usage callback (may be NULL)
 	juice_cb_turn_usage_t cb_turn_usage;
 	void *turn_usage_user_ptr;
+
+	// tea_a2: the error callback (may be NULL)
+	juice_cb_turn_error_t cb_turn_error;
+	void *turn_error_user_ptr;
 
 } juice_server_config_t;
 
