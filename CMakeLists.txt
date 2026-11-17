@@ -125,9 +125,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 if(WIN32)
-  # MinGW defaults to a much older _WIN32_WINNT than MSVC, which makes
-  # cpp-httplib refuse to build and hides CreateFile2(). Target Windows 10.
-  add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000000)
+  # **Windows 7** (0x0601) is the floor: customers still have machines that
+  # old, and a static import of a Windows 8+ API (CreateFile2, say) makes the
+  # loader refuse to start the program at all.
+  #
+  # Setting the ceiling here is not a promise, it is a *guard*: the Windows
+  # headers hide everything above it, so an accidental use of a newer API
+  # becomes a compile error instead of a binary that dies on the customer's
+  # machine.  The vendored cpp-httplib is patched for the same reason (see
+  # 3rd/cpp-httplib/httplib.h).
+  add_compile_definitions(_WIN32_WINNT=0x0601 WINVER=0x0601 NTDDI_VERSION=0x06010000)
   # A smaller windows.h, and no MSVC-only macros.
   add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
@@ -635,35 +642,17 @@ if(TEA_AGENT_BUILD_TUNNEL)
   if(CMAKE_TOOLCHAIN_FILE)
     list(APPEND TEA_TUNNEL_CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE})
   endif()
-  # Everything the tunnel is made of has to be listed here. A header that is
-  # missing from this list means "I changed it and the binary did not change"
-  # - which is exactly what happened with the tea_a2 patch in libjuice.
-  file(GLOB TEA_TUNNEL_SOURCES CONFIGURE_DEPENDS
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/tunnel_*.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/tunnel_*.h)
-  # The sidecar also compiles the shell code (src/shell*.cpp) and a few
-  # helpers - the same shell the agent uses.  They have to be dependencies
-  # too: without them a change to the shell (a locale fix, say) leaves the
-  # sidecar with the old code and nobody notices.
-  file(GLOB TEA_TUNNEL_SHELL_SOURCES CONFIGURE_DEPENDS
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/shell.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/shell.h
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/shell_posix.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/shell_win32.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/util.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/util.h
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/platform_fs.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/platform_fs.h
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/log.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/src/log.h)
-  # libjuice is patched by us (the TURN usage callback), so its sources are
-  # dependencies too.
-  file(GLOB TEA_TUNNEL_LIBMJUICE_SOURCES CONFIGURE_DEPENDS
-       ${CMAKE_CURRENT_SOURCE_DIR}/3rd/libdatachannel/deps/libjuice/src/*.c
-       ${CMAKE_CURRENT_SOURCE_DIR}/3rd/libdatachannel/deps/libjuice/src/*.h
-       ${CMAKE_CURRENT_SOURCE_DIR}/3rd/libdatachannel/deps/libjuice/include/juice/*.h)
-  add_custom_command(
-    OUTPUT ${TEA_TUNNEL_BINARIES}
+  # The nested project tracks its own dependencies (it knows every header it
+  # includes), so the outer project does NOT try to mirror that list here:
+  # a header missing from such a list means "I changed it and the binary did
+  # not change" - which is what happened with the tea_a2 patch in libjuice,
+  # and again with the cpp-httplib patch for Windows 7.
+  #
+  # So the nested build is simply *always* run.  It is incremental, so that
+  # costs a second or two when nothing changed, and it can never be stale.
+  # The assets (the terminal page that goes into the sidecar) are generated
+  # first - they are a dependency of this target.
+  add_custom_target(tea_tunnel_binaries ALL
     COMMAND ${CMAKE_COMMAND}
             -S ${CMAKE_CURRENT_SOURCE_DIR}/tunnel
             -B ${TEA_TUNNEL_DIR}
@@ -671,26 +660,12 @@ if(TEA_AGENT_BUILD_TUNNEL)
             -DTEA_TUNNEL_ASSETS_DIR=${TEA_TUNNEL_GEN_DIR}
             ${TEA_TUNNEL_CMAKE_ARGS}
     COMMAND ${CMAKE_COMMAND} --build ${TEA_TUNNEL_DIR} --config Release
-    DEPENDS tunnel/CMakeLists.txt
-            # The tunnel binaries report the version too, and the version
-            # lives in src/version.cpp: a bump has to reach them.
-            ${TEA_VERSION_SOURCE}
-            ${TEA_TUNNEL_SOURCES}
-            ${TEA_TUNNEL_SHELL_SOURCES}
-            ${TEA_TUNNEL_LIBMJUICE_SOURCES}
-            ${TEA_TUNNEL_ASSETS_CPP}
-            ${TEA_TUNNEL_ASSETS_H}
-    COMMENT "Building the tunnel binaries (a2_broker, a2_tunnel)"
-    VERBATIM)
-  # ALL: a plain `cmake --build build` has to produce the tunnel binaries
-  # too, otherwise a release built with the default target ships without them.
-  add_custom_target(tea_tunnel_binaries ALL DEPENDS ${TEA_TUNNEL_BINARIES})
-  # Put them next to the agent so the release package picks them up.
-  add_custom_command(TARGET tea_tunnel_binaries POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${TEA_TUNNEL_DIR}/bin/a2_broker${TEA_TUNNEL_SUFFIX} ${CMAKE_BINARY_DIR}/bin/
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${TEA_TUNNEL_DIR}/bin/a2_tunnel${TEA_TUNNEL_SUFFIX} ${CMAKE_BINARY_DIR}/bin/
+    DEPENDS ${TEA_TUNNEL_ASSETS_CPP} ${TEA_TUNNEL_ASSETS_H}
+    COMMENT "Building the tunnel binaries (a2_broker, a2_tunnel)"
     VERBATIM)
 endif()
 

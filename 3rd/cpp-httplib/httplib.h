@@ -12,9 +12,14 @@
 #define CPPHTTPLIB_VERSION_NUM "0x003d00"
 
 #ifdef _WIN32
+// PATCH (tea_a2, 2026-11-17): upstream refuses to build below Windows 10.
+// We build for Windows 7 (a customer's old machines), and the only thing
+// that really needs Windows 8+ in here is the static file server's
+// CreateFile2() / CreateFileMappingFromApp() - both are patched below to
+// their Windows-95-era equivalents.  Everything else in this header is
+// plain Win32.
 #if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0A00
-#error                                                                         \
-    "cpp-httplib doesn't support Windows 8 or lower. Please use Windows 10 or later."
+// (no error: see above)
 #endif
 #endif
 
@@ -6346,9 +6351,20 @@ inline bool mmap::open(const char *path) {
   auto wpath = u8string_to_wstring(path);
   if (wpath.empty()) { return false; }
 
+#if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0602
   hFile_ =
       ::CreateFile2(wpath.c_str(), GENERIC_READ,
                     FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, NULL);
+#else
+  // PATCH (tea_a2): CreateFile2() is Windows 8+.  It is a *static* import,
+  // so on Windows 7 the loader refuses to start the whole program ("the
+  // procedure entry point CreateFile2 could not be located").  CreateFileW
+  // is the same call without the extended parameters.
+  hFile_ =
+      ::CreateFileW(wpath.c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+#endif
 
   if (hFile_ == INVALID_HANDLE_VALUE) { return false; }
 
@@ -6364,8 +6380,18 @@ inline bool mmap::open(const char *path) {
   }
   size_ = static_cast<size_t>(size.QuadPart);
 
+#if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0602
   hMapping_ =
       ::CreateFileMappingFromApp(hFile_, NULL, PAGE_READONLY, size_, NULL);
+#else
+  // PATCH (tea_a2): the "FromApp" variant is Windows 8+ (same loader
+  // problem as CreateFile2 above).  CreateFileMappingW takes the size as
+  // two 32-bit halves; the "FromApp" one takes it as one 64-bit number.
+  hMapping_ = ::CreateFileMappingW(hFile_, NULL, PAGE_READONLY,
+                                   static_cast<DWORD>(size_ >> 32),
+                                   static_cast<DWORD>(size_ & 0xFFFFFFFFULL),
+                                   NULL);
+#endif
 
   // Special treatment for an empty file...
   if (hMapping_ == NULL && size_ == 0) {
@@ -6379,7 +6405,14 @@ inline bool mmap::open(const char *path) {
     return false;
   }
 
+#if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0602
   addr_ = ::MapViewOfFileFromApp(hMapping_, FILE_MAP_READ, 0, 0);
+#else
+  // PATCH (tea_a2): the "FromApp" variant is Windows 8+ (same loader
+  // problem as CreateFile2 above).  The old one takes the file offset as
+  // two 32-bit halves instead of one 64-bit number.
+  addr_ = ::MapViewOfFile(hMapping_, FILE_MAP_READ, 0, 0, 0);
+#endif
 
   if (addr_ == nullptr) {
     close();

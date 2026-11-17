@@ -141,16 +141,17 @@ add_executable(a2_broker ${TEA_ROOT}/src/tunnel_broker.cpp)
 # reports: src/version.cpp is the one truth in the tree).
 target_compile_definitions(a2_broker PRIVATE TEA_TUNNEL_VERSION="${TEA_TUNNEL_VERSION}")
 if(WIN32)
-  # MinGW defaults to a much older _WIN32_WINNT than MSVC, which makes
-  # cpp-httplib refuse to build and hides CreateFile2(). Target Windows 10.
-  # The agent's own build says the same in its top-level CMakeLists - the
-  # tunnel is a separate project, so it has to say it again.
+  # **Windows 7** (0x0601) is the floor - see the agent's top-level
+  # CMakeLists.txt for why.  The headers hide everything above the ceiling,
+  # so a newer API becomes a compile error instead of a binary that refuses
+  # to start on an old machine.  The vendored cpp-httplib is patched for the
+  # same reason (see 3rd/cpp-httplib/httplib.h).
   #
   # Only on the two binaries: the vendored C libraries (usrsctp, libjuice,
   # sqlite3, mbedTLS) are written for the Windows headers as they are, and
   # NOMINMAX would take the min/max macros away from usrsctp.
   target_compile_definitions(a2_broker PRIVATE
-    _WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000000
+    _WIN32_WINNT=0x0601 WINVER=0x0601 NTDDI_VERSION=0x06010000
     WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 target_include_directories(a2_broker PRIVATE ${TEA_3RD}/nlohmann_json ${TEA_3RD}/libdatachannel/deps/libjuice/include)
@@ -205,9 +206,9 @@ if(TEA_TUNNEL_ASSETS_DIR)
   target_include_directories(a2_tunnel PRIVATE ${TEA_TUNNEL_ASSETS_DIR})
 endif()
 if(WIN32)
-  # Windows 10, like the broker above and like the agent's own build.
+  # Windows 7, like the broker above and like the agent's own build.
   target_compile_definitions(a2_tunnel PRIVATE
-    _WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000000
+    _WIN32_WINNT=0x0601 WINVER=0x0601 NTDDI_VERSION=0x06010000
     WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 target_include_directories(a2_tunnel PRIVATE
