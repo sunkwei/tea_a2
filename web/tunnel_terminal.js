@@ -205,7 +205,7 @@
       state.term.reply = function (text) { send(text); };
       var info = d.session || {};
       meta((state.cap.shell || 'shell') + (info.cwd ? ' · ' + info.cwd : ''));
-      note('这是远端机器上的真实 shell：它能碰那台机器上的任何东西。');
+      note('这是远端机器上的真实 shell：它能碰那台机器上的任何东西。多个 console 用 tmux/screen。');
       render();
       pump();
       focusInput();

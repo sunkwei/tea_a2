@@ -83,7 +83,9 @@ build/bin/tea_agent --workspace . --open
 - 文件工具默认限制在工作区内；`--allow-outside-workspace`（或设置页的「全局」）会取消这个
   限制，慎用；
 - 网页里的「终端」是这台机器的真实 shell，**以运行程序的那个用户的身份执行**——不需要时用
-  `TEA_AGENT_SHELL=off` 关掉。
+  `TEA_AGENT_SHELL=off` 关掉。「新会话」会把现在这个 shell 结束掉（免得攒下一堆进程），
+  要同时开几个 console 就在里面跑 `tmux` 或 `screen`：它们的服务器会脱离这个终端，
+  关掉会话也还在，下次 `tmux attach` 就能接回去。
 
 细节见 [部署](docs/deploy.md)、[级联](docs/peer.md)、[机群运维](docs/fleet.md)。
 

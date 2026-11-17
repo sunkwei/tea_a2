@@ -7029,7 +7029,9 @@
       shell.term.reply = function (text) { shellSend(text); };
       var info = d.session || {};
       shellMeta((shell.cap.shell || 'shell') + (info.cwd ? ' · ' + info.cwd : ''));
-      shellNote('这是这台机器上的真实 shell：它能碰这台机器上的任何东西，跟 agent 的目录边界无关。');
+      shellNote('这是这台机器上的真实 shell：它能碰这台机器上的任何东西，跟 agent 的目录边界无关。' +
+                '要同时开几个 console：在里面跑 tmux 或 screen —— 它们的服务器会脱离这个终端，' +
+                '关掉会话也还在，下次 tmux attach 就能接回去。');
       shellRender();
       shellPump();
       shellFocus();          // 开完会话就把键盘交回终端
