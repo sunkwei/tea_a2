@@ -93,6 +93,17 @@ MSG_TYPE_USER = 1
 # answer goes out in pieces of this size.
 MESSAGE_CHUNK = 1800
 
+# The iLink server keeps a context token alive for about a day. An older one
+# is refused with "prepare failed" - and the whole push is lost that way.
+# 23 hours: old enough to be well inside the day, new enough to still work.
+CONTEXT_MAX_AGE = 23 * 3600
+
+# The server also has a send quota per bot token: sending too fast in a row
+# is refused with "prepare failed" (ret -2) and the session stays refused -
+# it does not heal on its own (sunwx: blocked from 11-16 19:30 on, three
+# days of pushes lost). So two sends are never closer together than this.
+MIN_SEND_GAP = 10
+
 MSG_TYPE_BOT = 2
 MSG_STATE_FINISH = 2
 ITEM_TEXT = 1
@@ -472,7 +483,7 @@ class State:
         self.path = os.path.abspath(os.path.expanduser(path))
         self.lock = threading.Lock()
         self.data = {"token": "", "base_url": "", "ilink_bot_id": "", "ilink_user_id": "",
-                     "cursor": "", "contexts": {}}
+                     "cursor": "", "contexts": {}, "context_times": {}}
         self.load()
 
     @property
@@ -487,10 +498,31 @@ class State:
             if isinstance(loaded, dict):
                 self.data.update(loaded)
                 self.data.setdefault("contexts", {})
+                self.data.setdefault("context_times", {})
         except (OSError, ValueError):
             pass
 
-    def save(self):
+    def save(self, force=False):
+        """Write the state out - but never over a token that is not ours.
+
+        Somebody can re-scan the account and write a new token into this
+        file while this process is running. Overwriting it with the old
+        token would throw the new session away (the new scan would be
+        useless). So: if the file on disk carries a different token, it is
+        the newer one - take it over instead of overwriting it.
+        """
+        if not force:
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    other = json.load(f)
+                other_token = str((other or {}).get("token") or "")
+                if other_token and other_token != self.data.get("token"):
+                    self.data.update(other)
+                    self.data.setdefault("contexts", {})
+                    self.data.setdefault("context_times", {})
+                    return
+            except (OSError, ValueError):
+                pass
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -500,11 +532,42 @@ class State:
     def remember_context(self, user_id, context_token):
         with self.lock:
             self.data.setdefault("contexts", {})[user_id] = context_token
+            # When the token arrived: the server refuses one that is older
+            # than about a day, so its age decides whether it may be used.
+            self.data.setdefault("context_times", {})[user_id] = int(time.time())
             self.save()
 
-    def context_for(self, user_id):
+    def forget_context(self, user_id):
+        """Drop a context token the server has refused.
+
+        The server refuses a token that is older than about a day. Once it
+        has said so the token is dead: keeping it would make every push try
+        it first and fail before it goes out without one.
+        """
         with self.lock:
-            return (self.data.get("contexts") or {}).get(user_id, "")
+            if (self.data.get("contexts") or {}).get(user_id):
+                self.data["contexts"][user_id] = ""
+                self.data.setdefault("context_times", {})[user_id] = 0
+                self.save()
+
+    def context_for(self, user_id, max_age=CONTEXT_MAX_AGE):
+        """The context token to reply with - empty when it is too old.
+
+        The token is what routes a reply into the right WeChat conversation,
+        but the server keeps it for about a day and then refuses every
+        message that carries it ("prepare failed"). A message without a token
+        is routed by the user id alone and goes through, so an old token is
+        worse than none.
+        """
+        with self.lock:
+            token = (self.data.get("contexts") or {}).get(user_id, "")
+            if not token:
+                return ""
+            if max_age:
+                at = (self.data.get("context_times") or {}).get(user_id)
+                if at and (time.time() - int(at)) > max_age:
+                    return ""
+            return token
 
     @property
     def token(self):
@@ -765,6 +828,10 @@ class WeChatBot(channel.TaskChannel):
         # an account is gone).
         self.stop_event = None
         self.ilink = ILink(args.base_url, cdn_base=getattr(args, "cdn_url", CDN_BASE_URL))
+        # When the last message went out (the server has a send quota).
+        self._last_send = 0.0
+        # Set when the server refuses the session itself (ret -2).
+        self.session_blocked = False
 
     def channel_name(self):
         """The name of this channel - it is the trigger source too.
@@ -877,7 +944,7 @@ class WeChatBot(channel.TaskChannel):
                     "ilink_bot_id": status.get("ilink_bot_id", ""),
                     "ilink_user_id": status.get("ilink_user_id", ""),
                 })
-                self.state.save()
+                self.state.save(force=True)
                 log("登录成功，凭证已存到 %s" % self.state.path)
                 return True
         return False
@@ -922,7 +989,7 @@ class WeChatBot(channel.TaskChannel):
                 "ilink_bot_id": data.get("ilink_bot_id") or "",
                 "ilink_user_id": data.get("ilink_user_id") or "",
             })
-            self.state.save()
+            self.state.save(force=True)
             log("这个微信号已经绑在这台机器上了，直接用它的凭证")
             return True
         log("服务器说这个码已经绑定了，可本机没有找到它的凭证")
@@ -1038,21 +1105,119 @@ class WeChatBot(channel.TaskChannel):
                                   "file_name": name or os.path.basename(path),
                                   "len": str(len(data))}}
 
-        self.ilink.send_items(user_id, self.state.context_for(user_id), [item], self.state.token)
+        context = self.state.context_for(user_id)
+        try:
+            self.throttle()
+            self.ilink.send_items(user_id, context, [item], self.state.token)
+            self.session_blocked = False
+        except ILinkError as exc:
+            if not context or "prepare failed" not in str(exc):
+                self.note_blocked(exc)
+                raise
+            # The context token was refused (too old): the same file without
+            # it goes through - the user id alone is enough to route it.
+            log("the context token was refused - sending the file without it")
+            self.state.forget_context(user_id)
+            try:
+                self.throttle()
+                self.ilink.send_items(user_id, "", [item], self.state.token)
+                self.session_blocked = False
+            except ILinkError as exc2:
+                self.note_blocked(exc2)
+                raise
         return len(data)
 
     # -- the command mapping ----------------------------------------------
     # -- the loop ----------------------------------------------------------
-    def reply(self, user_id, text):
-        context = self.state.context_for(user_id)
-        if not context:
-            log("no context token for %s - cannot reply" % user_id)
-            return False
+    # -- the sends --------------------------------------------------------
+    def account_name(self):
+        """The name of this account ("sunkw", "sunwx", ...)."""
+        name = (getattr(self.args, "account", "") or "").strip()
+        return name or "default"
+
+    def throttle(self):
+        """Keep two sends apart - the server has a quota per bot token.
+
+        Sending too fast in a row is refused with "prepare failed" (ret -2)
+        and the session stays refused: the whole account goes quiet (that
+        is how sunwx lost three days of pushes). Ten seconds between two
+        messages is slow enough to stay under it.
+        """
+        gap = MIN_SEND_GAP - (time.time() - self._last_send)
+        if self._last_send and gap > 0:
+            time.sleep(gap)
+        self._last_send = time.time()
+
+    def note_blocked(self, exc):
+        """The server refused the session itself - say so once, clearly.
+
+        A refused context token is a small thing (the message goes out
+        without it). A refused *session* is not: no message goes out at
+        all, no matter how often it is tried. The only cure is a new token
+        from a new QR scan.
+        """
+        if "prepare failed" in str(exc) and not self.session_blocked:
+            self.session_blocked = True
+            log("这个 bot 会话被服务端拒绝了（ret=-2 prepare failed）："
+                "连不带 context token 也发不出去 —— 是会话被拒，不是令牌过期。"
+                "重试没用，要重新扫码换 token："
+                "python3 /home/qdbot/a2/sched/wechat_multi.py --login %s"
+                % self.account_name())
+
+    def sync_credentials(self):
+        """Take over a token that somebody else wrote into the file.
+
+        A fresh QR scan writes a new token into the credentials file while
+        this process is running. Without this the process would keep
+        polling with the old token (and the old session stays refused).
+        """
         try:
+            with open(self.state.path, encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, ValueError):
+            return False
+        other = str((loaded or {}).get("token") or "")
+        if not other or other == self.state.token:
+            return False
+        log("凭证文件里是新 token（有人重新扫码了），换上去。")
+        self.state.load()
+        # 新会话从头开始：旧 cursor 属于上一段会话，不能接着用。
+        self.state.data["cursor"] = ""
+        self.state.save()
+        self.session_blocked = False
+        return True
+
+    def reply(self, user_id, text):
+        """One message to the user. The context token is best effort.
+
+        The token of the user's last message normally routes the reply into
+        the right WeChat conversation - but the server only keeps it for
+        about a day and then refuses it ("prepare failed"), which used to
+        throw the whole push away. A message without a token is routed by
+        the user id alone: use the token while it is fresh, and go without
+        it when it is not.
+        """
+        context = self.state.context_for(user_id)
+        try:
+            self.throttle()
             self.ilink.send_text(user_id, context, text, self.state.token)
+            self.session_blocked = False
             return True
         except ILinkError as exc:
+            if context and "prepare failed" in str(exc):
+                log("the context token was refused - sending without it")
+                self.state.forget_context(user_id)
+                try:
+                    self.throttle()
+                    self.ilink.send_text(user_id, "", text, self.state.token)
+                    self.session_blocked = False
+                    return True
+                except ILinkError as exc2:
+                    log("reply failed: %s" % exc2)
+                    self.note_blocked(exc2)
+                    return False
             log("reply failed: %s" % exc)
+            self.note_blocked(exc)
             return False
 
     def send_text(self, user_id, text):
@@ -1071,6 +1236,7 @@ class WeChatBot(channel.TaskChannel):
 
     def poll_once(self):
         """One long poll. Returns the messages that came in."""
+        self.sync_credentials()
         payload = self.ilink.updates(self.state.cursor, self.state.token)
         cursor = payload.get("get_updates_buf")
         if cursor and cursor != self.state.cursor:
