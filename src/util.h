@@ -26,6 +26,11 @@ namespace tea {
 std::string now_iso8601();       // UTC, second precision: 2026-01-01T00:00:00Z
 std::string now_iso8601_ms();    // UTC, millisecond precision
 std::string iso8601_from_unix(int64_t unix_seconds);
+/// Parse an ISO-8601 UTC timestamp ("2026-01-01T00:00:00Z" or
+/// "...T00:00:00.123Z") into epoch milliseconds. False when the string is
+/// not that shape: the caller must then treat the time as unknown, never as
+/// zero (1970 would drop every record into the wrong window).
+bool iso8601_to_unix_ms(const std::string& s, int64_t* out_ms);
 int64_t now_ms();
 std::string format_duration_ms(int64_t ms);
 

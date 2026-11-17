@@ -66,6 +66,31 @@ bool trajectory_id_is_safe(const std::string& id);
 bool load_trajectories(const std::string& path, std::vector<nlohmann::json>* out,
                        std::string* err);
 
+/// One turn as the trajectory recorded it: when it ran and how it ended.
+/// Only the fields the export needs - a trajectory line also carries every
+/// tool output, which is megabytes.
+struct TrajectoryTurn {
+  std::string turn_id;
+  std::string started_at;   // ISO8601, millisecond precision
+  std::string finished_at;  // empty when the turn never finished
+  bool cancelled = false;   // the user stopped it
+  bool partial = false;     // it never wrote its final line
+};
+
+/// Read the per-turn records of a trajectory file, oldest first. A turn's line
+/// is rewritten in place while it runs, so the LAST record for a turn_id
+/// wins; a torn line is skipped instead of failing the file.
+///
+/// Only the fields above are kept, so a multi-megabyte trajectory costs
+/// kilobytes of memory (load_trajectories() keeps the whole records, tool
+/// outputs included).
+///
+/// The file rules are the ones load_trajectories() uses: the compressed twin
+/// is read when the plain file is gone, and a file over the read cap keeps
+/// its tail - the newest turns.
+bool load_trajectory_turns(const std::string& path, std::vector<TrajectoryTurn>* out,
+                           std::string* err);
+
 /// The compact form returned by `GET /api/sessions/:id/trajectory`:
 /// turn_id, started_at, elapsed_ms, ok, iterations, steps (count), usage,
 /// files_changed (count), partial.

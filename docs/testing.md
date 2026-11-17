@@ -129,6 +129,7 @@ python3 tests/smoke_artifacts.py                          # 产出文件与 /dow
 node tests/ui_artifacts.mjs                               # 最终回答下方的下载链接（需 google-chrome）
 node tests/ui_todo.mjs                                    # 输入框上方的进度面板与侧栏徽章（需 google-chrome）
 python3 tests/smoke_export_html.py                        # 导出会话为单文件 HTML：内联/转义/往返导入
+python3 tests/smoke_export_merge.py                        # 导出合并：中断的一轮与接着做完的那一轮并成一条会话
 node tests/ui_session_export.mjs                          # 导出按钮 → 下载 → 离线打开 → 导入（需 google-chrome）
 python3 tests/smoke_run_archive.py                        # 工作区归档下载：真 zip / 沙箱 / 超限跳过
 node tests/ui_files_download.mjs                          # 文件页「下载」按钮真的产出 zip（需 google-chrome）

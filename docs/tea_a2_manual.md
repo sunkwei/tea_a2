@@ -535,6 +535,8 @@ curl -sJ "$B/api/sessions/s_xxx/export" -o session.html
 curl -sJ "$B/api/sessions/s_xxx/export?scope=turn&detail=brief&turn=2" -o turn.html
 curl -sJ "$B/api/sessions/s_xxx/export?scope=topic&detail=full" -o topic.html
 # 回答头：X-Export-Scope / X-Export-Detail
+# 被中断的一轮与接着做完的那一轮并成一条会话（标题「第 1-2 条会话」），
+# 页头写「X 轮 · Y 条会话，Z 处续做已合并」；判定看轨迹里的 cancelled / partial
 
 # 把导出的 HTML 导回去（新建一个会话，不覆盖）
 curl -s -X POST "$B/api/workspaces/ws_xxx/sessions/import" \

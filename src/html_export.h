@@ -13,10 +13,12 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "message.h"
+#include "trajectory.h"
 #include "workspace.h"
 
 namespace tea {
@@ -59,11 +61,49 @@ struct ExportSelection {
 /// so "turn 3" means the same thing on both sides of the wire.
 std::size_t session_turn_count(const Session& session);
 
+/// One turn of the session: was it interrupted?
+///
+/// The session file does not say: a turn that was stopped (or that died) is
+/// only recorded in the trajectory, next to the session. `known` is false when
+/// nothing could be said - such a turn counts as "not interrupted", because a
+/// wrong merge is worse than a missing one.
+struct TurnVerdict {
+  bool known = false;
+  bool interrupted = false;
+};
+
+/// The turns the file shows as ONE session ("一条会话"): the turn that was
+/// interrupted plus the turns that continued it.
+struct ExportGroup {
+  std::size_t first = 0;
+  std::size_t last = 0;
+  bool merged() const { return last > first; }
+};
+
+/// Which turns of `session` were interrupted.
+///
+/// `trajectory` is what load_trajectory_turns() read; it may be empty (no
+/// trajectory, or it could not be read) - then only the transcript's own
+/// marks count: a tool result that says it was interrupted.
+std::vector<TurnVerdict> session_turn_verdicts(const Session& session,
+                                                const std::vector<TrajectoryTurn>& trajectory);
+
+/// Group the turns: an interrupted turn and the turns that continued it
+/// become one group. A turn whose verdict is unknown is never interrupted,
+/// so it breaks a chain.
+std::vector<ExportGroup> group_turns(const std::vector<TurnVerdict>& verdicts);
+
 /// Render a slice of `session` as a standalone HTML document: one turn or the
 /// whole topic, with the questions and the final answers, or with everything
 /// (thinking, tool calls - their arguments and whether they worked - and the
 /// answers). The tool output is left out on purpose: a transcript is read,
 /// not replayed, and the output is where the megabytes are.
+///
+/// `verdicts` says which turns were interrupted (see session_turn_verdicts).
+/// An interrupted turn and the turns that continued it are shown as ONE
+/// session ("第 1-2 条会话"); the question of a continued turn is not shown
+/// (its pictures are), and no message is ever dropped - the JSON block still
+/// carries every turn, so an imported file is the conversation it was.
 ///
 /// The file carries the same stylesheet as the full export and the same JSON
 /// block, so it can be read offline and imported back.
@@ -72,7 +112,9 @@ std::string export_conversation_html(const Workspace& workspace, const Session& 
                                      const ExportSelection& selection,
                                      const ExportLimits& limits = ExportLimits(),
                                      std::map<std::string, std::string>* image_data = nullptr,
-                                     std::size_t* message_count = nullptr);
+                                     std::size_t* message_count = nullptr,
+                                     const std::vector<TurnVerdict>& verdicts =
+                                         std::vector<TurnVerdict>());
 
 /// Render `session` as a standalone HTML document. `version` is stamped in the
 /// header ("tea_agent 0.7.0") so a reader knows what wrote the file.

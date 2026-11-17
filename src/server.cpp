@@ -5247,9 +5247,25 @@ void ApiServer::Impl::install_routes() {
                   return;
                 }
               }
+              // Which turns were interrupted: only the trajectory knows, the
+              // session file does not say. A turn that was interrupted and the
+              // turns that continued it are shown as ONE session in the file.
+              std::vector<TurnVerdict> verdicts;
+              {
+                std::vector<TrajectoryTurn> trajectory;
+                std::string terr;
+                if (!load_trajectory_turns(trajectory_file_path(ws.run_dir(), session.info.id),
+                                           &trajectory, &terr)) {
+                  LOG_WARN("export: no trajectory for session ", session.info.id, " (", terr,
+                           "); only the transcript's own marks are used");
+                }
+                // Without a trajectory the transcript may still say: a tool
+                // result that was cancelled is the mark of an interrupted turn.
+                verdicts = session_turn_verdicts(session, trajectory);
+              }
               html = export_conversation_html(ws, session, std::string(tea::version_string()),
                                               selection, ExportLimits(), &image_data,
-                                              &messages);
+                                              &messages, verdicts);
               std::string tag =
                   (selection.scope == ExportSelection::Scope::kTurn) ? "turn" : "topic";
               if (selection.scope == ExportSelection::Scope::kTurn) {

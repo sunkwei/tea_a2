@@ -959,6 +959,34 @@ std::string question_html(const Workspace& ws, const Message& m, std::size_t* im
   return out.str();
 }
 
+/// The pictures of a question, without the question itself.
+///
+/// A turn that continued an interrupted one is shown as part of the same
+/// exchange: its text would only repeat what the reader already has, but its
+/// pictures would vanish from the record - and a picture is an answer of its
+/// own.
+std::string question_images_html(const Workspace& ws, const Message& m, std::size_t* image_budget,
+                                 const ExportLimits& limits, std::size_t* json_budget,
+                                 std::map<std::string, std::string>* image_data,
+                                 bool* images_omitted) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < m.images.size(); ++i) {
+    out << image_block(ws, m.images[i], image_budget, limits, json_budget, image_data,
+                       images_omitted);
+  }
+  return out.str();
+}
+
+/// How the file names the session it shows: "4" for a single turn, "1-2" for a
+/// group that was merged (the turn that was interrupted plus the turns that
+/// continued it).
+std::string group_label(const std::vector<ExportGroup>& groups, int number) {
+  if (groups.size() == 1 && groups[0].merged()) {
+    return std::to_string(groups[0].first + 1) + "-" + std::to_string(groups[0].last + 1);
+  }
+  return std::to_string(number);
+}
+
 /// One answer of the assistant: what it thought, what it said, what it called.
 std::string answer_html(const Workspace& ws, const Message& m, const TurnCalls& calls,
                         std::size_t* image_budget, const ExportLimits& limits,
@@ -1001,12 +1029,105 @@ std::size_t session_turn_count(const Session& session) {
   return n;
 }
 
+std::vector<TurnVerdict> session_turn_verdicts(const Session& session,
+                                                const std::vector<TrajectoryTurn>& trajectory) {
+  const std::vector<ExportTurn> turns = split_turns(session);
+  std::vector<TurnVerdict> verdicts(turns.size());
+
+  // When a turn ran: the trajectory knows the start, and the end unless the
+  // turn never finished (a turn that is still running has no end yet).
+  struct Window {
+    int64_t start = 0;
+    int64_t end = 0;  // 0 = still open
+    bool cancelled = false;
+    bool partial = false;
+    bool timed = false;  // the timestamps could not be parsed
+  };
+  std::vector<Window> windows;
+  windows.reserve(trajectory.size());
+  for (std::size_t i = 0; i < trajectory.size(); ++i) {
+    Window w;
+    w.cancelled = trajectory[i].cancelled;
+    w.partial = trajectory[i].partial;
+    int64_t start = 0;
+    int64_t finish = 0;
+    w.timed = iso8601_to_unix_ms(trajectory[i].started_at, &start);
+    if (w.timed && !trajectory[i].finished_at.empty()) {
+      if (!iso8601_to_unix_ms(trajectory[i].finished_at, &finish)) w.timed = false;
+    }
+    if (w.timed) {
+      w.start = start;
+      w.end = trajectory[i].finished_at.empty() ? 0 : finish;
+    }
+    windows.push_back(w);
+  }
+
+  // The question is written with second precision, the trajectory with
+  // milliseconds, and the question is written just before the turn starts.
+  const int64_t kSlackMs = 2000;
+
+  for (std::size_t t = 0; t < turns.size(); ++t) {
+    const Message& q = session.messages[turns[t].user_index];
+    int64_t when = 0;
+    bool matched = false;
+    if (iso8601_to_unix_ms(q.created_at, &when)) {
+      // The turn this question belongs to: the one that was running when the
+      // question was written. A question inserted into a running turn belongs
+      // to that turn - and two questions of one turn are one piece of work.
+      for (std::size_t w = 0; w < windows.size(); ++w) {
+        const Window& win = windows[w];
+        if (!win.timed) continue;
+        if (win.start > when + kSlackMs) break;  // the turns are in order
+        if (win.end == 0 || win.end >= when - kSlackMs) {
+          verdicts[t].known = true;
+          verdicts[t].interrupted = win.cancelled || win.partial;
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (matched) continue;
+    // No trajectory for this turn: the transcript may still say so. A tool
+    // result that was cancelled is the mark of an interrupted turn - but a
+    // turn without an answer is not (a failed model call has none either).
+    for (std::size_t i = 0; i < turns[t].indices.size(); ++i) {
+      const Message& m = session.messages[turns[t].indices[i]];
+      if (m.role == "tool" && m.cancelled) {
+        verdicts[t].known = true;
+        verdicts[t].interrupted = true;
+        break;
+      }
+    }
+  }
+  return verdicts;
+}
+
+std::vector<ExportGroup> group_turns(const std::vector<TurnVerdict>& verdicts) {
+  std::vector<ExportGroup> groups;
+  std::size_t i = 0;
+  while (i < verdicts.size()) {
+    ExportGroup g;
+    g.first = i;
+    g.last = i;
+    // An interrupted turn and the turns that continued it are one piece of
+    // work: the file shows them as one session. A turn that was interrupted
+    // again keeps the chain going.
+    while (verdicts[g.last].interrupted && g.last + 1 < verdicts.size()) {
+      g.last += 1;
+    }
+    groups.push_back(g);
+    i = g.last + 1;
+  }
+  return groups;
+}
+
 std::string export_conversation_html(const Workspace& workspace, const Session& session,
                                      const std::string& version,
                                      const ExportSelection& selection,
                                      const ExportLimits& limits,
                                      std::map<std::string, std::string>* image_data,
-                                     std::size_t* message_count) {
+                                     std::size_t* message_count,
+                                     const std::vector<TurnVerdict>& verdicts) {
   const std::string title = session.info.title.empty() ? "会话" : session.info.title;
   std::size_t budget = limits.total_image_bytes;
   std::size_t json_budget = limits.json_image_bytes;
@@ -1017,21 +1138,48 @@ std::string export_conversation_html(const Workspace& workspace, const Session& 
   const std::vector<ExportTurn> turns = split_turns(session);
   const bool brief = selection.detail == ExportSelection::Detail::kBrief;
 
+  // The groups: a turn that was interrupted and the turns that continued it
+  // are one session in the file ("第 1-2 条会话"). Without a verdict - no
+  // trajectory, or nothing to match - every turn is its own group and the
+  // file looks exactly like it did before.
+  std::vector<TurnVerdict> marks = verdicts;
+  marks.resize(turns.size());
+  const std::vector<ExportGroup> groups = group_turns(marks);
+
   // Which turns are in the file. "turn 0" means the last one: the newest
   // thing said, which is what "the current turn" means to somebody who did
   // not pick a number.
   std::size_t first = 0;
   std::size_t count = turns.size();
   int number = selection.turn;
+  std::vector<ExportGroup> shown_groups = groups;
   if (selection.scope == ExportSelection::Scope::kTurn) {
     if (number < 1) number = static_cast<int>(turns.size());
     if (number < 1 || static_cast<std::size_t>(number) > turns.size()) {
       first = 0;
       count = 0;
+      shown_groups.clear();
     } else {
-      first = static_cast<std::size_t>(number) - 1;
+      // The group the turn belongs to: the turn that was interrupted and the
+      // turns that continued it are one session, so the file shows all of it.
+      const std::size_t wanted = static_cast<std::size_t>(number) - 1;
+      first = wanted;
       count = 1;
+      shown_groups.clear();
+      for (std::size_t g = 0; g < groups.size(); ++g) {
+        if (wanted < groups[g].first || wanted > groups[g].last) continue;
+        first = groups[g].first;
+        count = groups[g].last - groups[g].first + 1;
+        shown_groups.push_back(groups[g]);
+        break;
+      }
     }
+  }
+
+  // How many of the sessions in the file are a continued piece of work.
+  std::size_t merged_groups = 0;
+  for (std::size_t g = 0; g < shown_groups.size(); ++g) {
+    if (shown_groups[g].merged()) ++merged_groups;
   }
 
   // The messages that end up in the file - and therefore the messages the
@@ -1041,60 +1189,109 @@ std::string export_conversation_html(const Workspace& workspace, const Session& 
   shown.info = session.info;
   shown.info.message_count = 0;
   if (selection.scope == ExportSelection::Scope::kTurn && number >= 1) {
-    shown.info.title = title + "（第 " + std::to_string(number) + " 条）";
+    shown.info.title = title + "（第 " + group_label(shown_groups, number) + " 条）";
   }
 
-  std::ostringstream body;
+  // The JSON block carries every turn of the file, exactly as before: the
+  // merging is about how the file reads, not about what it carries. An
+  // imported file is therefore still the conversation it was.
   for (std::size_t t = first; t < first + count && t < turns.size(); ++t) {
     const ExportTurn& turn = turns[t];
-    const TurnCalls calls = turn_calls(session, turn);
-    body << "<li class=\"msg system\"><div class=\"who\">第 " << (t + 1) << " 条会话</div></li>\n";
-
     const Message& q = session.messages[turn.user_index];
-    body << question_html(workspace, q, &budget, limits, &json_budget, images, &images_omitted);
     shown.messages.push_back(q);
-
     if (brief) {
-      // Only the question and the answer: the reader wants the exchange, not
-      // the machinery behind it.
       const std::size_t ans = final_answer_index(session, turn);
       if (ans != static_cast<std::size_t>(-1)) {
-        const Message& a = session.messages[ans];
-        body << "<li class=\"msg assistant\">" << who_line("助手", a);
-        if (!trim(a.content).empty()) {
-          body << "<div class=\"body\">" << markdown_to_html(a.content) << "</div>";
-        }
-        body << "</li>\n";
-        // The brief version shows the answer and nothing else: the thinking
-        // and the calls behind it are not in the file, so they are not in the
-        // JSON block either.
-        Message brief = a;
-        brief.reasoning.clear();
-        brief.tool_calls.clear();
-        shown.messages.push_back(brief);
+        Message only = session.messages[ans];
+        only.reasoning.clear();
+        only.tool_calls.clear();
+        shown.messages.push_back(only);
       }
       continue;
     }
-
     for (std::size_t i = 0; i < turn.indices.size(); ++i) {
       const std::size_t idx = turn.indices[i];
       if (idx == turn.user_index) continue;  // the question is already out
       const Message& m = session.messages[idx];
       if (m.role == "assistant") {
-        body << answer_html(workspace, m, calls, &budget, limits, &json_budget, images,
-                            &images_omitted);
         shown.messages.push_back(m);
       } else if (m.role == "tool") {
-        // The result is already on the call it answers (the badge). A result
-        // without a call would vanish - say so instead.
-        if (m.tool_call_id.empty() ||
-            calls.declared.find(m.tool_call_id) == calls.declared.end()) {
-          body << "<li class=\"msg tool\">" << who_line("工具", m)
-               << "<div class=\"body\">（没有对应的调用记录）</div></li>\n";
-        }
         Message trimmed = m;
         trimmed.content = "（本次下载不含工具输出）";
         shown.messages.push_back(trimmed);
+      }
+    }
+  }
+
+  std::ostringstream body;
+  for (std::size_t gi = 0; gi < shown_groups.size(); ++gi) {
+    const ExportGroup& group = shown_groups[gi];
+    bool interrupted_here = false;
+    for (std::size_t t = group.first; t <= group.last && t < turns.size(); ++t) {
+      if (marks[t].interrupted) interrupted_here = true;
+    }
+    body << "<li class=\"msg system\"><div class=\"who\">第 " << (group.first + 1);
+    if (group.merged()) body << "-" << (group.last + 1);
+    body << " 条会话";
+    if (interrupted_here) body << " <span class=\"badge info\">含中断</span>";
+    body << "</div></li>\n";
+
+    for (std::size_t t = group.first; t <= group.last && t < turns.size(); ++t) {
+      const ExportTurn& turn = turns[t];
+      const Message& q = session.messages[turn.user_index];
+      if (t == group.first) {
+        body << question_html(workspace, q, &budget, limits, &json_budget, images,
+                              &images_omitted);
+      } else {
+        // The question that continued the interrupted one is not shown: the
+        // file shows one exchange, not three. Its pictures stay - they would
+        // otherwise vanish from the record.
+        body << question_images_html(workspace, q, &budget, limits, &json_budget, images,
+                                     &images_omitted);
+      }
+
+      if (brief) {
+        // Only the question and the answer: the reader wants the exchange, not
+        // the machinery behind it. A merged group shows the answer of its last
+        // turn - the one that finished the work.
+        if (t == group.last) {
+          const std::size_t ans = final_answer_index(session, turn);
+          if (ans != static_cast<std::size_t>(-1)) {
+            const Message& a = session.messages[ans];
+            body << "<li class=\"msg assistant\">" << who_line("助手", a);
+            if (!trim(a.content).empty()) {
+              body << "<div class=\"body\">" << markdown_to_html(a.content) << "</div>";
+            }
+            body << "</li>\n";
+          }
+          if (marks[t].interrupted) {
+            body << "<li class=\"msg system\"><div class=\"body\">这一轮被中断，没有跑完。"
+                 << "</div></li>\n";
+          }
+        }
+        continue;
+      }
+
+      const TurnCalls calls = turn_calls(session, turn);
+      for (std::size_t i = 0; i < turn.indices.size(); ++i) {
+        const std::size_t idx = turn.indices[i];
+        if (idx == turn.user_index) continue;  // the question is already out
+        const Message& m = session.messages[idx];
+        if (m.role == "assistant") {
+          body << answer_html(workspace, m, calls, &budget, limits, &json_budget, images,
+                              &images_omitted);
+        } else if (m.role == "tool") {
+          // The result is already on the call it answers (the badge). A result
+          // without a call would vanish - say so instead.
+          if (m.tool_call_id.empty() ||
+              calls.declared.find(m.tool_call_id) == calls.declared.end()) {
+            body << "<li class=\"msg tool\">" << who_line("工具", m)
+                 << "<div class=\"body\">（没有对应的调用记录）</div></li>\n";
+          }
+        }
+      }
+      if (marks[t].interrupted) {
+        body << "<li class=\"msg system\"><div class=\"body\">这一轮被中断。</div></li>\n";
       }
     }
   }
@@ -1109,10 +1306,13 @@ std::string export_conversation_html(const Workspace& workspace, const Session& 
       << esc(workspace.root()) << "</dd>\n";
   out << "<dt>主题</dt><dd>" << esc(session.info.id) << "</dd>\n";
   if (selection.scope == ExportSelection::Scope::kTurn) {
-    out << "<dt>范围</dt><dd>当前会话（第 " << number << " 条，共 " << turns.size()
-        << " 条）</dd>\n";
+    out << "<dt>范围</dt><dd>当前会话（第 " << group_label(shown_groups, number) << " 条，共 "
+        << turns.size() << " 轮）</dd>\n";
   } else {
-    out << "<dt>范围</dt><dd>整个主题（" << turns.size() << " 条会话）</dd>\n";
+    out << "<dt>范围</dt><dd>整个主题（" << turns.size() << " 轮 · " << shown_groups.size()
+        << " 条会话";
+    if (merged_groups > 0) out << "，" << merged_groups << " 处续做已合并";
+    out << "）</dd>\n";
   }
   out << "<dt>内容</dt><dd>"
       << (brief ? "用户输入与最终回答" : "用户输入、思考、工具调用与最终回答") << "</dd>\n";
@@ -1123,6 +1323,10 @@ std::string export_conversation_html(const Workspace& workspace, const Session& 
   out << "</dd>\n";
   out << "<dt>导出</dt><dd>tea_agent " << esc(version) << " · " << esc(now_iso8601())
       << "</dd>\n</dl>\n";
+  if (merged_groups > 0) {
+    out << "<p class=\"lede\">其中 " << merged_groups
+        << " 处是被中断后接着做完的，已并成一条会话。</p>\n";
+  }
   out << "<p class=\"lede\">这是 tea_agent 导出的静态快照：不依赖服务器、不请求网络，"
          "直接双击打开即可阅读。工具输出没有包含在本次下载里（只记录了调用参数与成功与否）。"
          "页末的 <code>tea-session-data</code> 块保存了本次导出的会话 JSON，"

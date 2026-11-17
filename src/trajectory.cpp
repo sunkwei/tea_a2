@@ -55,6 +55,74 @@ long long meta_int(const nlohmann::json& meta, const char* key, bool* found = nu
 const std::string kOutputDroppedMarker = "\n... [trajectory: tool output dropped to stay within "
                                          "trajectory_step_max_bytes]";
 
+/// Older first. The timestamps are ISO-8601 UTC, so the strings compare like
+/// times - except that a second-precision stamp ("...:00Z") sorts after a
+/// millisecond one ("...:00.500Z") of the same second. That half second does
+/// not matter, but the epoch does: compare the parsed times when they parse.
+bool trajectory_turn_started_before(const TrajectoryTurn& a, const TrajectoryTurn& b) {
+  int64_t ta = 0;
+  int64_t tb = 0;
+  const bool oka = iso8601_to_unix_ms(a.started_at, &ta);
+  const bool okb = iso8601_to_unix_ms(b.started_at, &tb);
+  if (oka && okb) return ta < tb;
+  return a.started_at < b.started_at;
+}
+
+/// Read the raw bytes of a trajectory file (or its compressed twin).
+///
+/// Takes the writer's lock: the recorder refreshes its newest line *in place*
+/// (to keep the file append-only instead of rewriting it every step), so a
+/// reader that raced it would see a half-written last record. Readers are HTTP
+/// requests and writers are turns, so the wait is a file read long.
+///
+/// A file over the read cap keeps its tail - the newest turns - and the first
+/// (partial) line of that tail is dropped, so parsing starts at a record
+/// boundary.
+bool read_trajectory_bytes(const std::string& path, std::string* data, std::string* err) {
+  std::lock_guard<std::mutex> lock(trajectory_file_mutex());
+  // The cleaner may have compressed a cold trajectory: same turns, fewer
+  // bytes. The compressed twin is only consulted when the plain file is gone.
+  const std::string gz_path = path + ".gz";
+  const bool plain = path_is_file(path);
+  const bool packed = !plain && path_is_file(gz_path);
+  if (!plain && !packed) {
+    if (err) *err = "trajectory file not found: " + path;
+    return false;
+  }
+  data->clear();
+  const uint64_t size = file_size(plain ? path : gz_path);
+  if (size > kTrajectoryReadCap) {
+    if (!read_file_tail(plain ? path : gz_path, kTrajectoryReadCap, data)) {
+      if (err) *err = "cannot read " + path;
+      return false;
+    }
+    // The tail starts mid-line; drop it so parsing begins at a record boundary.
+    const std::size_t nl = data->find('\n');
+    if (nl == std::string::npos) data->clear();
+    else data->erase(0, nl + 1);
+  } else if (plain) {
+    if (!read_file(path, data)) {
+      if (err) *err = "cannot read " + path;
+      return false;
+    }
+  } else {
+    std::string gz_err;
+    if (!read_file_maybe_gzip(gz_path, data, &gz_err)) {
+      if (err) *err = gz_err;
+      return false;
+    }
+    if (data->size() > kTrajectoryReadCap) {
+      // A compressed file can still be big when it is opened. Keep the tail,
+      // which holds the newest turns.
+      data->erase(0, data->size() - kTrajectoryReadCap);
+      const std::size_t nl = data->find('\n');
+      if (nl == std::string::npos) data->clear();
+      else data->erase(0, nl + 1);
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 TrajectoryLimits trajectory_limits_from_settings(const Settings& settings) {
@@ -89,52 +157,9 @@ bool trajectory_id_is_safe(const std::string& id) {
 
 bool load_trajectories(const std::string& path, std::vector<nlohmann::json>* out,
                        std::string* err) {
-  // Take the writer's lock: the recorder refreshes its newest line *in place* (to
-  // keep the file append-only instead of rewriting it every step), so a reader
-  // that raced it would see a half-written last record. Readers are HTTP requests
-  // and writers are turns, so the wait is a file read long.
-  std::lock_guard<std::mutex> lock(trajectory_file_mutex());
   out->clear();
-  // The cleaner may have compressed a cold trajectory: same turns, fewer
-  // bytes. The compressed twin is only consulted when the plain file is gone.
-  const std::string gz_path = path + ".gz";
-  const bool plain = path_is_file(path);
-  const bool packed = !plain && path_is_file(gz_path);
-  if (!plain && !packed) {
-    if (err) *err = "trajectory file not found: " + path;
-    return false;
-  }
   std::string data;
-  const uint64_t size = file_size(plain ? path : gz_path);
-  if (size > kTrajectoryReadCap) {
-    if (!read_file_tail(plain ? path : gz_path, kTrajectoryReadCap, &data)) {
-      if (err) *err = "cannot read " + path;
-      return false;
-    }
-    // The tail starts mid-line; drop it so parsing begins at a record boundary.
-    const std::size_t nl = data.find('\n');
-    if (nl == std::string::npos) data.clear();
-    else data.erase(0, nl + 1);
-  } else if (plain) {
-    if (!read_file(path, &data)) {
-      if (err) *err = "cannot read " + path;
-      return false;
-    }
-  } else {
-    std::string gz_err;
-    if (!read_file_maybe_gzip(gz_path, &data, &gz_err)) {
-      if (err) *err = gz_err;
-      return false;
-    }
-    if (data.size() > kTrajectoryReadCap) {
-      // A compressed file can still be big when it is opened. Keep the tail,
-      // which holds the newest turns.
-      data.erase(0, data.size() - kTrajectoryReadCap);
-      const std::size_t nl = data.find('\n');
-      if (nl == std::string::npos) data.clear();
-      else data.erase(0, nl + 1);
-    }
-  }
+  if (!read_trajectory_bytes(path, &data, err)) return false;
 
   std::vector<nlohmann::json> records;
   std::map<std::string, std::size_t> by_turn;
@@ -169,6 +194,60 @@ bool load_trajectories(const std::string& path, std::vector<nlohmann::json>* out
   }
 
   out->assign(records.rbegin(), records.rend());  // newest first
+  return true;
+}
+
+bool load_trajectory_turns(const std::string& path, std::vector<TrajectoryTurn>* out,
+                           std::string* err) {
+  out->clear();
+  std::string data;
+  if (!read_trajectory_bytes(path, &data, err)) return false;
+
+  // Only the few fields are kept: a trajectory line also carries every tool
+  // output, and the whole file can be megabytes. Keeping the records would
+  // turn an 8 MB file into tens of megabytes of JSON DOM.
+  std::vector<TrajectoryTurn> records;
+  std::map<std::string, std::size_t> by_turn;
+  std::size_t pos = 0;
+  while (pos < data.size()) {
+    std::size_t nl = data.find('\n', pos);
+    if (nl == std::string::npos) nl = data.size();
+    const std::string line = trim(data.substr(pos, nl - pos));
+    pos = nl + 1;
+    if (line.empty()) continue;
+    nlohmann::json record;
+    try {
+      record = nlohmann::json::parse(line);
+    } catch (const std::exception&) {
+      // A crash can leave the last line half written; a reader must still be
+      // able to use everything before it.
+      LOG_DEBUG("trajectory: skipping an unparsable line in ", path);
+      continue;
+    }
+    if (!record.is_object()) continue;
+    const std::string id = record.value("turn_id", std::string());
+    if (id.empty()) continue;
+    TrajectoryTurn turn;
+    turn.turn_id = id;
+    turn.started_at = record.value("started_at", std::string());
+    turn.finished_at = record.value("finished_at", std::string());
+    turn.cancelled = record.value("cancelled", false);
+    turn.partial = record.value("partial", false);
+    std::map<std::string, std::size_t>::iterator it = by_turn.find(id);
+    if (it == by_turn.end()) {
+      by_turn[id] = records.size();
+      records.push_back(turn);
+    } else {
+      // The recorder rewrites a turn's line in place; if a fallback append
+      // happened, the later line is the newer snapshot.
+      records[it->second] = turn;
+    }
+  }
+
+  // Oldest first. A turn whose line was appended after another turn had
+  // started (the fallback path) would otherwise sit at the end of the file.
+  std::sort(records.begin(), records.end(), trajectory_turn_started_before);
+  out->assign(records.begin(), records.end());
   return true;
 }
 

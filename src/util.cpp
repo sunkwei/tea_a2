@@ -90,6 +90,70 @@ std::string now_iso8601_ms() {
 std::string iso8601_from_unix(int64_t unix_seconds) {
   return format_tm(gmtime_safe(static_cast<std::time_t>(unix_seconds)), false, 0);
 }
+namespace {
+
+/// Days from 1970-01-01 to a civil date (Howard Hinnant's algorithm). There
+/// is no timegm() on Windows, and every timestamp in this program is UTC.
+int64_t days_from_civil(int64_t y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  const int64_t era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(y - era * 400);             // [0, 399]
+  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;  // [0, 365]
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;           // [0, 146096]
+  return era * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+/// Read `n` digits at `at` as a number. False when they are not digits.
+bool digits_at(const std::string& s, std::size_t at, std::size_t n, int* out) {
+  int value = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    const char c = s[at + i];
+    if (c < '0' || c > '9') return false;
+    value = value * 10 + (c - '0');
+  }
+  *out = value;
+  return true;
+}
+
+}  // namespace
+
+bool iso8601_to_unix_ms(const std::string& s, int64_t* out_ms) {
+  // "YYYY-MM-DDTHH:MM:SS" + an optional fraction + "Z"
+  if (s.size() < 20) return false;
+  if (s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':') {
+    return false;
+  }
+  int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+  if (!digits_at(s, 0, 4, &year) || !digits_at(s, 5, 2, &month) ||
+      !digits_at(s, 8, 2, &day) || !digits_at(s, 11, 2, &hour) ||
+      !digits_at(s, 14, 2, &minute) || !digits_at(s, 17, 2, &second)) {
+    return false;
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  if (hour > 23 || minute > 59 || second > 60) return false;
+  int millis = 0;
+  std::size_t at = 19;
+  if (at < s.size() && s[at] == '.') {
+    ++at;
+    int digits = 0;
+    int value = 0;
+    while (at < s.size() && s[at] >= '0' && s[at] <= '9') {
+      if (digits < 3) value = value * 10 + (s[at] - '0');
+      ++digits;
+      ++at;
+    }
+    if (digits == 0) return false;
+    // ".5" is 500 ms, ".05" is 50 ms, ".123456" is 123 ms.
+    for (int i = digits; i < 3; ++i) value *= 10;
+    millis = value;
+  }
+  if (at >= s.size() || s[at] != 'Z') return false;
+  const int64_t days = days_from_civil(year, static_cast<unsigned>(month),
+                                       static_cast<unsigned>(day));
+  const int64_t secs = days * 86400 + hour * 3600 + minute * 60 + second;
+  if (out_ms) *out_ms = secs * 1000 + millis;
+  return true;
+}
 
 std::string format_duration_ms(int64_t ms) {
   if (ms < 1000) return std::to_string(ms) + "ms";
