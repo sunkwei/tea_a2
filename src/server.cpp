@@ -7310,6 +7310,20 @@ void ApiServer::Impl::install_routes() {
     send_ok(res);
   });
 
+  // The same thing, but as a POST: a browser that goes away can only say so
+  // with a beacon (navigator.sendBeacon), and a beacon is always a POST.
+  // Without this, every reload of the page leaves a shell behind, and after
+  // eight reloads the terminal says "too many shell sessions are open".
+  svr.Post(R"(/api/shell/session/([^/]+)/close)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    if (!shells.close(id)) {
+      send_error(res, 404, "not_found", "no such shell session: " + id);
+      return;
+    }
+    send_ok(res);
+  });
+
   // ---- files to and from the terminal -----------------------------------
   //
   // Upload: the body is the file, the name is in the query. It lands in the

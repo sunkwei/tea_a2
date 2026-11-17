@@ -375,6 +375,22 @@ void TerminalService::Impl::install_routes() {
     send_json(res, out);
   });
 
+  // The same thing, but as a POST: a browser that goes away can only say so
+  // with a beacon (navigator.sendBeacon), and a beacon is always a POST.
+  // Without this, every reload of the page leaves a shell on the far end
+  // behind, and after eight reloads the terminal is out of sessions.
+  svr.Post(R"(/api/term/session/([^/]+)/close)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+    const std::string id = req.matches[1].str();
+    if (!shells.close(id)) {
+      send_error(res, 404, "not_found", "no such session: " + id);
+      return;
+    }
+    json out = json::object();
+    out["ok"] = true;
+    send_json(res, out);
+  });
+
   // ---- files in and out ------------------------------------------------------
   // The upload lands in the session's directory, or in "dir" when the caller
   // names one. The name is reduced to its last component, so "../../etc/passwd"

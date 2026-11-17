@@ -257,13 +257,36 @@
       });
   }
 
+  // The input goes out in order: one request after the other, and whatever
+  // piled up in the meantime goes in the next one.
+  //
+  // It has to be like this.  Every key is its own request, and two requests
+  // that are on the wire at the same time can be answered in any order (the
+  // browser opens a second connection).  Over a tunnel that is not a corner
+  // case but the normal one: the letters of a word came out scrambled
+  // ("abcdefghij" arrived as "abcdfeghij").
+  var pendingInput = '';
+  var inputSending = false;
+
   function send(data) {
-    if (!data || !state.id || state.ended) return;
+    if (!data) return;
+    pendingInput += data;
+    if (inputSending) return;
+    inputSending = true;
+    pumpInput();
+  }
+
+  function pumpInput() {
+    if (!pendingInput) { inputSending = false; return; }
+    if (!state.id || state.ended) { pendingInput = ''; inputSending = false; return; }
+    var chunk = pendingInput;
+    pendingInput = '';
     api('api/term/session/' + encodeURIComponent(state.id) + '/input', {
       method: 'POST',
-      body: { data: data }
-    }).catch(function () {
+      body: { data: chunk }
+    }).then(pumpInput, function () {
       note('输入没有送到 shell。', true);
+      inputSending = false;
     });
   }
 
@@ -753,6 +776,22 @@
 
     window.addEventListener('resize', function () {
       resize();
+    });
+
+    // The tab goes away -> the shell on the far end goes away with it.
+    // A beacon is the only thing a browser can still send while it closes,
+    // and a beacon is always a POST (that is why the server has a POST
+    // route for it).  Without this, every reload of the page leaves a
+    // shell behind, and after eight reloads the terminal is out of
+    // sessions ("too many shell sessions are open").
+    window.addEventListener('pagehide', function () {
+      if (!state.id || state.ended) return;
+      var id = state.id;
+      state.id = '';
+      try {
+        navigator.sendBeacon('api/term/session/' + encodeURIComponent(id) + '/close',
+          new Blob(['{}'], { type: 'application/json' }));
+      } catch (e) { /* the far end reaps it eventually */ }
     });
   }
 

@@ -18,7 +18,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <langinfo.h>
 #include <limits.h>
+#include <locale.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -123,6 +125,40 @@ bool PtySession::spawn(const std::string& shell, const std::string& cwd, int col
     return false;
   }
 
+  // The locale of the shell.
+  //
+  // A terminal has to speak UTF-8, or Chinese input does not work: readline
+  // in the C locale turns every byte with the high bit set into an escape
+  // sequence (ESC + the rest), so one Chinese word arrives as a handful of
+  // meta keys and bash answers with "Display all 2159 possibilities?".
+  //
+  // The environment often asks for a locale the machine does not have (a
+  // minimal install asks for zh_CN.UTF-8 and only has C), and then the shell
+  // silently falls back to the C locale. So: if the locale we would run in
+  // is not UTF-8, look for one that is here and give that to the shell.
+  // The agent itself keeps the locale it had - this is only about the child.
+  std::string locale_for_child;
+  {
+    const char* current = std::setlocale(LC_ALL, nullptr);
+    const std::string saved = current ? current : "C";
+    bool utf8 = false;
+    if (std::setlocale(LC_ALL, "") != nullptr) {
+      const char* codeset = nl_langinfo(CODESET);
+      utf8 = codeset != nullptr &&
+             (std::strcmp(codeset, "UTF-8") == 0 || std::strcmp(codeset, "UTF8") == 0);
+    }
+    if (!utf8) {
+      static const char* kFallbacks[] = {"C.UTF-8", "C.utf8", "en_US.UTF-8", "en_US.utf8"};
+      for (std::size_t i = 0; i < sizeof(kFallbacks) / sizeof(kFallbacks[0]); ++i) {
+        if (std::setlocale(LC_ALL, kFallbacks[i]) != nullptr) {
+          locale_for_child = kFallbacks[i];
+          break;
+        }
+      }
+    }
+    std::setlocale(LC_ALL, saved.c_str());
+  }
+
   // The size is set before the child starts, so the very first prompt is
   // already wrapped for the window the browser has.
   struct winsize ws;
@@ -156,6 +192,11 @@ bool PtySession::spawn(const std::string& shell, const std::string& cwd, int col
       // Staying in the old directory is better than not starting at all.
     }
     setenv("TERM", "xterm-256color", 1);
+    if (!locale_for_child.empty()) {
+      // Both names: some programs read LC_ALL, others LANG.
+      setenv("LC_ALL", locale_for_child.c_str(), 1);
+      setenv("LANG", locale_for_child.c_str(), 1);
+    }
     // No arguments: a shell with a terminal on stdin is interactive by
     // itself, and this way it also works for shells we know nothing about.
     char* argv[2];

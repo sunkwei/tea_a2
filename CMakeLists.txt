@@ -641,6 +641,21 @@ if(TEA_AGENT_BUILD_TUNNEL)
   file(GLOB TEA_TUNNEL_SOURCES CONFIGURE_DEPENDS
        ${CMAKE_CURRENT_SOURCE_DIR}/src/tunnel_*.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/src/tunnel_*.h)
+  # The sidecar also compiles the shell code (src/shell*.cpp) and a few
+  # helpers - the same shell the agent uses.  They have to be dependencies
+  # too: without them a change to the shell (a locale fix, say) leaves the
+  # sidecar with the old code and nobody notices.
+  file(GLOB TEA_TUNNEL_SHELL_SOURCES CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/shell.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/shell.h
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/shell_posix.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/shell_win32.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/util.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/util.h
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/platform_fs.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/platform_fs.h
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/log.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/log.h)
   # libjuice is patched by us (the TURN usage callback), so its sources are
   # dependencies too.
   file(GLOB TEA_TUNNEL_LIBMJUICE_SOURCES CONFIGURE_DEPENDS
@@ -661,6 +676,7 @@ if(TEA_AGENT_BUILD_TUNNEL)
             # lives in src/version.cpp: a bump has to reach them.
             ${TEA_VERSION_SOURCE}
             ${TEA_TUNNEL_SOURCES}
+            ${TEA_TUNNEL_SHELL_SOURCES}
             ${TEA_TUNNEL_LIBMJUICE_SOURCES}
             ${TEA_TUNNEL_ASSETS_CPP}
             ${TEA_TUNNEL_ASSETS_H}

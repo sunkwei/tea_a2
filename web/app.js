@@ -7074,13 +7074,36 @@
       });
   }
 
+  // The input goes out in order: one request after the other, and whatever
+  // piled up in the meantime goes in the next one.
+  //
+  // It has to be like this.  Every key is its own request, and two requests
+  // that are on the wire at the same time can be answered in any order (the
+  // browser opens a second connection).  Over a tunnel that is not a corner
+  // case but the normal one: the letters of a word came out scrambled
+  // ("abcdefghij" arrived as "abcdfeghij").
+  var shellPending = '';
+  var shellSending = false;
+
   function shellSend(data) {
-    if (!data || !shell.id || shell.ended) return;
+    if (!data) return;
+    shellPending += data;
+    if (shellSending) return;
+    shellSending = true;
+    shellPumpInput();
+  }
+
+  function shellPumpInput() {
+    if (!shellPending) { shellSending = false; return; }
+    if (!shell.id || shell.ended) { shellPending = ''; shellSending = false; return; }
+    var chunk = shellPending;
+    shellPending = '';
     api('api/shell/session/' + encodeURIComponent(shell.id) + '/input', {
       method: 'POST',
-      body: { data: data }
-    }).catch(function () {
+      body: { data: chunk }
+    }).then(shellPumpInput, function () {
       shellNote('输入没有送到 shell。', true);
+      shellSending = false;
     });
   }
 
@@ -7496,6 +7519,20 @@
     });
     document.addEventListener('mouseup', shellMouseUp);
     $('shell-copy').onclick = shellCopyClick;
+    // The tab goes away -> the shell goes away with it.  A beacon is the
+    // only thing a browser can still send while it closes, and a beacon is
+    // always a POST (that is why the server has a POST route for it).
+    // Without this, every reload of the page leaves a shell behind, and
+    // after eight reloads the terminal is out of sessions.
+    window.addEventListener('pagehide', function () {
+      if (!shell.id || shell.ended) return;
+      var id = shell.id;
+      shell.id = '';
+      try {
+        navigator.sendBeacon(apiUrl('api/shell/session/' + encodeURIComponent(id) + '/close'),
+          new Blob(['{}'], { type: 'application/json' }));
+      } catch (err) { /* the session is reaped eventually */ }
+    });
     $('shell-input').addEventListener('keydown', function (e) {
       if (e.isComposing) return;
       var bytes = shellKeyBytes(e);

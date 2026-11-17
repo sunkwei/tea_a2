@@ -262,6 +262,49 @@ try {
   check('what the user types reaches the shell', gotOutput,
     (await screenText()).slice(-200));
 
+  // ---- the input requests must not overlap --------------------------------
+  // Every key is its own request.  Two requests that are on the wire at the
+  // same time can be answered in any order (the browser opens a second
+  // connection), and then the letters of a word come out scrambled - over a
+  // tunnel that is the normal case, not a corner case.  So the page sends
+  // them one after the other.
+  await evalJs(`(function(){
+    window.__inFlight = 0; window.__maxInFlight = 0;
+    var of = window.fetch;
+    window.fetch = function (url, opts) {
+      var u = String(url && url.url ? url.url : url);
+      if (u.indexOf('/input') < 0) return of.apply(this, arguments);
+      window.__inFlight++;
+      if (window.__inFlight > window.__maxInFlight) window.__maxInFlight = window.__inFlight;
+      return of.apply(this, arguments).then(function (r) {
+        window.__inFlight--; return r;
+      }, function (e) { window.__inFlight--; throw e; });
+    };
+    return true;
+  })()`);
+  await evalJs(`document.getElementById('input').focus(); true`);
+  // The keys go in without waiting: that is what makes the requests pile up.
+  for (const ch of 'abcde') {
+    await pressKey(ch, { code: 'Key' + ch.toUpperCase(), vk: ch.toUpperCase().charCodeAt(0), text: ch });
+  }
+  await sleep(1500);
+  const maxInFlight = await evalJs(`window.__maxInFlight`);
+  check('the input requests go out one after the other', maxInFlight === 1,
+    'max in flight: ' + maxInFlight);
+
+  // ---- the letters have to arrive in order --------------------------------
+  // Every key is its own request, and two requests that are on the wire at
+  // the same time can be answered in any order (the browser opens a second
+  // connection).  Over a tunnel that is the normal case: the word used to
+  // come out scrambled ("abcdefghij" arrived as "abcdfeghij").
+  const ordered = 'tea-order-qwertyuiop';
+  await evalJs(`document.getElementById('input').focus(); true`);
+  await typeText(ordered);
+  await pressKey('Enter', { code: 'Enter', vk: 13, text: '\r' });
+  const inOrder = await waitFor(async () => (await screenText()).indexOf(ordered) >= 0, 25000);
+  check('the letters arrive in the order they were typed', inOrder,
+    JSON.stringify((await screenText()).slice(-200)));
+
   // ---- Chinese input ------------------------------------------------------
   // The pinyin being composed is not a word yet: it must not go to the far
   // end.  Only the finished word does.
