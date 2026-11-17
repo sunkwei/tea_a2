@@ -3139,3 +3139,74 @@ a2: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found
 - 写 `web/term.js` 的时候手滑把 `TERM_WIDE_RANGES` 拼成 `TERM_WIDE_RAGES`，
   结果**宽字符一进 `feed()` 就抛异常**，屏幕从那个字起就全白了。
   这种错 VT 的老测试测不出来（它们不喂宽字符）→ 新的宽字符用例得跟着加。
+
+---
+
+## 把 a2_tunnel 部署到 zonekey，撞出终端的三个真问题（2026-11-17）
+
+把 `a2_tunnel` 装到 zonekey（客户侧那台 Ubuntu 20.04）跑 `--role agent --target terminal`，
+本机起 `--role client` 配对，浏览器开 `http://127.0.0.1:9941/` —— 隧道通了（经 broker 中继），
+但**中文打不进 shell**。一路挖出三个问题，都不是「隧道」的问题，是终端自己的。
+
+### 一、locale：字是好的，坏的是 locale
+
+现象：打一个中文词，zonekey 的 bash 回的是
+`Display all 2159 possibilities? (y or n)`，字一个都没进去。
+
+**别被现象骗了**：字其实是好的。`cat > /tmp/in.bin` 接住再 `xxd`，看得清清楚楚
+`e4bd a0e5 a5bd`（就是「你好」的 UTF-8）。坏的是 **zonekey 的 locale**：
+它的环境要 `zh_CN.UTF-8`（没装），`setlocale()` 失败 → shell 落在 **C locale** 里，
+而 readline 在 C locale 下把每个高位字节变成 **ESC 序列**（ESC + 其余），
+于是「你好」变成 12 个 meta 键 → bash 以为你在补全 → 列出 2159 个候选。
+
+**改法**（`src/shell_posix.cpp`）：fork 之前问一句「这台机器能用哪个 UTF-8 locale」
+（`C.UTF-8` → `C.utf8` → `en_US.UTF-8` → `en_US.utf8`），有就交给子进程
+（`LC_ALL` 和 `LANG` 都设）；**agent 自己的 locale 不动**（问完要还原）。
+
+**怎么验**：新测试 `tests/smoke_shell_locale.py` —— 用一个**装不上的** locale
+（`zz_ZZ.NOPE`）起 agent，再检查 shell 里的 `locale charmap` 是不是 UTF-8。
+⚠️ **要把 `HOME` 指到一个空目录**：开发机的 `~/.bashrc` 里 `export LANG=zh_CN.UTF-8`
+会把问题遮住（本机 zh_CN.UTF-8 装着）——不 neutralizing 的话，测试根本复现不出来。
+不改动代码时，这个测试 FAIL 的症状和 zonekey 一模一样。
+
+### 二、按键会乱序（这个更要命）
+
+打 `abcdefghij`，对面收到的是 **`abcdfeghij`**。
+
+**每个按键都是自己的 HTTP 请求**，而同时在路上的两个请求回来的顺序不保证
+（浏览器会另开一条连接）。本地回环时看不出来，**过隧道时这是常态**。
+
+**改法**（`web/app.js` + `web/tunnel_terminal.js`）：输入排成一条队，一次只发一个
+请求，积压的合并进下一个（这样请求数也少了）。
+
+**怎么验**：别指望「打一串字母看对不对」——本地隧道太快，复现不了（我试过，
+本地测试不修也过）。要钉的是**契约**：同一时刻在路上的输入请求只能有一个。
+测试里把 `fetch` 拦下来数「同时在飞几个」：不修是 3~4 个，修完是 1 个。
+（`tests/ui_shell.mjs`、`tests/ui_tunnel_terminal.mjs` 各一条。）
+
+### 三、刷新页面会漏掉 shell 会话
+
+会话上限 8 个，刷新八次终端就说 `too many shell sessions are open`，
+而且要等**一小时**（空闲回收）才清掉。
+
+**改法**：页面在 `pagehide` 时用 `navigator.sendBeacon` 关掉自己的会话；
+beacon 只能是 **POST**，所以服务端加了 `POST .../close` 路由
+（`/api/shell/session/<id>/close` 和 `/api/term/session/<id>/close`）。
+
+### 顺手修的一个构建坑
+
+`CMakeLists.txt` 里隧道二进制的依赖表只有 `src/tunnel_*.cpp`，
+可它**也编 `src/shell*.cpp`** —— 改了 shell 不会重编侧载，
+拿到的还是旧代码（这次差点把旧二进制发到 zonekey）。依赖表补齐。
+
+### 现场记录（zonekey）
+
+- 侧载：`/usr/bin/a2_tunnel`（静态版，glibc 2.31 的机器上必须静态），
+  日志 `/root/tunnel_terminal.log`，房间令牌在里面（**别外传**）。
+- broker：`103.232.92.54:8382`（TLS），STUN/TURN 同一台的 `3478/UDP`；
+  地址和证书指纹写在 `/root/.tea_agent/tunnel/broker.txt`（侧载读它）。
+- 本机 client：`./build/bin/a2_tunnel --role client --session <码> --port 9941`，
+  浏览器开 `http://127.0.0.1:9941/`。
+- 路径实测：`local 39.65.223.83:xxxxx (srflx) <-> remote 103.232.92.54:1147xx (relayed)`。
+- 探针：`.tea_agent_run/scripts/tunnel_ime_probe.mjs`（对着已经跑起来的 client 端口
+  测中文输入/输出）、`tunnel_dump.mjs`（把整个会话的原始字节倒出来）。
