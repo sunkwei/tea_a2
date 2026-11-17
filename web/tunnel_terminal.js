@@ -267,6 +267,18 @@
     });
   }
 
+  // 一段文字送进远端的 shell（中文、粘贴、手机的软键盘都走这里）。
+  // 同一个词别送两遍：有些浏览器既发 compositionend 又发 input。
+  var textSent = { text: '', at: 0 };
+  function sendText(text) {
+    if (!text) return;
+    var now = Date.now();
+    if (text === textSent.text && now - textSent.at < 300) return;
+    textSent.text = text;
+    textSent.at = now;
+    send(text.replace(/\r\n/g, '\r').replace(/\n/g, '\r'));
+  }
+
   function resize() {
     if (!state.id || state.ended) return;
     var size = measure();
@@ -361,6 +373,12 @@
     cursor.style.width = Math.round(state.charW) + 'px';
     cursor.style.height = Math.round(state.lineH) + 'px';
     cursor.classList.remove('hidden');
+    // 那个看不见的输入框跟着光标走：输入法的候选词窗口要出现在光标旁边。
+    var input = $('input');
+    if (input) {
+      input.style.left = cursor.style.left;
+      input.style.top = cursor.style.top;
+    }
   }
 
   /* ---- 选区 ------------------------------------------------------------
@@ -699,12 +717,20 @@
       e.preventDefault();
       send(bytes);
     });
-    input.addEventListener('input', function () {
+    // 中文输入（IME）：合成中的拼音不发（那只是还没定下来的音），
+    // 候选词定下来以后（compositionend）再把字送过去。
+    input.addEventListener('compositionend', function (e) {
+      var text = e.data || input.value;
+      input.value = '';
+      sendText(text);
+    });
+    input.addEventListener('input', function (e) {
       // The IME (and the mobile keyboard) put the text into the input.
+      if (e.isComposing) return;          // 还在合成：等 commit
       var text = input.value;
       if (!text) return;
       input.value = '';
-      send(text.replace(/\r\n/g, '\r').replace(/\n/g, '\r'));
+      sendText(text);
     });
     input.addEventListener('paste', function (e) {
       e.preventDefault();

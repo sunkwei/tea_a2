@@ -3091,3 +3091,51 @@ a2: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found
 - **不思考不等于变笨，但会飘**：同一道「9.11 和 9.9 哪个大」，`none` 下出过一次
   答反（`medium` 一直对）。四个小题的对照（`none` / `medium`）都是 4/4。
   干确定性的活儿用 `none` 省 token，要它推理就换 `low`/`medium`。
+
+---
+
+## web 终端里输入中文（2026-11-17）
+
+**现象**：浏览器里的终端（主界面那个「终端」和隧道那个「隧道终端」）**打不了中文**。
+在主界面里用输入法打「你好」，屏幕上什么也没有——字根本没进 shell；
+隧道终端里能进去，但**拼音也一起进去了**（shell 收到的是 `ni你好`）。
+
+**根因**（两处，都在前端）：
+
+1. **键盘是从一个隐藏的 `<textarea>` 里读的**（输入法要有一个真的输入框来合成）。
+   以前只听 `keydown`：可合成的时候浏览器发过来的 keydown 一律 `isComposing=true`，
+   **里面没有字**——汉字是在 `compositionend` / `input` 这两个事件里出现的。
+   主界面那个终端压根没监听这两个事件，所以中文一个都送不出去。
+2. **隧道终端监听的是 `input`，但没看 `isComposing`**：合成过程中浏览器每改一次
+   拼音就发一次 `input`（`isComposing=true`），于是 `ni` 被当成正文发给了远端。
+
+**顺带发现的第三个问题**：`web/term.js` 这个 VT 引擎**一个字符只占一格**，
+而真终端里一个汉字占两格。于是中文就算打进去了，画面也是歪的（光标跑到字左边去了）。
+
+**改法**：
+
+- `web/app.js` / `web/tunnel_terminal.js`：加 `compositionend`（字定下来了）和
+  `input`（`isComposing=false` 才算正文）两个监听；**合成中的拼音不发**。
+  同一个词别发两遍（有些浏览器既发 `compositionend` 又发 `input`）→ 300ms 去重。
+- 那个看不见的输入框**跟着光标走**（`shellCursorUpdate` / `cursorUpdate` 里改
+  `left/top`）：不然输入法的候选词窗口老出现在屏幕角落里。
+- `web/term.js`：`termCharWidth()` 判宽字符（CJK 占两列），`putChar` 里宽字符占
+  两格（第二格是空的「尾巴」），画的时候宽字符自己一个盒子（`width:2ch`）——
+  这样不管字体里汉字多宽，格子的位置都是准的。
+  宽字符在屏幕最右边放不下时换到下一行（真终端不画半个字）。
+
+**怎么验的**：
+
+- `tests/smoke_term_vt.mjs`（node，不用浏览器）：宽字符占两列、尾巴格子、
+  自己一个盒子、最后一行放不下就换行、选区能盖住宽字符。
+- `tests/ui_shell_ime.mjs`（浏览器，**用 CDP 的 `Input.imeSetComposition` +
+  `Input.insertText` 模拟输入法**）：字送到了 shell、拼音没送、只送了一次、
+  画面上两个字正好两格宽、光标列号对得上。
+- `tests/ui_tunnel_terminal.mjs`：同样的两条（字到了远端、拼音没到）。
+
+**踩到的坑**：
+
+- **改完 `web/term.js` 要重建**（`cmake --build build -j8`）——它是嵌进二进制的。
+- 写 `web/term.js` 的时候手滑把 `TERM_WIDE_RANGES` 拼成 `TERM_WIDE_RAGES`，
+  结果**宽字符一进 `feed()` 就抛异常**，屏幕从那个字起就全白了。
+  这种错 VT 的老测试测不出来（它们不喂宽字符）→ 新的宽字符用例得跟着加。

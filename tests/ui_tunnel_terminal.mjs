@@ -121,6 +121,17 @@ const typeText = async (text) => {
   }
 };
 
+// The input method: first the pinyin being composed, then the word.
+const typeChinese = async (pinyin, word) => {
+  await send('Input.imeSetComposition', {
+    text: pinyin, selectionStart: pinyin.length, selectionEnd: pinyin.length,
+    replacementStart: 0, replacementEnd: 0,
+  });
+  await sleep(250);
+  await send('Input.insertText', { text: word });
+  await sleep(400);
+};
+
 const screenText = () => evalJs(`(function(){
   var rows = document.getElementById('rows');
   return rows ? rows.textContent : '';
@@ -250,6 +261,30 @@ try {
   const gotOutput = await waitFor(async () => (await screenText()).includes(marker), 25000);
   check('what the user types reaches the shell', gotOutput,
     (await screenText()).slice(-200));
+
+  // ---- Chinese input ------------------------------------------------------
+  // The pinyin being composed is not a word yet: it must not go to the far
+  // end.  Only the finished word does.
+  await evalJs(`(function(){
+    window.__sent = [];
+    var of = window.fetch;
+    window.fetch = function (url, opts) {
+      var u = String(url && url.url ? url.url : url);
+      if (u.indexOf('/input') >= 0 && opts && opts.body) {
+        try { window.__sent.push(JSON.parse(opts.body).data); } catch (e) { window.__sent.push('?'); }
+      }
+      return of.apply(this, arguments);
+    };
+    document.getElementById('input').focus();
+    return true;
+  })()`);
+  await typeChinese('nihao', '\u4f60\u597d');
+  await sleep(600);
+  const sent = JSON.parse(await evalJs(`JSON.stringify(window.__sent)`));
+  check('the composed word reaches the far end', sent.join('|') === '\u4f60\u597d',
+    JSON.stringify(sent));
+  check('the pinyin does not reach the far end', sent.join('|').indexOf('ni') < 0,
+    JSON.stringify(sent));
 
   // ---- the selection is drawn by hand ---------------------------------------
   const sel = await dragSelect(marker);

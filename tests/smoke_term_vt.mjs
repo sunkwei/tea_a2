@@ -198,6 +198,85 @@ function tmuxFrame(term, pane, bar) {
     JSON.stringify(all.slice(0, 3)));
 }
 
+// ---- 13. wide characters take two columns ---------------------------------
+// A Chinese character is twice as wide as a letter.  A terminal gives it two
+// cells: the character itself and an empty "tail" next to it.  The engine
+// used to give it one cell, so everything after it was half a character too
+// far to the left (the cursor ended up in the middle of the text).
+{
+  const t = new TermScreen(80, 24);
+  t.feed('\u4f60\u597d');
+  check('a Chinese character takes two columns', t.cx === 4, 'cx=' + t.cx);
+  check('the character is in the first cell', t.lines[0][0].c === '\u4f60',
+    JSON.stringify(t.lines[0][0]));
+  check('the next cell is its empty tail', !!t.lines[0][1].cont && t.lines[0][1].c === '',
+    JSON.stringify(t.lines[0][1]));
+  check('a letter still takes one column', (() => {
+    const u = new TermScreen(80, 24);
+    u.feed('ab');
+    return u.cx === 2;
+  })(), 'cx=' + t.cx);
+  check('a letter and a Chinese character together take three columns', (() => {
+    const u = new TermScreen(80, 24);
+    u.feed('a\u4f60b');
+    return u.cx === 4;
+  })(), 'cx=' + t.cx);
+}
+
+// ---- 14. the wide character is drawn in a box of two cells -----------------
+{
+  const t = new TermScreen(80, 24);
+  t.feed('\u4f60\u597d');
+  const html = win.TeaTerm.termLineHtml(t.lines[0], -1, -1);
+  check('the wide character gets its own box', html.indexOf('term-wide') >= 0, html);
+  check('the box is two cells wide', html.indexOf('width:2ch') >= 0, html);
+  check('the text of the row is still the text', html.indexOf('\u4f60') >= 0 &&
+    html.indexOf('\u597d') >= 0, html);
+  // The tail cell must not be drawn as a space: the box is wide enough.
+  check('the tail cell draws nothing', html.indexOf('\u4f60</span><span') >= 0, html);
+}
+
+// ---- 15. a wide character at the edge of the screen ----------------------
+{
+  const t = new TermScreen(20, 5);
+  t.feed('x'.repeat(19));
+  t.feed('\u4f60');
+  check('a wide character that does not fit moves to the next line',
+    t.cy === 1 && t.cx === 2, 'cursor ' + t.cy + ',' + t.cx);
+  check('the wide character is whole on the new line',
+    t.lines[1][0].c === '\u4f60' && !!t.lines[1][1].cont, JSON.stringify(t.lines[1][0]));
+}
+{
+  const t = new TermScreen(20, 5);
+  t.feed('\x1b[?7l');                       // autowrap off
+  t.feed('x'.repeat(19));
+  t.feed('\u4f60');
+  check('without autowrap the wide character stays on the line', t.cy === 0,
+    'cursor ' + t.cy + ',' + t.cx);
+}
+
+// ---- 16. a wide character at the edge of the screen stays whole ----------
+{
+  const t = new TermScreen(20, 5);
+  t.feed('x'.repeat(18));
+  t.feed('\u4f60');                          // it just fits: cells 18 and 19
+  check('a wide character at the edge of the screen is whole',
+    t.lines[0][18].c === '\u4f60' && !!t.lines[0][19].cont,
+    JSON.stringify(t.lines[0].slice(18)));
+  t.resize(20, 5);
+  check('a resize keeps the wide character whole',
+    t.lines[0][18].c === '\u4f60' && !!t.lines[0][19].cont,
+    JSON.stringify(t.lines[0].slice(18)));
+}
+
+// ---- 17. the selection covers a wide character --------------------------
+{
+  const t = new TermScreen(80, 24);
+  t.feed('\u4f60\u597d');
+  const html = win.TeaTerm.termLineHtml(t.lines[0], 0, 2);
+  check('the selected wide character is highlighted', html.indexOf('term-sel') >= 0, html);
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log(failed.length ? `\n${failed.length} FAILED` : '\nALL PASS');
 process.exit(failed.length ? 1 : 0);

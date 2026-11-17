@@ -98,6 +98,7 @@ build/bin/tea_agent --workspace . --open
 - **跨平台同一套代码**：路径、文件 I/O、进程、SIGPIPE 都按平台封装，没有 `std::filesystem`。
 - **内置网页终端**：这台机器上的**真实 shell**（Linux 上是 bash、Windows 上是 PowerShell），跑在
   pty / ConPTY 上；浏览器里直接敲命令，**不经过模型**，也不经过 agent 的工具边界。
+  **支持中文输入**（输入法的字会送进 shell，中文在屏幕上也占两列，跟真终端一样）。
 - **能接别的程序（MCP）**：`mcp.yaml` 里列出的 MCP 服务器会被启动起来，它们的工具直接进模型的
   工具表——比如 Windows 上的
   [uiautomation-mcp](https://github.com/locomorange/uiautomation-mcp)，让模型真的去操作这台

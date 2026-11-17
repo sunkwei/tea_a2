@@ -52,6 +52,42 @@
       };
     }
 
+    /* ---- 宽字符：中文、日文、韩文占两列 ----
+     *
+     * 真终端里一个汉字占两列（不是一列）：光标要跨两格走，画框线的时候
+     * 两格要一起让出来。引擎以前一个字符一列，于是中文一输出，屏幕上的
+     * 东西就跟真终端对不上了（光标跑到文字左边去了）。
+     *
+     * 这里照真终端的规矩做：一个宽字符占两格——第一格放字，第二格放一个
+     * 「尾巴」（空的，标记它是上一个字的右半边）。 */
+    var TERM_WIDE_RANGES = [
+      [0x1100, 0x115F],   // 谚文字母
+      [0x2E80, 0x303E],   // 康熙部首、标点（不含 U+303F）
+      [0x3041, 0x33FF],   // 平假名、片假名、注音、兼容字符
+      [0x3400, 0x4DBF],   // 扩展 A
+      [0x4E00, 0x9FFF],   // 基本汉字
+      [0xA000, 0xA4CF],   // 彝文
+      [0xA960, 0xA97F],   // 朝鲜文扩展
+      [0xAC00, 0xD7A3],   // 朝鲜文音节
+      [0xF900, 0xFAFF],   // 兼容汉字
+      [0xFE10, 0xFE19],   // 竖排标点
+      [0xFE30, 0xFE6F],   // 兼容形式
+      [0xFF00, 0xFF60],   // 全角 ASCII
+      [0xFFE0, 0xFFE6]    // 全角符号
+    ];
+
+    /// 这个字符占几列（1 = 普通，2 = 宽）。
+    function termCharWidth(ch) {
+      if (!ch) return 1;
+      var code = ch.charCodeAt(0);
+      if (code < 0x1100) return 1;                    // ASCII、拉丁、希腊、西里尔
+      if (code >= 0xD800 && code <= 0xDFFF) return 1;  // 代理对（emoji）：两个码元 = 两列
+      for (var i = 0; i < TERM_WIDE_RANGES.length; i++) {
+        if (code >= TERM_WIDE_RANGES[i][0] && code <= TERM_WIDE_RANGES[i][1]) return 2;
+      }
+      return 1;
+    }
+
     /* ---- 屏幕：一块二维的字符格子 ---- */
     function TermScreen(cols, rows) {
       this.reply = null;          // 终端问 cursor 在哪时，用它把回答写回去
@@ -96,7 +132,12 @@
     function fitLine(line, cols) {
       var st = termDefaultStyle();
       while (line.length < cols) line.push({ c: ' ', s: st });
-      if (line.length > cols) line.length = cols;
+      if (line.length > cols) {
+        // 裁掉的地方正好是一个宽字符的右半边：那半个字也得拿走，
+        // 不然屏幕上会留一个空的「尾巴」。
+        if (line[cols] && line[cols].cont && cols > 0) line[cols - 1] = { c: ' ', s: st };
+        line.length = cols;
+      }
       return line;
     }
 
@@ -203,6 +244,29 @@
       }
       var line = this.lines[this.cy];
       if (!line) return;
+      if (termCharWidth(ch) === 2) {
+        // 宽字符要两列：右边那列是它的尾巴（空的，一起占位）。
+        if (this.cx + 2 > this.cols) {
+          // 最后只剩一列：真终端把这个字换到下一行去（不画半个字）。
+          if (this.autowrap) {
+            this.cx = 0;
+            this.lineFeed();
+            line = this.lines[this.cy];
+            if (!line) return;
+          } else {
+            this.cx = Math.max(0, this.cols - 2);
+          }
+        }
+        line[this.cx] = { c: ch, s: this.style, w: 2 };
+        line[this.cx + 1] = { c: '', s: this.style, w: 0, cont: true };
+        this.cx += 2;
+        if (this.cx >= this.cols) {
+          this.cx = this.cols - 1;
+          this.wrapNext = this.autowrap;
+        }
+        this.dirty = true;
+        return;
+      }
       line[this.cx] = { c: ch, s: this.style };
       if (this.cx < this.cols - 1) {
         this.cx++;
@@ -547,8 +611,8 @@
     };
 
     /* ---- 画出来 ---- */
-    function termSpan(style, text, sel) {
-      var s = style || termDefaultStyle();
+    function termStyleCss(s, sel) {
+      s = s || termDefaultStyle();
       var fg = s.fg;
       var bg = s.bg;
       if (s.inverse) {
@@ -566,11 +630,43 @@
       if (s.italic) css += 'font-style:italic;';
       if (s.underline) css += 'text-decoration:underline;';
       // 选中的部分要有一层底色。行内样式里的 background-color 是终端自己写的，
-      // 所以这里用 !important 盖住它（字色不动，还是终端原来的颜色）。
-      var cls = sel ? ' class="term-sel"' : '';
+      // 所以这里用 !important 盖掉它（字色不动，还是终端原来的颜色）。
       if (sel) css += 'background-color:rgba(96,156,255,.42) !important;';
+      return css;
+    }
+
+    function termSpan(style, text, sel) {
+      var cls = sel ? ' class="term-sel"' : '';
+      var css = termStyleCss(style, sel);
       if (!css) return esc(text);
       return '<span' + cls + ' style="' + css + '">' + esc(text) + '</span>';
+    }
+
+    // 宽字符：单独一个盒子，宽度正好两格（2ch = 两个字符宽）。
+    // 这样不管字体里的汉字有多宽，格子的位置都是准的。
+    function termWideSpan(style, ch, sel) {
+      var cls = sel ? ' class="term-sel term-wide"' : ' class="term-wide"';
+      var css = termStyleCss(style, sel) + 'display:inline-block;width:2ch;text-align:center;';
+      return '<span' + cls + ' style="' + css + '">' + esc(ch) + '</span>';
+    }
+
+    // 一段格子（[from, to)）画成 HTML。宽字符自己一个盒子。
+    function termCellsHtml(line, from, to, style, sel) {
+      var out = '';
+      var buf = '';
+      for (var j = from; j < to; j++) {
+        var c = line[j];
+        if (!c || c.cont) continue;        // 宽字符的尾巴：不画东西
+        var ch = c.c != null ? c.c : ' ';
+        if (c.w === 2) {
+          if (buf) { out += termSpan(style, buf, sel); buf = ''; }
+          out += termWideSpan(style, ch, sel);
+        } else {
+          buf += ch;
+        }
+      }
+      if (buf) out += termSpan(style, buf, sel);
+      return out;
     }
 
     // 一行画成 HTML。selFrom/selTo 是这一行里被选中的格子范围（半开区间，
@@ -583,6 +679,7 @@
       var start = 0;
       for (var i = 0; i < line.length; i++) {
         var cell = line[i];
+        if (cell && cell.cont) continue;    // 尾巴不算一格（样式也一样）
         var st = cell ? cell.s : cur;         // 没格子的地方算上一段的样子
         if (cur === null && i === 0) { cur = st; start = 0; continue; }
         if (st !== cur) { segs.push({ s: cur, from: start, to: i }); cur = st; start = i; }
@@ -591,18 +688,13 @@
       var out = '';
       for (var k = 0; k < segs.length; k++) {
         var seg = segs[k];
-        var text = '';
-        for (var j = seg.from; j < seg.to; j++) {
-          var c = line[j];
-          text += (c && c.c != null) ? c.c : ' ';
-        }
-        if (!hasSel) { out += termSpan(seg.s, text, false); continue; }
+        if (!hasSel) { out += termCellsHtml(line, seg.from, seg.to, seg.s, false); continue; }
         var a = Math.max(seg.from, selFrom);
         var b = Math.min(seg.to, selTo);
-        if (b <= a) { out += termSpan(seg.s, text, false); continue; }
-        if (a > seg.from) out += termSpan(seg.s, text.slice(0, a - seg.from), false);
-        out += termSpan(seg.s, text.slice(a - seg.from, b - seg.from), true);
-        if (b < seg.to) out += termSpan(seg.s, text.slice(b - seg.from), false);
+        if (b <= a) { out += termCellsHtml(line, seg.from, seg.to, seg.s, false); continue; }
+        out += termCellsHtml(line, seg.from, a, seg.s, false);
+        out += termCellsHtml(line, a, b, seg.s, true);
+        out += termCellsHtml(line, b, seg.to, seg.s, false);
       }
       return out;
     }
@@ -647,6 +739,7 @@
     termCloneStyle: termCloneStyle,
     termSpan: termSpan,
     termLineHtml: termLineHtml,
+    termCharWidth: termCharWidth,
     SHELL_KEYS: SHELL_KEYS,
     keyBytes: shellKeyBytes,
     esc: esc,

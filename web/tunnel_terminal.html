@@ -77,7 +77,8 @@
   /* The input is invisible: it only exists to receive the keyboard (and the
      IME needs a real input to compose into). */
   .hidden-input {
-    position: absolute; left: 0; bottom: 0; width: 2px; height: 2px; padding: 0;
+    /* 位置跟着光标走（脚本每次重画时改），这样输入法的候选词窗口出现在光标旁边。 */
+    position: absolute; left: 0; top: 0; bottom: auto; width: 2px; height: 2px; padding: 0;
     border: 0; opacity: 0; resize: none; overflow: hidden; outline: none;
   }
 </style>

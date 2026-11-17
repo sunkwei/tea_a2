@@ -6950,6 +6950,13 @@
     cursor.style.width = Math.round(shell.charW) + 'px';
     cursor.style.height = Math.round(shell.lineH) + 'px';
     cursor.classList.remove('hidden');
+    // 那个看不见的输入框跟着光标走：输入法的候选词窗口要出现在光标旁边，
+    // 不然它老是在屏幕的角落里。
+    var input = $('shell-input');
+    if (input) {
+      input.style.left = cursor.style.left;
+      input.style.top = cursor.style.top;
+    }
   }
 
   function shellApplyCapability(cap) {
@@ -7075,6 +7082,18 @@
     }).catch(function () {
       shellNote('输入没有送到 shell。', true);
     });
+  }
+
+  // 一段文字送进 shell（中文、粘贴、手机的软键盘都走这里）。
+  // 同一个词别送两遍：有些浏览器既发 compositionend 又发 input。
+  var shellTextSent = { text: '', at: 0 };
+  function shellSendText(text) {
+    if (!text) return;
+    var now = Date.now();
+    if (text === shellTextSent.text && now - shellTextSent.at < 300) return;
+    shellTextSent.text = text;
+    shellTextSent.at = now;
+    shellSend(text.replace(/\r\n/g, '\r').replace(/\n/g, '\r'));
   }
 
   function shellResize() {
@@ -7483,6 +7502,23 @@
       if (bytes === null) return;
       e.preventDefault();
       shellSend(bytes);
+    });
+    // ---- 中文输入（IME）----
+    // 合成中的拼音不发出去（那是还没定下来的东西），等候选词定下来
+    // （compositionend）或者输入框收到文字（input）再送进 shell。
+    // 光靠 keydown 是收不到中文的：合成的时候 keydown 一律 isComposing，
+    // 汉字是在这两个事件里出现的。
+    $('shell-input').addEventListener('compositionend', function (e) {
+      var text = e.data || $('shell-input').value;
+      $('shell-input').value = '';
+      shellSendText(text);
+    });
+    $('shell-input').addEventListener('input', function (e) {
+      if (e.isComposing) return;            // 还在合成：等 commit
+      var text = $('shell-input').value;
+      if (!text) return;
+      $('shell-input').value = '';
+      shellSendText(text);
     });
     $('shell-input').addEventListener('paste', function (e) {
       e.preventDefault();
