@@ -147,11 +147,16 @@ systemctl --user status a2_broker
 ### 内核参数（256 对 peers 建议调）
 
 ```bash
-cat > ~/.config/sysctl.d/99-a2-broker.conf <<'EOF'
+# ⚠️ 必须放 /etc/sysctl.d：`sysctl --system` 只读 /etc/sysctl.d、/run/sysctl.d
+# 和 /usr/local/lib/sysctl.d，**不读 ~/.config/sysctl.d**（那是 user 级 systemd
+# 管的，而内核参数本身又是主机级的）。放错地方不会报错，只是没生效。
+sudo tee /etc/sysctl.d/99-a2-broker.conf >/dev/null <<'EOF'
 net.core.rmem_default = 65536
 net.core.wmem_default = 65536
 EOF
 sudo sysctl --system
+# 确认一下：
+sysctl net.core.rmem_default net.core.wmem_default
 ```
 
 1024 个 socket 的内核内存从 ~425 MB 降到 ~128 MB。

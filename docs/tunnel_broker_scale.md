@@ -341,7 +341,7 @@ WantedBy=default.target
 ### 3.7 内核参数（不属于代码，落在文档与运维手册）
 
 ```ini
-# ~/.config/sysctl.d/99-a2-broker.conf
+# /etc/sysctl.d/99-a2-broker.conf   （必须是 /etc：sysctl --system 不读 ~/.config）
 net.core.rmem_default = 65536
 net.core.wmem_default = 65536
 ```
