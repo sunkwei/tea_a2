@@ -160,6 +160,15 @@ bool WorkspaceRegistry::load(const std::string& tea_home, std::string* err) {
       for (auto it = list->begin(); it != list->end(); ++it) {
         WorkspaceEntry e = WorkspaceEntry::from_json(*it);
         if (e.id.empty() && !e.path.empty()) e.id = make_id("ws_");
+        // The old index stamped `last_used_at` when the workspace was
+        // **added** - so the field said "when it was registered", not "when it
+        // was used". Those stamps are dropped on load: `created_at` already
+        // says when it was registered, and the field now means what it says.
+        // (A workspace that was added and used within the same second loses
+        // its stamp - rare, harmless, and it gets a new one on the next use.)
+        if (!e.last_used_at.empty() && e.last_used_at == e.created_at) {
+          e.last_used_at.clear();
+        }
         if (!e.path.empty()) entries_.push_back(e);
       }
     }

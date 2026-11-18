@@ -3318,6 +3318,10 @@ beacon 只能是 **POST**，所以服务端加了 `POST .../close` 路由
    网页 `Date.parse`）。
 3. **排序要稳定**（`std::stable_sort` + 比较器对相等的时间戳返回 false）：
    从没用过的工作区保持登记顺序。用 `std::sort` 的话，顺序会随运行而变。
+4. **老索引里的「上次使用」是登记时间**：1.5.8 之前 `last_used_at` 是**添加**工作区
+   时写的（所以它等于 `created_at`）。升级时要在 `load()` 里把这种戳清掉——
+   否则列表按登记时间排（新登记的在前，与登记顺序正好相反），tooltip 还会说
+   「上次使用」在某天，其实是登记那天。
 
 测试：`tests/smoke_workspace_order.py`（10 条）+ `tests/ui_workspace_order.mjs`
 （8 条，浏览器里点开下拉框看顺序）。

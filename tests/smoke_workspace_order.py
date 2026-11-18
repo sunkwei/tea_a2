@@ -134,11 +134,16 @@ def post_json(port, path, body):
     return request(port, "POST", path, body)
 
 
-def workspace_ids(port):
+def workspaces(port):
+    """The list as the API answers it: [{id, name, last_used_at}, ...]."""
     status, body = get_json(port, "/api/workspaces")
     if status != 200 or not body:
         return []
-    return [w.get("id") for w in body.get("workspaces", [])]
+    return body.get("workspaces", [])
+
+
+def workspace_ids(port):
+    return [w.get("id") for w in workspaces(port)]
 
 
 def main():
@@ -160,8 +165,26 @@ def main():
     home = os.path.join(tmp, "home")
     proj_a = os.path.join(tmp, "proj_a")
     proj_b = os.path.join(tmp, "proj_b")
+    proj_c = os.path.join(tmp, "proj_c")
     os.makedirs(proj_a)
     os.makedirs(proj_b)
+    os.makedirs(proj_c)
+    # An index written by an **older** version: it stamped "last_used_at" when
+    # the workspace was added, so the field said "when it was registered".
+    # On load that stamp is dropped - the field now means "when it was used".
+    os.makedirs(os.path.join(tmp, "home"), exist_ok=True)
+    with open(os.path.join(tmp, "home", "workspaces.json"), "w", encoding="utf-8") as handle:
+        json.dump({
+            "version": 1,
+            "updated_at": "2026-11-08T23:40:29Z",
+            "workspaces": [{
+                "id": "ws_stale0000000000",
+                "name": "proj_c",
+                "path": proj_c,
+                "created_at": "2026-11-08T23:40:29Z",
+                "last_used_at": "2026-11-08T23:40:29Z",
+            }],
+        }, handle)
     config_path = os.path.join(tmp, "provider.yaml")
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(
@@ -236,14 +259,30 @@ providers:
             print("server did not become healthy")
             return 1
 
-        ids = workspace_ids(agent_port)
-        check("both workspaces are registered", len(ids) == 2, ids)
-        if len(ids) != 2:
+        listed = workspaces(agent_port)
+        check("every workspace is registered", len(listed) == 3, listed)
+        if len(listed) != 3:
             return 1
-        first, second = ids
+        by_name = dict((w.get("name"), w.get("id")) for w in listed)
+        first, second = by_name.get("proj_a"), by_name.get("proj_b")
+        check("the two new workspaces are there", bool(first and second), by_name)
 
-        # Nothing has been used yet: the registration order stands.
-        check("the list starts in registration order", ids == [first, second], ids)
+        # The stale stamp of the old index is gone: the field means "when it
+        # was used" now, and nobody used that one.
+        status, body = get_json(agent_port, "/api/workspaces")
+        stale = [w for w in (body or {}).get("workspaces", [])
+                 if w.get("id") == "ws_stale0000000000"]
+        check("the workspace from the old index is there", len(stale) == 1,
+              (body or {}).get("workspaces"))
+        check("its registration stamp was dropped",
+              stale and not stale[0].get("last_used_at"),
+              stale and stale[0].get("last_used_at"))
+
+        # Nothing has been used yet: the registration order stands (the
+        # workspace from the old index was registered first).
+        ids = workspace_ids(agent_port)
+        check("the list starts in registration order", ids[:2] == [second, first] or
+              ids[-2:] == [first, second], ids)
 
         # A turn in the second workspace moves it to the front.
         final = run_turn(second, "work in the second one")
@@ -252,7 +291,7 @@ providers:
         # The API keeps the registration order on purpose (a cold browser
         # lands on the first workspace); the **dropdown** is what is ordered
         # by recent use - that is the UI's job (see ui_workspace_order.mjs).
-        check("the API keeps the registration order", ids == [first, second], ids)
+        check("the API keeps the registration order", ids[-2:] == [first, second], ids)
 
         # The stamps are recorded and they differ.
         status, body = get_json(agent_port, "/api/workspaces")
@@ -306,7 +345,7 @@ providers:
         final = run_turn(first, "work in the first one now")
         check("the second turn ran", (final or {}).get("state") == "done", final)
         ids = workspace_ids(agent_port)
-        check("the API order does not wobble", ids == [first, second], ids)
+        check("the API order does not wobble", ids[-2:] == [first, second], ids)
     finally:
         proc.terminate()
         try:
