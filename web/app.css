@@ -1231,10 +1231,15 @@ button{font-family:inherit}
 /* ---------- 并行中的轮次（子 agent 的卡片） ---------- */
 .parallel{
   flex:0 0 auto;margin:0;padding:8px 12px;
+  /* 面板不能把对话挤出屏幕：再多的卡片也只占这么高，剩下的自己滚。 */
+  max-height:30vh;overflow:auto;
   border-bottom:.5px solid var(--dsw-alias-border-l1);
   background:var(--dsw-alias-bg-layer-1);
 }
-.parallel-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.parallel-head{
+  display:flex;align-items:center;gap:10px;margin-bottom:6px;
+  position:sticky;top:0;background:var(--dsw-alias-bg-layer-1);
+}
 .parallel-title{font-size:12px;color:var(--dsw-alias-label-secondary)}
 .parallel-count{font-size:11px;color:var(--dsw-alias-label-caption)}
 .parallel-card{

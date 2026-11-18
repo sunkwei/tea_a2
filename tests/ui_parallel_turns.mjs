@@ -146,15 +146,31 @@ providers:
   const sessionA = JSON.parse(madeA.body).id || (JSON.parse(madeA.body).session || {}).id;
   const madeB = await postJson(agentPort, `/api/workspaces/${wsId}/sessions`, {});
   const sessionB = JSON.parse(madeB.body).id || (JSON.parse(madeB.body).session || {}).id;
-  check('two sessions were created', !!sessionA && !!sessionB,
+  // 第三个会话：真正在跑的那一轮在它里面（会话的标题 = 第一句话，
+  // 所以每个会话各自一句，卡片上的名字才对得上）。
+  const madeC = await postJson(agentPort, `/api/workspaces/${wsId}/sessions`, {});
+  const sessionC = JSON.parse(madeC.body).id || (JSON.parse(madeC.body).session || {}).id;
+  check('three sessions were created', !!sessionA && !!sessionB && !!sessionC,
     String(madeA.body).slice(0, 120) + ' / ' + String(madeB.body).slice(0, 120));
 
-  const turn = await postJson(agentPort, '/api/chat', {
-    workspace_id: wsId, session_id: sessionB, message: '子 agent 的活儿', async: true,
+  // ---- 先跑完一轮：它在页面打开之前就结束了 ------------------------------
+  // 面板只该显示「正在跑的」和「我们看着它跑完的」轮次。早早就结束的不该出现
+  // ——否则面板会挂着一堆旧卡片，把对话挤出屏幕（这正是它一开始的样子）。
+  const oldTurn = await postJson(agentPort, '/api/chat', {
+    workspace_id: wsId, session_id: sessionB, message: '早就跑完的活儿', async: true,
   });
-  const turnBody = JSON.parse(turn.body);
-  check('the background turn started', !!(turnBody.turn_id || (turnBody.data || {}).turn_id),
-    String(turn.body).slice(0, 200));
+  const oldBody = JSON.parse(oldTurn.body);
+  const oldId = oldBody.turn_id || (oldBody.data || {}).turn_id;
+  check('an earlier turn started', !!oldId, String(oldTurn.body).slice(0, 200));
+  let oldState = '';
+  for (let i = 0; i < 160; i++) {
+    await sleep(250);
+    const st = await getJson(agentPort, '/api/turns/' + oldId);
+    if (st.status !== 200) continue;
+    oldState = JSON.parse(st.body).state || '';
+    if (oldState && oldState !== 'running') break;
+  }
+  check('the earlier turn is over', !!oldState && oldState !== 'running', oldState);
 
   // ---- the browser -------------------------------------------------------
   chrome = await acquireBrowser(tmp);
@@ -179,12 +195,36 @@ providers:
   // other one, so the running turn is somebody else's turn.
   await evalJs(`(function(){
     var rows = document.querySelectorAll('#session-list .sess-row');
+    // 空着的那个会话才是页面上该看的（标题还是「新会话」）；另一个会话里
+    // 跑着后台的轮次，所以那个轮次是「别人的」。
+    for (var i = 0; i < rows.length; i++) {
+      if ((rows[i].textContent || '').indexOf('新会话') >= 0) { rows[i].click(); return true; }
+    }
     for (var i = 0; i < rows.length; i++) {
       if ((rows[i].textContent || '').indexOf('子 agent 的活儿') < 0) { rows[i].click(); return true; }
     }
     return false;
   })()`);
   await sleep(1000);
+
+  // ---- 早就结束的那一轮不该出现在面板上 ---------------------------------
+  await sleep(1200);
+  const stale = await evalJs(`(function(){
+    var box = document.getElementById('parallel');
+    if (!box) return { missing: true };
+    return { hidden: box.classList.contains('hidden'),
+             cards: box.querySelectorAll('.parallel-card').length };
+  })()`);
+  check('a turn that was over before the page opened does not show up',
+    stale && stale.hidden && stale.cards === 0, JSON.stringify(stale));
+
+  // ---- 现在起一轮真正在跑的 ----------------------------------------------
+  const turn = await postJson(agentPort, '/api/chat', {
+    workspace_id: wsId, session_id: sessionC, message: '子 agent 的活儿', async: true,
+  });
+  const turnBody = JSON.parse(turn.body);
+  check('the background turn started', !!(turnBody.turn_id || (turnBody.data || {}).turn_id),
+    String(turn.body).slice(0, 200));
 
   // ---- the panel shows the other turn ------------------------------------
   const errs = await evalJs('(window.__errs || []).join(" | ")');
@@ -254,5 +294,6 @@ console.log('');
 console.log(`${results.length - failed.length}/${results.length} checks passed`);
 if (failed.length) {
   console.log('FAILED: ' + failed.map((f) => f.name).join(', '));
-  process.exit(1);
 }
+// 一定要退出：mock 服务端的 keep-alive 连接还开着，事件循环不会自己结束。
+process.exit(failed.length ? 1 : 0);

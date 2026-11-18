@@ -842,6 +842,10 @@
     text: {},         // turn id -> 这一轮已经说出口的字
     logs: {},         // turn id -> [{cls, text}]（这一轮的过程）
     cards: {},        // turn id -> {card, state, elapsed, log, shown}
+    seen: {},         // turn id -> {endedAt}（我们**看着**它跑完的那些轮次）
+    titles: {},       // session id -> 标题（侧栏还不认识时我们自己取）
+    asked: {},        // session id -> true（问过标题了，别再问）
+    timerMs: 0,       // 当前轮询的节奏（毫秒）
     head: null, count: null,
     big: {},          // turn id -> true（把日志展开）
     timer: null
@@ -849,13 +853,76 @@
 
   function parallelTitle(turn) {
     // 会话的标题就是它的第一句话——子 agent 的任务就写在里面。
-    var list = state.sessions || [];
-    for (var i = 0; i < list.length; i++) {
-      if (list[i] && list[i].id === turn.session_id) {
-        return list[i].title || ('轮次 ' + String(turn.turn_id || '').slice(0, 8));
+    var sid = turn.session_id || '';
+    var title = parallel.titles[sid] || '';
+    if (!title) {
+      var list = state.sessions || [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].id === sid) { title = list[i].title || ''; break; }
       }
     }
+    if (title && title !== '新会话') return title;
+    // 侧栏还不认识这个会话（或者标题还是占位符）：自己去会话索引里取一次
+    // 标题——很轻，只拿列表。下一轮渲染就用上真名字了。
+    parallelAskTitle(sid);
     return '轮次 ' + String(turn.turn_id || '').slice(0, 8);
+  }
+
+  /// 会话索引里的一次查询：编排器刚建的会话，侧栏还没来得及认。
+  function parallelAskTitle(sid) {
+    if (!sid || parallel.asked[sid]) return;
+    if (!state.workspace) return;
+    parallel.asked[sid] = true;
+    var wid = state.workspace.id;
+    api('api/workspaces/' + encodeURIComponent(wid) + '/sessions').then(function (d) {
+      (d.sessions || []).forEach(function (s) {
+        if (s && s.id && s.title) parallel.titles[s.id] = s.title;
+      });
+      renderParallel();
+    }, function () {});
+  }
+
+  /// 我们看着它跑完的轮次，还要在面板上留多久（毫秒）：人得看见子 agent 最后
+  /// 说了什么，但也不能一直挂着。
+  var PARALLEL_KEEP_MS = 60000;
+  /// 面板空着时的心跳：慢一点，但不停；上面有东西时快一点。
+  var PARALLEL_IDLE_MS = 6000;
+  var PARALLEL_BUSY_MS = 2000;
+
+  /// 记住哪些轮次是我们**看着**跑的。
+  ///
+  /// 面板叫「并行中的轮次」，那就只该有正在跑的（和刚刚跑完的）。页面打开
+  /// 之前就结束的旧轮次不出现——否则面板会挂着一堆早就结束的卡片，把对话
+  /// 挤出屏幕（这正是它一开始的样子）。
+  function parallelTrack() {
+    var now = Date.now();
+    var ids = {};
+    (parallel.turns || []).forEach(function (t) {
+      if (!t || !t.turn_id) return;
+      ids[t.turn_id] = true;
+      var rec = parallel.seen[t.turn_id];
+      if (t.state === 'running') {
+        parallel.seen[t.turn_id] = { endedAt: 0 };
+      } else if (rec && !rec.endedAt) {
+        rec.endedAt = now;        // 刚刚跑完：留一会儿
+      }
+    });
+    Object.keys(parallel.seen).forEach(function (id) {
+      var rec = parallel.seen[id];
+      if (!rec.endedAt && !ids[id]) rec.endedAt = now;   // 服务端不再报了
+      if (rec.endedAt && now - rec.endedAt > PARALLEL_KEEP_MS) {
+        delete parallel.seen[id];
+      }
+    });
+  }
+
+  /// 这一轮要不要出现在面板上？正在跑的要；我们看着它跑完的，刚结束不久还要；
+  /// 更早以前就结束的不要。
+  function parallelWorthShowing(turn) {
+    if (turn.state === 'running') return true;
+    var rec = parallel.seen[turn.turn_id];
+    if (!rec || !rec.endedAt) return false;
+    return Date.now() - rec.endedAt < PARALLEL_KEEP_MS;
   }
 
   /// 这个工作区里除了当前会话之外的那些轮次。屏幕上的这一轮在对话里，
@@ -868,6 +935,7 @@
       if (!t || !t.turn_id) return;
       if (wid && t.workspace_id && t.workspace_id !== wid) return;
       if (mine && t.session_id === mine) return;
+      if (!parallelWorthShowing(t)) return;
       out.push(t);
     });
     return out.slice(0, 8);
@@ -887,6 +955,7 @@
     if (!state.workspace) return Promise.resolve([]);
     return api('api/turns').then(function (d) {
       parallel.turns = (d && d.turns) || [];
+      parallelTrack();
       renderParallel();
       return parallel.turns;
     }, function () { return []; });
@@ -944,10 +1013,12 @@
     var list = parallelList();
     if (!list.length) {
       // 没有并行轮次：把面板收起来，也把它挂着的流关掉（一条 SSE 一直挂着
-      // 是在占服务端的一个线程）。
+      // 是在占服务端的一个线程）。**轮询不能停**：停了就听不见「又有一轮跑
+      // 起来了」，面板会一直空着。
       if (!box.classList.contains('hidden')) { box.classList.add('hidden'); clear(box); }
       parallel.head = null; parallel.count = null; parallel.cards = {};
-      stopParallelTimer();
+      Object.keys(parallel.streams).forEach(closeParallelStream);
+      parallelTimer(PARALLEL_IDLE_MS);
       return;
     }
     box.classList.remove('hidden');
@@ -982,20 +1053,19 @@
       var still = list.filter(function (t) { return t.turn_id === id; })[0];
       if (!still || still.state !== 'running') closeParallelStream(id);
     });
-    startParallelTimer();
+    parallelTimer(PARALLEL_BUSY_MS);
   }
 
-  function startParallelTimer() {
-    if (parallel.timer) return;
+  /// 轮询的节奏：面板上有东西时快一点（2 秒），空着时慢一点（6 秒）。
+  /// **不能停**——停了就听不见「又有一轮跑起来了」，面板会一直空着。
+  function parallelTimer(ms) {
+    if (parallel.timer && parallel.timerMs === ms) return;
+    if (parallel.timer) { clearInterval(parallel.timer); parallel.timer = null; }
+    parallel.timerMs = ms;
     parallel.timer = setInterval(function () {
       if (document.hidden) return;      // 看不见的时候不折腾服务端
       refreshParallel();
-    }, 2000);
-  }
-
-  function stopParallelTimer() {
-    if (parallel.timer) { clearInterval(parallel.timer); parallel.timer = null; }
-    Object.keys(parallel.streams).forEach(closeParallelStream);
+    }, ms);
   }
 
   function openParallelStream(turn) {
