@@ -1,0 +1,29 @@
+[Unit]
+Description=tea_a2 Telegram bot (the queue's Telegram front end)
+Documentation=file://%h/a2/README.md
+After=network-online.target a2_task.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+# append: 不会自己建目录，日志目录不在的话单元起不来。
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+# Telegram 这一端：把 Telegram 里的话变成队列操作，做完把结果发回 Telegram。
+# 它调的是这台机器上的任务队列（127.0.0.1:8283），队列再调本机的 agent（8383）。
+#
+# bot token 不写在命令行里（ps 看得见）：放在 ~/.tea_agent/telegram/token（0600），
+# telegram_bot.py 默认就从那儿读。
+# --allow-chat：只有名单上的 chat id 能用它（bot 是公开的）。
+# --triggers：消息先过队列的触发器入口（规则文件 ~/.tea_agent/triggers.conf）。
+ExecStart=/usr/bin/env python3 %h/a2/sched/telegram_bot.py --agent http://localhost:8383 --tasks http://127.0.0.1:8283 --allow-chat 6460753829 --triggers
+WorkingDirectory=%h/a2
+Environment=HOME=%h
+Environment=LANG=C.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+StandardOutput=append:%h/.tea_agent/logs/a2_telegram.log
+StandardError=append:%h/.tea_agent/logs/a2_telegram.log
+
+[Install]
+WantedBy=default.target

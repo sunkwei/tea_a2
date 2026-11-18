@@ -4,7 +4,8 @@
 [Unit]
 Description=tea_a2 Telegram bot (the queue's Telegram front end)
 Documentation=file://%h/work/git/tea_a2/README.md
-After=network-online.target
+# 队列起来之后才起 bot：bot 一上来就问队列要东西。
+After=network-online.target a2_task.service
 Wants=network-online.target
 
 [Service]

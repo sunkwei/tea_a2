@@ -16,6 +16,9 @@ ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
 ExecStart=%h/bin/a2 --port 8383
 WorkingDirectory=%h
 Environment=HOME=%h
+# peer 令牌从文件里读，不写进命令行（ps 看得见）。前面的「-」是可选的意思：
+# 文件不在也不影响启动（这台机器没有 peer 时就是没有）。
+EnvironmentFile=-%h/.tea_agent/peer-token.env
 Environment=LANG=zh_CN.UTF-8
 Restart=on-failure
 RestartSec=3s
