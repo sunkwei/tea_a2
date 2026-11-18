@@ -40,8 +40,9 @@
 | `POST` | `/api/workspaces/{id}/sessions/import` | 导入导出的 `.html`（原样或 `{"html":"…"}`）或会话 JSON，新建一个会话；重复导入不会覆盖 |
 | `POST` | `/api/workspaces/{id}/gc` | **历史清理**：按年龄删掉太旧的会话与轨迹、把冷数据 gzip 起来、run_dir 超预算时按最旧优先删会话。body 可以覆盖上限：`{"dry_run":true}` 只报告不动手，`{"max_age_days":30,"max_bytes":104857600,"compress_after_days":7,"keep_recent":5}`。回答里有 `bytes_before/after`、`freed_bytes`、`sessions_removed`、`trajectories_removed`、`sessions_compressed`、`compressed_saved`、`usage`（sessions / trajectories / 其它各占多少） |
 | `GET` | `/api/sessions/{sid}/trajectory` | 每轮轨迹摘要，最新在前；`?full=1` 带步骤与文件变更，`?format=jsonl` 原始 JSONL |
-| `GET` | `/api/turns` | **最近的回合句柄**，最新在前（跑着的与刚跑完的都在里面，finished 的最多留 64 个） |
-| `GET` | `/api/turns/{turn_id}` | **一个回合现在怎么样**：`state`（`running` / `done` / `failed` / `stopped` / `budget`）、`result`（模型的回答）、`usage`、`metrics`、`iterations`、`stop_reason`、`trajectory_id`、`files_changed`（这一轮动过的文件）、`elapsed_ms`、`last_seq` |
+| `GET` | `/api/turns` | **最近的回合句柄**，最新在前（跑着的与刚跑完的都在里面，finished 的最多留 64 个）。另外还带上**没正常结束的那几轮**（从磁盘记录里恢复出来的，带 `recovered:true`） |
+| `GET` | `/api/recovery` | **没正常结束的那几轮**：被中断的（进程重启/崩溃/断电）与失败的（provider 报错）。回答 `{"turns":[…],"count":N}`；`?refresh=1` 强制重扫一遍记录 |
+| `GET` | `/api/turns/{turn_id}` | **一个回合现在怎么样**：`state`（`running` / `done` / `failed` / `stopped` / `budget` / `interrupted`）、`result`（模型的回答）、`usage`、`metrics`、`iterations`、`stop_reason`、`trajectory_id`、`files_changed`（这一轮动过的文件）、`elapsed_ms`、`last_seq`。**没正常结束的那一轮**（被中断/失败）在进程重启后句柄仍然答得上：句柄找不到就回落到磁盘上的记录（轨迹文件），回答里带 `recovered:true` |
 | `POST` | `/api/turns/{turn_id}/stop` | **精确停这一轮**（不用知道 session_id）。回答 `{"ok":true,"cancelled":true,"state":"stopping"}`；停是**请求**，不是保证：模型或工具要到下一个边界才会真的停下来 |
 | `GET` | `/api/turns/{turn_id}/events?since=` | **这一轮的事件流**：回放 `since` 之后的事件（`since` 省略 = 全部），然后继续直播；轮次已经跑完也能读（回放缓冲区还在）。每一帧带 `seq`，断线以后拿最后一个 `seq` 接回来就行 |
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`，也即这一轮的**句柄**） |
@@ -73,7 +74,7 @@
 | `POST` | `/api/chat/queue` | 把消息排进这个会话的队列。**默认等正在跑的那一轮结束**（然后开新一轮）；带 `{"insert":"now"}` 由那一轮在下一次模型请求之前采纳。没有轮次在跑时，这条消息**自己开一轮**（不再报 409） |
 | `POST` | `/api/chat/queue/cancel` | 取消一条（带 `id`）或全部排队消息 |
 | `GET` | `/api/chat/queue?session_id=` | 查看这个会话的排队消息（每条带 `insert`：`after` / `now`） |
-| `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`） |
+| `GET` | `/api/chat/turn?session_id=` | 这个会话是否还有轮次在跑（`running` / `last_seq` / `oldest_seq` / `dropped` / `subscribers`）。**没有轮次在跑时**，如果上一轮被中断/失败，回答里多一个 `recovered`（从轨迹与会话记录里恢复出来的那一轮：`state` / `error` / `steps` / `pending_message` / `sources`） |
 | `GET` | `/api/chat/turns` | 所有还在跑的轮次（含 `workspace_id` 与 `subscribers`），最近开始的在前 |
 | `POST` | `/api/chat/attach` | 接回正在跑的轮次：回放 `since` 之后的事件，然后继续直播。跟随者超过上限时 `429 too_many_subscribers` |
 
@@ -257,6 +258,52 @@ curl -s -X POST http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f/stop
   （`queued` 字段说明这是排队不是新开的一轮）。
 - 句柄在轮次跑完后**还留一会儿**（最多 64 个），所以「提交完去干别的，回头来问」
   是成立的；再久以前的就查不到了（404 `unknown_turn`）。
+
+### 中断之后：状态从记录里恢复
+
+一轮会话可以因为不是程序自己的原因而结束：
+
+- **SSE 断了**（页面刷新、笔记本睡了、隧道闪断）——这一轮**照样跑完**，客户端拿最后一个
+  `seq` 接回去就行（见下面「断线重连」）。这一层不需要恢复；
+- **provider 报错**——这一轮**失败**，错误帧里写着原因，轨迹里也记着；
+- **机器没了**（进程被杀、断电、重启）——这一轮**连同进程的记忆一起没了**。
+
+第三种是这里要说的：**http（a2）恢复之后，它应该尽量把状态找回来**。找得回来的东西有三个：
+
+| 来源 | 它知道什么 |
+| --- | --- |
+| **轨迹文件**（`<run_dir>/trajectories/<session>.jsonl`） | 那一轮跑到哪一步、用了多少 token、动了哪些文件、provider 报了什么错。**进程死在半路 → 这一行永远停在 `partial`**（没有收尾记录） |
+| **会话记录**（`<run_dir>/sessions/<session>.json`） | 用户问了什么、模型答了什么。**最后一条是用户消息 → 那一轮没有回答**（哪怕轨迹里连行都没写下来） |
+| **日志**（`<run_dir>/logs/agent.log`） | 「turn finished ok=… / elapsed_ms=…」这类收尾行 |
+
+于是：
+
+```bash
+# 这一轮现在怎么样？（**没正常结束的那一轮**，进程重启之后照样答得上）
+curl -s http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f
+# {"ok":true,"turn_id":"t_…","state":"interrupted","running":false,"recovered":true,
+#  "partial":true,"iterations":2,"steps":5,"usage":{…},"files_changed":[…],
+#  "started_at":"2026-11-18T02:26:34.240Z","sources":["trajectory"]}
+
+# 哪些轮次没正常结束？
+curl -s http://127.0.0.1:8282/api/recovery
+# {"ok":true,"count":2,"turns":[{"turn_id":"t_…","state":"interrupted",…},
+#                                {"turn_id":"t_…","state":"failed","error":"HTTP 500: …",…}]}
+
+# 这个会话的上一轮怎么了？（没有轮次在跑的时候）
+curl -s 'http://127.0.0.1:8282/api/chat/turn?session_id=s_xxx'
+# {"ok":true,"running":false,"session_id":"s_xxx",
+#  "recovered":{"state":"interrupted","pending_message":"把这一轮做完",
+#               "sources":["transcript","trajectory"], …}}
+```
+
+**恢复的是状态，不是结果**：模型的那段回答不在轨迹里（在会话记录里），所以恢复出来的
+东西是「这一轮怎么了、做到哪一步」，不是「答案是什么」。**它也不会替你重跑**——被切断的
+活儿可能已经做了一半，没人叫你别重跑，那就别重跑；网页上会给一个「重新问一次」，
+把那句没被回答的话放回输入框，**发不发由人决定**。
+
+界面上：会话里最后一轮被中断/失败时，对话顶部会出现一条提示（写清楚是中断还是失败、
+做到几步、provider 说了什么），旁边的「重新问一次」把那句请求放回输入框。
 
 ### 工作区：能不能写进去
 

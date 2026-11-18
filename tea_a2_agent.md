@@ -3210,3 +3210,85 @@ beacon 只能是 **POST**，所以服务端加了 `POST .../close` 路由
 - 路径实测：`local 39.65.223.83:xxxxx (srflx) <-> remote 103.232.92.54:1147xx (relayed)`。
 - 探针：`.tea_agent_run/scripts/tunnel_ime_probe.mjs`（对着已经跑起来的 client 端口
   测中文输入/输出）、`tunnel_dump.mjs`（把整个会话的原始字节倒出来）。
+
+## 中断之后：把状态从记录里恢复回来（1.5.7）
+
+**要解决的问题**：一轮会话可以因为不是程序自己的原因而结束——SSE 断了（这一轮照样
+跑完，客户端接回去就行）、provider 报错（这一轮失败）、**机器没了**（进程被杀、
+断电、重启——这一轮连同进程的记忆一起没了）。
+
+第三种是这次做的：**http（a2）恢复之后，要尽量把状态找回来**。
+
+### 之前是什么样
+
+句柄（`turn_id`）是**审计 id**：`GET /api/turns/<id>` 与轨迹文件里的 `turn_id` 是同一个
+字符串。但它**只活在内存里**（`Impl::turns_by_id`）。于是进程一重启：
+
+- `GET /api/turns/<id>` → 404 `unknown_turn`——**哪怕轨迹文件里那一行就在那儿**；
+- `GET /api/chat/turn?session_id=` → `running:false`——界面看不出「上一轮被砍了」，
+  用户只看到一句没人回答的话；
+- 队列（a2_task）重启后按 FR-15 把这种轮次**判死**——其实它可能只是被重启带走了。
+
+### 现在的做法
+
+新模块 `src/recovery.{h,cpp}`（**只读，不写**）：
+
+| 来源 | 它知道什么 |
+| --- | --- |
+| 轨迹文件 | 跑到哪一步、token、动过的文件、provider 的错。**进程死在半路 → 这一行停在 `partial`**（`TrajectoryRecorder::build()` 在 `finished_` 为假时写 `partial:true`，且**没有** `finished_at`） |
+| 会话记录 | 用户问了什么、模型答了什么。**最后一条是用户消息 → 那一轮没有回答**（连轨迹行都没写下来的那种，轨迹根本不知道） |
+| 日志 | 收尾行 `turn finished ok=…`（人工看的时候用；接口不依赖它） |
+
+接口：
+
+- `read_trajectory_states(path, ws_id, out, err)`：一个轨迹文件里的每一轮 + 它的状态
+  （`done` / `failed` / `interrupted` / `stopped` / `budget`）；**没正常结束的**用
+  `RecoveredTurn::abnormal()` 挑出来；
+- `read_transcript_state(...)` / `recover_session(ws, sid, out, err)`：把轨迹与会话记录
+  合起来说**这个会话的最后一轮怎么了**。
+
+服务端（`src/server.cpp`）：
+
+- `Impl::scan_recovery(refresh)`：扫所有工作区的轨迹目录（**有界**：每个工作区最多 64
+  个文件、总共最多 32 MB，按 mtime 从新到旧），把每一轮的小字段记在
+  `Impl::recovered_turns`（按句柄索引）。**扫一次就够**（记录在进程跑的时候不会变），
+  `?refresh=1` 可以强制重扫。
+- `GET /api/turns/<id>`：内存里没有就**回落到记录**（回答带 `recovered:true`）；
+- `GET /api/turns`：列表里**额外带上没正常结束的那几轮**；
+- `GET /api/recovery`（新）：运维视角——「我丢了什么？」；
+- `GET /api/chat/turn?session_id=`：没有轮次在跑时，回答里多一个 `recovered`。
+
+网页（`web/app.js`）：会话里最后一轮被中断/失败时，对话顶部一条提示
+（`.msg-notice.recovery-notice`），写清楚是中断还是失败、做到几步、provider 说了什么；
+旁边的「重新问一次」把那句没被回答的话**放回输入框**（不发出去——重跑是人的决定）。
+
+### 三条边界（别越过去）
+
+1. **恢复的是状态，不是结果**。模型的回答在**会话记录**里，不在轨迹里，所以恢复出来的
+   是「这一轮怎么了、做到哪一步」，不是「答案是什么」。
+2. **不重跑**。被切断的活儿可能已经做了一半（命令跑了一半、文件写了一半），没人叫你
+   别重跑，那就别重跑。
+3. **别撒谎**。用户手动停掉的一轮（`cancelled`）**不算**「中断」，不报；
+   `budget`（撞到预算）**不算**失败。`recover_session()` 里
+   `newest_cancelled` 那一条就是干这个的——光看会话记录分不出「用户停了」和「被砍了」。
+4. **只答「没正常结束」的**。`GET /api/turns/<id>` 的落盘兜底**只**回
+   `interrupted` / `failed`；正常结束的那一轮仍然 404（`dropped after it finished`）。
+   原因：模型的回答在**会话记录**里、不在轨迹里，回一个 `state:"done"` 而 `result`
+   是空的，比不回更坏——队列（a2_task）会把任务判成「做完了」，而答案是空的。
+   队列那边也补了一条：`interrupted` → 任务判失败，写明「这一轮被砍了」。
+
+### 坑
+
+- `load_trajectories()` 返回的是**新到旧**；`read_trajectory_states()` 又翻回了旧到新，
+  所以「一个会话最新那轮」= `records[0]`（`load_trajectories` 的顺序），
+  而「按会话记最新」要在遍历时**覆盖**（文件是追加的，遍历顺序即时间顺序）。
+- 扫目录要按 **mtime 从新到旧**排（`DirEntryInfo::mtime` 是 ISO 字符串，直接比字符串），
+  否则一个工作区有几百个会话时会把老的先读完。
+- 文件读取**不放锁里**：`scan_recovery()` 先在锁外读文件，最后才在锁里换掉缓存。
+
+### 验证
+
+- `tests/smoke_recovery.py`（29 条）：真的把 agent **SIGKILL** 掉再起来，检查句柄、
+  列表、`/api/recovery`、`/api/chat/turn` 的 `recovered`，以及 provider 报错那一轮
+  恢复成 `failed`（而不是 `interrupted`）。
+- `tests/ui_recovery_notice.mjs`（6 条）：浏览器里那条提示条 + 「重新问一次」。

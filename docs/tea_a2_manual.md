@@ -392,7 +392,43 @@ curl -s $B/api/turns
 - **不传 `async` 就还是老样子**：一条 SSE 流，行为一个字没变，现有的客户端不用改。
 - 会话上已经有轮次在跑时，异步提交**排队**，回答里带的是**正在跑的那一轮**的句柄。
 - 句柄在轮次跑完后还留一会儿（最多 64 个），回头来问是成立的；更早的查不到
-  （404 `unknown_turn`）。
+  （404 `unknown_turn`）——**除非它没正常结束**：那种情况下句柄会从磁盘上的记录里
+  恢复出来（见下）。
+
+### 2.5.1 中断之后：状态从记录里恢复
+
+一轮会话会因为不是程序自己的原因而结束：**SSE 断了**（这一轮照样跑完，接回去就行）、
+**provider 报错**（这一轮失败）、**机器没了**（进程被杀、断电、重启——这一轮连同进程
+的记忆一起没了）。
+
+第三种是这里要说的：**http（a2）恢复之后，它会尽量把状态找回来**。找得回来的东西：
+
+| 来源 | 它知道什么 |
+| --- | --- |
+| 轨迹文件 `<run_dir>/trajectories/<session>.jsonl` | 那一轮跑到哪一步、token、动过的文件、provider 报了什么错。**进程死在半路 → 这一行停在 `partial`** |
+| 会话记录 `<run_dir>/sessions/<session>.json` | 用户问了什么、模型答了什么。**最后一条是用户消息 → 那一轮没有回答** |
+| 日志 `<run_dir>/logs/agent.log` | 「turn finished ok=… / elapsed_ms=…」这类收尾行 |
+
+```bash
+# 句柄在重启后照样答得上（**没正常结束的那一轮**，回落到磁盘上的记录）
+curl -s $B/api/turns/t_1a2b3c4d5e6f
+# {"ok":true,"state":"interrupted","recovered":true,"partial":true,"iterations":2,
+#  "steps":5,"usage":{…},"files_changed":[…],"sources":["trajectory"], …}
+
+# 哪些轮次没正常结束？
+curl -s $B/api/recovery
+# {"ok":true,"count":2,"turns":[{"turn_id":"t_…","state":"interrupted",…},
+#                                {"turn_id":"t_…","state":"failed","error":"HTTP 500: …",…}]}
+
+# 这个会话的上一轮怎么了？（没有轮次在跑的时候，回答里多一个 recovered）
+curl -s "$B/api/chat/turn?session_id=s_xxx"
+# {"ok":true,"running":false,"session_id":"s_xxx",
+#  "recovered":{"state":"interrupted","pending_message":"把这一轮做完", …}}
+```
+
+**恢复的是状态，不是结果**（模型的回答在会话记录里，不在轨迹里），**也不会替你重跑**：
+被切断的活儿可能已经做了一半，没人叫你别重跑，那就别重跑。网页上给一个「重新问一次」，
+把那句没被回答的话放回输入框，发不发由人决定。
 
 ### 2.6 工作区
 

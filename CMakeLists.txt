@@ -485,6 +485,7 @@ set(TEA_SOURCES
   src/role_builtin.cpp
   src/llm.cpp
   src/trajectory.cpp
+  src/recovery.cpp
   src/agent.cpp
   src/html_export.cpp
   src/model_discovery.cpp

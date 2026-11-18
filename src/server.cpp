@@ -45,6 +45,7 @@
 #include "log.h"
 #include "model_discovery.h"
 #include "provider_yaml.h"
+#include "recovery.h"
 #include "shell.h"
 #include "trajectory.h"
 #include "usage.h"
@@ -303,11 +304,33 @@ constexpr size_t kFileReadLimit = 2u * 1024u * 1024u;
 /// to resync from the persisted session rather than shown a silent gap).
 constexpr std::size_t kTurnLogMaxBytes = 8u * 1024u * 1024u;
 
+/// A cheap fingerprint of a file: when it last changed and how big it is.
+/// Two equal stamps mean the file did not change, so whatever was computed
+/// from it is still true - and it is much cheaper than reading the file.
+std::string file_stamp(const std::string& path) {
+  if (path.empty() || !path_is_file(path)) return std::string();
+  return file_mtime_iso(path) + ":" + std::to_string(file_size(path));
+}
+
 /// How many **finished** turns stay queryable by their handle. A caller that
 /// submitted a turn asynchronously comes back later to ask how it went; the
 /// answer has to still be there. A finished turn is cheap (it holds a bounded
 /// replay buffer), so this is generous for a queue and still bounded.
 constexpr std::size_t kTurnHandleRetention = 64;
+
+/// ---- the recovery scan ----------------------------------------------------
+///
+/// A turn that was cut off (the process went away while it was working) or
+/// that failed (the provider gave up) is gone from memory as soon as the
+/// process that ran it is gone. The records it left behind are not: the
+/// trajectory file, the session transcript, the log.
+///
+/// The scan reads the trajectory files of the registered workspaces and
+/// remembers what it finds, so a handle answers again after a restart. It is
+/// bounded on purpose - a device has little flash and little patience: the
+/// newest files of every workspace, and a cap on how much is read in all.
+constexpr std::size_t kRecoveryScanFiles = 64;
+constexpr std::size_t kRecoveryScanBytes = 32u * 1024u * 1024u;
 
 /// Images and PDFs are fetched verbatim by the browser, so the raw route needs a
 /// much higher ceiling than the JSON `/file` view. 16 MB is generous for a
@@ -1869,6 +1892,33 @@ struct ApiServer::Impl {
   /// the old worker is still stuck (e.g. in a long tool call).
   std::vector<std::shared_ptr<ChatTurn>> retired;
 
+  /// The turns the durable records know about, by handle. A turn that ended
+  /// normally is here too - the audit trail outlives the process, so the
+  /// handle still answers after a restart. The ones that did **not** end
+  /// normally (cut off, failed) are what the recovery list is made of.
+  std::map<std::string, RecoveredTurn> recovered_turns;
+  /// The scan ran already. The records do not change while the process runs,
+  /// so it is done once - unless a caller asks for a fresh one.
+  bool recovery_scanned = false;
+  /// The recovery state of the sessions that were asked about, with the
+  /// fingerprint of the records it was computed from. The UI asks about the
+  /// last turn of the open session every couple of seconds; re-reading the
+  /// trajectory file (which can be megabytes) that often is wasteful, and the
+  /// answer only changes when the records do.
+  struct SessionRecovery {
+    std::string stamp;     // the fingerprint of the records
+    nlohmann::json value;  // null => there is nothing to recover
+  };
+  std::map<std::string, SessionRecovery> session_recovery;
+  /// The scan's own lock: it reads files (slow) and it must not run twice at
+  /// the same time. A caller that arrives while the background scan is
+  /// running waits for it instead of reading the same files again.
+  std::mutex recovery_mu;
+  std::condition_variable recovery_cv;
+  bool recovery_running = false;
+  /// The background scan (started with the server). Joined in stop().
+  std::thread recovery_thread;
+
   /// The messages that are waiting for a turn, per session. The queue belongs
   /// to the **session**, not to the turn: a message that waits for the turn to
   /// end has to outlive it.
@@ -1890,6 +1940,21 @@ struct ApiServer::Impl {
 
   // ---- helpers -----------------------------------------------------------
   void install_routes();
+
+  /// Read the durable records and remember the turns they describe.
+  ///
+  /// The scan runs once per process - the records do not change while it runs
+  /// - and `refresh` forces another one. The file reads happen outside `mu`;
+  /// only the result is stored under it.
+  void scan_recovery(bool refresh);
+
+  /// The turn with this handle, as the records describe it. False when the
+  /// records never heard of it.
+  bool find_recovered_turn(const std::string& turn_id, RecoveredTurn* out);
+
+  /// What the records say about the last turn of a session. False when the
+  /// last turn ended normally (or the user stopped it).
+  bool recover_session_state(const std::string& session_id, nlohmann::json* out);
 
   /// The pre-routing hook: the request gets its id, and the peer channel is
   /// kept behind its token. See the definition for why it is one function.
@@ -2500,6 +2565,148 @@ struct ApiServer::Impl {
     return true;
   }
 };
+
+// ---------------------------------------------------------------------------
+// Recovery: what the records say about the turns that did not end normally
+// ---------------------------------------------------------------------------
+//
+// The handle of a turn is the audit id: `GET /api/turns/<id>` and the
+// trajectory of that turn are the same string. The promise used to break the
+// moment the process went away - the handle lived in memory only, so a
+// caller that came back after a restart was told "no turn with this id is
+// known", even though the trajectory of that very turn was sitting on the
+// disk.
+//
+// The scan below reads the trajectory files and keeps what they say. A turn
+// that was cut off (the process went away while it was working) and a turn
+// that failed (the provider gave up) are what the recovery list is made of;
+// the ones that ended normally are kept too, so their handle still answers.
+
+void ApiServer::Impl::scan_recovery(bool refresh) {
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (recovery_scanned && !refresh) return;
+  }
+  {
+    // One scan at a time: the second one would read the same files again.
+    std::unique_lock<std::mutex> lock(recovery_mu);
+    while (recovery_running) recovery_cv.wait(lock);
+    if (recovery_scanned && !refresh) return;
+    recovery_running = true;
+  }
+
+  std::vector<WorkspaceEntry> entries;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    for (std::size_t i = 0; i < registry->entries().size(); ++i) {
+      entries.push_back(registry->entries()[i]);
+    }
+  }
+
+  std::map<std::string, RecoveredTurn> found;
+  std::size_t budget = kRecoveryScanBytes;
+  for (std::size_t i = 0; i < entries.size() && budget > 0; ++i) {
+    if (entries[i].path.empty() || !path_is_dir(entries[i].path)) continue;
+    Workspace ws;
+    std::string err;
+    if (!ws.open(entries[i], config->settings, &err)) continue;
+    const std::string dir = path_join(ws.run_dir(), "trajectories");
+    std::vector<DirEntryInfo> files;
+    if (!list_directory(dir, &files, &err)) continue;
+    // The newest files first: a turn that was cut off is a recent one.
+    std::sort(files.begin(), files.end(),
+              [](const DirEntryInfo& a, const DirEntryInfo& b) { return a.mtime > b.mtime; });
+    std::size_t taken = 0;
+    for (std::size_t k = 0; k < files.size() && taken < kRecoveryScanFiles; ++k) {
+      if (files[k].is_dir) continue;
+      const std::string ext = path_extension(files[k].name);
+      if (ext != ".jsonl" && ext != ".gz") continue;
+      ++taken;
+      if (files[k].size > budget) continue;
+      budget -= files[k].size;
+      std::vector<RecoveredTurn> turns;
+      if (!read_trajectory_states(files[k].path, ws.id(), &turns, &err)) continue;
+      for (std::size_t t = 0; t < turns.size(); ++t) {
+        const RecoveredTurn& turn = turns[t];
+        if (turn.turn_id.empty()) continue;
+        found[turn.turn_id] = turn;
+      }
+    }
+  }
+
+  std::size_t abnormal = 0;
+  for (std::map<std::string, RecoveredTurn>::const_iterator it = found.begin();
+       it != found.end(); ++it) {
+    if (it->second.abnormal()) ++abnormal;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    recovered_turns.swap(found);
+    recovery_scanned = true;
+  }
+  {
+    std::lock_guard<std::mutex> lock(recovery_mu);
+    recovery_running = false;
+    recovery_cv.notify_all();
+  }
+  if (abnormal > 0) {
+    LOG_INFO("recovery: ", abnormal, " turn(s) did not end normally; the records know what "
+             "happened to them");
+  }
+}
+
+bool ApiServer::Impl::find_recovered_turn(const std::string& turn_id, RecoveredTurn* out) {
+  scan_recovery(false);
+  std::lock_guard<std::mutex> lock(mu);
+  std::map<std::string, RecoveredTurn>::const_iterator it = recovered_turns.find(turn_id);
+  if (it == recovered_turns.end()) return false;
+  // Only the turns that did **not** end normally are answered from the
+  // records. A turn that ended normally was "dropped after it finished" -
+  // and its answer is not in the audit trail (it is in the session
+  // transcript), so answering "done" with an empty result would be worse
+  // than not answering at all.
+  if (!it->second.abnormal()) return false;
+  *out = it->second;
+  return true;
+}
+
+bool ApiServer::Impl::recover_session_state(const std::string& session_id,
+                                            nlohmann::json* out) {
+  Workspace ws;
+  std::string err;
+  if (!find_session_workspace(session_id, &ws, &err)) return false;
+  // The fingerprint of the two files the answer comes from. While they do not
+  // change, the answer does not either - and the trajectory file can be
+  // megabytes, so reading it every couple of seconds (the UI does) is worth
+  // avoiding.
+  const std::string traj = trajectory_file_path(ws.run_dir(), session_id);
+  const std::string sess = path_join(ws.sessions_dir(), session_id + ".json");
+  const std::string stamp = file_stamp(traj) + "|" + file_stamp(sess) + "|" +
+                            file_stamp(sess + ".gz");
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    std::map<std::string, SessionRecovery>::const_iterator it =
+        session_recovery.find(session_id);
+    if (it != session_recovery.end() && it->second.stamp == stamp) {
+      if (it->second.value.is_null()) return false;
+      *out = it->second.value;
+      return true;
+    }
+  }
+  RecoveredTurn turn;
+  const bool recovered = recover_session(ws, session_id, &turn, &err);
+  nlohmann::json value;
+  if (recovered) value = turn.to_json();
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    SessionRecovery& entry = session_recovery[session_id];
+    entry.stamp = stamp;
+    entry.value = value;
+  }
+  if (!recovered) return false;
+  *out = value;
+  return true;
+}
 
 bool ApiServer::Impl::run_web_tools(ChatRequest* req, ChatResult* result,
                                    const ProviderInfo* provider, const ModelInfo* model_info,
@@ -3321,6 +3528,7 @@ void ApiServer::Impl::install_routes() {
     features["mcp"] = true;            // MCP servers can add tools
     features["request_id"] = true;     // every answer carries X-Request-Id
     features["error_catalog"] = true;  // GET /api/errors
+    features["turn_recovery"] = true;  // GET /api/recovery, and the disk fallback
     j["features"] = features;
     // The ceilings this machine imposes, so a caller can plan inside them.
     nlohmann::json limits = nlohmann::json::object();
@@ -3341,6 +3549,7 @@ void ApiServer::Impl::install_routes() {
         {"GET", "/api/turns/{turn_id}/events", "0.19.0"},
         {"POST", "/api/turns/{turn_id}/stop", "0.19.0"},
         {"GET", "/api/turns/{turn_id}/trajectory", "0.18.5"},
+        {"GET", "/api/recovery", "1.5.7"},
         {"POST", "/api/chat/stop", "0.16.0"},
         {"GET", "/api/workspaces", "0.16.0"},
         {"GET", "/api/providers/{name}/usage", "0.18.5"},
@@ -6700,9 +6909,103 @@ void ApiServer::Impl::install_routes() {
       // trajectory of every turn would turn one request into a hundred reads.
       list.push_back(live[i]->handle_json(false));
     }
+    // The turns that did not end normally, as the records describe them: the
+    // process that ran them is gone, and a caller that asks about them has
+    // to get an answer. The ones that ended normally are not repeated here -
+    // this list is about what is going on and what was lost.
+    scan_recovery(false);
+    std::vector<RecoveredTurn> recovered;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (std::map<std::string, RecoveredTurn>::const_iterator it = recovered_turns.begin();
+           it != recovered_turns.end(); ++it) {
+        if (!it->second.abnormal()) continue;
+        recovered.push_back(it->second);
+      }
+    }
+    // Newest first.
+    std::sort(recovered.begin(), recovered.end(),
+              [](const RecoveredTurn& a, const RecoveredTurn& b) {
+                return a.started_at > b.started_at;
+              });
+    for (std::size_t i = 0; i < recovered.size(); ++i) {
+      bool known = false;
+      for (std::size_t k = 0; k < live.size(); ++k) {
+        if (live[k]->turn_id != recovered[i].turn_id) continue;
+        known = true;
+        break;
+      }
+      if (known) continue;
+      list.push_back(recovered[i].to_json());
+    }
     nlohmann::json j = nlohmann::json::object();
     j["ok"] = true;
     j["turns"] = list;
+    send_json(res, j);
+  });
+
+  // ---- what was cut off ---------------------------------------------------
+  //
+  // The turns that did not end normally, as the durable records describe
+  // them: the ones the process went away in the middle of, and the ones the
+  // provider gave up on. It is the operator's view after a restart - "what
+  // did I lose, and how far did it get?".
+  svr.Get("/api/recovery", [this](const httplib::Request& req, httplib::Response& res) {
+    const bool refresh = req.has_param("refresh") && req.get_param_value("refresh") != "0";
+    scan_recovery(refresh);
+    std::vector<RecoveredTurn> found;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (std::map<std::string, RecoveredTurn>::const_iterator it = recovered_turns.begin();
+           it != recovered_turns.end(); ++it) {
+        found.push_back(it->second);
+      }
+    }
+    // The sessions whose last turn never got an answer - the one case the
+    // trajectory cannot cover: the turn was cut before it wrote a single
+    // line, so only the transcript knows about it.
+    std::vector<WorkspaceEntry> entries;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (std::size_t i = 0; i < registry->entries().size(); ++i) {
+        entries.push_back(registry->entries()[i]);
+      }
+    }
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      if (entries[i].path.empty() || !path_is_dir(entries[i].path)) continue;
+      Workspace ws;
+      std::string err;
+      if (!ws.open(entries[i], config->settings, &err)) continue;
+      std::vector<SessionInfo> sessions = ws.list_sessions();
+      // The newest sessions first, and only a few of them: this reads the
+      // transcript of every session it looks at.
+      std::sort(sessions.begin(), sessions.end(),
+                [](const SessionInfo& a, const SessionInfo& b) {
+                  return a.updated_at > b.updated_at;
+                });
+      std::size_t taken = 0;
+      for (std::size_t k = 0; k < sessions.size() && taken < 20; ++k) {
+        ++taken;
+        RecoveredTurn turn;
+        if (!recover_session(ws, sessions[k].id, &turn, &err)) continue;
+        if (!turn.turn_id.empty()) continue;   // the trajectory already has it
+        found.push_back(turn);
+      }
+    }
+    // Newest first.
+    std::sort(found.begin(), found.end(),
+              [](const RecoveredTurn& a, const RecoveredTurn& b) {
+                return a.started_at > b.started_at;
+              });
+    nlohmann::json list = nlohmann::json::array();
+    for (std::size_t i = 0; i < found.size(); ++i) {
+      if (!found[i].abnormal()) continue;
+      list.push_back(found[i].to_json());
+    }
+    nlohmann::json j = nlohmann::json::object();
+    j["ok"] = true;
+    j["turns"] = list;
+    j["count"] = static_cast<long long>(list.size());
     send_json(res, j);
   });
 
@@ -6715,13 +7018,21 @@ void ApiServer::Impl::install_routes() {
       return;
     }
     std::shared_ptr<ChatTurn> turn = find_turn_by_id(turn_id);
-    if (!turn) {
-      send_error(res, 404, "unknown_turn",
-                 "no turn with this id is known; it was never submitted here, or it "
-                 "was dropped after it finished");
+    if (turn) {
+      send_json(res, turn->handle_json());
       return;
     }
-    send_json(res, turn->handle_json());
+    // Not in memory: the process that ran it is gone (a restart, a crash, a
+    // power cut). The records it left behind still know what happened to it -
+    // the handle is the audit id, and the audit trail outlives the process.
+    RecoveredTurn recovered;
+    if (find_recovered_turn(turn_id, &recovered)) {
+      send_json(res, recovered.to_json());
+      return;
+    }
+    send_error(res, 404, "unknown_turn",
+               "no turn with this id is known; it was never submitted here, or it "
+               "was dropped after it finished");
   });
 
   svr.Post(R"(/api/turns/([^/]+)/stop)", [this](const httplib::Request& req, httplib::Response& res) {
@@ -6820,6 +7131,11 @@ void ApiServer::Impl::install_routes() {
     } else {
       j["running"] = false;
       j["session_id"] = session_id;
+      // The process that ran the last turn may be gone. The records still
+      // know what happened to it, and saying so is the difference between
+      // "the answer is still coming" and "that turn never finished".
+      nlohmann::json recovered;
+      if (recover_session_state(session_id, &recovered)) j["recovered"] = recovered;
     }
     j["ok"] = true;
     send_json(res, j);
@@ -7550,6 +7866,13 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
   }
   LOG_INFO("server: listening on http://", host, ":", options_.port);
   write_port_file(port_record, host, options_.port);
+
+  // The recovery scan: the process that ran the last turn may be gone (this
+  // is a restart), and the records it left behind say what happened to it.
+  // It reads files, so it runs in the background - the server is already
+  // answering requests while it works, and a caller that asks before it is
+  // done waits for it instead of reading the same files a second time.
+  impl_->recovery_thread = std::thread([this]() { impl_->scan_recovery(false); });
   return true;
 }
 
@@ -7566,6 +7889,9 @@ void ApiServer::stop() {
   }
   impl_->server.stop();
   if (impl_->listen_thread.joinable()) impl_->listen_thread.join();
+  // The background scan touches the impl, so it has to be done before the
+  // object goes away.
+  if (impl_->recovery_thread.joinable()) impl_->recovery_thread.join();
 }
 
 bool ApiServer::is_running() const { return impl_ && impl_->server.is_running(); }

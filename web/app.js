@@ -45,6 +45,10 @@
     sidebarHidden: false,
     ended: false, streamError: null, expanded: {}, stickBottom: true,
     trajectory: [], trajFull: {}, lastTrajectoryId: null,
+    /// 上一轮被中断/失败时的状态（服务端从轨迹与会话历史里恢复出来的）：
+    /// { state: 'interrupted'|'failed', error, steps, pending_message, ... }。
+    /// null = 上一轮正常结束，没有要提醒的事。
+    recovered: null,
     access: null,                                    // 文件访问范围（受限工作区 / 全局）
     stats: null, liveTokens: 0, liveStartAt: 0, metricsTimer: null,
     turnStartAt: 0, turnSteps: 0, mdBase: '',
@@ -720,6 +724,35 @@
     // 本机正在流式输出时，最新那一轮就是正在跑的那一轮（服务端还没来得及刷新）。
     var turns = state.trajectory || [];
     return !!(state.streaming && turns.length && turns[0] && turns[0].turn_id === turn.turn_id);
+  }
+  /// 上一轮被中断/失败时的提示条。
+  ///
+  /// 服务端从轨迹文件与会话记录里把那一轮的状态恢复出来了（进程重启、
+  /// 断电、provider 报错之后，界面自己看不出发生了什么）。这里把它说清楚：
+  /// 哪一轮、怎么了、做到哪一步。「重新问一次」只把那句没被回答的话放回
+  /// 输入框——重跑是人的决定，不是程序的决定（那一轮可能已经做了一半）。
+  function recoveryNotice(info) {
+    if (!info) return null;
+    var text = '';
+    if (info.state === 'interrupted') {
+      text = '上一轮被中断了（进程重启/崩溃，或连接在这一轮中途断了）：' +
+             '做到 ' + num(info.steps || 0) + ' 步就停了，已完成的部分在下面的轨迹里。';
+    } else if (info.state === 'failed') {
+      text = '上一轮失败了：' + (info.error || '（没有更多细节）');
+    } else {
+      return null;
+    }
+    var node = el('div', 'msg-notice recovery-notice');
+    node.appendChild(el('span', 'recovery-text', text));
+    if (info.pending_message) {
+      node.appendChild(btn('recovery-again', '重新问一次', function () {
+        var ta = $('input');
+        ta.value = info.pending_message;
+        ta.focus();
+        if (typeof autoGrow === 'function') autoGrow();
+      }));
+    }
+    return node;
   }
   function trajectoryRow(turn, key) {
     var row = el('div', 'tool-row traj-row');
@@ -1412,6 +1445,10 @@
         else liveReason.scrollTop = reasonTop;
       }
     }
+    // 提示条放在**最后**：它说的是最后那一轮，放在顶上会被长对话卷出去，
+    // 看不见——而看不见的提示等于没有提示。
+    var notice = recoveryNotice(state.recovered);
+    if (notice) box.appendChild(notice);
     if (state.streamError) box.appendChild(el('div', 'msg error', state.streamError));
     else if (!state.messages.length && !state.live) {
       var empty = el('div', 'chat-empty');
@@ -2699,6 +2736,14 @@
     if (!sid || state.streaming) return Promise.resolve();
     return api('api/chat/turn?session_id=' + encodeURIComponent(sid)).then(function (d) {
       var running = !!(d && d.running);
+      // 服务端从轨迹与会话记录里恢复出来的状态：上一轮被中断了/失败了。
+      // 没有在跑的轮次时才有——正在跑的那一轮不需要提醒。
+      var recovered = (d && !running && d.recovered) ? d.recovered : null;
+      if (state.session && state.session.id === sid &&
+          JSON.stringify(recovered || null) !== JSON.stringify(state.recovered || null)) {
+        state.recovered = recovered;
+        renderChat();
+      }
       if (!running) {
         // 那一轮已经结束：侧栏上的「进行中」标记也该消失了。
         if (state.detached === sid) { state.detached = null; renderSessions(); }
@@ -2755,6 +2800,7 @@
     ta.value = ''; autoGrow();
     // 队列属于上一轮：新一轮开始时不可能还有可被采纳的旧条目。
     state.queue = []; state.queueDone = {}; renderQueue();
+    state.recovered = null;                          // 新的一轮开始了，旧的提示条作废
     state.turnSeq = 0; state.attachRetries = 0;
     // 你之前离开过这一轮（它还在服务端跑）：这条消息会排进它的队列（不是顶掉），
     // 之后跟着它一起直播，所以说清楚再发。
@@ -4283,6 +4329,7 @@
       setTodos(d.todos || []);
       state.artifacts = d.artifacts || [];
       state.live = null; state.streamError = null;
+      state.recovered = null;                       // 下面 maybeAttach 会带来真的那份
       state.stickBottom = true;                     // 打开会话默认落在最新一条
       clearQueue();
       renderCrumbs();

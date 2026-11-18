@@ -2457,6 +2457,20 @@ class Engine:
             if written is not None:
                 self._publish({"type": "task_cancelled", "task": written})
             return "cancelled"
+        if name == "interrupted":
+            # The turn was cut off: the agent restarted, or the machine went
+            # away while it was working. The agent recovered that from its
+            # records (the handle still answers after a restart), so the
+            # reason can be written down instead of "the work is lost".
+            written = self._finalize(workspace_id, task_id, FAILED, {
+                "error": str(status.get("error") or
+                             "the turn was cut off before it finished (the agent "
+                             "restarted or the machine went away)"),
+                "stop_reason": "interrupted",
+                "finished_at": now_iso()})
+            if written is not None:
+                self._publish({"type": "task_failed", "task": written})
+            return "failed"
         if name == "failed":
             written = self._finalize(workspace_id, task_id, FAILED, {
                 "error": str(status.get("error") or "the turn failed"),
