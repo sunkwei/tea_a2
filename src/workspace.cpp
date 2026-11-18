@@ -283,7 +283,10 @@ WorkspaceEntry* WorkspaceRegistry::add(const std::string& path_in, const std::st
     if (!name.empty()) existing->name = name;
     if (existing->id.empty()) existing->id = make_id("ws_");
     if (existing->created_at.empty()) existing->created_at = now_iso8601();
-    existing->last_used_at = now_iso8601();
+    // Registering a workspace is **not** using it: the "last used" stamp is
+    // for the people who work in it (see touch()). Overwriting it here would
+    // put every freshly added project on top of the list - the opposite of
+    // what the list is for.
     refresh_flags();
     std::string save_err;
     if (!save(&save_err)) LOG_WARN("workspaces: cannot update the index: ", save_err);
@@ -297,13 +300,30 @@ WorkspaceEntry* WorkspaceRegistry::add(const std::string& path_in, const std::st
   e.path = path;
   e.run_dir = path_join(path, kRunDirName);
   e.created_at = now_iso8601();
-  e.last_used_at = e.created_at;
+  // Empty until it is used: a workspace nobody worked in yet keeps its place
+  // in the registration order.
+  e.last_used_at.clear();
   e.exists = true;
   entries_.push_back(e);
   refresh_flags();
   std::string save_err;
   if (!save(&save_err)) LOG_WARN("workspaces: cannot update the index: ", save_err);
   return &entries_.back();
+}
+
+bool WorkspaceRegistry::touch(const std::string& id) {
+  // The state lock covers the change **and** the write: the index is one file
+  // that every workspace shares, and a half-written one loses a registration.
+  // (save() takes the same lock; it is recursive on purpose.)
+  StateLock lock(state_mutex());
+  WorkspaceEntry* e = find(id);
+  if (e == nullptr) return false;
+  const std::string stamp = now_iso8601_ms();
+  if (e->last_used_at == stamp) return true;
+  e->last_used_at = stamp;
+  std::string save_err;
+  if (!save(&save_err)) LOG_WARN("workspaces: cannot update the index: ", save_err);
+  return true;
 }
 
 bool WorkspaceRegistry::set_run_dir(const std::string& id, const std::string& dir) {

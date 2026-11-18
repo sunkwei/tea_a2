@@ -160,6 +160,17 @@ class WorkspaceRegistry {
   /// written to the index, so it survives a restart.
   bool set_run_dir(const std::string& id, const std::string& dir);
 
+  /// Note that a workspace was used, and remember when.
+  ///
+  /// The list of workspaces is ordered by "most recently used": the project
+  /// you just worked in is the one you want next - not the one you added
+  /// first. The index file keeps the registration order (it is the order the
+  /// user built the list in), so the stamp is what the order is computed
+  /// from.
+  ///
+  /// Returns false when the id is unknown.
+  bool touch(const std::string& id);
+
   std::string index_path() const { return index_path_; }
   void refresh_flags();
 

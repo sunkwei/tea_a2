@@ -3292,3 +3292,32 @@ beacon 只能是 **POST**，所以服务端加了 `POST .../close` 路由
   列表、`/api/recovery`、`/api/chat/turn` 的 `recovered`，以及 provider 报错那一轮
   恢复成 `failed`（而不是 `interrupted`）。
 - `tests/ui_recovery_notice.mjs`（6 条）：浏览器里那条提示条 + 「重新问一次」。
+
+## 工作区按「最近用过」排（1.5.8）
+
+**要解决的**：左边的工作区下拉框里，条目是**登记顺序**——先加的在前。可人用的是
+「刚才在干活的那个」应该在最上面。
+
+**改法**（服务端记时间戳，列表按它排）：
+
+- `WorkspaceRegistry::touch(id)`（src/workspace.cpp）：把 `last_used_at` 记成现在，
+  写回索引文件（`workspaces.json`）。**在一轮开始时调用**（`launch_turn` 里）——
+  「用过」= 「有轮次在里面跑过」，这是最硬的那个信号。
+- `GET /api/workspaces` 按 `last_used_at` **新到旧**排（`workspace_used_before`）。
+- 网页上再排一次（`workspaceUsedFirst`），并在 tooltip 里写「上次使用 …」；
+  打开下拉框时先拉一遍列表（`refreshWorkspaces()`——不能用 `loadWorkspaces()`，
+  它会顺手把页面重新落到某个主题上）。
+
+**三个坑**：
+
+1. **时间戳要毫秒精度**。`now_iso8601()` 只有秒级：同一秒里用过两个工作区，
+   时间戳一样，就分不出先后了（顺序会随机——`std::sort` 不稳定）。用
+   `now_iso8601_ms()`。
+2. **字符串比较时间戳会错**。"...:11Z"（秒级）按字节比**大于** "...:11.500Z"
+   （毫秒级）——点号比 'Z' 小。要**解析成时间再比**（服务端 `iso8601_to_unix_ms`，
+   网页 `Date.parse`）。
+3. **排序要稳定**（`std::stable_sort` + 比较器对相等的时间戳返回 false）：
+   从没用过的工作区保持登记顺序。用 `std::sort` 的话，顺序会随运行而变。
+
+测试：`tests/smoke_workspace_order.py`（10 条）+ `tests/ui_workspace_order.mjs`
+（8 条，浏览器里点开下拉框看顺序）。

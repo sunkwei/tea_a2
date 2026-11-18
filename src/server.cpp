@@ -2876,6 +2876,10 @@ std::shared_ptr<ChatTurn> ApiServer::Impl::launch_turn(const TurnSpec& spec, Tur
     return fail(404, "not_found", e);
   }
   turn->workspace_id = turn->workspace.id();
+  // The workspace was used: remember when, so the list of workspaces can be
+  // ordered by "most recently used" (the one you just worked in comes
+  // first). It is a small write (the index), once per turn.
+  registry->touch(turn->workspace_id);
 
   // The stage profile of this turn. It is resolved here, before the worker
   // starts, and frozen into the turn: switching the role applies to the
@@ -4693,6 +4697,15 @@ void ApiServer::Impl::install_routes() {
     {
       std::lock_guard<std::mutex> lock(mu);
       registry->refresh_flags();
+      // The order is the **registration** order (the order the user built the
+      // list in) - on purpose. The "most recently used" order is the
+      // dropdown's business: it is a list to pick from, and the project you
+      // just worked in belongs at the top of it.
+      //
+      // The API keeps the registration order because it is also what a cold
+      // browser lands on: a fresh profile must not be dragged into somebody
+      // else's running turn just because that turn is the most recent one.
+      // Every entry carries `last_used_at`, so a client can sort it itself.
       for (std::size_t i = 0; i < registry->entries().size(); ++i) {
         list.push_back(registry->entries()[i].to_json());
       }
@@ -4778,6 +4791,23 @@ void ApiServer::Impl::install_routes() {
       send_json(res, out);
     }
   });
+
+  // "这个工作区现在在用" —— 列表按「最近用过的在前」排，这个路由就是那个信号。
+  // 切到哪个工作区，网页就调它一下；一轮在里面跑起来时也会记一次。
+  svr.Post(R"(/api/workspaces/([^/]+)/touch)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             const std::string id = req.matches[1].str();
+             bool ok = false;
+             {
+               std::lock_guard<std::mutex> lock(mu);
+               ok = registry->touch(id);
+             }
+             if (!ok) {
+               send_error(res, 404, "not_found", "no workspace with this id: " + id);
+               return;
+             }
+             send_ok(res);
+           });
 
   svr.Delete(R"(/api/workspaces/([^/]+))",
              [this](const httplib::Request& req, httplib::Response& res) {

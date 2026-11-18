@@ -3505,10 +3505,19 @@
     // 「无工作区 / 新会话」会一直留着。工作区变了就重画，和标签页标题同一个时机。
     renderCrumbs();
   }
+  /// 工作区按「最近用过的在前」排。服务端已经这么给了，这里再排一次：这个
+  /// 列表也可能刚从别处塞进来（刚添加的工作区、刚跑完的一轮）。
+  function workspaceUsedFirst(a, b) {
+    var ta = Date.parse((a && a.last_used_at) || '') || 0;
+    var tb = Date.parse((b && b.last_used_at) || '') || 0;
+    if (ta === tb) return 0;                              // 一样新：保持原来的顺序
+    return tb - ta;                                      // 新的在前
+  }
   function renderWorkspaceMenu() {
     var dd = $('ws-dropdown');
     clear(dd);
-    state.workspaces.forEach(function (w) {
+    var list = (state.workspaces || []).slice().sort(workspaceUsedFirst);
+    list.forEach(function (w) {
       var active = state.workspace && state.workspace.id === w.id;
       // 「切换」和「删除」是两个并排的按钮：<button> 里再套 <button> 是非法 HTML，
       // 浏览器会把它拆开，点击也就串了（点删除会顺手切工作区）。
@@ -3528,6 +3537,10 @@
       var tip = (w.writable === false && w.write_error) ? w.write_error : '';
       if (w.run_dir && w.path && w.run_dir.indexOf(w.path) !== 0) {
         tip += (tip ? '；' : '') + '运行数据在 ' + w.run_dir;
+      }
+      // 什么时候用过：列表按这个排，鼠标停上去也能看见。
+      if (w.last_used_at) {
+        tip += (tip ? '；' : '') + '上次使用 ' + fmtTime(w.last_used_at);
       }
       if (tip) it.title = tip;
       row.appendChild(it);
@@ -4237,6 +4250,18 @@
     });
   }
 
+  /// 只拉工作区列表，**不动当前落在哪个主题**。
+  ///
+  /// 打开下拉框时用：别的机器上的轮次可能刚在这个工作区里跑过，排序要跟上。
+  /// 不能用 loadWorkspaces()——它会顺手把页面重新落到某个主题上。
+  function refreshWorkspaces() {
+    return api('api/workspaces').then(function (d) {
+      state.workspaces = d.workspaces || [];
+      state.indexPath = d.index_path || '';
+      renderWorkspaceMenu();
+      return state.workspaces;
+    }, function () { return state.workspaces; });
+  }
   /// 服务端正在跑的轮次 → state.running（按 session id）。侧栏据此标「进行中」，
   /// 会话行的改名/删除也因此禁用：worker 手里那份 Session 会把改动覆盖掉。
   function refreshRunning() {
@@ -4275,6 +4300,12 @@
       $('files-search-clear').classList.add('hidden');
     }
     renderWorkspaceChip(); renderChat(); renderMetrics(); saveLS();
+    // 「切过去看」也是用过：列表按最近用过的排，得让服务端知道。
+    // 失败了也不打紧——那只是列表的顺序。
+    if (changed) {
+      api('api/workspaces/' + encodeURIComponent(id) + '/touch', { method: 'POST' })
+        .catch(function () {});
+    }
     // 角色是工作区的：换工作区就要换角色（顶栏的徽标也跟着换）。
     if (changed) {
       state.roles.list = []; state.roles.current = ''; state.roles.currentExists = false;
@@ -7443,7 +7474,13 @@
       e.stopPropagation();
       var open = $('ws-dropdown').classList.contains('hidden');
       closeDropdowns();
-      if (open) { renderWorkspaceMenu(); $('ws-dropdown').classList.remove('hidden'); $('ws-chip').setAttribute('aria-expanded', 'true'); }
+      if (open) {
+        renderWorkspaceMenu();
+        $('ws-dropdown').classList.remove('hidden');
+        $('ws-chip').setAttribute('aria-expanded', 'true');
+        // 拉一遍最新的顺序（刚在别处跑过一轮的工作区要往上挪）。
+        refreshWorkspaces();
+      }
     };
     $('model-chip').onclick = function (e) {
       e.stopPropagation();

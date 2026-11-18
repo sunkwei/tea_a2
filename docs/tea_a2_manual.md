@@ -204,7 +204,7 @@ B=http://127.0.0.1:8282
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"1.5.7","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"1.5.8","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -433,10 +433,11 @@ curl -s "$B/api/chat/turn?session_id=s_xxx"
 ### 2.6 工作区
 
 ```bash
-# 列工作区
+# 列工作区（**最近用过的在前**：一轮跑在哪个工作区里，就把哪个挪到前面）
 curl -s $B/api/workspaces
 # {"index_path":"...","workspaces":[{"id":"ws_...","name":"tea_a2","path":"/home/me/work",
-#                                   "run_dir":"...","sessions":3,"exists":true}]}
+#                                   "run_dir":"...","sessions":3,"exists":true,
+#                                   "last_used_at":"2026-11-18T03:51:08.996Z"}]}
 
 # 注册一个（path 必须是绝对路径）
 curl -s -X POST $B/api/workspaces -H 'Content-Type: application/json' \
