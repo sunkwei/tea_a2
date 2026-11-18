@@ -910,7 +910,13 @@ class TaskChannel:
             return self.deliver_speech(event)
         if kind == "watchdog_alert":
             return self.notify_watchdog(event)
-        if kind not in ("task_done", "task_failed", "task_waiting_confirmation"):
+        if kind not in ("task_done", "task_failed", "task_waiting_confirmation",
+                        "task_cancelled"):
+            # A cancelled task used to be dropped here: the queue publishes
+            # "task_cancelled", the front end did not know that name, and
+            # the person who asked got **nothing at all** - no answer, no
+            # excuse, silence. A task that is stopped is still an answer
+            # ("it was cancelled"), so it goes out like the others.
             return False
         task = event.get("task") or {}
         task_id = task.get("id", "")
@@ -939,6 +945,10 @@ class TaskChannel:
             return sent
         elif kind == "task_failed":
             text = "%s 失败了：%s" % (task_id, task.get("error") or "未知原因")
+        elif kind == "task_cancelled":
+            reason = (task.get("error") or task.get("stop_reason")
+                      or task.get("note") or "未知原因")
+            text = "%s 取消了：%s" % (task_id, reason)
         else:
             text = ("%s 在等你回答：%s\n（/answer %s 你的回答）"
                     % (task_id, task.get("question") or "", task_id))
