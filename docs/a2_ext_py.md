@@ -151,6 +151,31 @@ for event in queue.events():
 
 旧的 import 名还认（`from tea_api import Tea, Queue`），但那是过时的写法。
 
+## 现成的例子：任务编排器（`toolkit_plan`）
+
+`sched/a2_ext_py/modules/toolkit_plan.py` 是一个能直接用的模块：把一个大任务拆成
+**并行子任务**，跑完由**模型**汇总。细节见 [multi_agent.md](multi_agent.md)。
+
+```bash
+cp sched/a2_ext_py/modules/toolkit_plan.py ~/.tea_agent/ext/
+```
+
+```yaml
+# ~/.tea_agent/mcp.yaml
+servers:
+  a2ext:
+    command: "python3"
+    args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
+           "--modules", "/home/you/.tea_agent/ext",
+           "--agent-url", "http://127.0.0.1:8282"]
+    env:
+      TEA_AGENT_URL: "http://127.0.0.1:8282"   # 模块要自己找 agent
+      TEA_HOME: "/home/you/.tea_agent"          # 计划落在 <TEA_HOME>/plans
+```
+
+它靠 `sched/planning.py`（规划内核：模型分解 + 模型汇总 + 校验）。模块从 MCP 服务器
+自己的路径推出源码目录；也可以用 `TEA_A2_SCHED` 显式指过去。
+
 ## 现成的例子：桌面三件套（截图 / 鼠标 / 键盘）
 
 `sched/a2_ext_py/examples/` 里有三个可以直接用的模块，**Windows 和 Linux 都能用**

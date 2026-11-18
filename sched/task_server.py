@@ -64,6 +64,7 @@ if sys.version_info[0] < 3:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import plans  # noqa: E402
+import planning  # noqa: E402
 import schedules  # noqa: E402
 import task_order  # noqa: E402
 import triggers  # noqa: E402
@@ -123,11 +124,10 @@ ERROR_CODES = {
     "internal": CODE_INTERNAL,
 }
 
-AGGREGATE_SYSTEM = (
-    "你在给一个复杂任务做最终汇总。下面是这个任务的目标和每个步骤的结果。\n"
-    "请合成一份完整、可以直接交付的结果：不要罗列步骤，要给出结论性的答案；"
-    "步骤之间有矛盾就指出来；缺什么就说明缺什么。只输出汇总本身，"
-    "不要解释，不要 markdown 代码块。")
+# The wording of the summary is the shared one (planning.AGGREGATE_SYSTEM):
+# the queue and the extension layer ask for the summary in the same words,
+# and both are told to say which step each conclusion came from.
+AGGREGATE_SYSTEM = planning.AGGREGATE_SYSTEM
 
 # Which queue this is. The client asks before it speaks (see the
 # client's _tasks_prefix): the version segment arrived in 0.21.0.
@@ -407,6 +407,25 @@ def parse_limits(body):
     return limits, ""
 
 
+def parse_mode(body, default="rw"):
+    """Is this task read-only, or does it change something?
+
+    "ro" means the task only reads: it runs under the read-only role (the
+    file tools refuse to write) and it may run next to another read-only
+    task in the same project. "rw" means it changes something: it runs
+    alone, because the file it is rewriting is not a file another task may
+    read (the write is not atomic).
+
+    A task without a mode is "rw" - the safe answer.
+    """
+    raw = str((body or {}).get("mode") or "").strip().lower()
+    if not raw:
+        return default, ""
+    if raw not in ("ro", "rw"):
+        return default, "mode must be 'ro' or 'rw' (got '%s')" % raw
+    return raw, ""
+
+
 def parse_policy(body):
     """The permissions of a task: (policy, error message).
 
@@ -651,6 +670,10 @@ def new_task(body, workspace_id, allow_paths=None, priority=0, not_before="",
         "tenant_id": "",
         "identity": "",
         "workspace_id": workspace_id,
+        # Read-only ("ro") or read-write ("rw"). A read-only task runs under
+        # the read-only role and may run next to another read-only task; a
+        # read-write one runs alone. Empty means "rw" - the safe answer.
+        "mode": str(body.get("mode") or "").strip().lower() or "rw",
         "prompt": str(body.get("prompt") or "").strip(),
         "title": str(body.get("title") or "").strip(),
         "provider": str(body.get("provider") or "").strip(),
@@ -1299,6 +1322,9 @@ class Engine:
         # The plans whose summary is being made right now: one plan is
         # summarized once, not once per round.
         self.summarizing = set()
+        # The workspaces that already have the read-only role. It is written
+        # once and then left alone - the operator may have changed it.
+        self._readonly_roles = set()
         self.running = {}     # task id -> {"thread":..., "workspace_id":...}
         self._quota = (None, None, 0.0)   # (percent, window, read_at)
         # Does the agent on the other end know about **turn handles** (the
@@ -1504,6 +1530,54 @@ class Engine:
                 return True
         return False
 
+    def _blocks(self, running, task):
+        """Does a running task keep this one from starting?
+
+        The rule of the project: a **read-write** task runs alone - the file
+        it is rewriting is not a file another task may read (the write is
+        not atomic). Two **read-only** tasks may run side by side: they
+        change nothing.
+
+        With --parallel-ro-steps off (the default) the queue behaves as it
+        always has: one task per project, read-only or not.
+        """
+        if not getattr(self.args, "parallel_ro_steps", 0):
+            return self._running_in(running, task.get("workspace_id"))
+        if str(task.get("mode") or "rw").strip().lower() != "ro":
+            # A read-write task wants the project to itself.
+            return self._running_in(running, task.get("workspace_id"))
+        for one in running:
+            if one.get("workspace_id") != task.get("workspace_id"):
+                continue
+            if str(one.get("mode") or "rw").strip().lower() != "ro":
+                return True
+        return False
+
+    def _ensure_readonly_role(self, workspace_id):
+        """Put the read-only role into the workspace (once per workspace).
+
+        The role is the promise: read_only is enforced by the tools, and the
+        tool list is what keeps the promise true. A role that is already
+        there is left alone - the operator may have changed it on purpose.
+        """
+        name = planning.read_only_role_name()
+        if workspace_id in self._readonly_roles:
+            return True, ""
+        try:
+            listing = self.agent.roles(workspace_id) or {}
+            for role in listing.get("roles") or []:
+                if role.get("id") == name:
+                    self._readonly_roles.add(workspace_id)
+                    return True, ""
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        try:
+            self.agent.put_role(workspace_id, name, planning.read_only_role_yaml())
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        self._readonly_roles.add(workspace_id)
+        return True, ""
+
     # ---- one round --------------------------------------------------------
     def round(self):
         # A paused queue starts nothing. The pause is an operator decision
@@ -1550,6 +1624,10 @@ class Engine:
         # what an "agent" is here) works on one task at a time, while other
         # projects may run in parallel. --max-concurrent caps the total; 0
         # means "only the per-project rule".
+        #
+        # --parallel-ro-steps turns one rule off: two **read-only** tasks of
+        # the same project may run side by side. A read-write task still runs
+        # alone (see _blocks).
         if self.args.max_concurrent and self.running_count() >= self.args.max_concurrent:
             log("%d task(s) already running - waiting" % self.running_count())
             return 0
@@ -1582,8 +1660,8 @@ class Engine:
             not_before = parse_iso(task.get("not_before") or "")
             if not_before is not None and not_before > now:
                 continue
-            # One task at a time per project.
-            if self._running_in(running, task.get("workspace_id")):
+            # One task at a time per project - unless both are read-only.
+            if self._blocks(running, task):
                 # The project is working on something else: the task keeps its
                 # place and waits its turn.
                 busy += 1
@@ -1870,18 +1948,20 @@ class Engine:
         thread.start()
 
     def aggregate_prompt(self, plan):
-        """What the model is asked to turn the steps into one result."""
+        """What the model is asked to turn the steps into one result.
+
+        The wording is the shared one (planning.aggregate_prompt), so the
+        queue's summary and the extension layer's summary are asked for in
+        the same words - including "say which step each conclusion came
+        from" and "say which step failed".
+        """
         workspace_id = plan.get("workspace_id") or ""
-        parts = []
+        results = {}
         for step in plan.get("steps") or []:
             child = self.store.load(workspace_id, step.get("task_id") or "") or {}
-            title = step.get("title") or step.get("key") or ""
             text = str(child.get("result") or child.get("error") or "").strip()
-            parts.append("【%s】\n%s" % (title, text or "（这一步没有留下结果）"))
-        goal = plan.get("goal") or plan.get("title") or ""
-        ask = plan.get("aggregate_prompt") or "把这些结果汇总成一份完整、可以直接交付的结果。"
-        return ("【任务目标】\n%s\n\n【要做的汇总】\n%s\n\n【各步骤的结果】\n%s"
-                % (goal, ask, "\n\n".join(parts)))
+            results[str(step.get("key") or "")] = text or "（这一步没有留下结果）"
+        return planning.aggregate_prompt(plan, results)
 
     def _summarize_plan(self, plan):
         """One model call turns the steps into the plan's result."""
@@ -2522,6 +2602,16 @@ class Engine:
         # The knobs the task asked for (temperature, max_tokens, ...).
         params = task.get("model_params") or {}
         limits = task.get("limits") or {}
+        # A read-only task runs under the read-only role: the file tools
+        # refuse to write, there is no command tool, and it may run next to
+        # another read-only task of the same project.
+        role = ""
+        if str(task.get("mode") or "rw").strip().lower() == "ro":
+            ok, why = self._ensure_readonly_role(workspace_id)
+            if ok:
+                role = planning.read_only_role_name()
+            else:
+                log("  task %s: the read-only role is not available: %s", task_id, why)
         policy = task.get("policy") or {}
         # What the queue knows about this turn while it runs. It is passed
         # around instead of being a local variable, because the turn can be
@@ -2551,7 +2641,8 @@ class Engine:
                         session_id=session_id, task_id=task_id,
                         task_context=context, allow_paths=allow_paths,
                         model=model or None, params=params,
-                        limits=limits, policy=policy, idempotency_key=idem_key)
+                        limits=limits, policy=policy, role=role or None,
+                        idempotency_key=idem_key)
                     break
                 except AgentError as exc:
                     log("  task %s: the turn could not be submitted (%s)", task_id, exc)
@@ -2604,7 +2695,7 @@ class Engine:
                                      session_id=session_id, task_id=task_id,
                                      task_context=context, allow_paths=allow_paths,
                                      model=model or None, params=params,
-                                     limits=limits, policy=policy):
+                                     limits=limits, policy=policy, role=role or None):
             verdict = self._on_event(workspace_id, task_id, event, state)
             if verdict:
                 return
@@ -3920,6 +4011,11 @@ class Handler(BaseHTTPRequestHandler):
         limits, limits_error = parse_limits(body)
         if limits_error:
             return self._error(400, "bad_request", limits_error)
+        # Read-only or read-write. It decides whether the task may run next
+        # to another task of the same project.
+        mode, mode_error = parse_mode(body)
+        if mode_error:
+            return self._error(400, "bad_request", mode_error)
         policy, policy_error = parse_policy(body)
         if policy_error:
             return self._error(400, "bad_request", policy_error)
@@ -4622,7 +4718,8 @@ class App:
             child = new_task({"prompt": step["prompt"],
                               "title": step["title"][:80],
                               "provider": step.get("provider") or plan_provider,
-                              "model": step.get("model") or plan_model},
+                              "model": step.get("model") or plan_model,
+                              "mode": step.get("mode") or "rw"},
                              step.get("workspace_id") or workspace_id)
             child["kind"] = "step"
             child["plan_id"] = plan_id
@@ -5210,6 +5307,11 @@ def main(argv=None):
     parser.add_argument("--max-concurrent", type=int, default=0,
                         help="how many tasks may run at the same time in total "
                              "(0 = only the per-project rule: one per project)")
+    parser.add_argument("--parallel-ro-steps", type=int, default=0,
+                        help="let read-only tasks run next to each other in the same "
+                             "project (0 = off: one task per project, as always). A "
+                             "read-write task still runs alone - the file it is "
+                             "rewriting is not a file another task may read")
     parser.add_argument("--quota-interval", type=float, default=60.0,
                         help="how long the provider's quota answer is reused (the queue polls "
                              "every --interval seconds; the quota endpoint is a real call)")

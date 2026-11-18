@@ -827,6 +827,243 @@
       }
     }
   }
+  /* ---------- 4c) 并行中的轮次（子 agent 的卡片） ----------
+   *
+   * 一个工作区里可以同时跑好几轮——不同的会话就是不同的 agent。子 agent
+   * 各自是一个会话，所以它们的轨迹**不在**父会话的轨迹里：这个面板是它们
+   * 唯一的去处（谁在跑、跑到哪一步、最后说了什么）。
+   *
+   * 面板只读服务端已有的东西：GET /api/turns（最近的轮次句柄）、
+   * GET /api/turns/{id}/events（事件流：先回放再直播）。**后端一个字都不用改。**
+   */
+  var parallel = {
+    turns: [],        // 服务端最近的几轮（句柄）
+    streams: {},      // turn id -> EventSource
+    text: {},         // turn id -> 这一轮已经说出口的字
+    logs: {},         // turn id -> [{cls, text}]（这一轮的过程）
+    cards: {},        // turn id -> {card, state, elapsed, log, shown}
+    head: null, count: null,
+    big: {},          // turn id -> true（把日志展开）
+    timer: null
+  };
+
+  function parallelTitle(turn) {
+    // 会话的标题就是它的第一句话——子 agent 的任务就写在里面。
+    var list = state.sessions || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].id === turn.session_id) {
+        return list[i].title || ('轮次 ' + String(turn.turn_id || '').slice(0, 8));
+      }
+    }
+    return '轮次 ' + String(turn.turn_id || '').slice(0, 8);
+  }
+
+  /// 这个工作区里除了当前会话之外的那些轮次。屏幕上的这一轮在对话里，
+  /// 不该在这里再出现一次。
+  function parallelList() {
+    var wid = state.workspace && state.workspace.id;
+    var mine = state.session && state.session.id;
+    var out = [];
+    (parallel.turns || []).forEach(function (t) {
+      if (!t || !t.turn_id) return;
+      if (wid && t.workspace_id && t.workspace_id !== wid) return;
+      if (mine && t.session_id === mine) return;
+      out.push(t);
+    });
+    return out.slice(0, 8);
+  }
+
+  function parallelStateLabel(kind) {
+    if (kind === 'running') return '进行中';
+    if (kind === 'done') return '完成';
+    if (kind === 'failed') return '失败';
+    if (kind === 'stopped') return '已停';
+    if (kind === 'budget') return '到预算';
+    if (kind === 'interrupted') return '被中断';
+    return String(kind || '');
+  }
+
+  function refreshParallel() {
+    if (!state.workspace) return Promise.resolve([]);
+    return api('api/turns').then(function (d) {
+      parallel.turns = (d && d.turns) || [];
+      renderParallel();
+      return parallel.turns;
+    }, function () { return []; });
+  }
+
+  /// 一张卡片。**原地更新**：每两秒刷一次句柄，如果每次都重建 DOM，
+  /// 事件流写进去的行就落到了已经脱离页面的节点上——面板会一直是空的。
+  function parallelCard(turn) {
+    var id = turn.turn_id || '';
+    var entry = parallel.cards[id];
+    if (!entry) {
+      var card = el('div', 'parallel-card');
+      card.dataset.turnId = id;
+      var chead = el('div', 'parallel-card-head');
+      var title = el('span', 'parallel-card-title', '');
+      var state = el('span', 'parallel-state', '');
+      var elapsed = el('span', 'parallel-elapsed', '');
+      var toggle = btn('parallel-toggle', '展开', function () {
+        parallel.big[id] = !parallel.big[id];
+        renderParallel();
+      });
+      chead.appendChild(title); chead.appendChild(state); chead.appendChild(elapsed);
+      chead.appendChild(toggle);
+      var log = el('div', 'parallel-log');
+      log.dataset.turnId = id;
+      card.appendChild(chead); card.appendChild(log);
+      entry = { card: card, title: title, state: state, elapsed: elapsed,
+                toggle: toggle, log: log, shown: 0 };
+      parallel.cards[id] = entry;
+    }
+    entry.title.textContent = parallelTitle(turn);
+    entry.state.textContent = parallelStateLabel(turn.state);
+    entry.state.className = 'parallel-state parallel-state-' + (turn.state || 'running');
+    entry.elapsed.textContent = turn.elapsed_ms ? fmtMs(turn.elapsed_ms) : '';
+    entry.toggle.textContent = parallel.big[id] ? '收起' : '展开';
+    entry.log.className = 'parallel-log' + (parallel.big[id] ? ' big' : '');
+    // 过程：新到的行补上去（已经画过的不重画）。
+    var lines = parallel.logs[id] || [];
+    for (var i = entry.shown; i < lines.length; i++) {
+      entry.log.appendChild(el('div', lines[i].cls, lines[i].text));
+    }
+    entry.shown = lines.length;
+    var said = parallel.text[id];
+    if (said) {
+      var node = entry.log.querySelector('.parallel-text');
+      if (!node) { node = el('div', 'parallel-text'); entry.log.appendChild(node); }
+      node.textContent = said;
+    }
+    return entry.card;
+  }
+
+  function renderParallel() {
+    var box = $('parallel');
+    if (!box) return;
+    var list = parallelList();
+    if (!list.length) {
+      // 没有并行轮次：把面板收起来，也把它挂着的流关掉（一条 SSE 一直挂着
+      // 是在占服务端的一个线程）。
+      if (!box.classList.contains('hidden')) { box.classList.add('hidden'); clear(box); }
+      parallel.head = null; parallel.count = null; parallel.cards = {};
+      stopParallelTimer();
+      return;
+    }
+    box.classList.remove('hidden');
+    if (!parallel.head) {
+      parallel.head = el('div', 'parallel-head');
+      parallel.head.appendChild(el('span', 'parallel-title', '并行中的轮次'));
+      parallel.count = el('span', 'parallel-count', '');
+      parallel.head.appendChild(parallel.count);
+      box.appendChild(parallel.head);
+    }
+    parallel.count.textContent = list.length + ' 个';
+    // 走掉的轮次：卡片收起来。
+    var ids = list.map(function (t) { return t.turn_id; });
+    Object.keys(parallel.cards).forEach(function (id) {
+      if (ids.indexOf(id) < 0) {
+        var old = parallel.cards[id];
+        if (old && old.card && old.card.parentNode) old.card.parentNode.removeChild(old.card);
+        delete parallel.cards[id];
+        delete parallel.logs[id];
+        delete parallel.text[id];
+      }
+    });
+    list.forEach(function (t) {
+      var card = parallelCard(t);
+      if (card.parentNode !== box) box.appendChild(card);
+    });
+    // 事件流：跑着的轮次各挂一条（先回放，再直播）。
+    list.forEach(function (t) {
+      if (t.state === 'running') openParallelStream(t);
+    });
+    Object.keys(parallel.streams).forEach(function (id) {
+      var still = list.filter(function (t) { return t.turn_id === id; })[0];
+      if (!still || still.state !== 'running') closeParallelStream(id);
+    });
+    startParallelTimer();
+  }
+
+  function startParallelTimer() {
+    if (parallel.timer) return;
+    parallel.timer = setInterval(function () {
+      if (document.hidden) return;      // 看不见的时候不折腾服务端
+      refreshParallel();
+    }, 2000);
+  }
+
+  function stopParallelTimer() {
+    if (parallel.timer) { clearInterval(parallel.timer); parallel.timer = null; }
+    Object.keys(parallel.streams).forEach(closeParallelStream);
+  }
+
+  function openParallelStream(turn) {
+    var id = turn.turn_id;
+    if (!id || parallel.streams[id]) return;
+    var es;
+    try {
+      es = new EventSource(apiUrl('api/turns/' + encodeURIComponent(id) + '/events?since=0'));
+    } catch (e) { return; }
+    parallel.streams[id] = es;
+    es.onmessage = function (ev) {
+      var frame = null;
+      try { frame = JSON.parse(ev.data); } catch (e) { return; }
+      parallelFrame(id, frame);
+    };
+    es.onerror = function () {
+      // 这一轮结束了（服务端把流关了），或者服务端没了。
+      closeParallelStream(id);
+    };
+  }
+
+  function closeParallelStream(id) {
+    var es = parallel.streams[id];
+    if (!es) return;
+    try { es.close(); } catch (e) { /* 已经断了 */ }
+    delete parallel.streams[id];
+  }
+
+  /// 一帧事件 → 面板上的一行。
+  function parallelLine(id, cls, text) {
+    if (!parallel.logs[id]) parallel.logs[id] = [];
+    parallel.logs[id].push({ cls: cls, text: text });
+    renderParallel();
+  }
+
+  function parallelFrame(id, frame) {
+    var type = (frame && frame.type) || '';
+    if (type === 'content_delta' || type === 'reasoning_delta') {
+      parallel.text[id] = (parallel.text[id] || '') + (frame.text || '');
+      renderParallel();
+      return;
+    }
+    if (type === 'tool_call') {
+      parallelLine(id, 'parallel-line parallel-tool',
+                  '· ' + (frame.name || '工具') + parallelArgs(frame.arguments));
+    } else if (type === 'tool_result') {
+      parallelLine(id, 'parallel-line parallel-result' + (frame.ok === false ? ' bad' : ''),
+                   (frame.ok === false ? '✗ ' : '✓ ') + (frame.name || '') +
+                   (frame.elapsed_ms ? '（' + fmtMs(frame.elapsed_ms) + '）' : ''));
+    } else if (type === 'done') {
+      parallelLine(id, 'parallel-line parallel-done', '这一轮结束了');
+    } else if (type === 'error') {
+      parallelLine(id, 'parallel-line parallel-error', frame.message || '出错了');
+    } else if (type === 'stopped') {
+      parallelLine(id, 'parallel-line parallel-warn', '被停下了');
+    } else if (type === 'budget') {
+      parallelLine(id, 'parallel-line parallel-warn', '到预算了');
+    }
+  }
+
+  function parallelArgs(args) {
+    if (!args) return '';
+    // 参数有的是字符串（有的是对象）——两种都要能读。
+    var text = (typeof args === 'string') ? args : JSON.stringify(args);
+    if (text.length > 80) text = text.slice(0, 80) + '…';
+    return ' ' + text;
+  }
+
   /* ---------- 4a-1) 流式渲染的成本 ----------
      一段回答在流式期间是「一个 md 块，text 一直在长」。以前每来一个 delta 就把
      整块重新跑一遍 markdown 解析、再 innerHTML 换掉：单次成本随回答长度线性增长，
@@ -4300,6 +4537,7 @@
       $('files-search-clear').classList.add('hidden');
     }
     renderWorkspaceChip(); renderChat(); renderMetrics(); saveLS();
+    refreshParallel();
     // 「切过去看」也是用过：列表按最近用过的排，得让服务端知道。
     // 失败了也不打紧——那只是列表的顺序。
     if (changed) {
@@ -4333,6 +4571,7 @@
         if (still) state.session = still;
       }
       renderSessions();
+      refreshParallel();
       // 自动打开"最近更新的会话"是便利，但不能覆盖用户明确的草稿。
       if (!state.session && !state.draft && state.sessions.length) return openSession(state.sessions[0].id);
       if (!state.session) renderChat();
@@ -4341,6 +4580,7 @@
   }
   function openSession(sid, jumpTo) {
     if (!sid) return Promise.resolve();
+    refreshParallel();
     // 正在跟随另一轮：先离开（服务端照跑），而不是拒绝点这一下。多主题并行时
     // "必须先按停止/离开才能看别的会话"是最别扭的地方，这里改成自动离开。
     if (state.streaming && (!state.session || state.session.id !== sid)) detachStream();

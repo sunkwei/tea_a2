@@ -154,6 +154,10 @@
       <button class="btn" id="banner-retry" type="button">重试</button>
     </div>
 
+    <!-- 并行中的轮次（子 agent）：它们各自是一个会话，轨迹不在当前会话里，
+         这里是它们唯一的去处。app.js 按需显示，没有就藏起来。 -->
+    <section class="parallel hidden" id="parallel" aria-label="并行中的轮次"></section>
+
     <!-- 对话 -->
     <section class="view" id="view-chat">
       <div class="chat-scroll" id="chat-scroll">

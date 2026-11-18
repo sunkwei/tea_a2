@@ -205,6 +205,28 @@ class Queue:
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return self._request("POST", self._tasks_prefix(), body, headers=headers)
 
+    def create_plan(self, plan, workspace_id=None, idempotency_key=None):
+        """Hand a plan to the queue: it becomes a parent task and one child
+        per step.
+
+        The plan is the dict the planning core (sched/planning.py) makes:
+        {"title", "goal", "aggregate_prompt", "steps": [{"key", "title",
+        "prompt", "mode", "depends_on"}]}. The queue checks it again before
+        it takes it - a broken plan is refused, not half-run.
+
+        The steps may run in parallel: the read-only ones ("ro") side by
+        side, a read-write one ("rw") alone. That is the queue's switch
+        (--parallel-ro-steps); with it off, the steps run one after another
+        as they always did.
+        """
+        body = {"plan": dict(plan or {})}
+        if workspace_id:
+            body["workspace_id"] = workspace_id
+        if idempotency_key:
+            body["idempotency_key"] = idempotency_key
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        return self._request("POST", "/api/plans", body, headers=headers)
+
     def create(self, prompt, workspace_id=None, title="", provider="", allow_paths=None,
                meta=None, key="", not_before="", model="", priority=0, extra=None,
                model_params=None):

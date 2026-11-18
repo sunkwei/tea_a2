@@ -554,16 +554,29 @@ ToolResult tool_workspace_search(const nlohmann::json& args, const ToolContext& 
   }
   query.whole = arg_bool(args, "exact", false);
   query.case_sensitive = arg_bool(args, "case_sensitive", false);
+  // regex=true: the query is a pattern, and a pattern matches file content
+  // only. The scope asked for is ignored on purpose - asking for a pattern
+  // and getting file names back would be a quiet lie.
+  query.regex = arg_bool(args, "regex", false);
+  if (query.regex) {
+    query.names = false;
+    query.content = true;
+  }
   const long long wanted = arg_int(args, "max_results", 50);
   if (wanted > 0) {
     query.max_results = static_cast<std::size_t>(wanted > 200 ? 200 : wanted);
   }
 
   const SearchResults found = ctx.workspace->search(query);
+  if (!found.error.empty()) {
+    result.ok = false;
+    result.output = "error: " + found.error;
+    return result;
+  }
   std::ostringstream out;
   out << found.hits.size() << (found.hits.size() == 1 ? " match" : " matches") << " for \""
       << query_text << "\" in " << ctx.workspace->root() << " (scope="
-      << (query.names && query.content ? "both" : (query.names ? "name" : "content"))
+      << (query.regex ? "content (regex)" : (query.names && query.content ? "both" : (query.names ? "name" : "content")))
       << ", " << (query.whole ? "exact" : "substring") << ", "
       << (query.case_sensitive ? "case-sensitive" : "case-insensitive") << "; scanned "
       << found.files_scanned << " files)";
@@ -2661,12 +2674,15 @@ ToolRegistry::ToolRegistry() {
     def.name = "toolkit_workspace_search";
     def.description =
         "Search the workspace for a literal string: file names and file content. The query is "
-        "compared byte for byte - no regular expression, no glob, no fuzzy matching. scope=name "
+        "compared byte for byte - no glob, no fuzzy matching. scope=name "
         "matches the path, scope=content matches the text inside the files, scope=both (default) "
         "does both. exact=true asks for a whole-string match (完全匹配): the path (or file name) "
         "has to equal the query, or the whole line has to equal it. Use it when you know the "
         "exact name you are looking for; leave it off for a normal search. "
-        "在工作区里搜文件与内容（完全字符串匹配）。";
+        "regex=true treats the query as a regular expression (ECMAScript syntax) and matches it "
+        "against file CONTENT only (file names are not matched by a pattern); the pattern may "
+        "be at most 256 characters and a complex one can be slow - narrow it with path. "
+        "在工作区里搜文件与内容（完全字符串匹配）；regex=true 时按正则匹配文件内容。";
     def.parameters = nlohmann::json::parse(R"JSON({
       "type": "object",
       "properties": {
@@ -2690,6 +2706,10 @@ ToolRegistry::ToolRegistry() {
         "path": {
           "type": "string",
           "description": "Search only this subdirectory of the workspace (relative path)."
+        },
+        "regex": {
+          "type": "boolean",
+          "description": "true => the query is a regular expression (ECMAScript syntax), matched against file content only. At most 256 characters."
         },
         "max_results": {
           "type": "integer",

@@ -277,7 +277,7 @@ class Client:
     def _chat_body(self, workspace_id, message, provider=None, session_id=None,
                    task_id=None, task_context=None, allow_paths=None, model=None,
                    params=None, limits=None, policy=None, tools=None,
-                   system_prompt=None, idempotency_key=None):
+                   system_prompt=None, role=None, idempotency_key=None):
         """The body of a turn. Shared by `chat()` and `submit()`.
 
         One place builds it, so the two ways of starting a turn cannot drift
@@ -298,6 +298,12 @@ class Client:
                     body[key] = value
         if system_prompt:
             body["system_prompt"] = system_prompt
+        if role:
+            # The stage profile of this turn (see /api/workspaces/{id}/roles).
+            # The role may only tighten what the turn may do: its tool list
+            # intersects the turn's, its fence stacks on the turn's, its
+            # budget is the tighter of the two.
+            body["role"] = str(role)
         if session_id:
             body["session_id"] = session_id
         if task_id:
@@ -330,7 +336,7 @@ class Client:
     def chat(self, workspace_id, message, provider=None, session_id=None,
              task_id=None, task_context=None, allow_paths=None, model=None,
              params=None, limits=None, policy=None, tools=None, system_prompt=None,
-             idempotency_key=None):
+             role=None, idempotency_key=None):
         """Run one turn and yield the agent's events as they happen.
 
         This is the whole contract between a caller that keeps its own policy
@@ -350,7 +356,7 @@ class Client:
             workspace_id, message, provider=provider, session_id=session_id,
             task_id=task_id, task_context=task_context, allow_paths=allow_paths,
             model=model, params=params, limits=limits, policy=policy, tools=tools,
-            system_prompt=system_prompt, idempotency_key=idempotency_key)
+            system_prompt=system_prompt, role=role, idempotency_key=idempotency_key)
         headers = {"Content-Type": "application/json"}
         if idempotency_key:
             headers["Idempotency-Key"] = str(idempotency_key)
@@ -390,24 +396,51 @@ class Client:
     def submit(self, workspace_id, message, provider=None, session_id=None,
                task_id=None, task_context=None, allow_paths=None, model=None,
                params=None, limits=None, policy=None, tools=None,
-               system_prompt=None, idempotency_key=None):
+               system_prompt=None, role=None, idempotency_key=None):
         """Submit a turn and walk away. Returns the handle.
 
         The answer is {"ok": true, "turn_id": "t_…", "session_id": "s_…",
         "state": "running", "status_url": …, "events_url": …}. The turn keeps
         working with nobody watching; the caller comes back to
         `turn_status(turn_id)`, `turn_events(turn_id)` or `stop_turn(turn_id)`.
+
+        `role` names a stage profile of the workspace (see
+        `GET /api/workspaces/{id}/roles`): a read-only stage, for instance.
+        The role may only tighten this turn - never widen it.
         """
         body = self._chat_body(
             workspace_id, message, provider=provider, session_id=session_id,
             task_id=task_id, task_context=task_context, allow_paths=allow_paths,
             model=model, params=params, limits=limits, policy=policy, tools=tools,
-            system_prompt=system_prompt, idempotency_key=idempotency_key)
+            system_prompt=system_prompt, role=role, idempotency_key=idempotency_key)
         body["async"] = True
         headers = {}
         if idempotency_key:
             headers["Idempotency-Key"] = str(idempotency_key)
         return self._request("POST", "/api/chat", body, headers=headers)
+
+    def turn_trajectory(self, turn_id):
+        """The full trajectory of one turn: the steps it took, tool by tool.
+
+        The steps are objects with a "kind" ("model" / "tool" /
+        "compaction"); a tool step carries the tool's name, whether it
+        succeeded and how long it took. This is what a caller shows when
+        somebody asks "what did that turn actually do".
+        """
+        return self._request("GET", "/api/turns/" + self._turn_path(turn_id) + "/trajectory")
+
+    def roles(self, workspace_id):
+        """The stage profiles of a workspace (persona, tools, fences, ...)."""
+        return self._request("GET", "/api/workspaces/%s/roles" % workspace_id)
+
+    def put_role(self, workspace_id, name, content):
+        """Write a stage profile into a workspace.
+
+        The agent parses it before it stores it, so a broken profile is
+        refused instead of becoming a file nobody can read.
+        """
+        return self._request("PUT", "/api/workspaces/%s/roles/%s"
+                             % (workspace_id, name), {"content": content})
 
     def turn_status(self, turn_id):
         """How did the turn with this handle go?

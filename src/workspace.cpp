@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <regex>
 
 #include "env.h"
 #include "gzip.h"
@@ -1826,6 +1827,39 @@ std::string search_preview(const std::string& line) {
   return s;
 }
 
+// A regular expression is the one place where the comparison is not
+// byte-for-byte, so it is bounded on both ends: the pattern may not be
+// longer than this, and a regex search may not look at more than
+// kMaxRegexLines lines. std::regex has no timeout - without these caps a
+// pathological pattern ("(a+)+b") would hang the agent instead of
+// answering.
+constexpr std::size_t kMaxRegexPattern = 256;
+constexpr std::size_t kMaxRegexLines = 200000;
+
+/// The part of the line that matched, with a little context around it.
+/// A pattern match says *where* the hit is; showing the whole line hides it.
+std::string search_preview_regex(const std::string& line, const std::smatch& m) {
+  const std::size_t kMax = 200;
+  const std::size_t kContext = 40;
+  std::size_t from = 0;
+  std::size_t to = line.size();
+  if (m.size() > 0 && m[0].matched) {
+    const std::size_t start = static_cast<std::size_t>(m.position(0));
+    const std::size_t len = static_cast<std::size_t>(m.length(0));
+    from = start > kContext ? start - kContext : 0;
+    to = start + len + kContext;
+    if (to > line.size()) to = line.size();
+  }
+  std::string out = trim(line.substr(from, to - from));
+  if (from > 0) out = "…" + out;
+  if (to < line.size()) out += "…";
+  if (out.size() > kMax) {
+    out = out.substr(0, kMax);
+    out += "…";
+  }
+  return out;
+}
+
 }  // namespace
 
 nlohmann::json SearchHit::to_json() const {
@@ -1848,6 +1882,29 @@ SearchResults Workspace::search(const SearchQuery& query) const {
   const std::string needle = trim(query.text);
   if (needle.empty()) return out;
   if (!query.names && !query.content) return out;
+
+  // The pattern is compiled once, here: the walk below compares every line
+  // of every file against it.
+  std::regex pattern;
+  const bool use_regex = query.regex;
+  if (use_regex) {
+    if (needle.size() > kMaxRegexPattern) {
+      out.error = "the regular expression is too long (" +
+                  std::to_string(needle.size()) + " > " +
+                  std::to_string(kMaxRegexPattern) + " characters)";
+      return out;
+    }
+    std::regex::flag_type flags = std::regex::ECMAScript;
+    if (!query.case_sensitive) flags |= std::regex::icase;
+    try {
+      pattern = std::regex(needle, flags);
+    } catch (const std::regex_error& exc) {
+      out.error = std::string("invalid regular expression: ") + exc.what();
+      return out;
+    }
+  }
+  // How many lines a regex search may still look at (0 = no limit).
+  std::size_t regex_lines = 0;
 
   // Where the walk starts: the workspace root, or a subdirectory of it. A
   // subdirectory that leaves the workspace is refused - the search never
@@ -1906,7 +1963,10 @@ SearchResults Workspace::search(const SearchQuery& query) const {
       hit.size = e.size;
       hit.mtime = e.mtime;
 
-      if (query.names) {
+      // A regular expression matches file content only: a path is never
+      // matched by a pattern (a path is not a line of text, and pretending
+      // otherwise would surprise whoever wrote the pattern).
+      if (query.names && !use_regex) {
         // The whole-string mode accepts the file name as well as the whole
         // relative path: "main.cpp" should find "src/main.cpp".
         hit.name_hit = query.whole
@@ -1937,14 +1997,35 @@ SearchResults Workspace::search(const SearchQuery& query) const {
                     (nl == std::string::npos) ? text.substr(pos) : text.substr(pos, nl - pos);
                 ++line_no;
                 if (!line.empty() && line.back() == '\r') line.pop_back();
-                const bool matched =
-                    query.whole ? search_equals(trim(line), needle, query.case_sensitive)
-                                 : search_contains(line, needle, query.case_sensitive);
+                bool matched = false;
+                std::string preview;
+                if (use_regex) {
+                  if (regex_lines >= kMaxRegexLines) {
+                    // The cap is reached: the rest of the tree is left alone
+                    // and the caller is told the answer is partial.
+                    out.truncated = true;
+                    break;
+                  }
+                  ++regex_lines;
+                  if (query.whole) {
+                    matched = std::regex_match(trim(line), pattern);
+                    preview = search_preview(line);
+                  } else {
+                    std::smatch m;
+                    matched = std::regex_search(line, m, pattern);
+                    if (matched) preview = search_preview_regex(line, m);
+                  }
+                } else {
+                  matched = query.whole
+                                ? search_equals(trim(line), needle, query.case_sensitive)
+                                : search_contains(line, needle, query.case_sensitive);
+                  preview = search_preview(line);
+                }
                 if (matched) {
-                  if (hit.hits == 0) hit.preview = search_preview(line);
+                  if (hit.hits == 0) hit.preview = preview;
                   if (hit.lines.size() < kMaxHitsPerFile) hit.lines.push_back(line_no);
                   if (hit.samples.size() < kMaxSamplesPerFile) {
-                    hit.samples.push_back(search_preview(line));
+                    hit.samples.push_back(preview);
                   }
                   ++hit.hits;
                 }

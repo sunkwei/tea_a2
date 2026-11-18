@@ -62,11 +62,16 @@ struct SearchHit {
 
 /// What to look for, and how.
 ///
-/// The query is a **literal string**: no regular expression, no glob, no
-/// fuzzy matching. What the user types is what gets compared, byte for byte
-/// (modulo case folding and the `whole` flag below).
+/// By default the query is a **literal string**: no glob, no fuzzy matching.
+/// What the user types is what gets compared, byte for byte (modulo case
+/// folding and the `whole` flag below).
+///
+/// With `regex` on, the query is an ECMAScript regular expression and it is
+/// matched against the **content** of the files only - a path is never
+/// matched by a pattern. That is the one place where the comparison stops
+/// being byte-for-byte, so it is opt-in.
 struct SearchQuery {
-  std::string text;        // the literal query; empty => nothing to look for
+  std::string text;        // the literal query (or the pattern, when regex is on); empty => nothing to look for
   std::string subpath;     // search only here (workspace-relative); empty => the whole tree
   bool names = true;       // match the path of a file/directory
   bool content = true;     // match the text inside a file
@@ -76,6 +81,12 @@ struct SearchQuery {
   /// exact spelling is useless for anything but a known name.
   bool whole = false;
   bool case_sensitive = false;
+  /// The query is a regular expression (ECMAScript syntax) instead of a
+  /// literal string. It matches file **content** only; names stay literal.
+  /// The pattern is limited in length and the number of lines a regex search
+  /// may look at is capped, because std::regex has no timeout: a
+  /// pathological pattern would otherwise hang the search.
+  bool regex = false;
   std::size_t max_results = 100;
   /// Files bigger than this are not read (their path can still match).
   std::size_t max_file_bytes = 2u * 1024u * 1024u;
@@ -86,6 +97,9 @@ struct SearchResults {
   std::size_t files_scanned = 0;
   bool truncated = false;      // the result cap hid hits
   bool files_skipped = false;  // some files were too big or binary
+  /// Why the search could not run (empty = it ran). A pattern that does not
+  /// compile says so here instead of quietly finding nothing.
+  std::string error;
 };
 
 /// One place inside a conversation where the query was found.

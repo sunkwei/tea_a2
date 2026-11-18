@@ -8,7 +8,7 @@
 | --- | --- |
 | `toolkit_exec` | 执行系统命令。Windows 写成临时 `.cmd`/`.ps1` 再执行（绕开引号问题），超时用 Job Object 杀整个进程树；POSIX 用 `setsid` + 进程组 `kill`。输出统一转 UTF-8 回填模型 |
 | `toolkit_file` | `read` `write` `append` `list` `mkdir` `delete` `move` `stat` |
-| `toolkit_workspace_search` | 在工作区里搜东西：**文件名 + 文件内容**。查询串按原样逐字节比较（**不做正则/模糊匹配**）；`scope=name\|content\|both`、`exact=true`（完全匹配：路径整串相等 / 整行相等）、`case_sensitive`、`path=`（只搜某个子目录）、`max_results=`。见 [api.md](api.md#工作区搜索get-ap-workspacesidsearch) |
+| `toolkit_workspace_search` | 在工作区里搜东西：**文件名 + 文件内容**。查询串按原样逐字节比较（**不做正则/模糊匹配**）；`scope=name\|content\|both`、`exact=true`（完全匹配：路径整串相等 / 整行相等）、`case_sensitive`、`path=`（只搜某个子目录）、`max_results=`、`regex=true`（查询串当 **ECMAScript 正则**，只匹配文件内容；默认关着）。见 [api.md](api.md#工作区搜索get-ap-workspacesidsearch) |
 | `toolkit_history_search` | 搜**历史对话**：会话标题、说过的话、想过的、调用过的工具，以及**轨迹**（命令的输出在那里）。查询串按原样逐字节比较（**不做正则/模糊匹配**）；`scope=all\|title\|messages\|trajectory`、`exact=true`（完全匹配）、`case_sensitive`、`max_results=`。见 [api.md](api.md#历史搜索get-ap-workspacesidsessionssearch) |
 | `toolkit_memory` | 工作区长期记忆的增删查，自动注入 system prompt，跨会话保留偏好与项目事实 |
 | `toolkit_agent_doc` | `read` `append` `replace` `scripts`：维护 `.tea_agent_run/agent.md`（本工作区的经验：坑、可复用命令与脚本） |
@@ -118,15 +118,30 @@
 { "query": "TODO", "scope": "content", "path": "src" }
 ```
 
-**匹配规则就一条：完全字符串匹配。** 查询串按原样逐字节比较——不是正则、不是通配符、
-不是模糊匹配。查 `.*` 找的是字面量 `.*`，不会有任何意外。这一点是刻意的：搜索是给人
-（和给模型）用的，猜错了意图比找不到更让人火大。
+**默认的匹配规则只有一条：完全字符串匹配。** 查询串按原样逐字节比较——不是正则、不是
+通配符、不是模糊匹配。查 `.*` 找的是字面量 `.*`，不会有任何意外。这一点是刻意的：
+搜索是给人（和给模型）用的，猜错了意图比找不到更让人火大。
 
 - `scope`：`both`（默认）/ `name` / `content`；
 - `exact=true`：**完全匹配**——路径（或者文件名）必须整串相等，内容则是整行相等；
 - `case_sensitive=true`：区分大小写（默认不区分，只折 ASCII 大写）；
 - `path=`：只在这个子目录里搜；
-- `max_results=`：最多几条（默认 50）。
+- `max_results=`：最多几条（默认 50）；
+- `regex=true`：**查询串当正则**（见下）。
+
+**`regex=true` 时规则换一套**（默认关着，关着时行为一个字没变）：
+
+- 查询串是 **ECMAScript 正则**（`std::regex`），**只匹配文件内容**——路径不参与匹配；
+- `exact=true` 变成「整行要匹配这个正则」，而不是「行里含有」；
+- 正则编译不过 → 明确报错（`invalid regular expression: …`），**不静默当成字面量**；
+- 命中预览给的是**匹配的那一段**（前后带一点上下文），不是整行；
+- 有上限：正则式 ≤ 256 字符，单次搜索最多看 20 万行——`std::regex` 没有超时，
+  病态表达式会把 agent 卡住，所以宁可拒绝长表达式。
+
+```jsonc
+// 找所有 TODO 和 FIXME
+{ "query": "TODO|FIXME", "regex": true, "scope": "content" }
+```
 
 返回的是一段文本：每个命中的文件一行路径，下面跟着命中的行号和那几行原文。
 

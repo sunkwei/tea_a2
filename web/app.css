@@ -1227,3 +1227,47 @@ button{font-family:inherit}
   /* 顶栏那一排按钮在窄屏上挤：让它们能横向滚，而不是把会话名挤没 */
   .topbar-left{gap:6px}
 }
+
+/* ---------- 并行中的轮次（子 agent 的卡片） ---------- */
+.parallel{
+  flex:0 0 auto;margin:0;padding:8px 12px;
+  border-bottom:.5px solid var(--dsw-alias-border-l1);
+  background:var(--dsw-alias-bg-layer-1);
+}
+.parallel-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.parallel-title{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.parallel-count{font-size:11px;color:var(--dsw-alias-label-caption)}
+.parallel-card{
+  margin-top:6px;padding:6px 10px;border-radius:6px;
+  border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);
+}
+.parallel-card-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px}
+.parallel-card-title{
+  flex:1 1 auto;min-width:0;font-size:12px;color:var(--dsw-alias-label-primary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.parallel-state{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.parallel-state-running{color:var(--dsw-alias-brand-primary)}
+.parallel-state-done{color:var(--dsw-alias-label-success)}
+.parallel-state-failed{color:var(--dsw-alias-state-error-primary)}
+.parallel-state-budget,.parallel-state-stopped{color:var(--dsw-alias-state-warn-primary)}
+.parallel-elapsed{font-size:11px;color:var(--dsw-alias-label-caption)}
+.parallel-toggle{
+  border:.5px solid var(--dsw-alias-border-l1);border-radius:4px;
+  background:transparent;color:var(--dsw-alias-label-tertiary);
+  font-size:11px;padding:1px 7px;cursor:pointer;
+}
+.parallel-toggle:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.parallel-log{
+  max-height:88px;overflow:auto;margin-top:4px;
+  font:11px/16px var(--ds-font-family-code);color:var(--dsw-alias-label-secondary);
+}
+.parallel-log.big{max-height:320px}
+.parallel-line{white-space:pre-wrap;word-break:break-word}
+.parallel-tool{color:var(--dsw-alias-label-secondary)}
+.parallel-result{color:var(--dsw-alias-label-success)}
+.parallel-result.bad{color:var(--dsw-alias-state-error-primary)}
+.parallel-done{color:var(--dsw-alias-label-success)}
+.parallel-error{color:var(--dsw-alias-state-error-primary)}
+.parallel-warn{color:var(--dsw-alias-state-warn-primary)}
+.parallel-text{margin-top:4px;color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word}

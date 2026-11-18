@@ -45,21 +45,16 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import plans  # noqa: E402
+import planning  # noqa: E402
 
 DEFAULT_TASKS = os.environ.get("TEA_TASK_URL", "http://127.0.0.1:8283")
 DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8282")
 
-PLANNER_SYSTEM = (
-    "你在把一个复杂任务拆成可以一步步做的计划。\n"
-    "要求：\n"
-    "1. 步骤要能独立做完，每一步的 prompt 要写清楚（做什么、在哪儿做、做成什么样），"
-    "不要依赖对话里的上下文；\n"
-    "2. 能并行的步骤不要互相依赖；确实要等的才写 depends_on；\n"
-    "3. 步骤不超过 6 个，宁少勿多；\n"
-    "4. 最后一步通常是汇总成最终交付物。\n"
-    "只输出一个 JSON 对象，不要解释，不要 markdown 代码块：\n"
-    '{"title": "...", "goal": "...", "aggregate_prompt": "...", '
-    '"steps": [{"key": "s1", "title": "...", "prompt": "...", "depends_on": []}]}')
+# The wording of the plan is the shared one (planning.PLANNER_SYSTEM): the
+# queue's plan and the extension layer's plan are asked for in the same
+# words - including which step only reads ("ro") and which one changes
+# something ("rw").
+PLANNER_SYSTEM = planning.PLANNER_SYSTEM
 
 
 def log(message):
@@ -97,56 +92,50 @@ def unwrap(body):
     return body
 
 
-def extract_json(text):
-    """The plan out of the model's answer.
+class _AgentClient(object):
+    """The bit of the agent the planning core needs: one model call.
 
-    The model is asked for JSON only, but models like to talk: the first
-    object in the text is the plan.
+    The planning core talks to the agent through a client with an
+    ``llm_chat`` method (the same one sched/a2_ext_py/client.py has). This
+    is that method - the planner is a standalone script and does not pull
+    the whole client in.
     """
-    content = (text or "").strip()
-    if not content:
-        return None
-    if content.startswith("```"):
-        content = content.strip("`")
-        if content.lower().startswith("json"):
-            content = content[4:]
-    start = content.find("{")
-    end = content.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        loaded = json.loads(content[start:end + 1])
-    except ValueError:
-        return None
-    return loaded if isinstance(loaded, dict) else None
+
+    def __init__(self, agent_url, timeout=180):
+        self.agent_url = agent_url
+        self.timeout = timeout
+
+    def llm_chat(self, prompt=None, system=None, temperature=None, max_tokens=None,
+                 provider=None, model=None, stream=False, timeout=None):
+        body = {"prompt": prompt, "system": system, "stream": bool(stream)}
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if provider:
+            body["provider"] = provider
+        if model:
+            body["model"] = model
+        status, answer = http_json(self.agent_url + "/api/llm/chat", "POST", body,
+                                   timeout=timeout or self.timeout)
+        if status == 0 or status >= 400:
+            raise planning.PlanError("模型没有回答：%s" % (answer or {}).get("error"))
+        return answer if isinstance(answer, dict) else {}
 
 
 def make_plan(agent_url, goal, title="", max_steps=6, timeout=180):
-    """One model call: the goal becomes a plan."""
-    prompt = "任务：\n%s\n" % goal
-    if title:
-        prompt += "\n这件事的名字：%s\n" % title
-    prompt += ("\n拆成不超过 %d 个步骤。只输出 JSON。" % max_steps)
-    status, body = http_json(agent_url + "/api/llm/chat", "POST", {
-        "prompt": prompt,
-        "system": PLANNER_SYSTEM,
-        "temperature": 0.2,
-        "max_tokens": 2000,
-        "stream": False,
-    }, timeout=timeout)
-    if status == 0 or status >= 400:
-        raise SystemExit("模型没有回答：%s" % (body or {}).get("error"))
-    answer = body if isinstance(body, dict) else {}
-    content = answer.get("content") or answer.get("reasoning") or ""
-    plan = extract_json(content)
-    if plan is None:
-        raise SystemExit("模型没有给出计划（它说的是）：\n%s" % str(content)[:600])
-    plan.setdefault("title", title or goal.splitlines()[0][:60])
-    plan.setdefault("goal", goal)
-    # The steps are checked here, so a broken plan is caught before it is
-    # written down - not after it is handed to the queue.
-    plan["steps"] = plans.normalize_steps(plan.get("steps"), max_steps=max_steps)
-    return plan
+    """One model call: the goal becomes a plan.
+
+    The plan comes from the shared core (sched/planning.py): the same
+    prompt, the same checks - and every step says whether it only reads
+    ("ro") or changes something ("rw").
+    """
+    client = _AgentClient(agent_url, timeout=timeout)
+    try:
+        return planning.make_plan(client, goal, title=title, max_steps=max_steps,
+                                   timeout=timeout)
+    except planning.PlanError as exc:
+        raise SystemExit(str(exc))
 
 
 def show(plan):
@@ -154,7 +143,8 @@ def show(plan):
     log("目标：%s" % (plan.get("goal") or ""))
     for step in plan.get("steps") or []:
         waits = ("（等 %s）" % "、".join(step.get("depends_on") or [])) if step.get("depends_on") else ""
-        log("  - %-10s %s%s" % (step.get("key"), step.get("title"), waits))
+        log("  - %-10s [%-2s] %s%s" % (step.get("key"), step.get("mode") or "rw",
+                                       step.get("title"), waits))
 
 
 def submit(tasks_url, plan, timeout=60):

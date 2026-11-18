@@ -119,7 +119,11 @@ class MockProvider(BaseHTTPRequestHandler):
             if m.get("role") == "user":
                 last_user = m.get("content") or ""
                 break
-        if "SCENARIO=search" in last_user:
+        if "SCENARIO=regex" in last_user:
+            self._tool_call("toolkit_workspace_search",
+                            {"query": "MAGIC\\w*", "scope": "content", "regex": True},
+                            "call_regex")
+        elif "SCENARIO=search" in last_user:
             self._tool_call("toolkit_workspace_search",
                             {"query": "MAGICTOKEN", "scope": "content"},
                             "call_search")
@@ -318,6 +322,46 @@ providers:
                          "/api/workspaces/" + wid + "/search?q=Ma%5BGT%5D*&scope=content")
         check("a glob-looking query is taken literally", not paths_of(r), paths_of(r))
 
+        # ---- regex=1: the query is a pattern -------------------------------
+        # The URLs are built by concatenation: a percent-escape inside a
+        # %-format would be read as a format specifier.
+        def search_url(query, **kw):
+            parts = ["q=" + query]
+            for key, value in kw.items():
+                parts.append(key.replace("_", "-") + "=" + value)
+            return "/api/workspaces/" + wid + "/search?" + "&".join(parts)
+
+        status, r = call(agent_port, "GET",
+                         search_url("MAGIC%5Cw%2A", scope="content", regex="1"))
+        found = paths_of(r)
+        check("a pattern finds the content hits",
+              "src/main.cpp" in found and "notes.txt" in found, found)
+        check("the response says it was a pattern", r.get("regex") is True, r)
+        hit = [x for x in r.get("results") or [] if x.get("path") == "src/main.cpp"]
+        check("a pattern reports the line numbers", hit and hit[0].get("lines") == [2], hit)
+        check("a pattern quotes the match back",
+              hit and "MAGIC" in (hit[0].get("preview") or ""), hit)
+        status, r = call(agent_port, "GET",
+                         search_url("main%5C.cpp", scope="name", regex="1"))
+        check("a pattern does not match a file name", not paths_of(r), paths_of(r))
+        # "[a-" is an unterminated character class: it does not compile.
+        status, r = call(agent_port, "GET",
+                         search_url("%5Ba-", scope="content", regex="1"))
+        check("a pattern that does not compile is refused", status == 400, (status, r))
+        check("the refusal says what is wrong with it",
+              "regular expression" in json.dumps(r), r)
+        status, r = call(agent_port, "GET",
+                         search_url("MAGICTOKEN", scope="content", regex="1", exact="1"))
+        check("a pattern with exact=1 wants the whole line", not paths_of(r), paths_of(r))
+        status, r = call(agent_port, "GET",
+                         search_url("a%20line%20with%20MAGICTOKEN%20inside",
+                                    scope="content", regex="1", exact="1"))
+        check("a pattern with exact=1 matches the whole line",
+              "notes.txt" in paths_of(r), paths_of(r))
+        status, r = call(agent_port, "GET",
+                         search_url("MAGIC%5Cw%2A", scope="content", regex="1", path="docs"))
+        check("a pattern honours path= like a literal search does", not paths_of(r), paths_of(r))
+
         # ---- the search stays inside the workspace ---------------------------
         status, r = call(agent_port, "GET",
                          "/api/workspaces/%s/search?q=MAGICTOKEN&scope=content" % wid)
@@ -353,6 +397,15 @@ providers:
               "src/main.cpp" in output and "notes.txt" in output, output[:400])
         check("the tool reports the line numbers",
               "2: " in output, output[:400])
+
+        events = run_turn(agent_port, wid, "regex")
+        res = tool_results(events).get("toolkit_workspace_search")
+        check("the tool can search with a pattern", res is not None and res.get("ok"), res)
+        output = (res or {}).get("output", "")
+        check("the tool reports the pattern hits",
+              "src/main.cpp" in output and "notes.txt" in output, output[:400])
+        check("the tool says it searched the content",
+              "regex" in output, output[:200])
 
         tools = [t.get("function", {}).get("name")
                  for t in (MockProvider.records[0].get("tools") or [])]

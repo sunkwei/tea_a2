@@ -26,9 +26,17 @@ The vocabulary:
 
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
+
+# The planning core (sched/planning.py) holds the rules about a step's mode
+# (read-only or read-write) and its write paths. The queue and the extension
+# layer keep the same rules, so they live in one place.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import planning  # noqa: E402
 
 MAX_STEPS = 32
 MAX_PROMPT = 4000
@@ -84,6 +92,11 @@ def normalize_steps(steps, max_steps=MAX_STEPS):
             "workspace_id": str(raw.get("workspace_id") or "").strip(),
             "provider": str(raw.get("provider") or "").strip(),
             "model": str(raw.get("model") or "").strip(),
+            # Is this step read-only ("ro") or does it change something ("rw")?
+            # A step without a mode is "rw" - the safe answer. The rules are
+            # the shared ones (planning.check_modes).
+            "mode": raw.get("mode") or "",
+            "write_paths": raw.get("write_paths") or [],
         })
     # The dependencies must exist...
     for step in out:
@@ -95,6 +108,11 @@ def normalize_steps(steps, max_steps=MAX_STEPS):
     # ...and must not make a circle.
     if _topological_order(out) is None:
         raise PlanError("这些步骤互相对着等，永远不会开始")
+    # The mode of every step, checked by the shared rules.
+    try:
+        planning.check_modes(out)
+    except planning.PlanError as exc:
+        raise PlanError(str(exc))
     return out
 
 

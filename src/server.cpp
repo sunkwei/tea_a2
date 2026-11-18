@@ -4912,6 +4912,16 @@ void ApiServer::Impl::install_routes() {
             query.case_sensitive = req.has_param("case") &&
                                    (req.get_param_value("case") == "1" ||
                                     req.get_param_value("case") == "true");
+            // regex=1 => the query is a pattern (ECMAScript syntax). A
+            // pattern matches file content only - the scope asked for is
+            // ignored on purpose.
+            query.regex = req.has_param("regex") &&
+                          (req.get_param_value("regex") == "1" ||
+                           req.get_param_value("regex") == "true");
+            if (query.regex) {
+                query.names = false;
+                query.content = true;
+            }
             if (req.has_param("limit")) {
               const long long limit = atoll(req.get_param_value("limit").c_str());
               if (limit > 0) {
@@ -4921,6 +4931,12 @@ void ApiServer::Impl::install_routes() {
             }
 
             const SearchResults found = ws.search(query);
+            if (!found.error.empty()) {
+                // A pattern that does not compile is the caller's mistake:
+                // say so instead of answering "no matches".
+                send_error(res, 400, "bad_request", found.error);
+                return;
+            }
             nlohmann::json list = nlohmann::json::array();
             for (std::size_t i = 0; i < found.hits.size(); ++i) {
               list.push_back(found.hits[i].to_json());
@@ -4930,6 +4946,7 @@ void ApiServer::Impl::install_routes() {
             j["scope"] = scope.empty() ? "both" : scope;
             j["exact"] = query.whole;
             j["case_sensitive"] = query.case_sensitive;
+            j["regex"] = query.regex;
             j["path"] = query.subpath;
             j["root"] = ws.root();
             j["results"] = list;
