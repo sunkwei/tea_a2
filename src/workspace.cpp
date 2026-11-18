@@ -21,6 +21,16 @@ namespace tea {
 namespace {
 
 const char* const kRunDirName = ".tea_agent_run";
+
+/// The format of the workspace index (workspaces.json).
+///
+///   1 - "last_used_at" was stamped when the workspace was **added**;
+///   2 - "last_used_at" means "when it was used" (a turn ran there, or
+///       somebody switched to it in the UI).
+///
+/// An index of version 1 is migrated on load: those stamps are registration
+/// times, not usage times.
+const int kIndexVersion = 2;
 const char* const kMemoryFileName = "memory.json";
 
 /// Hard ceiling for `<run_dir>/agent.md`. The file is injected into the system
@@ -147,28 +157,36 @@ bool WorkspaceRegistry::load(const std::string& tea_home, std::string* err) {
     if (err) *err = "cannot read workspace index: " + index_path_;
     return false;
   }
+  // The index format:
+  //   1 - "last_used_at" was stamped when the workspace was **added** (and
+  //       again when it was registered a second time), so the field said
+  //       "when it was registered", not "when it was used";
+  //   2 - "last_used_at" means what it says: the last time a turn ran there
+  //       or somebody switched to it.
+  //
+  // An index of version 1 therefore carries registration times in that field.
+  // They are dropped on load (the registration time is in `created_at`
+  // anyway), and the index is written back as version 2.
+  int version = 1;
+  bool migrate = false;
   try {
     nlohmann::json j = nlohmann::json::parse(text);
     const nlohmann::json* list = nullptr;
     if (j.is_object()) {
+      if (j.contains("version") && j["version"].is_number_integer()) {
+        version = j["version"].get<int>();
+      }
       auto it = j.find("workspaces");
       if (it != j.end() && it->is_array()) list = &(*it);
     } else if (j.is_array()) {
       list = &j;
     }
+    migrate = version < kIndexVersion;
     if (list) {
       for (auto it = list->begin(); it != list->end(); ++it) {
         WorkspaceEntry e = WorkspaceEntry::from_json(*it);
         if (e.id.empty() && !e.path.empty()) e.id = make_id("ws_");
-        // The old index stamped `last_used_at` when the workspace was
-        // **added** - so the field said "when it was registered", not "when it
-        // was used". Those stamps are dropped on load: `created_at` already
-        // says when it was registered, and the field now means what it says.
-        // (A workspace that was added and used within the same second loses
-        // its stamp - rare, harmless, and it gets a new one on the next use.)
-        if (!e.last_used_at.empty() && e.last_used_at == e.created_at) {
-          e.last_used_at.clear();
-        }
+        if (migrate) e.last_used_at.clear();
         if (!e.path.empty()) entries_.push_back(e);
       }
     }
@@ -178,13 +196,19 @@ bool WorkspaceRegistry::load(const std::string& tea_home, std::string* err) {
   }
   refresh_flags();
   LOG_INFO("workspaces: loaded ", entries_.size(), " entr(ies) from ", index_path_);
+  if (migrate) {
+    LOG_INFO("workspaces: the index is from an older version - the \"last used\" stamps in it "
+             "were registration times; they are dropped");
+    std::string save_err;
+    if (!save(&save_err)) LOG_WARN("workspaces: cannot write the migrated index: ", save_err);
+  }
   return true;
 }
 
 bool WorkspaceRegistry::save(std::string* err) const {
   StateLock lock(state_mutex());
   nlohmann::json root = nlohmann::json::object();
-  root["version"] = 1;
+  root["version"] = kIndexVersion;
   root["updated_at"] = now_iso8601();
   nlohmann::json list = nlohmann::json::array();
   for (std::size_t i = 0; i < entries_.size(); ++i) list.push_back(entries_[i].to_json());

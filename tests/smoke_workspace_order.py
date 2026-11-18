@@ -340,6 +340,15 @@ providers:
                 on_disk.get(second) == stamps.get(second),
                 on_disk,
             )
+            # The migrated index is written back as the new format.
+            check("the index was migrated to the new format",
+                  index.get("version") == 2, index.get("version"))
+            check(
+                "the migrated index has no registration stamp left",
+                not any(e.get("last_used_at") for e in entries
+                        if e.get("id") == "ws_stale0000000000"),
+                entries,
+            )
 
         # A turn in the other workspace flips the order back.
         final = run_turn(first, "work in the first one now")
