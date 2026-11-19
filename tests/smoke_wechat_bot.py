@@ -802,6 +802,46 @@ def main():
               len([m for m in MockILink.sent
                    if any(i.get("type") == 4 for i in (m["msg"].get("item_list") or []))]) == 1,
               (reply, MockILink.sent))
+
+        # ---- 会话被拒：先说「让用户在微信里说一句话」 ---------------------
+        # 设备上 2026-11-19 实测：ret=-2 prepare failed 多半不是令牌过期，是
+        # 用户太久没给机器人发消息（会话过期，约一天以上就会被拒）—— 用户在
+        # 微信里说一句就复活；发得太快撞频率配额也是同一个报错。只有令牌真坏
+        # （errcode -14/-4）才需要重新扫码。所以状态里要留住「用户最后一次发
+        # 消息」的时刻，报错也要把它报出来。
+        st = bot.state
+        st.data["last_inbound"] = {}
+        check("没有用户消息记录时 idle_hours 是 None", bot.idle_hours() is None,
+              bot.idle_hours())
+        st.data["last_inbound"] = {"u1": int(time.time()) - 5 * 3600}
+        hours = bot.idle_hours()
+        check("idle_hours 报出用户多久没说话",
+              hours is not None and 4.9 < hours < 5.1, hours)
+        st.remember_context("u3", "ctx-3")
+        check("收到消息时记下 last_inbound",
+              (st.data.get("last_inbound") or {}).get("u3", 0) > 0,
+              st.data.get("last_inbound"))
+        st.forget_context("u3")
+        check("令牌被弃用后 last_inbound 还在（会话过期与否仍判断得了）",
+              (st.data.get("last_inbound") or {}).get("u3", 0) > 0,
+              st.data.get("last_inbound"))
+        st.data["last_inbound"] = {"u1": int(time.time()) - 5 * 3600}
+
+        seen = []
+        real_log = wechat_bot.log
+        wechat_bot.log = lambda message: seen.append(str(message))
+        try:
+            bot.session_blocked = False
+            bot.note_blocked(Exception("0: prepare failed"))
+        finally:
+            wechat_bot.log = real_log
+        text = "\n".join(seen)
+        check("会话被拒时先说「让用户在微信里发一句话」",
+              "会话过期" in text and "发一句话" in text, text)
+        check("会话被拒时报出用户多久没发消息", "5.0 小时前" in text, text)
+        check("会话被拒时不再说「重试没用」", "重试没用" not in text, text)
+        check("会话被拒会打开 session_blocked 标记", bot.session_blocked is True,
+              bot.session_blocked)
     finally:
         ilink.shutdown()
         queue.shutdown()

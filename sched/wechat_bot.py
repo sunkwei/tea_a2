@@ -532,6 +532,8 @@ class State:
     def remember_context(self, user_id, context_token):
         with self.lock:
             self.data.setdefault("contexts", {})[user_id] = context_token
+            # 用户刚给机器人发过消息的时刻（用来判断会话过期了没）
+            self.data.setdefault("last_inbound", {})[user_id] = int(time.time())
             # When the token arrived: the server refuses one that is older
             # than about a day, so its age decides whether it may be used.
             self.data.setdefault("context_times", {})[user_id] = int(time.time())
@@ -546,6 +548,10 @@ class State:
         """
         with self.lock:
             if (self.data.get("contexts") or {}).get(user_id):
+                # 保留“用户最后一次给机器人发消息”的时刻（令牌本身保存为空）
+                at = (self.data.get("context_times") or {}).get(user_id)
+                if at:
+                    self.data.setdefault("last_inbound", {})[user_id] = int(at)
                 self.data["contexts"][user_id] = ""
                 self.data.setdefault("context_times", {})[user_id] = 0
                 self.save()
@@ -1148,19 +1154,43 @@ class WeChatBot(channel.TaskChannel):
             time.sleep(gap)
         self._last_send = time.time()
 
+    def idle_hours(self):
+        """用户最后一次给机器人发消息是多久前（没有记录就返回 None）。"""
+        times = self.state.data.get("last_inbound") or {}
+        if not times:
+            return None
+        newest = max(int(v) for v in times.values() if v)
+        return (time.time() - newest) / 3600.0
+
     def note_blocked(self, exc):
         """The server refused the session itself - say so once, clearly.
 
         A refused context token is a small thing (the message goes out
         without it). A refused *session* is not: no message goes out at
-        all, no matter how often it is tried. The only cure is a new token
-        from a new QR scan.
+        all, no matter how often it is tried.
+
+        The cure is usually not a new QR scan: one message from the user
+        in WeChat revives the conversation (the server treats a bot that
+        has not been talked to for a long time as stale) - verified on
+        2026-11-19 17:39, sunwx: the same token pushed fine again one
+        minute after the user wrote to the bot. Only when that does not
+        help (or the token itself is dead: errcode -14/-4) is a re-scan
+        the way to go.
         """
         if "prepare failed" in str(exc) and not self.session_blocked:
             self.session_blocked = True
+            # 两种常见原因（都不是令牌过期）：① 用户太久没给机器人发消息
+            # （会话过期，实测约一天以上就会被拒）—— 让他在微信里给机器人
+            # 发一句话就能恢复，推送会立刻有效；② 发得太快撞了频率配额——
+            # 等几分钟再发。两条路都不通时才真需要重新扫码换 token。
+            idle = self.idle_hours()
             log("这个 bot 会话被服务端拒绝了（ret=-2 prepare failed）："
                 "连不带 context token 也发不出去 —— 是会话被拒，不是令牌过期。"
-                "重试没用，要重新扫码换 token："
+                "最多是①用户太久没给机器人发消息（会话过期）——"
+                "让他在微信里给机器人发一句话就能恢复，推送会立刻有效；"
+                "或者②发得太快撞了频率配额 —— 等几分钟再发。"
+                + ("（用户最后一次发消息是 %.1f 小时前）" % idle if idle else "（没有用户消息记录）")
+                + "两条都不行才重新扫码换 token："
                 "python3 /home/qdbot/a2/sched/wechat_multi.py --login %s"
                 % self.account_name())
 
