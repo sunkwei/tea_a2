@@ -178,10 +178,38 @@ class MockProvider(BaseHTTPRequestHandler):
             })
         record = MockProvider.records[-1]
 
+        fail = False
         if kind == "plan":
             # The agent turns the prompt into a user message, so the goal is
             # in the messages, not in a "prompt" field.
-            if "MIXED" in last_user:
+            if "FAILFIRST" in last_user:
+                # The step that changes something fails; the one that waits
+                # for it can never run.
+                plan = {
+                    "title": "two writes",
+                    "goal": "one after the other",
+                    "aggregate_prompt": "put it together",
+                    "steps": [
+                        {"key": "s1", "title": "改", "prompt": "SUBTASK-FAIL",
+                         "mode": "rw", "write_paths": ["out/"], "depends_on": []},
+                        {"key": "s2", "title": "改完再验", "prompt": "SUBTASK-NEVER",
+                         "mode": "rw", "write_paths": ["out2/"],
+                         "depends_on": ["s1"]},
+                    ],
+                }
+            elif "SUMMARIZE-FAIL" in last_user:
+                # One read-only step; its finding carries the marker the
+                # summary request will choke on.
+                plan = {
+                    "title": "one read",
+                    "goal": "read it",
+                    "aggregate_prompt": "put it together",
+                    "steps": [
+                        {"key": "s1", "title": "读", "prompt": "SUBTASK-SUMMARYFAIL",
+                         "mode": "ro", "depends_on": []},
+                    ],
+                }
+            elif "MIXED" in last_user:
                 plan = {
                     "title": "mixed",
                     "goal": "one read, one write",
@@ -207,7 +235,11 @@ class MockProvider(BaseHTTPRequestHandler):
                 }
             answer = json.dumps(plan, ensure_ascii=False)
         elif kind == "aggregate":
-            answer = "SUMMARY: the first step says ONE, the second says TWO"
+            if "SUMMARIZE-FAIL" in last_user:
+                fail = True
+                answer = "the provider is down"
+            else:
+                answer = "SUMMARY: the first step says ONE, the second says TWO"
         elif kind == "parent":
             answer = None
         elif kind == "after_tool":
@@ -216,8 +248,24 @@ class MockProvider(BaseHTTPRequestHandler):
             # A subtask: it takes a moment, so two of them overlap.
             time.sleep(SUBTASK_DELAY)
             answer = "SUBTASK-ANSWER"
+            if "SUBTASK-SUMMARYFAIL" in last_user:
+                answer = "SUMMARIZE-FAIL: the step found something"
+            if "SUBTASK-FAIL" in last_user:
+                fail = True
 
         streaming = bool(payload.get("stream"))
+        if fail:
+            # A provider that says no: the turn fails, which is what a step
+            # that cannot do its work looks like.
+            body = json.dumps({"error": {"message": "the provider is down"}}).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            with MockProvider.lock:
+                record["finished"] = time.time()
+            return
         if kind == "parent":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -367,8 +415,10 @@ def main():
 
     ws_a = os.path.join(tmp, "ws_a")
     ws_b = os.path.join(tmp, "ws_b")
-    os.makedirs(ws_a)
-    os.makedirs(ws_b)
+    ws_c = os.path.join(tmp, "ws_c")
+    ws_d = os.path.join(tmp, "ws_d")
+    for one in (ws_a, ws_b, ws_c, ws_d):
+        os.makedirs(one)
 
     config_path = os.path.join(tmp, "provider.yaml")
     with open(config_path, "w", encoding="utf-8") as f:
@@ -554,6 +604,67 @@ providers:
                   ("before=%d " % before) +
                   str([(r["kind"], r["last_user"][:24], r["started"], r["finished"])
                        for r in MockProvider.records]))
+
+        # ---- the planner is asked for what the tool allows ----------------
+        with MockProvider.lock:
+            plan_requests = [r["last_user"] for r in MockProvider.records
+                             if r["kind"] == "plan"]
+        check("the planner is asked for at most the steps the tool allows",
+              any("拆成不超过 4 个子任务" in one for one in plan_requests),
+              [one[:80] for one in plan_requests[:2]])
+
+        # ---- a step that waits for a failed step is skipped, not waited for -
+        status, made = call(agent_port, "POST", "/api/workspaces",
+                            {"path": ws_c, "name": "ws_c"})
+        wid_c = made.get("id") or made.get("workspace", {}).get("id") or ""
+        check("a third workspace is registered", bool(wid_c), made)
+
+        def status_of(pid):
+            _, text_out, _ = mcp_call(agent_port, "mcp__a2ext__toolkit_plan",
+                                      {"op": "status", "plan_id": pid})
+            return text_out
+
+        began = time.time()
+        status, output, body = mcp_call(agent_port, "mcp__a2ext__toolkit_plan",
+                                        {"op": "start", "goal": "FAILFIRST do it",
+                                         "workspace_id": wid_c})
+        match = re.search(r"(plan_[0-9a-f]+)", output or "")
+        plan_c = match.group(1) if match else ""
+        check("a plan whose first step will fail starts", bool(plan_c), output[:300])
+        # The budget is 300 s per step: if the scheduler waited for the step
+        # that can never run, this would take ten minutes (and burn a core).
+        def plan_over(text):
+            # "done" or "interrupted" - anything but still running. The
+            # summary text alone is not enough: "跑完了这里会有汇总" says 汇总.
+            return text if ("状态：完成" in text or "出错了" in text) else None
+
+        final = wait_for(lambda: plan_over(status_of(plan_c)),
+                         timeout=90.0) if plan_c else None
+        took = time.time() - began
+        check("a plan whose step failed still ends", final is not None, final)
+        check("it ends without waiting for the deadline", took < 60.0, took)
+        check("the step that waited for the failed one is marked skipped",
+              "skipped" in (final or ""), final)
+        check("the summary is told which step did not run",
+              final is not None and "没有完成" in final, final)
+
+        # ---- a summary that cannot be made says so ------------------------
+        status, made = call(agent_port, "POST", "/api/workspaces",
+                            {"path": ws_d, "name": "ws_d"})
+        wid_d = made.get("id") or made.get("workspace", {}).get("id") or ""
+        check("a fourth workspace is registered", bool(wid_d), made)
+        status, output, body = mcp_call(agent_port, "mcp__a2ext__toolkit_plan",
+                                        {"op": "start", "goal": "SUMMARIZE-FAIL look",
+                                         "workspace_id": wid_d})
+        match = re.search(r"(plan_[0-9a-f]+)", output or "")
+        plan_d = match.group(1) if match else ""
+        check("the plan for the failing summary starts", bool(plan_d), output[:300])
+        final = wait_for(
+            lambda: (lambda t: t if "出错了" in t else None)(status_of(plan_d)),
+            timeout=90.0) if plan_d else None
+        check("a summary that failed is reported to the caller", final is not None, final)
+        check("the plan still says the step itself ran",
+              final is not None and "done" in final, final)
 
         # ---- a model can call the tool in a turn ----------------------------
         events = run_turn(agent_port, wid_a, "SCENARIO=plan")

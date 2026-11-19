@@ -57,6 +57,7 @@ class MockAgent(BaseHTTPRequestHandler):
 
     records = []       # one entry per turn
     roles = []         # the roles the queue wrote into the workspace
+    existing_roles = []  # the roles the workspace already had (a test sets this)
     lock = threading.Lock()
 
     def log_message(self, *args):
@@ -76,9 +77,11 @@ class MockAgent(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/api/workspaces/"):
-            # The roles of the workspace: none yet, so the queue has to
-            # install the read-only one itself.
-            return self._json({"roles": [], "current": "", "current_id": ""})
+            # The roles of the workspace. Empty at first, so the queue has to
+            # install the read-only one itself; a test can hand the workspace
+            # a role of its own (see MockAgent.existing_roles).
+            return self._json({"roles": list(MockAgent.existing_roles),
+                               "current": "", "current_id": ""})
         if self.path.startswith("/api/health"):
             return self._json({"ok": True})
         return self._not_found()
@@ -348,6 +351,48 @@ def main():
             check("a task with a wrong mode is refused", status == 400, (status, answer))
         finally:
             stop(proc)
+
+        # ---- a role named readonly that is not read-only -------------------
+        # The role is the promise ("this task only reads"). A role with that
+        # name that may still run commands and write files is refused - and
+        # refused *before* the task runs, not silently downgraded to "runs
+        # without a role while the record still says ro".
+        MockAgent.records = []
+        MockAgent.roles = []
+        MockAgent.existing_roles = [
+            {"id": "readonly", "name": "只读", "read_only": False,
+             "tools": ["toolkit_file", "toolkit_exec"]},
+        ]
+        proc, queue_port = start_queue(tmp, agent_port, parallel=True)
+        try:
+            if not wait_health(queue_port):
+                print("the queue did not become healthy")
+                return 1
+            before = len(turns())
+            status, answer = call(queue_port, "POST", "/api/tasks", {
+                "prompt": "ROLE-CHECK", "mode": "ro"})
+            check("a read-only task is accepted", status == 200, (status, answer))
+
+            def role_task():
+                _, body = call(queue_port, "GET", "/api/tasks")
+                for one in (unwrap(body).get("tasks") or []):
+                    if one.get("prompt") == "ROLE-CHECK":
+                        return one
+                return None
+
+            done = wait_for(
+                lambda: (lambda t: t if t and t.get("status") in ("failed", "done")
+                         else None)(role_task()), timeout=60.0)
+            check("a read-only task does not run without a read-only role",
+                  bool(done) and done.get("status") == "failed", done)
+            check("the failure says why",
+                  done is not None and "read-only" in (done.get("error") or ""),
+                  (done or {}).get("error"))
+            check("nothing was submitted for it", len(turns()) == before,
+                  turns()[before:])
+        finally:
+            stop(proc)
+            MockAgent.existing_roles = []
     finally:
         agent.shutdown()
 

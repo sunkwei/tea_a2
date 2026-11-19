@@ -163,10 +163,12 @@ def _set_slot(plan, key, **fields):
 
 # --- the gates ---------------------------------------------------------------
 def _ensure_readonly_role(client, workspace_id):
-    """Put the read-only role into the workspace (if it is not there yet).
+    """Put the read-only role into the workspace (and check it is read-only).
 
-    The role is the promise: read_only is enforced by the tools, and the
-    tool list is what keeps the promise true.
+    The role is the promise: read_only is enforced by the tools, and the tool
+    list is what keeps the promise true. A role with this name that is *not*
+    read-only is refused - not used (the promise would be a word), and not
+    overwritten (the operator may have written it on purpose).
     """
     name = planning.read_only_role_name()
     try:
@@ -174,8 +176,13 @@ def _ensure_readonly_role(client, workspace_id):
     except Exception as exc:  # noqa: BLE001
         return False, "读不到这个工作区的角色：%s" % exc
     for role in listing.get("roles") or []:
-        if role.get("id") == name:
+        if role.get("id") != name:
+            continue
+        ok, why = planning.role_is_read_only(role)
+        if ok:
             return True, ""
+        return False, ("工作区里的角色 '%s' 不能用来跑只读子任务：%s（改回去，"
+                       "或者删掉它，让编排器重新装一份）" % (name, why))
     try:
         client.put_role(workspace_id, name, planning.read_only_role_yaml())
     except Exception as exc:  # noqa: BLE001
@@ -264,15 +271,36 @@ def _run_subtask(plan_id, key):
               elapsed_ms=int((_now() - started) * 1000))
 
 
-def _deps_done(step, finished):
+def _deps_settled(step, finished, failed):
+    """Is every step this one waits for over - done, or not coming?"""
     for dep in step.get("depends_on") or []:
-        if dep not in finished:
+        if dep not in finished and dep not in failed:
             return False
     return True
 
 
+def _deps_failed(step, failed):
+    """Does this step wait for one that did not make it?"""
+    for dep in step.get("depends_on") or []:
+        if dep in failed:
+            return True
+    return False
+
+
+def _skip_step(plan, key, why):
+    """Say a step will not run, instead of leaving it "pending" for ever."""
+    _set_slot(plan, key, state="skipped", error=why, finished_at=_stamp())
+
+
 def _run_plan(plan_id):
-    """The scheduler: read-only steps side by side, write steps alone."""
+    """The scheduler: read-only steps side by side, write steps alone.
+
+    A step that waits for a step which failed can never run. It is marked
+    "skipped" right away: leaving it "pending" made the loop wait for it - and
+    with nothing running there was nothing to wait on, so the loop spun on the
+    CPU until the deadline (tens of minutes with the default budget) and the
+    summary was never told what had happened.
+    """
     client = _client()
     plan = _plan_of(plan_id)
     if not plan:
@@ -289,6 +317,9 @@ def _run_plan(plan_id):
         if _now() > deadline:
             for key in list(running):
                 _stop_subtask(client, plan, key)
+                _set_slot(plan, key, state="stopped", finished_at=_stamp(),
+                          error="整个计划超过了时间上限，被收掉了")
+            running.clear()
             break
         rw_running = [k for k in running
                       if _mode_of(plan, k) == planning.MODE_RW]
@@ -297,7 +328,11 @@ def _run_plan(plan_id):
                 key = step.get("key")
                 if key in running or key in finished or key in failed:
                     continue
-                if not _deps_done(step, finished):
+                if not _deps_settled(step, finished, failed):
+                    continue
+                if _deps_failed(step, failed):
+                    _skip_step(plan, key, "它等的那一步没有完成")
+                    failed.add(key)
                     continue
                 if step.get("mode") == planning.MODE_RW:
                     # A write step runs alone: while it runs, nobody reads.
@@ -319,6 +354,27 @@ def _run_plan(plan_id):
                     failed.add(key)
         if running:
             time.sleep(POLL_SECONDS)
+            continue
+        # Nothing is running. If nothing can be started either, the rest of
+        # the plan waits for a step that will never finish: say so and stop.
+        # Spinning here burns a core, and the answer would be the same.
+        startable = False
+        for step in steps:
+            key = step.get("key")
+            if key in finished or key in failed:
+                continue
+            if _deps_settled(step, finished, failed) and not _deps_failed(step, failed):
+                startable = True
+                break
+        if startable:
+            continue
+        for step in steps:
+            key = step.get("key")
+            if key in finished or key in failed:
+                continue
+            _skip_step(plan, key, "它等的那一步没有完成")
+            failed.add(key)
+        break
 
     # Everything is done (or was stopped): the model puts it together.
     results = {}
@@ -329,14 +385,19 @@ def _run_plan(plan_id):
         if not text and slot.get("error"):
             text = "（这个子任务没有完成：%s）" % slot.get("error")
         results[key] = text
+    error = ""
     try:
         summary = planning.aggregate(client, plan, results)
     except Exception as exc:  # noqa: BLE001
         summary = ""
-        _set_slot(plan, "__aggregate__", state="failed", error=str(exc))
+        error = str(exc)
     with _PLAN_LOCK:
         plan["status"] = "done"
         plan["result"] = summary
+        # A summary that failed is not "there was nothing to say": the reason
+        # stays on the plan and op="status" reports it. An empty result with
+        # no reason reads like the plan simply had nothing to deliver.
+        plan["error"] = error
         plan["finished_at"] = _stamp()
         planning.save_plan(plan)
 
@@ -381,40 +442,118 @@ def _reaper_loop():
             pass
 
 
+def _parse_stamp(text):
+    """A UTC stamp from _stamp(), as a unix time (None when it is not one)."""
+    if not text:
+        return None
+    try:
+        return calendar.timegm(time.strptime(str(text), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _update_plan(plan_id, fields=None, slots=None):
+    """Write fields / slots of a plan - on disk and in the live copy.
+
+    The file is re-read under the lock first: the scheduler may have finished a
+    step while the reaper was looking at an older copy, and saving that copy
+    back would put the older state on disk (and, after a restart, in front of
+    whoever reads op="status").
+    """
+    with _PLAN_LOCK:
+        plan = planning.load_plan(plan_id)
+        if plan:
+            if fields:
+                plan.update(fields)
+            for key, values in (slots or []):
+                slot = (plan.get("subtasks") or {}).get(key)
+                if isinstance(slot, dict):
+                    slot.update(values)
+            planning.save_plan(plan)
+    with _LOCK:
+        live = _PLANS.get(plan_id)
+    if live is not None:
+        with _PLAN_LOCK:
+            if fields:
+                live.update(fields)
+            for key, values in (slots or []):
+                slot = (live.get("subtasks") or {}).get(key)
+                if isinstance(slot, dict):
+                    slot.update(values)
+
+
 def _reap_once():
-    client = _client()
+    """Stop the steps that overran, then close the plans nobody runs."""
     now = _now()
-    for plan in planning.list_plans():
-        limits = plan.get("limits") or DEFAULT_LIMITS
+    for loaded in planning.list_plans():
+        plan_id = str(loaded.get("id") or "")
+        if not plan_id:
+            continue
+        limits = loaded.get("limits") or DEFAULT_LIMITS
         limit_ms = int(limits.get("max_wall_ms") or 300000)
-        for key, slot in (plan.get("subtasks") or {}).items():
+        overdue = []
+        for key, slot in (loaded.get("subtasks") or {}).items():
             if not isinstance(slot, dict):
                 continue
             if str(slot.get("state") or "") != "running":
                 continue
-            started = str(slot.get("started_at") or "")
-            if not started:
-                continue
-            try:
-                begin = calendar.timegm(time.strptime(started, "%Y-%m-%dT%H:%M:%SZ"))
-            except Exception:  # noqa: BLE001
+            begin = _parse_stamp(slot.get("started_at"))
+            if begin is None:
                 continue
             if now - begin <= limit_ms / 1000.0 + GRACE_SECONDS:
                 continue
-            turn_id = str(slot.get("turn_id") or "")
-            if not turn_id:
-                continue
-            try:
-                client.stop_turn(turn_id)
-            except Exception:  # noqa: BLE001
-                continue
-            slot["state"] = "stopped"
-            slot["error"] = "超时，被回收掉了"
-            slot["finished_at"] = _stamp()
-            try:
-                planning.save_plan(plan)
-            except Exception:  # noqa: BLE001
-                pass
+            overdue.append((key, str(slot.get("turn_id") or "")))
+        if overdue:
+            client = _client()
+            for key, turn_id in overdue:
+                if not turn_id:
+                    continue
+                try:
+                    client.stop_turn(turn_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            _update_plan(plan_id, slots=[
+                (key, {"state": "stopped", "error": "超时，被回收掉了",
+                       "finished_at": _stamp()}) for key, _ in overdue])
+        _close_abandoned(plan_id, now, limit_ms)
+
+
+def _close_abandoned(plan_id, now, limit_ms):
+    """A plan that will never be finished again is closed.
+
+    After a restart (or a reload of this module) the scheduler thread is gone
+    with the old process and the plan file still says "running" - so
+    op="status" would say "还没跑完" for ever. The plan's own deadline plus a
+    slack for the summary decides when nobody is coming back for it.
+    """
+    fields = None
+    with _PLAN_LOCK:
+        plan = planning.load_plan(plan_id)
+        if not plan or str(plan.get("status") or "") != "running":
+            return
+        steps = plan.get("steps") or []
+        created = _parse_stamp(plan.get("created_at"))
+        if created is None:
+            return
+        slack = (limit_ms * max(1, len(steps))) / 1000.0 + GRACE_SECONDS + 300.0
+        if now - created <= slack:
+            return
+        for slot in (plan.get("subtasks") or {}).values():
+            if isinstance(slot, dict) and str(slot.get("state") or "") == "running":
+                return          # still somebody's work: the timeout pass has it
+        plan["status"] = "interrupted"
+        if not plan.get("error"):
+            plan["error"] = "这个计划没有跑完：编排进程重启过，剩下的步骤不会再跑了"
+        plan["finished_at"] = _stamp()
+        planning.save_plan(plan)
+        fields = {"status": plan["status"], "error": plan["error"],
+                  "finished_at": plan["finished_at"]}
+    if fields:
+        with _LOCK:
+            live = _PLANS.get(plan_id)
+        if live is not None:
+            with _PLAN_LOCK:
+                live.update(fields)
 
 
 def _ensure_reaper():
@@ -467,14 +606,37 @@ def _op_start(goal, workspace_id="", title="", max_subtasks=planning.MAX_SUBTASK
         max_subtasks = planning.MAX_SUBTASKS
 
     client = _client()
+    asked = (workspace_id or "").strip()
+    try:
+        workspaces = client.workspaces() or []
+        list_error = ""
+    except Exception as exc:  # noqa: BLE001
+        workspaces, list_error = [], str(exc)
+    workspace_id = asked
     if not workspace_id:
-        try:
-            workspaces = client.workspaces() or []
-        except Exception as exc:  # noqa: BLE001
-            return "连不上这台机器的 agent：%s" % exc
+        if list_error:
+            return "连不上这台机器的 agent：%s" % list_error
         if not workspaces:
             return "这台机器还没有工作区，编排不了。"
-        workspace_id = workspaces[0].get("id") or ""
+        workspace_id = str(workspaces[0].get("id") or "")
+    # Where the subtasks will run. It is said out loud in the answer: a plan
+    # that quietly runs in another project is the kind of mistake that gets
+    # expensive before anybody notices it.
+    name, path, known = "", "", False
+    for one in workspaces:
+        if str(one.get("id") or "") == workspace_id:
+            name = str(one.get("name") or "")
+            path = str(one.get("path") or "")
+            known = True
+            break
+    if workspaces and not known:
+        return "没有这个工作区：%s（有：%s）" % (
+            workspace_id,
+            "、".join(str(one.get("id") or "") for one in workspaces)[:400])
+    note = ""
+    if len(workspaces) > 1 and not asked:
+        note = ("（这台机器有 %d 个工作区，默认用第一个；要换就在 workspace_id 里说）"
+                % len(workspaces))
 
     with _LOCK:
         last = float(_LAST_START.get(workspace_id) or 0)
@@ -487,7 +649,11 @@ def _op_start(goal, workspace_id="", title="", max_subtasks=planning.MAX_SUBTASK
         _LAST_START[workspace_id] = _now()
 
     try:
-        plan = planning.make_plan(client, goal, title=title)
+        # The plan may not have more steps than this call allows: the model is
+        # asked for that many in the first place (asking for six and then
+        # refusing five spends a model call and a minute of cooldown for
+        # nothing).
+        plan = planning.make_plan(client, goal, title=title, max_steps=max_subtasks)
     except planning.PlanError as exc:
         return "模型给出的计划不能用：%s" % exc
     except Exception as exc:  # noqa: BLE001
@@ -505,6 +671,8 @@ def _op_start(goal, workspace_id="", title="", max_subtasks=planning.MAX_SUBTASK
 
     plan["id"] = planning.new_plan_id()
     plan["workspace_id"] = workspace_id
+    plan["workspace_name"] = name
+    plan["workspace_path"] = path
     plan["created_at"] = _stamp()
     plan["status"] = "running"
     plan["limits"] = dict(DEFAULT_LIMITS)
@@ -532,12 +700,40 @@ def _op_start(goal, workspace_id="", title="", max_subtasks=planning.MAX_SUBTASK
     thread.start()
     _ensure_reaper()
 
-    lines = ["编排已经开始了（计划 %s）：" % plan["id"],
-             planning.summarize(plan),
-             "",
-             "子任务在后台跑。用 toolkit_plan(op=\"status\", plan_id=\"%s\") 看进展；"
-             "都跑完之后那里会有汇总。" % plan["id"]]
+    lines = ["编排已经开始了（计划 %s，工作区：%s）："
+             % (plan["id"], _plan_workspace_label(plan)),
+             planning.summarize(plan)]
+    if note:
+        lines.append(note)
+    lines.append("")
+    lines.append("子任务在后台跑。用 toolkit_plan(op=\"status\", plan_id=\"%s\") 看进展；"
+                 "都跑完之后那里会有汇总。" % plan["id"])
     return "\n".join(lines)
+
+
+_STATE_LABELS = {
+    "pending": "还没开始",
+    "running": "在跑",
+    "done": "完成",
+    "failed": "失败",
+    "stopped": "被停下",
+    "budget": "到预算",
+    "interrupted": "被中断",
+    "skipped": "没有跑（等的那一步没有完成）",
+}
+
+
+def _state_label(state):
+    text = str(state or "unknown")
+    label = _STATE_LABELS.get(text)
+    return "%s（%s）" % (label, text) if label else text
+
+
+def _plan_workspace_label(plan):
+    """Where the plan runs, the way a person reads it."""
+    name = plan.get("workspace_name") or plan.get("workspace_id") or "?"
+    path = plan.get("workspace_path") or ""
+    return "%s (%s)" % (name, path) if path else str(name)
 
 
 def _op_status(plan_id, subtask=""):
@@ -553,9 +749,10 @@ def _op_status(plan_id, subtask=""):
         if not slot:
             keys = "、".join(sorted((plan.get("subtasks") or {}).keys()))
             return "这个计划里没有子任务 %s（有：%s）" % (subtask, keys or "无")
-        lines = ["子任务 %s（%s，%s）：" % (subtask, slot.get("title") or "",
-                                          slot.get("mode") or ""),
-                 "  状态：%s" % (slot.get("state") or "unknown")]
+        lines = ["子任务 %s（%s，%s）在工作区：%s" % (
+                     subtask, slot.get("title") or "", slot.get("mode") or "",
+                     _plan_workspace_label(plan)),
+                 "  状态：%s" % _state_label(slot.get("state"))]
         if slot.get("turn_id"):
             lines.append("  回合句柄：%s" % slot.get("turn_id"))
             lines.append("  过程：%s/api/turns/%s/events" % (_agent_base(), slot.get("turn_id")))
@@ -575,14 +772,15 @@ def _op_status(plan_id, subtask=""):
             lines.append(str(slot.get("result")))
         return "\n".join(lines)
 
-    lines = ["计划 %s：%s" % (plan["id"], plan.get("title") or ""),
+    lines = ["计划 %s：%s" % (plan.get("id") or plan_id, plan.get("title") or ""),
              "  目标：%s" % (plan.get("goal") or ""),
-             "  状态：%s" % (plan.get("status") or "unknown")]
+             "  工作区：%s" % _plan_workspace_label(plan),
+             "  状态：%s" % _state_label(plan.get("status"))]
     for step in plan.get("steps") or []:
         slot = _slot(plan, step.get("key"))
         lines.append("  - %-6s [%s] %s：%s" % (step.get("key"), step.get("mode"),
                                               step.get("title") or "",
-                                              slot.get("state") or "pending"))
+                                              _state_label(slot.get("state") or "pending")))
     if plan.get("result"):
         lines.append("")
         lines.append("汇总：")
@@ -590,6 +788,9 @@ def _op_status(plan_id, subtask=""):
     elif plan.get("status") == "running":
         lines.append("")
         lines.append("还没跑完。跑完了这里会有汇总。")
+    if plan.get("error"):
+        lines.append("")
+        lines.append("出错了：%s" % plan.get("error"))
     return "\n".join(lines)
 
 
@@ -641,3 +842,9 @@ def meta_toolkit_plan():
             },
         },
     }
+
+
+# The reaper runs from the moment this module is loaded, not from the first
+# plan: a plan left behind by an earlier process (or by a reload of this
+# module) has nobody else to close it.
+_ensure_reaper()

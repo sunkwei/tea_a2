@@ -213,13 +213,18 @@ def check_modes(steps):
             raw_paths = []
         write_paths = []
         for one in raw_paths:
-            one = str(one or "").strip().replace("\\", "/").strip("/")
-            if not one:
+            given = str(one or "").strip().replace("\\", "/")
+            # The path is inspected as it was written: stripping the leading
+            # "/" first would turn "/etc/passwd" into a relative path and hide
+            # the mistake (it did).
+            if not given or given == ".":
                 continue
-            if one.startswith("..") or one.startswith("/"):
+            if (given.startswith("/") or (len(given) > 1 and given[1] == ":")
+                    or ".." in given.split("/")):
                 raise PlanError("第 %d 个子任务的 write_paths 必须是工作区里的相对路径：%s"
-                                % (index, one))
-            if one not in write_paths:
+                                % (index, given))
+            one = given.strip("/")
+            if one and one not in write_paths:
                 write_paths.append(one)
         if mode == MODE_RO and write_paths:
             raise PlanError("第 %d 个子任务标了只读（ro），却又写了 write_paths：%s"
@@ -329,14 +334,36 @@ def make_plan(client, goal, title="", max_steps=MAX_STEPS, timeout=180,
     return plan
 
 
-def aggregate_prompt(plan, results):
+# How much of one step's result the summary is shown. The results of four
+# steps are easily longer than the model's whole context - and a summary that
+# cannot be made is a plan that delivered nothing.
+MAX_RESULT_CHARS = 8000
+
+MISSING_RESULT = "（这个子任务没有留下结果）"
+
+
+def result_text(value, limit=MAX_RESULT_CHARS):
+    """One step's result, as the summary sees it.
+
+    A step that left nothing behind says so: an empty section reads like "this
+    step found nothing", which is a different thing from "this step did not
+    run".
+    """
+    text = value if isinstance(value, str) else str(value or "")
+    text = text.strip() or MISSING_RESULT
+    if limit and len(text) > limit:
+        text = "%s\n（……太长了，只给了前 %d 个字；原文共 %d 个字）" % (
+            text[:limit], limit, len(text))
+    return text
+
+
+def aggregate_prompt(plan, results, max_result_chars=MAX_RESULT_CHARS):
     """What the model is asked to turn the steps' results into one answer."""
     parts = []
     for step in plan.get("steps") or []:
-        text = (results or {}).get(step.get("key")) or ""
+        text = result_text((results or {}).get(step.get("key")), max_result_chars)
         title = step.get("title") or step.get("key") or ""
-        parts.append("【%s】\n%s" % (title, text.strip() if isinstance(text, str) else str(text)
-                                     or "（这个子任务没有留下结果）"))
+        parts.append("【%s】\n%s" % (title, text))
     goal = plan.get("goal") or plan.get("title") or ""
     ask = plan.get("aggregate_prompt") or "把这些结果汇总成一份完整、可以直接交付的结果。"
     # The wording is the queue's own (it is what the queue's callers and
@@ -436,6 +463,34 @@ def read_only_role_name():
 def read_only_role_yaml():
     """The read-only role, as the workspace wants it."""
     return READ_ONLY_ROLE_YAML
+
+
+# The tools a read-only role must not have: a command can write anything, the
+# memory and the agent doc are shared state that the other steps read, and the
+# orchestrator tool would let a read-only step start more work.
+READ_ONLY_FORBIDDEN_TOOLS = ("toolkit_exec", "toolkit_memory", "toolkit_agent_doc",
+                             "mcp__a2ext__toolkit_plan")
+
+
+def role_is_read_only(role):
+    """Is this workspace role really read-only? (ok, why)
+
+    The name is not enough: a role called "readonly" that lists toolkit_exec -
+    or that lists no tools at all, which in a2 means *every* tool - can change
+    anything. The queue and the extension layer both ask this before they let
+    a read-only step run under the role.
+    """
+    if not isinstance(role, dict):
+        return False, "这个角色不是一个对象"
+    if not role.get("read_only"):
+        return False, "read_only 不是 true"
+    tools = [str(t) for t in (role.get("tools") or [])]
+    if not tools:
+        return False, "没有工具清单（空清单在 a2 里等于全部工具）"
+    bad = [t for t in READ_ONLY_FORBIDDEN_TOOLS if t in tools]
+    if bad:
+        return False, "工具清单里有不该给的：%s" % "、".join(bad)
+    return True, ""
 
 
 def summarize(plan):

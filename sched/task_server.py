@@ -1558,7 +1558,9 @@ class Engine:
 
         The role is the promise: read_only is enforced by the tools, and the
         tool list is what keeps the promise true. A role that is already
-        there is left alone - the operator may have changed it on purpose.
+        there is checked and then left alone (the operator may have edited
+        it): a role called "readonly" that may still write would keep the
+        promise on paper only, so it is refused instead of being used.
         """
         name = planning.read_only_role_name()
         if workspace_id in self._readonly_roles:
@@ -1566,9 +1568,14 @@ class Engine:
         try:
             listing = self.agent.roles(workspace_id) or {}
             for role in listing.get("roles") or []:
-                if role.get("id") == name:
+                if role.get("id") != name:
+                    continue
+                ok, why = planning.role_is_read_only(role)
+                if ok:
                     self._readonly_roles.add(workspace_id)
                     return True, ""
+                return False, ("the role '%s' in this workspace is not read-only: %s"
+                               % (name, why))
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
         try:
@@ -2608,10 +2615,20 @@ class Engine:
         role = ""
         if str(task.get("mode") or "rw").strip().lower() == "ro":
             ok, why = self._ensure_readonly_role(workspace_id)
-            if ok:
-                role = planning.read_only_role_name()
-            else:
-                log("  task %s: the read-only role is not available: %s", task_id, why)
+            if not ok:
+                # The role *is* the promise ("this task only reads"). Running
+                # the task without it would keep the record saying "ro" - so it
+                # would still be scheduled next to another read-only task, with
+                # the whole tool set in hand. It does not run at all.
+                log("  task %s: the read-only role is not available: %s" % (task_id, why))
+                written = self._finalize(workspace_id, task_id, FAILED, {
+                    "error": "the read-only role is not available: %s" % why,
+                    "stop_reason": "read_only_role_missing",
+                    "finished_at": now_iso()})
+                if written is not None:
+                    self._publish({"type": "task_failed", "task": written})
+                return
+            role = planning.read_only_role_name()
         policy = task.get("policy") or {}
         # What the queue knows about this turn while it runs. It is passed
         # around instead of being a local variable, because the turn can be
