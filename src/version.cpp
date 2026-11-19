@@ -16,7 +16,7 @@ namespace {
 /// included by six translation units, and a constant in a header is pulled
 /// into every one of them - a version bump would rebuild all six
 /// (server.cpp among them) instead of this single file.
-const char* const kVersionString = "1.6.1";
+const char* const kVersionString = "1.6.2";
 
 /// The commit recorded in tea_agent.buildinfo next to the executable.
 ///
