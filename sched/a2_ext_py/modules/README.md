@@ -29,4 +29,8 @@ servers:
 模块靠 `sched/planning.py`（规划内核：模型分解 + 模型汇总 + 校验）。它从 MCP 服务器
 自己的路径推出源码目录；也可以用 `TEA_A2_SCHED` 显式指过去。
 
+> **模块与内核要配套**：模块用到规划内核里的函数（如 `role_is_read_only()`、
+> `result_text()`），两者要来自同一个版本。升级时别只拷模块——`TEA_A2_SCHED` 指着
+> 一棵旧源码树，工具会在加载时直接报错（`planning has no attribute …`）。
+
 只用标准库，不用 pip 装东西。

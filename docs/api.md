@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`1.6.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
+| `GET` | `/api/health` | 探活、版本（`1.6.2`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
@@ -26,7 +26,7 @@
 | `GET` | `/api/workspaces` | 工作区索引（`index_path` + `workspaces[]`）。**按「最近用过的在前」排**（一轮跑在哪个工作区里，就把哪个挪到前面；`last_used_at` 是那个时间戳，毫秒精度，所以同一秒里用过两个也能分出来。没用过的按登记顺序）。每条带 `writable`（这个工作区进程**能不能写**）与 `write_error`（不能写的原因，带着操作系统自己的话）；`run_dir` 是运行数据的位置——项目目录写不进去时它落在 tea home 里 |
 | `POST` | `/api/workspaces` | 注册工作区 `{"path":"…","name":"…"}`（可加 `"create":true` 让服务端先把目录建出来）。路径里的 `~` / `$HOME` / `${HOME}`（Windows 上还有 `%USERPROFILE%`）会先展开成**服务端那台机器**的用户目录，索引里存的是展开后的绝对路径；相对路径仍然拒绝。回答里带 `warning` 就说明工作区写不进去、或者索引 `workspaces.json` 没写成功（重启后这条登记就没了） |
 | `GET` | `/api/workspaces/{id}/tree?path=` | 列目录 |
-| `GET` | `/api/workspaces/{id}/search?q=` | **在工作区里搜东西**：文件名 + 文件内容。查询串按原样逐字节比较（**不做正则/模糊匹配**）。`scope=name\|content\|both`（默认 both）、`exact=1`（完全匹配：路径整串相等 / 整行相等）、`case=1`（区分大小写）、`path=`（只搜这个子目录）、`limit=`（最多几条，默认 100）、`regex=1`（查询串当 **ECMAScript 正则**，只匹配文件内容；默认关着） |
+| `GET` | `/api/workspaces/{id}/search?q=` | **在工作区里搜东西**：文件名 + 文件内容。默认按原样逐字节比较（**不做正则/模糊匹配**）。`scope=name\|content\|both`（默认 both）、`exact=1`（完全匹配：路径整串相等 / 整行相等）、`case=1`（区分大小写）、`path=`（只搜这个子目录）、`limit=`（最多几条，默认 100）、`regex=1`（查询串当 **ECMAScript 正则**，只匹配文件内容；默认关着） |
 | `GET` / `PUT` | `/api/workspaces/{id}/file` | 读 / 写文件。`GET` 的回答里除了 `path` / `size` / `truncated` / `content`，还有 `binary`：文件里头 8 KB 有 NUL 字节就是 true（预览页据此说「预览不了」而不是显示一屏乱码） |
 | `GET` | `/api/workspaces/{id}/raw?path=` | 读文件原始字节（图片 / PDF 等，**16 MB 上限**，用于在页面里显示） |
 | `GET` | `/api/workspaces/{id}/download?path=` | 以附件形式下载文件（`Content-Disposition: attachment`），**从磁盘流式发送、无 16 MB 限制**；`&inline=1` 改为在浏览器里直接打开（视频 / PDF） |
@@ -491,7 +491,8 @@ curl -s "http://127.0.0.1:8282/api/workspaces/$WS/search?q=TODO%7CFIXME&scope=co
 ```
 
 正则编译不过 → `400 bad_request`（`invalid regular expression: …`）——**不会静默当成
-字面量**。正则式 ≤ 256 字符，单次搜索最多看 20 万行。
+字面量**。正则式 ≤ 256 字符，单次搜索最多看 20 万行（按**行数**算，单行特别长时挡不住
+回溯——给准 `path=`，别写 `(a+)+b`）。
 
 ```json
 {

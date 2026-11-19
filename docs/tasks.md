@@ -165,7 +165,7 @@ curl http://127.0.0.1:8283/api/tasks
 | --- | --- | --- |
 | `GET` | `/api/health` | 服务自己、以及它连着的 agent 的状态、队列计数 |
 | `GET` | `/api/tasks?workspace_id=&status=` | 任务列表 + 每种状态的计数 |
-| `POST` | `/api/tasks` | 排队：`{workspace_id?, prompt, title?, provider?, model?, model_params?, allow_paths?, meta?}` |
+| `POST` | `/api/tasks` | 排队：`{workspace_id?, prompt, title?, provider?, model?, model_params?, allow_paths?, meta?, mode?}`（`mode`：`"ro"` 只读 / `"rw"` 会写，缺省 rw） |
 | `GET` | `/api/tasks/{id}?workspace_id=` | 单个任务：状态、进度、中间状态、结果（生成物带下载链接） |
 | `GET` | `/api/tasks/{id}/download?path=&workspace_id=` | 下载这个任务产出的一个文件（队列自己伺服，agent 在别的机器上也行） |
 | `GET` | `/api/workspaces` | 任务可以放在哪些工作区里（agent 的 + 队列自己的）——网页的下拉框就是它画的 |
@@ -205,6 +205,7 @@ python3 sched/task_server.py --submit "把 README 的例子跑一遍" --title "�
 | `workspace` | 工作区的**路径**（也可以写 id）——人写路径，队列换成 agent 认识的那个 id |
 | `not_before`（或 `start_at`） | 什么时候开始做：`"+5"`、`"23:30"`、`"+30m"`、`"+2d"`、`"2026-10-24T09:00:00Z"`，或者**本机时间** `"2026-10-24T09:30"`（网页的日期框给的就是这个） |
 | `model_params` | 这一轮用哪些模型参数：`{"temperature": 0.3, "max_tokens": 8000, "reasoning_effort": "off"}` |
+| `mode` | `"ro"`（只读，可以和其他只读任务并行）或 `"rw"`（会写东西，独占这个项目；**缺省**）。写别的当场 400。只读任务要跑在只读角色下（见上面 `--parallel-ro-steps`） |
 
 **模型参数**是 agent 自己 `/api/chat` 也认的那几个旋钮（`temperature`、`top_p`、`top_k`、
 `frequency_penalty`、`presence_penalty`、`seed`、`max_tokens`、`reasoning_effort`）。
@@ -451,8 +452,9 @@ tail -f ~/.tea_agent/logs/a2_telegram.log
   原子的）。
 
 没标就是 `"rw"`（保守：只读的活儿标成会写，最多是白跑一次；会写的活儿标成只读，则会写不成）。
-一个只读步骤带 `write_paths`、或者两个会写的步骤写同一个地方，都会被当场拒绝（400）——
-模型自己写错了，在开工前发现比干到一半发现好。
+`write_paths` 是**工作区里的相对路径**：绝对路径（`/etc/passwd`、`C:/…`）和带 `..` 的
+一律拒。一个只读步骤带 `write_paths`、或者两个会写的步骤写同一个地方，都会被当场拒绝（400）
+——模型自己写错了，在开工前发现比干到一半发现好。
 
 开关是 `--parallel-ro-steps`（默认关）：关着时队列**一个字没变**（一个项目一个时刻一个任务），
 开了以后只读步骤才并行。详见 [多 agent 并发](multi_agent.md)。
@@ -620,6 +622,12 @@ agent，这台机器上还有别的 agent（比如 8383 上那个）时加 `--ag
 **例外：只读任务可以并行**（`--parallel-ro-steps`，默认关）。两个**只读**任务
 （`mode: "ro"`）不写任何东西，可以同时跑；**会写的任务（`mode: "rw"`）仍然独占**——
 它正在改的文件不是另一个任务能读的文件。开关关着时，队列的行为一个字没变。
+
+只读任务**必须**跑在只读角色下：队列第一次给某个工作区装 `readonly` 角色；已经有的
+（操作者可能改过）会先检查——`read_only` 不为真、工具清单里有 `toolkit_exec`/内存/文档
+工具、或者干脆没有工具清单（= 全部工具）都不算只读。**检查不过就不跑**：任务直接判失败
+（`error` 说明原因，`stop_reason: read_only_role_missing`），而不是在没有角色的情况下照跑
+——那样它仍然会被当成只读任务和别的只读任务并行，手里却握着全套工具。
 
 **权限按项目**：每个项目一把钥匙，`Authorization: Bearer <key>`（或 `X-Project-Key`）带着它就
 **只能**碰这个项目的任务、事件、导出和排队，别人的 → 403。钥匙由本机操作者用

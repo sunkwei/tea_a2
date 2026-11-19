@@ -3328,3 +3328,65 @@ beacon 只能是 **POST**，所以服务端加了 `POST .../close` 路由
 
 测试：`tests/smoke_workspace_order.py`（10 条）+ `tests/ui_workspace_order.mjs`
 （8 条，浏览器里点开下拉框看顺序）。
+
+## 一个大任务拆成并行子任务（1.6.0 / 1.6.1；复审的七个修复在 1.6.2）
+
+**为什么放在策略层**：a2 的内核早就能并发跑多轮（一个会话 = 一个 agent，`launch_turn`
+起一个 worker 线程），缺的只是「谁去拆、谁去汇总」。所以这一版 C++ 一行没动，全在
+`sched/`：
+
+| 落在哪 | 是什么 |
+| --- | --- |
+| `sched/planning.py` | 共用内核：模型出计划（每步标 `ro`/`rw`）、校验、模型汇总、只读角色的 YAML |
+| `sched/a2_ext_py/modules/toolkit_plan.py` | 两段式 MCP 工具（`op=start` 秒回、`op=status` 取结果）+ 调度器 + 闸门 + 回收器 |
+| `sched/task_server.py` | 队列那一侧：任务的记录带 `mode`，`--parallel-ro-steps` 打开后 ro 并行 |
+| `web/app.js` | 「并行中的轮次」面板：子 agent 各自一个会话，轨迹不在父会话里，这里是它们唯一的去处 |
+
+**只读是机制层的保证，不是提示词里的一句话**：`ro` = 角色 `readonly`
+（`read_only: true` → `src/tools.cpp:424` 拒绝写/建/删/移） + 工具白名单（没有
+`toolkit_exec`、内存、agent doc、编排工具）。白名单靠 `launch_turn` 的工具交集生效，
+MCP 工具也在工具表里，所以 `mcp__a2ext__toolkit_plan` 天然被挡在只读之外。
+
+**复审（1.6.2 之前）修掉的七个坑**——都是「看起来对、跑起来不对」：
+
+1. **依赖失败 → 调度器空转**。`_deps_done()` 只认 `done`，失败/超时/被停的进的是
+   `failed`；于是「s2 等 s1、s1 失败」时 s2 永远起不来也永远不算结束，`while` 不退出、
+   `running` 又是空的（没有 `sleep`）→ **100% 占一个核**直到 deadline（默认 300 秒 ×
+   步数）。而且汇总里 s2 是空串。修法：依赖不可达就标 `skipped`；没有在跑的也没有能跑的
+   就收尾。复现/回归：`.tea_agent_run/scripts/review_plan_checks.py`、
+   `tests/smoke_plan_orchestrator.py`（「it ends without waiting for the deadline」）。
+2. **`_set_slot(plan, "__aggregate__", …)` 是空操作**。`_set_slot` 只在槽位已存在时才写，
+   `__aggregate__` 从来不存在 → 汇总失败的**原因整个丢掉**，计划只留一个空 `result`。
+   修法：把错误记到 `plan["error"]`，`op="status"` 报「出错了：…」。
+3. **回收器只在第一次 `op=start` 时起**。扩展进程重启（a2 重启、网页里刷新 MCP）之后，
+   老计划既没有调度器也没有回收器，永远停在 `running`。修法：模块**加载时**就起；过了
+   「自身 deadline + 5 分钟」还没跑完且没人在跑的计划标 `interrupted`。
+4. **回收器用旧快照整份写盘**。它 load 一份、改一格、整份存回；中间调度器刚写好的
+   `result`/`state` 会被盖回旧值（重启后看历史就错了）。修法：写之前在同一把锁里重读，
+   只改那一格。
+5. **`write_paths` 的绝对路径校验是死代码**：先 `.strip("/")` 再判 `startswith("/")`，
+   永远为假；`/etc/passwd` 被**静默改写成** `etc/passwd`，`a/../../etc` 更是直接放过。
+   修法：按原样判绝对路径/盘符/`..` 段。
+6. **`aggregate_prompt()` 的兜底写错了分支**：`text.strip() if isinstance(text, str) else
+   str(text) or "（没有留下结果）"`——三元优先级让兜底只落在非字符串分支上，`result == ""`
+   （最常见的失败形态）时给汇总的是一个**空段落**，读起来像「这个子任务什么都没找到」。
+   修法：抽 `result_text()`，空串就说没留下结果；顺带把单步结果截到 8000 字（四步结果
+   很容易超模型上下文，超了就是一次 400 → 空汇总）。
+7. **队列：只读角色装不上就静默降级**。`_ensure_readonly_role()` 失败只打一行日志，任务
+   继续以 `role=""` 跑，而记录里还是 `mode: "ro"` → 调度器让它和别的只读任务并行，它却
+   握着全套工具。修法：装不上/不合规**不跑**（`stop_reason: read_only_role_missing`）。
+   顺带：已存在的 `readonly` 角色要**校验内容**（`read_only` + 非空工具清单 + 不在禁止
+   名单）——只断言名字等于没断言；空清单在 a2 里是「全部工具」，最容易漏。
+
+**判断标准**：只读的承诺必须能在**机制层**被验证（工具层拒绝 + 工具清单），凡是「名字对了
+就算」的检查都要再看一眼内容。
+
+**回归**：`tests/smoke_planning_rules.py`（28：纯函数，校验/汇总提示词/角色判定）、
+`tests/smoke_plan_orchestrator.py`（37：两段式、并行与独占、依赖失败、汇总失败、
+planner 被要求的上限）、`tests/smoke_plan_parallel.py`（19：开关、只读角色、不合规角色）、
+`tests/ui_parallel_turns.mjs`（12）。
+
+**部署注意**：`toolkit_plan.py` 是**拷贝**到 `~/.tea_agent/ext/` 的（不是从源码目录加载），
+改完要重新 `cp` + `POST /api/mcp/refresh`；队列侧改的是 `sched/task_server.py`，要换
+那份文件再重启队列。P1-2 之后，**旧版 `a2_ext_py`（没有 `roles()` 接口）会让只读任务以
+`read_only_role_missing` 失败**——换二进制/模块时把 `client.py` 一起换。
