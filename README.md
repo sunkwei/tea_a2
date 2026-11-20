@@ -6,6 +6,12 @@
 
 把大模型 agent 的「手和脚」放到设备上;
 
+<picture>
+  <source type="image/svg+xml" srcset="docs/images/brand/hero.svg">
+  <img src="docs/images/brand/hero.png" width="1200"
+       alt="tea_a2：一个自包含的 C++ agent 运行时——一个二进制、本地 HTTP/SSE，把大模型 agent 的手和脚放到设备上。右侧示意一节终端：tea_agent --workspace .、POST /api/chat、toolkit_exec ls -la。">
+</picture>
+
 <br/>
 
 <a href="https://github.com/sunkwei/tea_a2"><img alt="repo" src="https://img.shields.io/badge/repo-sunkwei%2Ftea__a2-181717.svg"></a>
@@ -24,20 +30,15 @@
 嵌入式设备上通常跑不了通用 agent，「在设备上干活」需要的是本地能力：执行命令、读写文件、
 记住上下文。`tea_a2` 就是这部分能力的最小实现：
 
-```
-┌──────────────────────┐        HTTP / SSE (JSON)        ┌───────────────────────────┐
-│  Remote brain        │  ───────────────────────────▶  │  Embedded device          │
-│  (LLM agent /        │                                 │  ┌─────────────────────┐  │
-│   orchestrator /     │   POST /api/chat                │  │ tea_a2 (single exe) │  │
-│   云端 workflow)     │   ◀─── content_delta / tools ── │  │  · agent loop       │  │
-└──────────────────────┘                                 │  │  · tools            │  │
-                                                         │  │  · workspaces       │  │
-                                                         │  │  · built-in Web UI  │  │
-                                                         │  └─────────┬───────────┘  │
-                                                         │            │              │
-                                                         │     本地文件 / 本地命令    │
-                                                         └───────────────────────────┘
-```
+<p align="center">
+  <picture>
+    <source type="image/svg+xml" srcset="docs/images/brand/architecture.svg">
+    <img src="docs/images/brand/architecture.png" width="1200"
+         alt="架构：上层 agent（云端 workflow，或另一个 tea_a2）用 POST /api/chat 下发任务，用 SSE（content_delta / tool_call / done）收回过程与结果；设备上跑一个 tea_a2 二进制，内含 agent loop、工具、工作区与内置 Web UI，工具落到本地文件与本地命令；不需要安装运行时。">
+  </picture>
+</p>
+
+一条流同时给「过程」和「结果」——上层不用轮询，设备也不用暴露文件系统。
 
 | 模式 | 说明 |
 | --- | --- |

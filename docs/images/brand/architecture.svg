@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" width="1200" height="460"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="1200" height="420"
      role="img" aria-label="tea_a2 架构：上层 agent 通过 HTTP/SSE 驱动设备上的单个二进制">
   <title>tea_a2 架构：上层 agent 通过 HTTP/SSE 驱动设备上的单个二进制</title>
   <defs>
@@ -11,56 +11,57 @@
     </radialGradient>
   </defs>
 
-    <rect x="0.5" y="0.5" width="1199" height="459" rx="24" fill="url(#bg)"/>
-    <rect x="0.5" y="0.5" width="1199" height="459" rx="24" fill="none"
+    <rect x="0.5" y="0.5" width="1199" height="419" rx="24" fill="url(#bg)"/>
+    <rect x="0.5" y="0.5" width="1199" height="419" rx="24" fill="none"
           stroke="#FFFFFF" stroke-opacity="0.10"/>
-  <ellipse cx="600" cy="-60" rx="520" ry="240" fill="url(#glow)"/>
+  <ellipse cx="600" cy="-80" rx="520" ry="240" fill="url(#glow)"/>
 
   <!-- 左：上层 agent -->
-  <rect x="48" y="96" width="300" height="268" rx="18" fill="#10352F"
+  <rect x="56" y="120" width="300" height="200" rx="18" fill="#10352F"
         stroke="#FFFFFF" stroke-opacity="0.10"/>
-  <text x="76" y="140" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="20" font-weight="600" fill="#FFFBF2">
+  <text x="84" y="160" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="20" font-weight="600" fill="#FFFBF2">
     上层 agent
   </text>
-  <text x="76" y="168" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#9CBDB4">
+  <text x="84" y="186" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#9CBDB4">
     云端 workflow · 另一个 tea_a2
   </text>
   <g font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#E9F4F0">
-    <circle cx="82" cy="205" r="3.5" fill="#1AC2AC"/><text x="96" y="210">拆任务、下发</text>
-    <circle cx="82" cy="237" r="3.5" fill="#1AC2AC"/><text x="96" y="242">按 SSE 帧汇总</text>
-    <circle cx="82" cy="269" r="3.5" fill="#1AC2AC"/><text x="96" y="274">不需要连设备</text>
+    <circle cx="90" cy="222" r="3.5" fill="#1AC2AC"/><text x="104" y="227">拆任务、下发</text>
+    <circle cx="90" cy="254" r="3.5" fill="#1AC2AC"/><text x="104" y="259">按 SSE 帧汇总</text>
+    <circle cx="90" cy="286" r="3.5" fill="#1AC2AC"/><text x="104" y="291">不需要连设备</text>
   </g>
 
   <!-- 中：HTTP / SSE -->
-  <text x="600" y="150" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="16" fill="#9CBDB4">
+  <text x="594" y="152" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="16" fill="#9CBDB4">
     HTTP / SSE（JSON）
   </text>
-  <path d="M648 186h160" stroke="#1AC2AC" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M800 178l12 8-12 8" fill="none" stroke="#1AC2AC" stroke-width="2.5"
-        stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="656" y="176" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="13" fill="#1AC2AC">POST /api/chat</text>
 
-  <path d="M808 244H648" stroke="#9CBDB4" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M656 236l-12 8 12 8" fill="none" stroke="#9CBDB4" stroke-width="2.5"
+  <path d="M372 196H790" stroke="#1AC2AC" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M782 188l12 8-12 8" fill="none" stroke="#1AC2AC" stroke-width="2.5"
         stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="656" y="272" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="13" fill="#9CBDB4">
+  <text x="372" y="184" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="13" fill="#1AC2AC">POST /api/chat</text>
+
+  <path d="M790 256H372" stroke="#9CBDB4" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M380 248l-12 8 12 8" fill="none" stroke="#9CBDB4" stroke-width="2.5"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="372" y="282" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="12" fill="#9CBDB4">
     content_delta · tool_call · done
   </text>
 
-  <text x="600" y="330" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#7FA39A">
+  <text x="594" y="340" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#7FA39A">
     一条流同时给「过程」和「结果」
   </text>
 
   <!-- 右：设备 -->
-  <rect x="836" y="72" width="316" height="316" rx="18" fill="#0C2A25"
+  <rect x="812" y="70" width="336" height="300" rx="18" fill="#0C2A25"
         stroke="#FFFFFF" stroke-opacity="0.12"/>
-  <text x="864" y="112" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="20" font-weight="600" fill="#FFFBF2">
+  <text x="840" y="112" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="20" font-weight="600" fill="#FFFBF2">
     设备
   </text>
-  <text x="864" y="140" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#9CBDB4">
+  <text x="840" y="138" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#9CBDB4">
     嵌入式 / 老机器 / 工控机
   </text>
-  <g transform="translate(864 160) scale(0.8125)">
+  <g transform="translate(840 158) scale(0.8125)">
     <defs>
       <linearGradient id="tilea" x1="0" y1="0" x2="1" y2="1">
         <stop offset="0" stop-color="#0F8172"/><stop offset="0.6" stop-color="#13A692"/><stop offset="1" stop-color="#1AC2AC"/>
@@ -86,18 +87,18 @@
       <path d="M32.2 37.8h4.6" stroke-width="2.6"/>
     </g>
   </g>
-  <text x="928" y="186" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="18" font-weight="600" fill="#FFFBF2">
+  <text x="904" y="184" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="18" font-weight="600" fill="#FFFBF2">
     tea_a2
   </text>
-  <text x="928" y="208" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="13" fill="#1AC2AC">单文件 · 无运行时依赖</text>
-  <g font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#E9F4F0">
-    <text x="880" y="250">agent loop · tools · workspaces</text>
-    <text x="880" y="278">内置 Web UI（对话 / 文件 / 记忆 / 日志 / 终端）</text>
-    <text x="880" y="306">/api/turns · SSE 过程直播</text>
+  <text x="904" y="206" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="12" fill="#1AC2AC">单文件 · 无运行时依赖</text>
+  <g font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#E9F4F0">
+    <text x="840" y="248">agent loop · tools · workspaces</text>
+    <text x="840" y="276">内置 Web UI：对话 / 文件 / 终端</text>
+    <text x="840" y="304">/api/turns · SSE 过程直播</text>
   </g>
-  <rect x="864" y="330" width="260" height="38" rx="10" fill="#FFFFFF" fill-opacity="0.05"
+  <rect x="840" y="324" width="280" height="34" rx="10" fill="#FFFFFF" fill-opacity="0.05"
         stroke="#FFFFFF" stroke-opacity="0.10"/>
-  <text x="994" y="355" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#9CBDB4">
+  <text x="980" y="347" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#9CBDB4">
     本地文件 · 本地命令
   </text>
 </svg>
