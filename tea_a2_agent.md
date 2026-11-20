@@ -3340,7 +3340,7 @@ beacon 只能是 **POST**，所以服务端加了 `POST .../close` 路由
 | `sched/planning.py` | 共用内核：模型出计划（每步标 `ro`/`rw`）、校验、模型汇总、只读角色的 YAML |
 | `sched/a2_ext_py/modules/toolkit_plan.py` | 两段式 MCP 工具（`op=start` 秒回、`op=status` 取结果）+ 调度器 + 闸门 + 回收器 |
 | `sched/task_server.py` | 队列那一侧：任务的记录带 `mode`，`--parallel-ro-steps` 打开后 ro 并行 |
-| `web/app.js` | 「并行中的轮次」面板：子 agent 各自一个会话，轨迹不在父会话里，这里是它们唯一的去处 |
+| `web/app.js` | 「并行中的轮次」：右下角热区（一个进行中的轮次一个）+ 悬停浮层；子 agent 各自一个会话，轨迹不在父会话里，这里是它们唯一的去处 |
 
 **只读是机制层的保证，不是提示词里的一句话**：`ro` = 角色 `readonly`
 （`read_only: true` → `src/tools.cpp:424` 拒绝写/建/删/移） + 工具白名单（没有

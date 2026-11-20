@@ -154,10 +154,6 @@
       <button class="btn" id="banner-retry" type="button">重试</button>
     </div>
 
-    <!-- 并行中的轮次（子 agent）：它们各自是一个会话，轨迹不在当前会话里，
-         这里是它们唯一的去处。app.js 按需显示，没有就藏起来。 -->
-    <section class="parallel hidden" id="parallel" aria-label="并行中的轮次"></section>
-
     <!-- 对话 -->
     <section class="view" id="view-chat">
       <div class="chat-scroll" id="chat-scroll">
@@ -567,6 +563,11 @@
   <div class="iv-meta" id="image-viewer-meta"></div>
 </div>
 <div class="toast hidden" id="toast"></div>
+<!-- 并行轮次的热区（右下角，一个进行中的轮次一个）与悬停弹出的浮层。
+     fixed + body 级：放进 #view-chat 会被 .chat-scroll 的滚动容器裁掉。
+     由 app.js 的 parallelSync() 按需显示，没有进行中的轮次时整块隐藏。 -->
+<div class="pz-hot hidden" id="parallel-hot" aria-label="并行中的轮次"></div>
+<div class="pz-pop hidden" id="parallel-pop" role="dialog" aria-label="并行中的轮次"></div>
 <!-- 跳转索引的悬停提示：fixed 定位，避免被索引条的滚动容器裁掉 -->
 <div class="turn-tip hidden" id="turn-tip" role="tooltip"></div>
 

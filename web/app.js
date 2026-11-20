@@ -827,29 +827,51 @@
       }
     }
   }
-  /* ---------- 4c) 并行中的轮次（子 agent 的卡片） ----------
+  /* ---------- 4c) 并行中的轮次（右下角的热区 + 悬停浮层） ----------
    *
    * 一个工作区里可以同时跑好几轮——不同的会话就是不同的 agent。子 agent
-   * 各自是一个会话，所以它们的轨迹**不在**父会话的轨迹里：这个面板是它们
-   * 唯一的去处（谁在跑、跑到哪一步、最后说了什么）。
+   * 各自是一个会话，所以它们的轨迹**不在**父会话的轨迹里：这个浮层是它们
+   * 唯一的去处（谁在跑、跑到哪一步）。
    *
-   * 面板只读服务端已有的东西：GET /api/turns（最近的轮次句柄）、
+   * 形态（2026-11-20 定）：右下角、输入框上方，**一个进行中的轮次一个热区**
+   * （最多四个，其余合并成「+N」）；悬停 180ms 弹出浮层，点「关闭」收回。
+   * 热区是 fixed 的浮块，**不占对话区的布局**——原来那条横幅把当前会话
+   * 压掉了 150px。
+   *
+   * 只列**进行中**的轮次：跑完/失败/被中断的立刻消失（1.6.1 那套「结束后
+   * 再留一分钟」已取消，所以子 agent 最后说了什么，只在它还跑着时看得见）。
+   *
+   * 数据只读服务端已有的东西：GET /api/turns（最近的轮次句柄）、
    * GET /api/turns/{id}/events（事件流：先回放再直播）。**后端一个字都不用改。**
    */
   var parallel = {
-    turns: [],        // 服务端最近的几轮（句柄）
+    turns: [],        // 服务端最近的几轮（句柄，最新在前）
     streams: {},      // turn id -> EventSource
     text: {},         // turn id -> 这一轮已经说出口的字
     logs: {},         // turn id -> [{cls, text}]（这一轮的过程）
-    cards: {},        // turn id -> {card, state, elapsed, log, shown}
-    seen: {},         // turn id -> {endedAt}（我们**看着**它跑完的那些轮次）
+    chips: {},        // turn id -> {el, text, title, over}
+    card: null,       // 浮层里那一张卡片（只有一个浮层，所以最多一张）
+    open: null,       // null | turn_id | '+more'
+    stuck: {},        // turn id -> 日志要不要贴着最新一行
     titles: {},       // session id -> 标题（侧栏还不认识时我们自己取）
     asked: {},        // session id -> true（问过标题了，别再问）
-    timerMs: 0,       // 当前轮询的节奏（毫秒）
-    head: null, count: null,
-    big: {},          // turn id -> true（把日志展开）
-    timer: null
+    moreEl: null,     // 「+N」那个热区
+    enterTimer: 0, popTimer: 0, raf: 0,
+    leftAt: 0,        // 上一次离开热区的时间（350ms 内回来就立刻弹）
+    timerMs: 0, timer: null
   };
+
+  /// 一个轮次都没有时的心跳：慢一点，但不停；有东西时快一点。
+  var PARALLEL_IDLE_MS = 6000;
+  var PARALLEL_BUSY_MS = 2000;
+  /// 悬停多久才弹：鼠标扫过桌面不该弹。
+  var PARALLEL_ENTER_MS = 180;
+  /// 离开之后 350ms 内又回到同一个热区 = 想接着看，不再等那 180ms。
+  var PARALLEL_LEAVE_MS = 350;
+  /// 热区最多几个：再多就合并成「+N」（竖着堆到半屏高不是好主意）。
+  var PARALLEL_MAX_CHIPS = 4;
+  /// 流式文字最多 10 次/秒 重画（四个子 agent 同时流式时别把主线程占满）。
+  var PARALLEL_TEXT_MS = 100;
 
   function parallelTitle(turn) {
     // 会话的标题就是它的第一句话——子 agent 的任务就写在里面。
@@ -878,67 +900,8 @@
       (d.sessions || []).forEach(function (s) {
         if (s && s.id && s.title) parallel.titles[s.id] = s.title;
       });
-      renderParallel();
+      parallelSync();
     }, function () {});
-  }
-
-  /// 我们看着它跑完的轮次，还要在面板上留多久（毫秒）：人得看见子 agent 最后
-  /// 说了什么，但也不能一直挂着。
-  var PARALLEL_KEEP_MS = 60000;
-  /// 面板空着时的心跳：慢一点，但不停；上面有东西时快一点。
-  var PARALLEL_IDLE_MS = 6000;
-  var PARALLEL_BUSY_MS = 2000;
-
-  /// 记住哪些轮次是我们**看着**跑的。
-  ///
-  /// 面板叫「并行中的轮次」，那就只该有正在跑的（和刚刚跑完的）。页面打开
-  /// 之前就结束的旧轮次不出现——否则面板会挂着一堆早就结束的卡片，把对话
-  /// 挤出屏幕（这正是它一开始的样子）。
-  function parallelTrack() {
-    var now = Date.now();
-    var ids = {};
-    (parallel.turns || []).forEach(function (t) {
-      if (!t || !t.turn_id) return;
-      ids[t.turn_id] = true;
-      var rec = parallel.seen[t.turn_id];
-      if (t.state === 'running') {
-        parallel.seen[t.turn_id] = { endedAt: 0 };
-      } else if (rec && !rec.endedAt) {
-        rec.endedAt = now;        // 刚刚跑完：留一会儿
-      }
-    });
-    Object.keys(parallel.seen).forEach(function (id) {
-      var rec = parallel.seen[id];
-      if (!rec.endedAt && !ids[id]) rec.endedAt = now;   // 服务端不再报了
-      if (rec.endedAt && now - rec.endedAt > PARALLEL_KEEP_MS) {
-        delete parallel.seen[id];
-      }
-    });
-  }
-
-  /// 这一轮要不要出现在面板上？正在跑的要；我们看着它跑完的，刚结束不久还要；
-  /// 更早以前就结束的不要。
-  function parallelWorthShowing(turn) {
-    if (turn.state === 'running') return true;
-    var rec = parallel.seen[turn.turn_id];
-    if (!rec || !rec.endedAt) return false;
-    return Date.now() - rec.endedAt < PARALLEL_KEEP_MS;
-  }
-
-  /// 这个工作区里除了当前会话之外的那些轮次。屏幕上的这一轮在对话里，
-  /// 不该在这里再出现一次。
-  function parallelList() {
-    var wid = state.workspace && state.workspace.id;
-    var mine = state.session && state.session.id;
-    var out = [];
-    (parallel.turns || []).forEach(function (t) {
-      if (!t || !t.turn_id) return;
-      if (wid && t.workspace_id && t.workspace_id !== wid) return;
-      if (mine && t.session_id === mine) return;
-      if (!parallelWorthShowing(t)) return;
-      out.push(t);
-    });
-    return out.slice(0, 8);
   }
 
   function parallelStateLabel(kind) {
@@ -951,48 +914,289 @@
     return String(kind || '');
   }
 
+  /// 这个工作区里**正在跑**的、除了当前会话之外的那些轮次（最新在前）。
+  /// 屏幕上的这一轮在对话里，不该在这里再出现一次。
+  function parallelList() {
+    var wid = state.workspace && state.workspace.id;
+    var mine = state.session && state.session.id;
+    var out = [];
+    (parallel.turns || []).forEach(function (t) {
+      if (!t || !t.turn_id) return;
+      if (t.state !== 'running') return;             // 结束即消失
+      if (wid && t.workspace_id && t.workspace_id !== wid) return;
+      if (mine && t.session_id === mine) return;
+      out.push(t);
+    });
+    return out;
+  }
+
+  function currentParallelTurn(id) {
+    var list = parallel.turns || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].turn_id === id) return list[i];
+    }
+    return null;
+  }
+
   function refreshParallel() {
-    if (!state.workspace) return Promise.resolve([]);
+    if (!state.workspace) { parallelHideDom(); return Promise.resolve([]); }
     return api('api/turns').then(function (d) {
       parallel.turns = (d && d.turns) || [];
-      parallelTrack();
-      renderParallel();
+      parallelSync();
       return parallel.turns;
     }, function () { return []; });
   }
 
-  /// 一张卡片。**原地更新**：每两秒刷一次句柄，如果每次都重建 DOM，
-  /// 事件流写进去的行就落到了已经脱离页面的节点上——面板会一直是空的。
-  function parallelCard(turn) {
+  /// 轮询到新句柄之后：重画热区、维护事件流、必要时收起浮层。
+  function parallelSync() {
+    if (!state.workspace) { parallelHideDom(); return; }
+    var list = parallelList();
+    var shown = list.slice(0, PARALLEL_MAX_CHIPS);   // 最新的几个（数组最新在前）
+    var rest = list.length - shown.length;
+    var ids = {};
+    list.forEach(function (t) { ids[t.turn_id] = true; });
+    // 走掉的轮次：它的过程与卡片都不该再占内存。
+    Object.keys(parallel.logs).forEach(function (id) { if (!ids[id]) delete parallel.logs[id]; });
+    Object.keys(parallel.text).forEach(function (id) { if (!ids[id]) delete parallel.text[id]; });
+    Object.keys(parallel.stuck).forEach(function (id) { if (!ids[id]) delete parallel.stuck[id]; });
+    // 打开的那一轮已经结束：立刻收起（没有「完成」态可看）。
+    if (parallel.open && parallel.open !== '+more' && !ids[parallel.open]) closePop();
+    if (state.view === 'chat') renderHot(shown, rest);
+    if (parallel.open && parallel.open !== '+more') {
+      var still = currentParallelTurn(parallel.open);
+      if (still && still.state === 'running') parallelPopFill(still);
+      else closePop();
+    }
+    // 事件流：跑着的轮次各挂一条（先回放，再直播）。不在热区里的也挂着——
+    // 热区腾出位置时它的过程已经在手上了，不用等回放。
+    list.forEach(openParallelStream);
+    Object.keys(parallel.streams).forEach(function (id) {
+      if (!ids[id]) closeParallelStream(id);
+    });
+    parallelTimer(list.length ? PARALLEL_BUSY_MS : PARALLEL_IDLE_MS);
+    parallelPlace();
+  }
+
+  /// 热区与浮层都不该再出现（没有 workspace、或者一个进行中的轮次都没有）。
+  function parallelHideDom() {
+    closePop();
+    clearHot();
+  }
+
+  function clearHot() {
+    var box = $('parallel-hot');
+    if (box) { box.classList.add('hidden'); clear(box); }
+    parallel.chips = {};
+    parallel.moreEl = null;
+  }
+
+  /// 换页面：热区只在对话页出现。离开时**保留**已抓到的数据（回来立刻就有），
+  /// 只是把浮块藏起来。
+  function parallelOnView(name) {
+    if (name === 'chat') { parallelSync(); return; }
+    closePop();
+    var box = $('parallel-hot');
+    if (box) box.classList.add('hidden');
+  }
+
+  /// 热区：一个进行中的轮次一个，最新那个贴着输入框（最下面）。
+  function renderHot(shown, rest) {
+    var box = $('parallel-hot');
+    if (!box) return;
+    if (!shown.length) { parallelHideDom(); return; }
+    box.classList.remove('hidden');
+    // 数组最新在前，热区最新在最下 —— 反过来排（「+N」因此自然落在最上面，
+    // 它代表的是更早的那些）。
+    var order = shown.slice().reverse();
+    var want = {};
+    order.forEach(function (t) { want[t.turn_id] = true; });
+    Object.keys(parallel.chips).forEach(function (id) { if (!want[id]) removeChip(id); });
+    order.forEach(function (t, i) {
+      var entry = parallelChip(t);
+      // 顺序不对才动 DOM（insertBefore 不重建节点，事件流写的行还在）。
+      if (box.children[i] !== entry.el) box.insertBefore(entry.el, box.children[i] || null);
+    });
+    if (rest > 0) {
+      var more = parallelMoreChip();
+      more.textContent = '+' + rest;
+      if (box.children[0] !== more) box.insertBefore(more, box.children[0] || null);
+    } else if (parallel.moreEl && parallel.moreEl.parentNode) {
+      parallel.moreEl.parentNode.removeChild(parallel.moreEl);
+    }
+  }
+
+  /// 一个热区。**原地更新**：标题变了才写文字、才量宽度。
+  function parallelChip(turn) {
     var id = turn.turn_id || '';
-    var entry = parallel.cards[id];
+    var entry = parallel.chips[id];
     if (!entry) {
+      var chip = el('button', 'pz-chip');
+      chip.type = 'button';
+      chip.dataset.turnId = id;
+      var title = el('span', 'pz-title');
+      var text = el('span', 'pz-title-text');
+      title.appendChild(text);
+      chip.appendChild(el('span', 'pz-spin', '⟳'));
+      chip.appendChild(title);
+      chip.onmouseenter = function () { parallelHover(id); };
+      chip.onmouseleave = parallelUnhover;
+      // 新轮次：脉一下，让人注意到右下来了东西。
+      chip.classList.add('is-new');
+      chip.addEventListener('animationend', function () { chip.classList.remove('is-new'); });
+      entry = { el: chip, text: text, title: '', over: false };
+      parallel.chips[id] = entry;
+    }
+    var name = parallelTitle(turn);
+    if (entry.title !== name) {
+      entry.title = name;
+      entry.text.textContent = name;
+      entry.text.classList.remove('is-over');
+      // 只在标题变化时量一次：窗口写死 5em，超了才滚（每次都量会白摆一次布局）。
+      requestAnimationFrame(function () {
+        var win = entry.text.parentNode;
+        if (!win || !entry.text.isConnected) return;
+        if (entry.text.offsetWidth > win.clientWidth + 1) entry.text.classList.add('is-over');
+      });
+    }
+    return entry;
+  }
+
+  function removeChip(id) {
+    var entry = parallel.chips[id];
+    if (entry && entry.el.parentNode) entry.el.parentNode.removeChild(entry.el);
+    delete parallel.chips[id];
+  }
+
+  /// 「+N」：编号比它大的热区都是更早的轮次，悬停只列标题（过程要在各自的
+  /// 会话里看，这里不摊开——否则又变成占满屏幕的那块面板）。
+  function parallelMoreChip() {
+    if (!parallel.moreEl) {
+      var chip = el('button', 'pz-chip pz-more');
+      chip.type = 'button';
+      chip.onmouseenter = function () { parallelHover('+more'); };
+      chip.onmouseleave = parallelUnhover;
+      parallel.moreEl = chip;
+    }
+    return parallel.moreEl;
+  }
+
+  /// 悬停 180ms 才弹。**打开之后不因鼠标离开而收起**——要能读 6-7 行、
+  /// 要能点「展开」翻日志；收起只有三条路：「关闭」、点浮层外、悬停另一个热区。
+  function parallelHover(key) {
+    if (parallel.open === key) return;
+    clearTimeout(parallel.enterTimer);
+    // 刚离开不久又回来（350ms 内）= 想接着看，不再等那 180ms。
+    var wait = (Date.now() - parallel.leftAt < PARALLEL_LEAVE_MS) ? 0 : PARALLEL_ENTER_MS;
+    parallel.enterTimer = setTimeout(function () {
+      parallel.enterTimer = 0;
+      parallelOpen(key);
+    }, wait);
+  }
+  function parallelUnhover() {
+    clearTimeout(parallel.enterTimer);
+    parallel.enterTimer = 0;
+    parallel.leftAt = Date.now();
+  }
+
+  function parallelOpen(key) {
+    var pop = $('parallel-pop');
+    if (!pop || parallel.open === key) return;
+    if (key === '+more') {
+      parallel.open = '+more';
+      parallel.card = null;
+      renderMorePop();
+    } else {
+      var turn = currentParallelTurn(key);
+      if (!turn || turn.state !== 'running') return;   // 刚跑完的：不弹了
+      parallel.open = key;
+      parallelPopRender(turn, true);
+    }
+    pop.classList.remove('hidden');
+    parallelPlace();
+  }
+
+  function closePop() {
+    if (parallel.popTimer) { clearTimeout(parallel.popTimer); parallel.popTimer = 0; }
+    parallel.open = null;
+    parallel.card = null;
+    var pop = $('parallel-pop');
+    if (pop) { pop.classList.add('hidden'); clear(pop); }
+  }
+
+  /// 「+N」的浮层：只有标题（早的在前）。
+  function renderMorePop() {
+    var pop = $('parallel-pop');
+    if (!pop) return;
+    clear(pop);
+    var head = el('div', 'pz-head');
+    head.appendChild(el('span', 'pz-name', '还有 ' +
+      Math.max(0, parallelList().length - PARALLEL_MAX_CHIPS) + ' 个在跑'));
+    head.appendChild(btn('pz-close', '关闭', closePop));
+    var list = el('ul', 'pz-more-list');
+    parallelList().slice(PARALLEL_MAX_CHIPS).reverse().forEach(function (t) {
+      list.appendChild(el('li', 'pz-more-item', parallelTitle(t)));
+    });
+    pop.appendChild(head);
+    pop.appendChild(list);
+  }
+
+  /// 浮层里的那张卡片。**原地更新**：每两秒刷一次句柄，若每次都重建 DOM，
+  /// 事件流写进去的行就落到了已经脱离页面的节点上——面板会一直是空的。
+  function parallelPopRender(turn, fresh) {
+    var pop = $('parallel-pop');
+    if (!pop) return;
+    var id = turn.turn_id || '';
+    if (fresh || !parallel.card || parallel.card.id !== id) {
+      clear(pop);
+      var head = el('div', 'pz-head');
+      var name = el('span', 'pz-name', '');
+      head.appendChild(name);
+      head.appendChild(btn('pz-close', '关闭', closePop));
       var card = el('div', 'parallel-card');
       card.dataset.turnId = id;
       var chead = el('div', 'parallel-card-head');
-      var title = el('span', 'parallel-card-title', '');
       var state = el('span', 'parallel-state', '');
       var elapsed = el('span', 'parallel-elapsed', '');
       var toggle = btn('parallel-toggle', '展开', function () {
-        parallel.big[id] = !parallel.big[id];
-        renderParallel();
+        if (!parallel.card) return;
+        parallel.card.big = !parallel.card.big;
+        var t = currentParallelTurn(parallel.card.id);
+        if (t) parallelPopFill(t);
+        parallelPlace();
       });
-      chead.appendChild(title); chead.appendChild(state); chead.appendChild(elapsed);
+      chead.appendChild(state);
+      chead.appendChild(elapsed);
       chead.appendChild(toggle);
       var log = el('div', 'parallel-log');
-      log.dataset.turnId = id;
-      card.appendChild(chead); card.appendChild(log);
-      entry = { card: card, title: title, state: state, elapsed: elapsed,
-                toggle: toggle, log: log, shown: 0 };
-      parallel.cards[id] = entry;
+      log.addEventListener('scroll', function () {
+        if (!parallel.card || parallel.card.log !== log) return;
+        // 用户自己往上翻了：别再把他拽回最新一行。
+        parallel.stuck[parallel.card.id] =
+          log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+      });
+      card.appendChild(chead);
+      card.appendChild(log);
+      pop.appendChild(head);
+      pop.appendChild(card);
+      parallel.card = { id: id, name: name, state: state, elapsed: elapsed,
+                        toggle: toggle, log: log, shown: 0, textRow: null, big: false };
+      parallel.stuck[id] = true;       // 刚打开：先给最新的几行
     }
-    entry.title.textContent = parallelTitle(turn);
+    parallelPopFill(turn);
+  }
+
+  /// 卡片头（状态/时长/展开）+ 过程（新行追加，旧的画过不重画）。
+  function parallelPopFill(turn) {
+    var entry = parallel.card;
+    if (!entry || entry.id !== (turn.turn_id || '')) return;
+    var id = entry.id;
+    var name = parallelTitle(turn);
+    if (entry.name.textContent !== name) entry.name.textContent = name;
     entry.state.textContent = parallelStateLabel(turn.state);
     entry.state.className = 'parallel-state parallel-state-' + (turn.state || 'running');
     entry.elapsed.textContent = turn.elapsed_ms ? fmtMs(turn.elapsed_ms) : '';
-    entry.toggle.textContent = parallel.big[id] ? '收起' : '展开';
-    entry.log.className = 'parallel-log' + (parallel.big[id] ? ' big' : '');
-    // 过程：新到的行补上去（已经画过的不重画）。
+    entry.toggle.textContent = entry.big ? '收起' : '展开';
+    entry.log.className = 'parallel-log' + (entry.big ? ' big' : '');
     var lines = parallel.logs[id] || [];
     for (var i = entry.shown; i < lines.length; i++) {
       entry.log.appendChild(el('div', lines[i].cls, lines[i].text));
@@ -1000,64 +1204,26 @@
     entry.shown = lines.length;
     var said = parallel.text[id];
     if (said) {
-      var node = entry.log.querySelector('.parallel-text');
-      if (!node) { node = el('div', 'parallel-text'); entry.log.appendChild(node); }
-      node.textContent = said;
+      if (!entry.textRow) { entry.textRow = el('div', 'parallel-text'); entry.log.appendChild(entry.textRow); }
+      if (entry.textRow.textContent !== said) entry.textRow.textContent = said;
     }
-    return entry.card;
+    // 贴底：默认给最后几行（否则跑了 20 分钟的轮次只会看到第一条工具调用）。
+    if (parallel.stuck[id] !== false) entry.log.scrollTop = entry.log.scrollHeight;
   }
 
-  function renderParallel() {
-    var box = $('parallel');
-    if (!box) return;
-    var list = parallelList();
-    if (!list.length) {
-      // 没有并行轮次：把面板收起来，也把它挂着的流关掉（一条 SSE 一直挂着
-      // 是在占服务端的一个线程）。**轮询不能停**：停了就听不见「又有一轮跑
-      // 起来了」，面板会一直空着。
-      if (!box.classList.contains('hidden')) { box.classList.add('hidden'); clear(box); }
-      parallel.head = null; parallel.count = null; parallel.cards = {};
-      Object.keys(parallel.streams).forEach(closeParallelStream);
-      parallelTimer(PARALLEL_IDLE_MS);
-      return;
-    }
-    box.classList.remove('hidden');
-    if (!parallel.head) {
-      parallel.head = el('div', 'parallel-head');
-      parallel.head.appendChild(el('span', 'parallel-title', '并行中的轮次'));
-      parallel.count = el('span', 'parallel-count', '');
-      parallel.head.appendChild(parallel.count);
-      box.appendChild(parallel.head);
-    }
-    parallel.count.textContent = list.length + ' 个';
-    // 走掉的轮次：卡片收起来。
-    var ids = list.map(function (t) { return t.turn_id; });
-    Object.keys(parallel.cards).forEach(function (id) {
-      if (ids.indexOf(id) < 0) {
-        var old = parallel.cards[id];
-        if (old && old.card && old.card.parentNode) old.card.parentNode.removeChild(old.card);
-        delete parallel.cards[id];
-        delete parallel.logs[id];
-        delete parallel.text[id];
-      }
-    });
-    list.forEach(function (t) {
-      var card = parallelCard(t);
-      if (card.parentNode !== box) box.appendChild(card);
-    });
-    // 事件流：跑着的轮次各挂一条（先回放，再直播）。
-    list.forEach(function (t) {
-      if (t.state === 'running') openParallelStream(t);
-    });
-    Object.keys(parallel.streams).forEach(function (id) {
-      var still = list.filter(function (t) { return t.turn_id === id; })[0];
-      if (!still || still.state !== 'running') closeParallelStream(id);
-    });
-    parallelTimer(PARALLEL_BUSY_MS);
+  /// 流式文字与日志行合并成 ~10 次/秒 重画；没打开的那一轮一个 DOM 都不碰。
+  function parallelPopSoon() {
+    if (parallel.popTimer) return;
+    parallel.popTimer = setTimeout(function () {
+      parallel.popTimer = 0;
+      if (!parallel.open || parallel.open === '+more') return;
+      var turn = currentParallelTurn(parallel.open);
+      if (turn) parallelPopFill(turn);
+    }, PARALLEL_TEXT_MS);
   }
 
-  /// 轮询的节奏：面板上有东西时快一点（2 秒），空着时慢一点（6 秒）。
-  /// **不能停**——停了就听不见「又有一轮跑起来了」，面板会一直空着。
+  /// 轮询的节奏：有轮次时快一点（2 秒），没有时慢一点（6 秒）。
+  /// **不能停**——停了就听不见「又有一轮跑起来了」，热区会一直不出现。
   function parallelTimer(ms) {
     if (parallel.timer && parallel.timerMs === ms) return;
     if (parallel.timer) { clearInterval(parallel.timer); parallel.timer = null; }
@@ -1094,18 +1260,18 @@
     delete parallel.streams[id];
   }
 
-  /// 一帧事件 → 面板上的一行。
+  /// 一帧事件 → 浮层上的一行。
   function parallelLine(id, cls, text) {
     if (!parallel.logs[id]) parallel.logs[id] = [];
     parallel.logs[id].push({ cls: cls, text: text });
-    renderParallel();
+    if (parallel.open === id) parallelPopSoon();
   }
 
   function parallelFrame(id, frame) {
     var type = (frame && frame.type) || '';
     if (type === 'content_delta' || type === 'reasoning_delta') {
       parallel.text[id] = (parallel.text[id] || '') + (frame.text || '');
-      renderParallel();
+      if (parallel.open === id) parallelPopSoon();
       return;
     }
     if (type === 'tool_call') {
@@ -1132,6 +1298,55 @@
     var text = (typeof args === 'string') ? args : JSON.stringify(args);
     if (text.length > 80) text = text.slice(0, 80) + '…';
     return ' ' + text;
+  }
+
+  /// 锚点：**发送按钮的右缘 + composer 的顶边**。宽屏上对话列是居中的
+  /// （max-width 780/1040），锚视口右下角的话热区会孤零零飘在空白里；
+  /// 锚发送按钮则和输入框那一列在同一条线上，窄屏也不会贴到屏幕边缘。
+  function parallelAnchor() {
+    var wrap = document.querySelector('.composer-wrap');
+    var col = wrap ? wrap.querySelector('.chat-col') : null;
+    var send = $('send');
+    if (!col) return null;
+    var r = col.getBoundingClientRect();
+    if (!r.width && !r.height) return null;      // 不在对话页 / 被隐藏
+    var s = send ? send.getBoundingClientRect() : null;
+    // 发送按钮拿不到（被隐藏）时退回对话列的内边距内侧。
+    var rightEdge = (s && s.width) ? s.right : (r.right - 24);
+    return {
+      right: Math.max(8, window.innerWidth - rightEdge),
+      bottom: Math.max(8, window.innerHeight - r.top + 12)
+    };
+  }
+
+  /// 定位：热区贴右下；浮层贴在热区上方一行，太高就夹回视口。
+  /// 用 right + 写死的 width —— left + max-width 会把浮层压成一列单字
+  /// （和 .turn-tip 同一个坑，见 showTurnTip 的注释）。
+  function parallelPlace() {
+    var a = parallelAnchor();
+    var box = $('parallel-hot');
+    if (!a || !box) return;
+    box.style.right = a.right + 'px';
+    box.style.bottom = a.bottom + 'px';
+    var pop = $('parallel-pop');
+    if (!pop || pop.classList.contains('hidden')) return;
+    // 浮层要落在**整摞热区**的上面，不是某一个热区的上面——否则它会盖住
+    // 上面那几个热区，鼠标就没法移到它们上面去切换。
+    var stack = box.offsetHeight || 30;
+    var h = pop.offsetHeight;
+    var bottom = a.bottom + stack + 4;                  // 整摞热区上方
+    var top = window.innerHeight - h - 8;               // 太高：往下压回视口
+    pop.style.right = a.right + 'px';                   // 右缘和热区对齐
+    pop.style.bottom = Math.max(8, Math.min(bottom, top)) + 'px';
+  }
+
+  /// 同一帧里的多次请求合并成一次（resize 会连着来好几下）。
+  function parallelPlaceSoon() {
+    if (parallel.raf) return;
+    parallel.raf = requestAnimationFrame(function () {
+      parallel.raf = 0;
+      parallelPlace();
+    });
   }
 
   /* ---------- 4a-1) 流式渲染的成本 ----------
@@ -3270,6 +3485,8 @@
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 168) + 'px';
     ta.style.overflowY = ta.scrollHeight > 168 ? 'auto' : 'hidden';
+    // 输入框长高会把 composer 的顶边推上去：热区贴在它上方，得跟着挪。
+    parallelPlaceSoon();
   }
 
   /* ---------- 6) 顶栏 / 状态 / 模型与工作区选择 ---------- */
@@ -4862,6 +5079,8 @@
     VIEWS.forEach(function (v) { $('view-' + v).classList.toggle('hidden', v !== name); });
     Array.prototype.forEach.call(document.querySelectorAll('.nav-row'), function (b) { b.classList.toggle('active', b.dataset.view === name); });
     renderCrumbs();
+    // 热区只在对话页出现：切走时藏起来（数据留着，回来立刻就有）。
+    parallelOnView(name);
     if (name === 'chat') { scrollMaybe(); scheduleTurnSpy(); setTimeout(autoGrow, 0); }
     if (name === 'files') loadTree(state.files.dir);
     if (name === 'shell') {
@@ -4893,6 +5112,8 @@
     $('sidebar-hide').setAttribute('aria-expanded', hidden ? 'false' : 'true');
     $('sidebar-show').setAttribute('aria-expanded', hidden ? 'true' : 'false');
     fitCrumbPath();      // 侧栏收起/展开：顶栏的可用宽度变了，路径要重裁
+    // 对话列也跟着变宽（780 -> 1040）：热区锚在它的右缘上，要重算。
+    parallelPlaceSoon();
   }
   function toggleSidebar(force) {
     state.sidebarHidden = typeof force === 'boolean' ? force : !state.sidebarHidden;
@@ -7658,6 +7879,14 @@
     Array.prototype.forEach.call(document.querySelectorAll('.nav-row'), function (b) {
       b.onclick = function () { showView(b.dataset.view); };
     });
+    // 并行轮次的浮层：打开后不随鼠标离开收起，所以「点别处」得能关掉它。
+    document.addEventListener('mousedown', function (e) {
+      var pop = $('parallel-pop');
+      if (!pop || pop.classList.contains('hidden')) return;
+      var hot = $('parallel-hot');
+      if (pop.contains(e.target) || (hot && hot.contains(e.target))) return;
+      closePop();
+    });
     $('chat-scroll').addEventListener('scroll', function () {
       state.stickBottom = nearBottom();
       scheduleTurnSpy();
@@ -7667,6 +7896,7 @@
       hideTurnTip();
       scheduleTurnSpy();
       fitCrumbPath();          // 窗口窄了：路径按新宽度重裁
+      parallelPlaceSoon();     // 热区/浮层贴着输入框那一列，窗口变了要跟着挪
       if (state.view === 'shell') shellResize();
     });
     $('input').addEventListener('input', autoGrow);
