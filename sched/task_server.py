@@ -202,8 +202,190 @@ def parse_iso(text):
         return None
 
 
+# The queue polls every couple of seconds, and a line that says the same
+# thing on every poll ("nothing queued") is noise, not information: one
+# day of it filled the log with megabytes of nothing.  The throttle keeps
+# the first line and then repeats it at most once per interval.
+_LOG_LOCK = threading.RLock()
+_LOG_THROTTLE = {}
+
+
 def log(message):
-    print("%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
+    with _LOG_LOCK:
+        print("%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
+
+
+def log_throttled(key, message, interval=300.0, force=False):
+    """Log a line, but not more than once per `interval` seconds.
+
+    The key says which line it is: the same key shares one counter, a
+    different key is a different line with its own.  An `interval` of 0
+    turns the throttle off (the line is written every time).  `force`
+    writes the line anyway.
+    """
+    if not force and interval and interval > 0:
+        now = time.time()
+        with _LOG_LOCK:
+            last = _LOG_THROTTLE.get(key)
+            if last is not None and (now - last) < interval:
+                return False
+            _LOG_THROTTLE[key] = now
+    log(message)
+    return True
+
+
+class LogRotator:
+    """The log of the service: one file per day, at most a few days.
+
+    The unit writes the log through stdout (it redirects stdout into the
+    file), so the file belongs to a writer that does not own it: rotating
+    it is a copy + truncate.  The file keeps its name and its inode, and
+    the process that writes into it goes on writing into it - no restart,
+    no lost lines.
+
+    The archive is named after the day the lines belong to
+    (a2_task.log.2026-11-19), and the days that fall out of the window
+    are deleted.  `keep_days` counts the days in total: today's file is
+    one of them, so five days are five files.
+
+    The file is only touched when it is really the file that is being
+    written to (the same inode as stdout).  If the output is redirected
+    somewhere else, the file is left alone.
+    """
+
+    def __init__(self, path="", keep_days=5, interval=60.0):
+        self.path = os.path.abspath(os.path.expanduser(path)) if path else ""
+        self.keep_days = max(1, int(keep_days or 1))
+        self.interval = max(5.0, float(interval or 60.0))
+        self._thread = None
+        self._warned = False
+        # The day the file is believed to hold.  It is read when the
+        # rotator is made - before anything is written today - so a file
+        # that still holds an older day is archived before today's lines
+        # are added to it.
+        self._day = time.strftime("%Y-%m-%d")
+        if self.path:
+            try:
+                stamp = os.stat(self.path).st_mtime
+            except OSError:
+                stamp = 0
+            if stamp:
+                day = time.strftime("%Y-%m-%d", time.localtime(stamp))
+                if day != self._day:
+                    self._day = day
+
+    # -- the rotation --------------------------------------------------
+    def archive_name(self, day):
+        return "%s.%s" % (self.path, day)
+
+    def _stdout_writes_this_file(self):
+        """Is the file the one stdout is pointed at?"""
+        try:
+            out = os.fstat(sys.stdout.fileno())
+            here = os.stat(self.path)
+        except (OSError, ValueError, AttributeError):
+            return False
+        return (out.st_dev, out.st_ino) == (here.st_dev, here.st_ino)
+
+    def rotate(self, day=None):
+        """Archive the log file under the day it belongs to, and empty it."""
+        if not self.path or not os.path.exists(self.path):
+            return False
+        day = day or self._day
+        if not self._stdout_writes_this_file():
+            if not self._warned:
+                self._warned = True
+                log("the log file %s is not the file that is being written to"
+                    " - it is left alone" % self.path)
+            return False
+        target = self.archive_name(day)
+        try:
+            with _LOG_LOCK:
+                if os.path.exists(target):
+                    # The same day was archived before (the service was
+                    # restarted): the lines are added to the old archive.
+                    with open(target, "ab") as out:
+                        with open(self.path, "rb") as src:
+                            shutil.copyfileobj(src, out)
+                else:
+                    shutil.copyfile(self.path, target)
+                os.truncate(self.path, 0)
+        except OSError as exc:
+            log("cannot rotate the log file %s: %s" % (self.path, exc))
+            return False
+        self._day = time.strftime("%Y-%m-%d")
+        self.prune()
+        log("the log was rotated: %s" % target)
+        return True
+
+    def prune(self):
+        """Delete the archives that fell out of the window."""
+        if not self.path:
+            return
+        folder = os.path.dirname(self.path) or "."
+        prefix = os.path.basename(self.path) + "."
+        today = time.strftime("%Y-%m-%d")
+        try:
+            today_stamp = time.mktime(time.strptime(today, "%Y-%m-%d"))
+        except ValueError:
+            return
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            return
+        for name in names:
+            if not name.startswith(prefix):
+                continue
+            day = name[len(prefix):]
+            try:
+                stamp = time.mktime(time.strptime(day, "%Y-%m-%d"))
+            except ValueError:
+                continue
+            age = (today_stamp - stamp) / 86400.0
+            if age > (self.keep_days - 1):
+                try:
+                    os.remove(os.path.join(folder, name))
+                except OSError:
+                    pass
+
+    # -- the watcher ----------------------------------------------------
+    def tick(self):
+        """Rotate when the day changed, or when the file is from an older day."""
+        if not self.path:
+            return False
+        today = time.strftime("%Y-%m-%d")
+        if today != self._day:
+            # The day changed: the file belongs to the day that just ended.
+            return self.rotate(self._day)
+        try:
+            stamp = os.stat(self.path).st_mtime
+        except OSError:
+            return False
+        day = time.strftime("%Y-%m-%d", time.localtime(stamp))
+        if day != today:
+            return self.rotate(day)
+        return False
+
+    def _loop(self):
+        while True:
+            time.sleep(self.interval)
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001 - the rotation may not stop the queue
+                log("the log rotation failed: %s: %s" % (type(exc).__name__, exc))
+
+    def start(self):
+        """Rotate what is left of an older day, then watch for the next one."""
+        if not self.path:
+            return None
+        try:
+            self.tick()
+        except Exception as exc:  # noqa: BLE001
+            log("the log rotation failed: %s: %s" % (type(exc).__name__, exc))
+        self._thread = threading.Thread(target=self._loop, name="log-rotator")
+        self._thread.daemon = True
+        self._thread.start()
+        return self._thread
 
 
 def iso_from_epoch(epoch):
@@ -1607,7 +1789,8 @@ class Engine:
         if not queued:
             # Nothing to do: do not call the provider either. The quota is
             # only interesting when there is work waiting for it.
-            log("nothing queued")
+            log_throttled("nothing-queued", "nothing queued",
+                          interval=self.args.log_throttle)
             return 0
 
         # The quota is read fresh whenever there is work: the queue polls
@@ -1616,16 +1799,23 @@ class Engine:
         left, window = self.quota_left(provider, fresh=True)
         if left is None:
             if not self.args.allow_without_quota:
-                log("no quota to look at - not starting anything "
-                    "(use --allow-without-quota to work anyway)")
+                log_throttled("no-quota",
+                              "no quota to look at - not starting anything "
+                              "(use --allow-without-quota to work anyway)",
+                              interval=self.args.log_throttle)
                 return 0
-            log("working anyway (--allow-without-quota)")
+            log_throttled("quota-anyway", "working anyway (--allow-without-quota)",
+                          interval=self.args.log_throttle)
         else:
             if left < self.args.min_remaining:
-                log("quota of %r: %s%% left (need %d%%) - not starting anything"
-                    % (provider, left, self.args.min_remaining))
+                log_throttled("quota-low",
+                              "quota of %r: %s%% left (need %d%%) - not starting anything"
+                              % (provider, left, self.args.min_remaining),
+                              interval=self.args.log_throttle)
                 return 0
-            log("quota of %r: %s%% left - going to work" % (provider, left))
+            log_throttled("quota-work",
+                          "quota of %r: %s%% left - going to work" % (provider, left),
+                          interval=self.args.log_throttle)
 
         # The queue is serial *per project*: a project (a workspace, which is
         # what an "agent" is here) works on one task at a time, while other
@@ -1636,7 +1826,9 @@ class Engine:
         # the same project may run side by side. A read-write task still runs
         # alone (see _blocks).
         if self.args.max_concurrent and self.running_count() >= self.args.max_concurrent:
-            log("%d task(s) already running - waiting" % self.running_count())
+            log_throttled("max-concurrent",
+                          "%d task(s) already running - waiting" % self.running_count(),
+                          interval=self.args.log_throttle)
             return 0
 
         # Highest priority first, then the queue order (FIFO). A task that
@@ -1688,8 +1880,10 @@ class Engine:
                 continue
             wanted = task.get("provider")
             if wanted and wanted != provider:
-                log("  task %s wants provider %r, not %r - leaving it alone"
-                    % (task.get("id"), wanted, provider))
+                log_throttled("provider:%s" % (task.get("id") or ""),
+                              "  task %s wants provider %r, not %r - leaving it alone"
+                              % (task.get("id"), wanted, provider),
+                              interval=self.args.log_throttle)
                 continue
             if self.start_task(task, provider):
                 started += 1
@@ -1697,7 +1891,9 @@ class Engine:
                 # project has to wait for it.
                 running.append(task)
         if busy:
-            log("  %d task(s) wait: their project is busy" % busy)
+            log_throttled("project-busy",
+                          "  %d task(s) wait: their project is busy" % busy,
+                          interval=self.args.log_throttle)
         return started
 
     # ---- the tasks this process inherited --------------------------------
@@ -2079,8 +2275,12 @@ class Engine:
                 schedule["last_error"] = ("上一次还没做完（%s），这一次没有排队"
                                           % (busy.get("id") or ""))
                 self.schedule_store.save(schedule)
-                log("schedule %s: the last run (%s) is still going - skipped"
-                    % (schedule_id, busy.get("id")))
+                log_throttled("schedule-skip:%s" % schedule_id,
+                              "schedule %s: the last run (%s) is still going - skipped"
+                              " (%d time(s) so far)"
+                              % (schedule_id, busy.get("id"),
+                                 int(schedule.get("skipped_count") or 0)),
+                              interval=self.args.log_throttle)
                 self._publish({"type": "schedule_skipped",
                                "schedule": schedule_id, "task": busy})
                 return False
@@ -5337,6 +5537,17 @@ def main(argv=None):
                              "a slot any more")
     parser.add_argument("--interval", type=float, default=2.0,
                         help="seconds between rounds (default: 2)")
+    parser.add_argument("--log-throttle", type=float, default=300.0,
+                        help="how often a line that repeats itself may be repeated "
+                             "(seconds; 0 writes it every time; default: 300)")
+    parser.add_argument("--log-file", default=os.path.expanduser("~/.tea_agent/logs/a2_task.log"),
+                        help="the log file to rotate (empty turns the rotation off)")
+    parser.add_argument("--log-rotate-days", type=int, default=5,
+                        help="how many days of log to keep (today's file counts as "
+                             "one of them; default: 5)")
+    parser.add_argument("--log-rotate-interval", type=float, default=60.0,
+                        help="how often the rotation looks for a new day "
+                             "(seconds; default: 60)")
     parser.add_argument("--fleet-url", default=os.environ.get("TEA_FLEET_URL", ""),
                         help="the fleet service's HTTP API (a task with target=fleet runs "
                              "on the devices' own agents)")
@@ -5394,6 +5605,13 @@ def main(argv=None):
     if args.version:
         print("tea-task-server %s" % QUEUE_VERSION)
         return 0
+
+    # The log of the service: one file per day, at most a few days.  This
+    # starts before anything else is written, so a log file that still holds
+    # an older day is archived (and emptied) before today's lines go in.
+    rotator = LogRotator(args.log_file, keep_days=args.log_rotate_days,
+                         interval=args.log_rotate_interval)
+    rotator.start()
 
     app = App(args)
 
