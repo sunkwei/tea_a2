@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320"
+     role="img" aria-label="tea_a2：一个二进制，本地 HTTP/SSE，让 agent 在设备上干活">
+  <title>tea_a2：一个二进制，本地 HTTP/SSE，让 agent 在设备上干活</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B2B27"/><stop offset="1" stop-color="#071D1A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#1AC2AC" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#1AC2AC" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+    <rect x="0.5" y="0.5" width="1199" height="319" rx="24" fill="url(#bg)"/>
+    <rect x="0.5" y="0.5" width="1199" height="319" rx="24" fill="none"
+          stroke="#FFFFFF" stroke-opacity="0.10"/>
+  <ellipse cx="980" cy="40" rx="420" ry="260" fill="url(#glow)"/>
+  <g transform="translate(72 62) scale(1.1875)">
+    <defs>
+      <linearGradient id="tileh" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#0F8172"/><stop offset="0.6" stop-color="#13A692"/><stop offset="1" stop-color="#1AC2AC"/>
+      </linearGradient>
+      <linearGradient id="cuph" x1="0" y1="0" x2="0.25" y2="1">
+        <stop offset="0" stop-color="#FFFBF2"/><stop offset="1" stop-color="#F2E4CB"/>
+      </linearGradient>
+    </defs>
+    <rect x="1" y="1" width="62" height="62" rx="14.5" fill="url(#tileh)"/>
+    <rect x="1.4" y="1.4" width="61.2" height="61.2" rx="14.1" fill="none"
+          stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="0.8"/>
+    <g stroke="#FFFBF2" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.8">
+      <path d="M24.6 21.9c-1.5-2.2 1.5-3.3 0-5.5"/>
+      <path d="M33.6 21.9c1.5-2.2-1.5-3.3 0-5.5"/>
+    </g>
+    <ellipse cx="29" cy="45.6" rx="15.6" ry="2.6" fill="#063C34" opacity="0.22"/>
+    <path d="M14.6 23.6h28.8l-2.7 15.9a5.6 5.6 0 0 1-5.5 4.7H22.8a5.6 5.6 0 0 1-5.5-4.7z"
+          fill="url(#cuph)"/>
+    <path d="M43.4 27.6c5.4 0 7.9 3.1 7.9 6.4s-2.5 6.4-7.9 6.4"
+          stroke="url(#cuph)" stroke-width="3.3" stroke-linecap="round" fill="none"/>
+    <g stroke="#0A5A50" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <path d="M24.4 29.3 29.6 33.5 24.4 37.7" stroke-width="2.9"/>
+      <path d="M32.2 37.8h4.6" stroke-width="2.6"/>
+    </g>
+  </g>
+  <text x="172" y="112" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="58" font-weight="700"
+        letter-spacing="-1.2" fill="#FFFBF2">tea_a2</text>
+  <text x="174" y="152" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="21" fill="#E9F4F0">
+    一个自包含的 C++ agent 运行时：一个二进制，本地 HTTP/SSE
+  </text>
+  <text x="174" y="184" font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="21" fill="#9CBDB4">
+    把大模型 agent 的「手和脚」放到设备上
+  </text>
+
+  <!-- 一排属性 -->
+  <g font-family="system-ui,-apple-system,'Segoe UI','Noto Sans CJK SC','Source Han Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#E9F4F0">
+    <rect x="72" y="216" width="128" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.06"
+          stroke="#FFFFFF" stroke-opacity="0.12"/>
+    <text x="136" y="238" text-anchor="middle">单文件 · 静态</text>
+    <rect x="212" y="216" width="150" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.06"
+          stroke="#FFFFFF" stroke-opacity="0.12"/>
+    <text x="287" y="238" text-anchor="middle">Windows · Linux</text>
+    <rect x="374" y="216" width="168" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.06"
+          stroke="#FFFFFF" stroke-opacity="0.12"/>
+    <text x="458" y="238" text-anchor="middle">工具 · 工作区 · SSE</text>
+  </g>
+
+  <!-- 右边：一个终端小窗 -->
+  <g>
+    <rect x="790" y="54" width="340" height="212" rx="16" fill="#10352F"
+          stroke="#FFFFFF" stroke-opacity="0.12"/>
+    <path d="M790 86h340" stroke="#FFFFFF" stroke-opacity="0.10"/>
+    <circle cx="814" cy="70" r="4" fill="#1AC2AC" opacity="0.9"/>
+    <circle cx="830" cy="70" r="4" fill="#FFFFFF" opacity="0.18"/>
+    <circle cx="846" cy="70" r="4" fill="#FFFFFF" opacity="0.18"/>
+    <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="14">
+      <text x="812" y="118" fill="#1AC2AC">$ tea_agent --workspace .</text>
+      <text x="812" y="146" fill="#E9F4F0">POST /api/chat <tspan fill="#1AC2AC">202</tspan></text>
+      <text x="812" y="174" fill="#9CBDB4">toolkit_exec</text>
+      <text x="812" y="174" dx="118" fill="#9CBDB4">ls -la</text>
+      <text x="812" y="174" dx="188" fill="#1AC2AC">3 ms</text>
+      <text x="812" y="202" fill="#9CBDB4">file_write</text>
+      <text x="812" y="202" dx="112" fill="#9CBDB4">report.md</text>
+      <text x="812" y="202" dx="212" fill="#1AC2AC">ok</text>
+      <text x="812" y="234" fill="#1AC2AC">> _</text>
+    </g>
+  </g>
+</svg>
