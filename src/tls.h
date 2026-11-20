@@ -21,6 +21,19 @@ class TlsStream {
   /// > 0 bytes read, 0 = clean end of stream, -1 = error (err is set).
   virtual int read(char* buffer, std::size_t capacity, std::string* err) = 0;
   virtual bool write(const char* data, std::size_t length, std::string* err) = 0;
+  /// Wait until the stream has something to read, or the timeout passes.
+  ///
+  /// > 0 readable, 0 timed out, -1 not supported by this backend. read() on a
+  /// blocking stream never returns on a keepalive tick, so a caller that has
+  /// to do work on a timer (MQTT ping, heartbeat) uses this first.
+  virtual int wait_readable(int timeout_ms) {
+    (void)timeout_ms;
+    return -1;
+  }
+  /// Bytes already buffered inside the TLS layer (read() would return without
+  /// touching the socket). A caller that polls with wait_readable() has to ask
+  /// this first, or it can sleep while a whole record is sitting in memory.
+  virtual bool has_pending() const { return false; }
   virtual std::string description() const = 0;
 };
 

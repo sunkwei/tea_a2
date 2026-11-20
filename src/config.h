@@ -508,6 +508,22 @@ struct McpConfig {
   std::string error;
 };
 
+/// The MQTT control channel (`--mqtt HOST:PORT --mqtt_user ... --mqtt_pass ...
+/// --mqtt_name ...`). Off unless all of them are given and valid.
+struct MqttSettings {
+  bool enabled = false;
+  std::string host;
+  int port = 1883;
+  std::string user;
+  std::string password;
+  std::string name;         // what the operator typed
+  std::string client_name;  // "<name>@<ipv4>", the topic key
+  std::string ca_bundle;
+  /// The tunnel broker the sidecar talks to. It is not the MQTT broker: the
+  /// MQTT one may be an EMQX, while the tunnel one is a2_broker.
+  std::string tunnel_broker = "103.232.92.54:8382";
+};
+
 struct AppConfig {  std::string path;      // provider.yaml that was loaded
   std::string extra_path;  // tea_agent.yaml, if present
   std::string tea_home;  // $HOME/.tea_agent
@@ -542,6 +558,8 @@ struct AppConfig {  std::string path;      // provider.yaml that was loaded
   /// may switch the restriction *on*, but never off again while the process runs
   /// with the flag.
   bool cli_allow_outside_workspace = false;
+  /// The MQTT control channel (opt-in; see --mqtt in the usage text).
+  MqttSettings mqtt;
 
   bool load(const std::string& config_path, const std::string& tea_home);
 

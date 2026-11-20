@@ -70,9 +70,15 @@ using json = nlohmann::json;
 #include "tunnel_net.h"
 #include "tunnel_proc_stat.h"
 #include "tunnel_paths.h"
+#include "mqtt_server.h"
+#include "tunnel_conn.h"
 #include "tunnel_tls.h"
 #include "tunnel_turn_db.h"
 #include "tunnel_usage.h"
+
+using tea_tunnel::Connection;
+using tea_tunnel::TlsMaterial;
+using tea_tunnel::TlsServer;
 
 // ---- the built-in TURN credentials -----------------------------------------
 // The TURN relay is the broker's bandwidth, not a secret worth hiding: the
@@ -127,29 +133,10 @@ bool read_token_file(std::string* out) {
 
 namespace {
 
-// ---- one connected signalling client ---------------------------------------
-//
-// A connection is a socket, and sometimes a TLS session on top of it. The
-// two live together in one object: mbedTLS' socket helpers want a pointer to
-// the socket, so the socket has to outlive the TLS session, and the TLS
-// session has to outlive the handshake.
-struct Connection {
-  tea_socket_t fd = kTeaInvalidSocket;
-  mbedtls_ssl_context ssl{};
-  bool tls = false;
-
-  ~Connection() {
-    if (tls) {
-      mbedtls_ssl_free(&ssl);
-      tea_net_close(fd);
-    } else if (fd != kTeaInvalidSocket) {
-      tea_net_close(fd);
-    }
-  }
-};
-
 struct Peer {
   std::shared_ptr<Connection> conn;
+  /// Bytes read before the protocol was known (the first-byte probe).
+  std::string initial;
   std::string role;
   std::string room;
   std::mutex out;        // serialises writes to the socket
@@ -268,9 +255,22 @@ void handle_line(const std::shared_ptr<Peer>& p, const json& j) {
 }
 
 void peer_loop(std::shared_ptr<Peer> p) {
-  std::string buf;
+  std::string buf = p->initial;
   char chunk[4096];
   while (p->alive) {
+    // Lines that arrived together with the first byte are handled before the
+    // next read: a slow client must not delay its own join message.
+    size_t early_pos;
+    while ((early_pos = buf.find('\n')) != std::string::npos) {
+      std::string line = buf.substr(0, early_pos);
+      buf.erase(0, early_pos + 1);
+      if (line.empty()) continue;
+      try {
+        handle_line(p, json::parse(line));
+      } catch (const std::exception& e) {
+        send_line(p, {{"type", "error"}, {"message", std::string("bad json: ") + e.what()}});
+      }
+    }
     ssize_t n = 0;
     if (p->conn->tls) {
       n = mbedtls_ssl_read(&p->conn->ssl, reinterpret_cast<unsigned char*>(chunk), sizeof(chunk));
@@ -347,6 +347,7 @@ struct BrokerOptions {
   int usage_days = 15;
   bool usage_only = false;
   bool use_tls = true;
+  bool mqtt = false;
   std::vector<std::string> cert_names;
 };
 
@@ -495,12 +496,6 @@ bool start_stun_turn(uint16_t port, const std::string& realm,
 // ---- the TLS material ------------------------------------------------------
 // The broker makes its own certificate and keeps it, so the fingerprint the
 // clients pin survives a restart. It lives next to the room token.
-struct TlsMaterial {
-  std::string cert_pem;
-  std::string key_pem;
-  std::string fingerprint;   // sha256 of the certificate, lower case hex
-  std::string cert_path;
-};
 
 std::string certificate_path() { return tea_tunnel::tunnel_dir() + "/broker.crt"; }
 std::string key_path() { return tea_tunnel::tunnel_dir() + "/broker.key"; }
@@ -567,109 +562,6 @@ int listen_tcp(uint16_t port, const std::string& bind_addr) {
   return fd;
 }
 
-/// The TLS side of the signalling server: one configuration, many sessions.
-///
-/// The sessions are made on the accepted socket, one at a time, in the thread
-/// that serves the peer - the handshake is quick and doing it there keeps the
-/// accept loop free.
-class TlsServer {
- public:
-  bool start(const TlsMaterial& material, std::string* err) {
-    mbedtls_ssl_config_init(&conf_);
-    mbedtls_x509_crt_init(&cert_);
-    mbedtls_pk_init(&key_);
-    mbedtls_entropy_init(&entropy_);
-    mbedtls_ctr_drbg_init(&drbg_);
-
-    const int seeded = mbedtls_ctr_drbg_seed(&drbg_, mbedtls_entropy_func, &entropy_,
-                                            reinterpret_cast<const unsigned char*>("a2-broker"),
-                                            std::strlen("a2-broker"));
-    if (seeded != 0) {
-      *err = "cannot seed the random generator";
-      return false;
-    }
-    int rc = mbedtls_ssl_config_defaults(&conf_, MBEDTLS_SSL_IS_SERVER,
-                                         MBEDTLS_SSL_TRANSPORT_STREAM,
-                                         MBEDTLS_SSL_PRESET_DEFAULT);
-    if (rc != 0) {
-      *err = "cannot set up the TLS configuration: " + tea_tunnel::tls_error_text(rc);
-      return false;
-    }
-    mbedtls_ssl_conf_rng(&conf_, mbedtls_ctr_drbg_random, &drbg_);
-    // The clients do not present a certificate: the room token is what says
-    // who may join, and it never leaves the TLS session.
-    mbedtls_ssl_conf_authmode(&conf_, MBEDTLS_SSL_VERIFY_NONE);
-
-    rc = mbedtls_x509_crt_parse(&cert_, reinterpret_cast<const unsigned char*>(material.cert_pem.data()),
-                                material.cert_pem.size() + 1);
-    if (rc != 0) {
-      *err = "cannot read the certificate: " + tea_tunnel::tls_error_text(rc);
-      return false;
-    }
-    rc = mbedtls_pk_parse_key(&key_, reinterpret_cast<const unsigned char*>(material.key_pem.data()),
-                              material.key_pem.size() + 1, nullptr, 0, mbedtls_ctr_drbg_random,
-                              &drbg_);
-    if (rc != 0) {
-      *err = "cannot read the private key: " + tea_tunnel::tls_error_text(rc);
-      return false;
-    }
-    rc = mbedtls_ssl_conf_own_cert(&conf_, &cert_, &key_);
-    if (rc != 0) {
-      *err = "cannot use the certificate: " + tea_tunnel::tls_error_text(rc);
-      return false;
-    }
-    return true;
-  }
-
-  /// Wrap an accepted socket in TLS. Returns null when the handshake failed.
-  ///
-  /// The socket lives in the Connection object, and the BIO helpers are given
-  /// its address: mbedTLS keeps that pointer for as long as the session
-  /// lives, so it must not be a local variable.
-  bool wrap(const std::shared_ptr<Connection>& conn, std::string* err) {
-    mbedtls_ssl_init(&conn->ssl);
-    int rc = mbedtls_ssl_setup(&conn->ssl, &conf_);
-    if (rc != 0) {
-      *err = "cannot set up the TLS session: " + tea_tunnel::tls_error_text(rc);
-      return false;
-    }
-    mbedtls_ssl_set_bio(&conn->ssl, &conn->fd, &TlsServer::bio_send, &TlsServer::bio_recv,
-                        nullptr);
-    rc = mbedtls_ssl_handshake(&conn->ssl);
-    if (rc != 0) {
-      *err = "the TLS handshake failed: " + tea_tunnel::tls_error_text(rc);
-      return false;
-    }
-    conn->tls = true;
-    return true;
-  }
-
- private:
-  // mbedTLS' own socket helpers work on POSIX file descriptors; on Windows a
-  // socket is not one, so the two calls are done here instead.
-  static int bio_send(void* ctx, const unsigned char* buf, size_t len) {
-    tea_socket_t fd = *static_cast<tea_socket_t*>(ctx);
-    const int n = tea_net_send(fd, buf, len);
-    if (n >= 0) return n;
-    if (tea_net_would_block(tea_net_errno())) return MBEDTLS_ERR_SSL_WANT_WRITE;
-    return MBEDTLS_ERR_NET_SEND_FAILED;
-  }
-
-  static int bio_recv(void* ctx, unsigned char* buf, size_t len) {
-    tea_socket_t fd = *static_cast<tea_socket_t*>(ctx);
-    const int n = tea_net_recv(fd, buf, len);
-    if (n >= 0) return n;
-    if (tea_net_would_block(tea_net_errno())) return MBEDTLS_ERR_SSL_WANT_READ;
-    return MBEDTLS_ERR_NET_RECV_FAILED;
-  }
-
-  mbedtls_ssl_config conf_{};
-  mbedtls_x509_crt cert_{};
-  mbedtls_pk_context key_{};
-  mbedtls_entropy_context entropy_{};
-  mbedtls_ctr_drbg_context drbg_{};
-};
-
 }  // namespace
 
 namespace {
@@ -697,7 +589,7 @@ bool parse_number(const std::string& text, long* out) {
         "          [--max-peer-pair %d]\n"
         "          [--token <secret>] [--turn-user <user>] [--turn-pass <pass>]\n"
         "          [--turn-db <file>] [--usage] [--usage-days <n>]\n"
-        "          [--cert-name <name>]... [--no-tls]\n"
+        "          [--cert-name <name>]... [--no-tls] [--mqtt]\n"
         "\n"
         "  One process, one file: STUN + TURN + the signalling (with TLS).\n"
         "  The signalling port speaks TLS by default; the certificate is made\n"
@@ -794,6 +686,9 @@ bool parse_options(int argc, char** argv, BrokerOptions* opts) {
       opts->token = take_value();
     } else if (name == "--cert-name") {
       opts->cert_names.push_back(take_value());
+    } else if (name == "--mqtt") {
+      take_flag();
+      opts->mqtt = true;
     } else if (name == "--no-tls") {
       take_flag();
       opts->use_tls = false;
@@ -1077,6 +972,25 @@ int main(int argc, char** argv) {
     }
   }
 
+  std::shared_ptr<mqtt::Server> mqtt_server;
+  if (opts.mqtt) {
+    if (!opts.use_tls) {
+      std::fprintf(stderr, "broker: --mqtt needs TLS (MQTT is never offered in the clear)\n");
+      return 1;
+    }
+    mqtt_server = std::make_shared<mqtt::Server>();
+    mqtt::Server::Options mqtt_options;
+    mqtt_options.db_path = opts.turn_db;
+    std::string mqtt_error;
+    if (!mqtt_server->start(mqtt_options, &mqtt_error)) {
+      std::fprintf(stderr, "broker: %s\n", mqtt_error.c_str());
+      return 1;
+    }
+    std::printf("broker: mqtt on tcp/%u (shared with signalling, accounts in mqtt_accounts)\n",
+                opts.signal_port);
+    std::fflush(stdout);
+  }
+
   int lfd = listen_tcp(opts.signal_port, opts.signal_bind);
   if (lfd < 0) {
     std::fprintf(stderr, "broker: cannot listen on tcp/%u\n", opts.signal_port);
@@ -1121,6 +1035,24 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "broker: %s\n", err.c_str());
         continue;
       }
+    }
+    if (mqtt_server) {
+      // One port, two protocols. After the handshake both start talking
+      // immediately, so the first byte decides: MQTT CONNECT is 0x10, the
+      // signalling protocol is newline-delimited JSON ('{').
+      tea_net_set_recv_timeout(fd, 3000);
+      unsigned char first = 0;
+      const int n = mbedtls_ssl_read(&p->conn->ssl, &first, 1);
+      if (n == 1 && first == 0x10) {
+        mqtt_server->serve(p->conn, std::string(1, static_cast<char>(first)));
+        continue;
+      }
+      if (n == 1) {
+        p->initial.assign(1, static_cast<char>(first));
+      }
+      // Blocking reads again: an old sidecar may have been slow to speak and
+      // must still be served exactly as before.
+      tea_net_set_recv_timeout(fd, 0);
     }
     std::thread(peer_loop, p).detach();
   }

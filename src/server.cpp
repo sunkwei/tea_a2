@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "server.h"
 
+#include "mqtt_client.h"
+#include "mqtt_tunnel.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -17,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <ctime>
 
 #include <cerrno>
 
@@ -1846,6 +1850,21 @@ const WebAsset* find_embedded_asset(const std::string& path) {
 // ---------------------------------------------------------------------------
 // Impl
 // ---------------------------------------------------------------------------
+/// Everything the MQTT control channel owns, in one place so the teardown
+/// order is explicit: the client stops first (no more callbacks), then the
+/// command worker, then the sidecar.
+struct MqttRuntime {
+  MqttClient client;
+  TunnelController tunnel;
+  CommandHandler handler;
+
+  void shutdown() {
+    client.stop();
+    handler.stop();
+    tunnel.shutdown();
+  }
+};
+
 struct ApiServer::Impl {
   AppConfig* config = nullptr;
   ToolRegistry* tools = nullptr;
@@ -1861,6 +1880,8 @@ struct ApiServer::Impl {
   std::string web_dir;
   /// The shared secret for /api/exec (see ServerOptions::api_token).
   std::string api_token;
+  /// The MQTT control channel; null when --mqtt was not given.
+  std::unique_ptr<MqttRuntime> mqtt;
 
   /// Can this process write into the tea home? Probed once at start-up: the
   /// workspace index and the global log live there, and they are lost - with
@@ -3607,6 +3628,20 @@ void ApiServer::Impl::install_routes() {
     j["active_turns"] = static_cast<long long>(active_turn_count());
     // The fleet manager reads this to know whether it may use /api/exec here.
     j["exec_enabled"] = !api_token.empty();
+    {
+      nlohmann::json mqtt_status;
+      if (mqtt) {
+        const TunnelController::Status tunnel = mqtt->tunnel.status();
+        mqtt_status["enabled"] = true;
+        mqtt_status["connected"] = mqtt->client.connected();
+        mqtt_status["name"] = mqtt->client.client_id();
+        mqtt_status["tunnel"] = tunnel.state.empty() ? std::string("stopped") : tunnel.state;
+        mqtt_status["last_error"] = mqtt->client.last_error();
+      } else {
+        mqtt_status["enabled"] = false;
+      }
+      j["mqtt"] = mqtt_status;
+    }
     send_json(res, j);
   });
 
@@ -7921,6 +7956,65 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
   LOG_INFO("server: listening on http://", host, ":", options_.port);
   write_port_file(port_record, host, options_.port);
 
+  // ---- the MQTT control channel (opt-in) --------------------------------
+  if (impl_->config && impl_->config->mqtt.enabled) {
+    const MqttSettings& settings = impl_->config->mqtt;
+    impl_->mqtt.reset(new MqttRuntime());
+
+    // a2_tunnel sits next to this binary.
+    std::string sidecar = executable_path();
+    const std::size_t slash = sidecar.find_last_of("/\\");
+    const std::string directory =
+        slash == std::string::npos ? std::string() : sidecar.substr(0, slash + 1);
+#ifdef _WIN32
+    sidecar = directory + "a2_tunnel.exe";
+#else
+    sidecar = directory + "a2_tunnel";
+#endif
+    const std::string target = "127.0.0.1:" + std::to_string(options_.port);
+    impl_->mqtt->tunnel.configure(sidecar, target);
+
+    CommandHandler::Options handler_options;
+    handler_options.resp_topic = "mt_control/" + settings.client_name + "/resp";
+    handler_options.default_target = target;
+    handler_options.sidecar_path = sidecar;
+    handler_options.tunnel_broker = settings.tunnel_broker;
+    impl_->mqtt->handler.start(&impl_->mqtt->client, &impl_->mqtt->tunnel, handler_options);
+
+    const std::string name = settings.client_name;
+    const int a2_port = options_.port;
+    auto registration = [name, a2_port](bool online) {
+      nlohmann::json j;
+      j["name"] = name;
+      j["version"] = std::string(tea::version_string());
+      j["port"] = a2_port;
+      j["actions"] = {"tunnel.start", "tunnel.stop", "status"};
+      j["online"] = online;
+      j["ts"] = static_cast<long long>(std::time(nullptr));
+      return j.dump();
+    };
+
+    MqttClient::Config client_config;
+    client_config.host = settings.host;
+    client_config.port = settings.port;
+    client_config.user = settings.user;
+    client_config.password = settings.password;
+    client_config.client_id = settings.client_name;
+    client_config.ca_bundle = settings.ca_bundle;
+    client_config.subscribe_topic = "mt_control/" + settings.client_name + "/cmd";
+    client_config.will_topic = "mt_register/" + settings.client_name;
+    client_config.will_payload = registration(false);
+    client_config.register_payload = [registration]() { return registration(true); };
+
+    MqttRuntime* runtime = impl_->mqtt.get();
+    impl_->mqtt->client.start(
+        client_config,
+        [runtime](const std::string& topic, const std::string& payload) {
+          runtime->handler.on_message(topic, payload);
+        });
+    LOG_INFO("server: mqtt control enabled as ", settings.client_name);
+  }
+
   // The recovery scan: the process that ran the last turn may be gone (this
   // is a restart), and the records it left behind say what happened to it.
   // It reads files, so it runs in the background - the server is already
@@ -7933,6 +8027,7 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
 void ApiServer::stop() {
   if (!impl_) return;
   remove_port_file(port_file_path(impl_->config ? impl_->config->tea_home : std::string()));
+  if (impl_->mqtt) impl_->mqtt->shutdown();
   // The shells are children of this process: they have to go with it.
   impl_->shells.close_all();
   {

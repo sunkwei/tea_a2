@@ -483,6 +483,8 @@ set(TEA_SOURCES
   src/http_gzip.cpp
   src/history_gc.cpp
   src/mcp.cpp
+  src/mqtt_client.cpp
+  src/mqtt_tunnel.cpp
   src/tools.cpp
   src/workspace.cpp
   src/role.cpp

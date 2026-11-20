@@ -20,6 +20,7 @@
 #include "server.h"
 #include "tls.h"
 #include "mcp.h"
+#include "mqtt_client.h"
 #include "tools.h"
 #include "util.h"
 #include "version.h"
@@ -542,6 +543,68 @@ int tea_agent_main(int argc, char** argv) {
   if (options.port <= 0 || options.port > 65535) {
     console_write_line("error: --port must be between 1 and 65535");
     return 1;
+  }
+
+  // ---- the MQTT control channel (opt-in) --------------------------------
+  // All four values are needed. A partial set is reported and the channel
+  // stays off: a device that half-registers is worse than one that does not.
+  {
+    MqttSettings& mqtt = config.mqtt;
+    mqtt.host = args.get("mqtt");
+    mqtt.user = args.get("mqtt_user");
+    if (mqtt.user.empty()) mqtt.user = args.get("mqtt-user");
+    mqtt.password = args.get("mqtt_pass");
+    if (mqtt.password.empty()) mqtt.password = args.get("mqtt-pass");
+    mqtt.name = args.get("mqtt_name");
+    if (mqtt.name.empty()) mqtt.name = args.get("mqtt-name");
+    const std::string tunnel_broker = args.get("tunnel-broker");
+    if (!tunnel_broker.empty()) mqtt.tunnel_broker = tunnel_broker;
+    const std::string ca_bundle = args.get("ca-bundle");
+    if (!ca_bundle.empty()) mqtt.ca_bundle = ca_bundle;
+
+    const bool asked = !mqtt.host.empty() || !mqtt.user.empty() || !mqtt.password.empty() ||
+                       !mqtt.name.empty();
+    if (asked) {
+      bool ok = true;
+      const std::size_t colon = mqtt.host.rfind(':');
+      if (colon == std::string::npos) {
+        console_write_line("error: --mqtt needs HOST:PORT");
+        ok = false;
+      } else {
+        const std::string host = mqtt.host.substr(0, colon);
+        int port = 0;
+        try {
+          port = std::stoi(mqtt.host.substr(colon + 1));
+        } catch (const std::exception&) {
+          port = 0;
+        }
+        if (host.empty() || port <= 0 || port > 65535) {
+          console_write_line("error: --mqtt needs HOST:PORT");
+          ok = false;
+        } else {
+          mqtt.host = host;
+          mqtt.port = port;
+        }
+      }
+      if (mqtt.user.empty() || mqtt.password.empty() || mqtt.name.empty()) {
+        console_write_line("error: --mqtt needs --mqtt_user, --mqtt_pass and --mqtt_name");
+        ok = false;
+      }
+      for (std::size_t i = 0; ok && i < mqtt.name.size(); ++i) {
+        const char c = mqtt.name[i];
+        const bool good = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (!good) {
+          console_write_line("error: --mqtt_name may only use A-Z a-z 0-9 . _ -");
+          ok = false;
+        }
+      }
+      if (ok) {
+        const std::string ip = tea::primary_ipv4();
+        mqtt.client_name = mqtt.name + "@" + (ip.empty() ? std::string("unknown") : ip);
+        mqtt.enabled = true;
+      }
+    }
   }
 
   ApiServer server(&config, &tools, &registry, &mcp);

@@ -136,7 +136,8 @@ endif()
 add_subdirectory(${TEA_3RD}/x264 ${CMAKE_BINARY_DIR}/x264 EXCLUDE_FROM_ALL)
 
 # --- the two binaries --------------------------------------------------------
-add_executable(a2_broker ${TEA_ROOT}/src/tunnel_broker.cpp)
+add_executable(a2_broker ${TEA_ROOT}/src/tunnel_broker.cpp
+  ${TEA_ROOT}/src/mqtt_server.cpp)
 # The version the broker reports --version with (the same string the agent
 # reports: src/version.cpp is the one truth in the tree).
 target_compile_definitions(a2_broker PRIVATE TEA_TUNNEL_VERSION="${TEA_TUNNEL_VERSION}")

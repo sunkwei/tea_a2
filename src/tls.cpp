@@ -199,6 +199,24 @@ class MbedTlsStream : public TlsStream {
     return true;
   }
 
+  int wait_readable(int timeout_ms) {
+    if (mbedtls_ssl_get_bytes_avail(&ssl_) > 0) return 1;
+    fd_set read_set;
+    FD_ZERO(&read_set);
+    FD_SET(fd_, &read_set);
+    timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+#ifdef _WIN32
+    const int rc = ::select(0, &read_set, nullptr, nullptr, &tv);
+#else
+    const int rc = ::select(static_cast<int>(fd_) + 1, &read_set, nullptr, nullptr, &tv);
+#endif
+    return rc;
+  }
+
+  bool has_pending() const { return mbedtls_ssl_get_bytes_avail(&ssl_) > 0; }
+
   std::string description() const {
     const char* version = mbedtls_ssl_get_version(&ssl_);
     const char* suite = mbedtls_ssl_get_ciphersuite(&ssl_);

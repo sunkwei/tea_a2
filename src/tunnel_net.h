@@ -99,6 +99,7 @@ inline int tea_net_recv(tea_socket_t s, void* data, std::size_t len) {
   return static_cast<int>(::recv(s, data, len, 0));
 }
 
+
 #endif
 
 /// Shut down the writing side only: the reader drains what is still in the
@@ -110,4 +111,17 @@ inline int tea_net_shutdown_send(tea_socket_t s) {
 /// The last socket error, as a message.
 inline std::string tea_net_error_text() {
   return std::to_string(tea_net_errno());
+}
+
+/// 0 clears the timeout (a blocking read again).
+inline void tea_net_set_recv_timeout(tea_socket_t s, int ms) {
+#ifdef _WIN32
+  DWORD tv = static_cast<DWORD>(ms);
+  ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#else
+  timeval tv;
+  tv.tv_sec = ms / 1000;
+  tv.tv_usec = (ms % 1000) * 1000;
+  ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
 }
