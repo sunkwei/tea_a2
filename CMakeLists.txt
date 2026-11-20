@@ -261,6 +261,10 @@ set(TEA_ASSET_SPECS
     app.css=web/app.css
     term.js=web/term.js
     app.js=web/app.js
+    icon.svg=web/icon.svg
+    icon-32.png=web/icon-32.png
+    icon-180.png=web/icon-180.png
+    favicon.ico=web/favicon.ico
     api.md=docs/api.md)
 set(TEA_ASSET_FILES "")
 foreach(_spec ${TEA_ASSET_SPECS})

@@ -2558,8 +2558,13 @@ struct ApiServer::Impl {
     // terminator: a build where they disagree used to append the next asset to
     // app.js, which is a JS syntax error and left the UI stuck on 连接中.
     std::size_t n = asset->size;
-    const std::size_t term = std::strlen(asset->data);
-    if (n > term) n = term;
+    // 但这条兜底只对文本资产成立：png/ico 里本来就有 NUL，strlen 会把它从第一个
+    // 0 字节处截断（图标发出去就是半张图）。图片的尺寸有构建期的 static_assert
+    // 保证，不需要再算一次。
+    if (std::strncmp(asset->mime, "image/", 6) != 0) {
+      const std::size_t term = std::strlen(asset->data);
+      if (n > term) n = term;
+    }
     res.set_content(std::string(asset->data, n), asset->mime);
     res.set_header("Cache-Control", "no-store");
     return true;
@@ -3390,7 +3395,9 @@ void ApiServer::Impl::install_routes() {
   svr.Get(R"(/([A-Za-z0-9_.-]+))", [this](const httplib::Request& req, httplib::Response& res) {
     const std::string name = req.matches[1].str();
     if (name == "favicon.ico") {
-      res.status = 204;
+      // 有图标就发（web/favicon.ico 在构建期嵌进去了）；没有也不算错：
+      // 老浏览器天天来问这个路径，204 比 404 安静。
+      if (!serve_asset("favicon.ico", res)) res.status = 204;
       return;
     }
     if (!serve_asset(name, res)) {

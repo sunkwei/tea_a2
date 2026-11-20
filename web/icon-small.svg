@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="tea_a2">
+  <!-- 小尺寸专用（16/24/32px）：和 icon.svg 同一个标记，但去掉热气与光标、
+       杯子放大、提示符只留一个更粗的 >。16px 下细节一定糊，所以这里只留
+       「一只有 > 的杯子」这一件事。 -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0E7C6E"/>
+      <stop offset="1" stop-color="#1AC2AC"/>
+    </linearGradient>
+    <linearGradient id="cup" x1="0" y1="0" x2="0.2" y2="1">
+      <stop offset="0" stop-color="#FFFBF2"/>
+      <stop offset="1" stop-color="#F0E1C6"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="62" height="62" rx="14.5" fill="url(#tile)"/>
+  <path d="M13 22.5h32l-2.8 19a6.3 6.3 0 0 1-6.2 5.3H22a6.3 6.3 0 0 1-6.2-5.3z" fill="url(#cup)"/>
+  <path d="M45 27.5c6 0 8.6 3.4 8.6 7.2S51 42 45 42"
+        stroke="url(#cup)" stroke-width="4" stroke-linecap="round" fill="none"/>
+  <path d="M24 29.5 30.4 35.5 24 41.5" stroke="#0A5A50" stroke-width="4.6"
+        stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
