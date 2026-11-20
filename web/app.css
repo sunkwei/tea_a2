@@ -28,8 +28,13 @@ button{font-family:inherit}
 /* 收起后整条侧栏让位，右侧内容自己占满（宽度跟着 .chat-col 的 max-width 走） */
 #app.side-collapsed #sidebar{display:none}
 .side-head{display:flex;align-items:center;gap:8px;padding-right:8px}
+/* 字标左边的图标：和 favicon 是同一张图（web/icon.svg） */
+.brand-mark{
+  flex:0 0 22px;width:22px;height:22px;margin:3px 0 0 14px;border-radius:6px;
+  box-shadow:0 1px 3px #0006;
+}
 .wordmark{
-  flex:1 1 auto;min-width:0;padding:16px 0 10px 16px;
+  flex:1 1 auto;min-width:0;padding:16px 0 10px 10px;
   font-size:16px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
