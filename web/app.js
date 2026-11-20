@@ -1333,11 +1333,17 @@
     // 浮层要落在**整摞热区**的上面，不是某一个热区的上面——否则它会盖住
     // 上面那几个热区，鼠标就没法移到它们上面去切换。
     var stack = box.offsetHeight || 30;
+    // 窗口不高时（远端桌面、小窗口）先压浮层的高度：从热区顶到**顶栏下缘**
+    // 就这么多地方，50vh 硬顶会让浮层压到顶栏上，连会话名都看不见。
+    var bar = document.getElementById('topbar');
+    var ceil = (bar ? bar.getBoundingClientRect().bottom : 0) + 8;
+    var avail = Math.max(96, window.innerHeight - a.bottom - stack - 4 - ceil);
+    pop.style.maxHeight = Math.min(Math.round(window.innerHeight * 0.5), avail) + 'px';
     var h = pop.offsetHeight;
     var bottom = a.bottom + stack + 4;                  // 整摞热区上方
-    var top = window.innerHeight - h - 8;               // 太高：往下压回视口
+    var limit = window.innerHeight - h - ceil;          // 再兜一次底（不压顶栏）
     pop.style.right = a.right + 'px';                   // 右缘和热区对齐
-    pop.style.bottom = Math.max(8, Math.min(bottom, top)) + 'px';
+    pop.style.bottom = Math.max(8, Math.min(bottom, limit)) + 'px';
   }
 
   /// 同一帧里的多次请求合并成一次（resize 会连着来好几下）。
