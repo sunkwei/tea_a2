@@ -512,6 +512,17 @@ if(WIN32)
   list(APPEND TEA_SOURCES src/http_winhttp.cpp)
   # The interactive shell runs on a ConPTY (a pseudo console) here.
   list(APPEND TEA_SOURCES src/shell_win32.cpp)
+  # A Windows application carries its icon in a resource, not in the source: the
+  # teacup (web/icon.svg -> web/favicon.ico, the same artwork as the tray host and
+  # the APK) plus a version block, so Properties -> Details on a binary that came
+  # off the netdisk says which version it is. The .rc is generated because the
+  # version lives in src/version.cpp.
+  enable_language(RC)
+  set(TEA_RC_ICON "${CMAKE_CURRENT_SOURCE_DIR}/web/favicon.ico")
+  set(TEA_RC_VERSION
+      "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
+  configure_file(resources/tea_agent.rc.in ${TEA_GEN_DIR}/tea_agent.rc @ONLY)
+  list(APPEND TEA_SOURCES ${TEA_GEN_DIR}/tea_agent.rc)
 else()
   # ... and on a pty everywhere else.
   list(APPEND TEA_SOURCES src/shell_posix.cpp)

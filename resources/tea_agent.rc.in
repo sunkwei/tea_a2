@@ -1,0 +1,43 @@
+// resources/tea_agent.rc.in -- what Windows sees when it looks at the binary:
+// the teacup icon (the same artwork as the web UI / the Android launcher, see
+// web/icon.svg) and a version block, so "Properties -> Details" on a copy that
+// came off the netdisk says which version it is.
+//
+// CMake configures this file (the version comes from src/version.cpp, the icon
+// path from the source tree), so these numbers do not have to be bumped by
+// hand. `appstub.rc` next to the tray host is a plain file: that program has no
+// version of its own.
+#include <winver.h>
+
+// The id has to be a number: an undefined identifier is taken by the resource
+// compiler as a *name*, and LoadIcon(hInstance, MAKEINTRESOURCE(1)) would not
+// find it then.
+#define IDI_ICON1 1
+
+IDI_ICON1 ICON "@TEA_RC_ICON@"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @TEA_RC_VERSION@
+PRODUCTVERSION @TEA_RC_VERSION@
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription", "tea_a2 agent"
+            VALUE "FileVersion", "@TEA_AGENT_VERSION@"
+            VALUE "ProductName", "tea_a2"
+            VALUE "ProductVersion", "@TEA_AGENT_VERSION@"
+            VALUE "OriginalFilename", "tea_agent.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
