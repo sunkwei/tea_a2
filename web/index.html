@@ -364,10 +364,17 @@
             <div class="doc-scripts" id="agent-doc-scripts"></div>
           </div>
           <div class="note-add">
-            <textarea class="ta" id="memory-input" rows="3" placeholder="记录一条长期记忆…"></textarea>
+            <textarea class="ta" id="memory-input" rows="3" placeholder="记录一条长期记忆（手动添加的永久保留、每轮注入）…"></textarea>
             <button class="btn primary" id="memory-add" type="button">添加</button>
           </div>
+          <!-- 上限与档位的说明：手动 20 条（不衰减、每轮注入），
+               自动 100 条（14 天半衰）。数字由 /memory 的 limits 填。 -->
+          <div class="note-hint" id="memory-hint"></div>
           <div class="note-list" id="memory-list"></div>
+          <details class="note-evicted" id="memory-evicted-wrap" hidden>
+            <summary id="memory-evicted-summary">已挤出</summary>
+            <div class="note-list" id="memory-evicted"></div>
+          </details>
         </div>
       </div>
     </section>

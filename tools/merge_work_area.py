@@ -480,14 +480,15 @@ class Merger(object):
             dst_notes = [n for n in dst_mem["notes"] if isinstance(n, dict)]
 
         seen_ids = set()
-        seen_texts = set()
+        by_text = {}
         for note in dst_notes:
             if note.get("id"):
                 seen_ids.add(note["id"])
             if note.get("text"):
-                seen_texts.add(note["text"])
+                by_text[note["text"]] = note
 
         added = 0
+        merged = 0
         for note in src_notes:
             if not isinstance(note, dict):
                 continue
@@ -497,21 +498,44 @@ class Merger(object):
                 self.act("memory", "skipped", "memory/memory.json",
                          "the note %s is already there" % note_id)
                 continue
-            if text and text in seen_texts:
-                self.act("memory", "skipped", "memory/memory.json",
-                         "the same note is already there")
+            kept = by_text.get(text) if text else None
+            if kept is not None:
+                # The same note exists on both sides. Its weight is a property of
+                # the note, so the stronger one wins - but its age is not reset:
+                # copying a store over is not the user confirming the note again.
+                src_weight = note.get("weight_base")
+                dst_weight = kept.get("weight_base")
+                if isinstance(src_weight, (int, float)) and (
+                        not isinstance(dst_weight, (int, float)) or src_weight > dst_weight):
+                    kept["weight_base"] = src_weight
+                    merged += 1
+                    self.act("memory", "merged", "memory/memory.json",
+                             "the same note is already there; kept the stronger weight")
+                else:
+                    self.act("memory", "skipped", "memory/memory.json",
+                             "the same note is already there")
                 continue
             dst_notes.append(note)
             if note_id:
                 seen_ids.add(note_id)
             if text:
-                seen_texts.add(text)
+                by_text[text] = note
             added += 1
-        if added:
+        if added or merged:
             payload = {"notes": dst_notes, "updated_at": now_iso8601()}
             if self.write_json(dst_path, payload):
                 self.act("memory", "copied", "memory/memory.json",
-                         "%d note(s) added" % added)
+                         "%d note(s) added, %d weight(s) merged" % (added, merged))
+
+        # A merge across workspaces has no business deleting anything: the caps
+        # are enforced by the agent when it writes, and a store that comes in
+        # over the cap is reported rather than trimmed.
+        manual = sum(1 for n in dst_notes if n.get("source") != "agent")
+        agents = len(dst_notes) - manual
+        if manual > 20 or agents > 100:
+            self.act("memory", "capped", "memory/memory.json",
+                     "%d manual / %d agent notes: over the caps (20/100), "
+                     "nothing was removed" % (manual, agents))
 
     # -- trajectories -----------------------------------------------------
     def target_workspace_id(self):

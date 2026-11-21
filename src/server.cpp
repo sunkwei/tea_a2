@@ -6003,12 +6003,42 @@ void ApiServer::Impl::install_routes() {
               send_error(res, 404, "not_found", err);
               return;
             }
-            const std::vector<nlohmann::json> notes = ws.load_memory(&err);
+            const std::vector<MemoryNote> notes = ws.load_memory_notes(&err);
             nlohmann::json list = nlohmann::json::array();
-            for (std::size_t i = 0; i < notes.size(); ++i) list.push_back(notes[i]);
+            std::size_t manual = 0, agent = 0;
+            for (std::size_t i = 0; i < notes.size(); ++i) {
+              const MemoryNote& n = notes[i];
+              nlohmann::json j = n.raw.is_object() ? n.raw : nlohmann::json::object();
+              j["id"] = n.id;
+              j["text"] = n.text;
+              j["source"] = n.source;
+              j["tier"] = n.tier;
+              j["weight_base"] = n.weight_base;
+              // Three decimals: enough to see a note fade, short enough to read.
+              j["weight_effective"] =
+                  std::round(n.weight_effective * 1000.0) / 1000.0;
+              j["age_days"] = std::round(n.age_days * 10.0) / 10.0;
+              j["created_at"] = n.created_at;
+              j["last_write"] = n.last_write;
+              j["merge_count"] = n.merge_count;
+              list.push_back(j);
+              if (n.source == "user") ++manual; else ++agent;
+            }
             nlohmann::json j = nlohmann::json::object();
             j["notes"] = list;
             j["path"] = ws.memory_file();
+            // The caps and budgets the rows above are measured against, so the
+            // UI (and a script) can say "17/20" without hard-coding them.
+            nlohmann::json limits = nlohmann::json::object();
+            limits["manual_cap"] = 20;
+            limits["agent_cap"] = 100;
+            limits["manual_used"] = manual;
+            limits["agent_used"] = agent;
+            limits["strong_budget"] = 24;
+            limits["medium_budget"] = 14;
+            limits["weak_pick"] = 2;
+            j["limits"] = limits;
+            j["evicted"] = ws.recent_evictions(20);
             send_json(res, j);
           });
 
@@ -6022,12 +6052,19 @@ void ApiServer::Impl::install_routes() {
                send_error(res, 404, "not_found", err);
                return;
              }
-             const nlohmann::json note = ws.add_memory_note(json_string(body, "text"), &err);
-             if (note.is_null()) {
+             // This route is the human's way in: a note added here is
+             // permanent (w=1) and never decays. The agent's own notes go
+             // through toolkit_memory and are not.
+             const MemoryWrite write = ws.add_memory_note(json_string(body, "text"), "user", &err);
+             if (!write.ok()) {
                send_error(res, 400, "bad_request", err);
                return;
              }
-             send_json(res, note);
+             nlohmann::json j = nlohmann::json::object();
+             j["note"] = write.note;
+             j["merged_into"] = write.merged_into;
+             j["evicted"] = write.evicted;
+             send_json(res, j);
            });
 
   svr.Delete(R"(/api/workspaces/([^/]+)/memory/([^/]+))",

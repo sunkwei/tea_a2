@@ -619,7 +619,11 @@ try {
 
     $memAdd = Invoke-RestMethod "$base/api/workspaces/$wsId/memory" -Method Post `
         -ContentType 'application/json' -Body '{"text":"e2e test note"}'
-    Check "POST memory creates a note" (-not [string]::IsNullOrEmpty($memAdd.id))
+    # The response is {note, merged_into, evicted}: the note itself lives under
+    # .note (see docs/api.md), and a note added through this route is a
+    # person's note - permanent, never decayed.
+    Check "POST memory creates a note" (-not [string]::IsNullOrEmpty($memAdd.note.id))
+    Check "a note added in the UI is a permanent one" ($memAdd.note.source -eq 'user' -and $memAdd.note.tier -eq 'manual')
 
     $logs = Invoke-RestMethod "$base/api/workspaces/$wsId/logs?tail=50"
     Check "GET logs returns lines" ($logs.lines.Count -ge 1)

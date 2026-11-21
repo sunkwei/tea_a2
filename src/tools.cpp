@@ -699,13 +699,27 @@ ToolResult tool_memory(const nlohmann::json& args, const ToolContext& ctx) {
   std::string err;
 
   if (op == "add") {
-    const nlohmann::json note = ctx.workspace->add_memory_note(arg_str(args, "text"), &err);
-    if (note.is_null()) {
+    const MemoryWrite write =
+        ctx.workspace->add_memory_note(arg_str(args, "text"), "agent", &err);
+    if (!write.ok()) {
       result.output = "error: " + err;
       return result;
     }
     result.ok = true;
-    result.output = "stored memory note " + note.value("id", std::string());
+    std::ostringstream out;
+    out << "stored memory note " << write.note.value("id", std::string());
+    if (!write.merged_into.empty()) {
+      out << " (merged into " << write.merged_into << ", weight "
+          << write.note.value("weight_base", 0.0) << ")";
+    } else {
+      out << " (weight " << write.note.value("weight_base", 0.0) << ")";
+    }
+    for (std::size_t i = 0; i < write.evicted.size(); ++i) {
+      out << "\nevicted " << write.evicted[i].value("id", std::string()) << " ["
+          << write.evicted[i].value("reason", std::string()) << "]: "
+          << write.evicted[i].value("text", std::string());
+    }
+    result.output = out.str();
     return result;
   }
   if (op == "delete") {
@@ -718,7 +732,7 @@ ToolResult tool_memory(const nlohmann::json& args, const ToolContext& ctx) {
     return result;
   }
   if (op == "list") {
-    const std::vector<nlohmann::json> notes = ctx.workspace->load_memory(&err);
+    const std::vector<MemoryNote> notes = ctx.workspace->load_memory_notes(&err);
     if (notes.empty()) {
       result.ok = true;
       result.output = "(no memory notes)";
@@ -726,8 +740,9 @@ ToolResult tool_memory(const nlohmann::json& args, const ToolContext& ctx) {
     }
     std::ostringstream out;
     for (std::size_t i = 0; i < notes.size(); ++i) {
-      out << "- [" << notes[i].value("id", std::string()) << "] "
-          << notes[i].value("text", std::string()) << "\n";
+      const MemoryNote& n = notes[i];
+      out << "- [" << n.id << "] (" << n.tier << ", w=" << n.weight_effective
+          << ", " << n.source << ") " << n.text << "\n";
     }
     result.ok = true;
     result.output = out.str();
@@ -2766,7 +2781,12 @@ ToolRegistry::ToolRegistry() {
     def.description =
         "Store and recall durable notes about this workspace (kept in "
         ".tea_agent_run/memory/memory.json). Use op=add to remember user preferences or project "
-        "facts, and op=list to recall them. 工作区长期记忆的读写。";
+        "facts, and op=list to recall them. 工作区长期记忆的读写。"
+        " A note fades with its age (half-life 14 days): repeating a similar note merges into "
+        "the existing one, raises its weight and renews its age, so op=add the same fact again "
+        "when it still matters instead of writing a second note. At most 100 notes of yours are "
+        "kept and the weakest is dropped past that; notes the user wrote are permanent. "
+        "op=list shows each note's tier and weight.";
     def.parameters = nlohmann::json::parse(R"JSON({
       "type": "object",
       "properties": {

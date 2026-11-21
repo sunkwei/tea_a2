@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -200,6 +201,54 @@ class WorkspaceRegistry {
   mutable std::string last_save_error_;
 };
 
+/// One memory note with the weight rules applied.
+///
+/// `weight_base` is what the file stores; `weight_effective` is that number
+/// decayed by the note's absolute age (14-day half-life). A note a person wrote
+/// down is permanent and always injected; a note the agent wrote fades. The tier
+/// decides how it is injected: strong every turn, medium when it matches the
+/// conversation, weak as a deterministic sample (see select_memory_for_prompt).
+struct MemoryNote {
+  nlohmann::json raw;         ///< the entry as the file holds it (unknown fields kept)
+  std::string id;
+  std::string text;
+  std::string source;         ///< "user" (a person wrote it) | "agent"
+  std::string created_at;      ///< when it was first written
+  std::string decay_anchor;    ///< the age is counted from here (moves on a confirmation)
+  std::string last_merge_at;   ///< the last time a similar note confirmed this one
+  std::string last_write;      ///< max(created_at, last_merge_at); what eviction orders on
+  int merge_count = 0;
+  int renew_count = 0;         ///< how often the anchor was reset (capped)
+  double weight_base = 0.0;
+  double weight_effective = 0.0;
+  double age_days = 0.0;
+  std::string tier;            ///< manual | strong | medium | weak
+};
+
+/// What one memory write did.
+struct MemoryWrite {
+  nlohmann::json note;                  ///< the stored note (null on error)
+  std::string merged_into;              ///< id it was merged into (empty = new note)
+  std::vector<nlohmann::json> evicted;  ///< entries the caps dropped
+  bool ok() const { return !note.is_null(); }
+};
+
+/// The "Workspace memory" block for the system prompt, and how much was left
+/// out of it.
+struct MemoryPrompt {
+  std::string text;
+  int manual = 0;
+  int strong = 0;
+  int strong_total = 0;
+  int truncated_strong = 0;
+  int medium = 0;
+  int medium_total = 0;
+  int medium_matched = 0;
+  int weak = 0;
+  int weak_total = 0;
+  std::vector<std::string> weak_ids;
+};
+
 class Workspace {
  public:
   /// Layering: `base_settings` (builtin defaults + tea_agent.yaml + CLI) is
@@ -259,6 +308,9 @@ class Workspace {
   bool set_current_role(const std::string& id, std::string* err);
   std::string sessions_dir() const;
   std::string memory_file() const;
+  /// Where an evicted note is kept (`memory/evicted.jsonl`): the note itself is
+  /// gone from memory.json, but a person can still see what was dropped.
+  std::string memory_audit_file() const;
   std::string log_file() const;
   std::string tmp_dir() const;
   std::string meta_file() const;
@@ -373,8 +425,23 @@ class Workspace {
   HistoryResults search_history(const HistoryQuery& query) const;
 
   std::vector<nlohmann::json> load_memory(std::string* err) const;
-  nlohmann::json add_memory_note(const std::string& text, std::string* err) const;
+  /// The notes with the weight rules applied (effective weight, tier, age).
+  std::vector<MemoryNote> load_memory_notes(std::string* err) const;
+  /// Add a note for `source`: "user" is what a person wrote down and is
+  /// permanent; anything else is the agent's ("agent"). A similar existing
+  /// note is merged into instead of duplicated, then the caps are enforced
+  /// (20 manual / 100 agent, oldest confirmation first / weakest first).
+  MemoryWrite add_memory_note(const std::string& text, const std::string& source,
+                              std::string* err) const;
   bool delete_memory_note(const std::string& note_id, std::string* err) const;
+  /// The memory block of the system prompt: manual notes first, then strong,
+  /// medium (matched against `focus`) and a deterministic sample of the weak
+  /// ones. `seed` is stable for a whole UTC day, so a re-run sees the same
+  /// sample and the prompt prefix does not churn every turn.
+  MemoryPrompt select_memory_for_prompt(const std::string& focus,
+                                        const std::string& seed) const;
+  /// The newest eviction-audit entries, oldest first (max `max`).
+  std::vector<nlohmann::json> recent_evictions(std::size_t max) const;
 
   std::vector<std::string> tail_log(std::size_t max_lines) const;
 
@@ -388,6 +455,12 @@ class Workspace {
   /// so comments, key order and quoting survive byte for byte).
   bool write_setting_line(const std::string& key, const std::string& value_literal,
                           std::string* err);
+
+  bool save_memory_notes(const std::vector<MemoryNote>& notes, std::string* err) const;
+  /// Drop the excess notes (manual > 20, agent > 100) and write the audit.
+  std::vector<nlohmann::json> enforce_memory_caps(std::vector<MemoryNote>* notes,
+                                                  int64_t now) const;
+  bool append_memory_audit(const std::vector<nlohmann::json>& evicted) const;
 
   WorkspaceEntry entry_;
   std::string root_;

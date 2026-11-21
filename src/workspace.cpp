@@ -5,11 +5,16 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <map>
 #include <regex>
+#include <set>
+#include <sstream>
+#include <utility>
 
 #include "env.h"
 #include "gzip.h"
@@ -2339,6 +2344,292 @@ HistoryResults Workspace::search_history(const HistoryQuery& query) const {
   return out;
 }
 
+namespace {
+
+// --- memory weights --------------------------------------------------------
+//
+// A memory note is a fact or a preference that is injected into the system
+// prompt. Left alone the file would grow without bound and the oldest line
+// would still be there years later, so a note carries a weight that decays with
+// its **absolute age** (14-day half-life - a memory that is never confirmed
+// fades, like a human one) plus a hard cap on how many notes of each kind may
+// exist.
+constexpr double kMemoryHalfLifeDays = 14.0;
+/// `weight_effective >= 0.75`: injected every turn.
+constexpr double kMemoryTierStrong = 0.75;
+/// `weight_effective > 0.50`: injected when it matches the conversation.
+constexpr double kMemoryTierMedium = 0.50;
+/// What the agent's fresh note starts at (a person's note starts at 1, on
+/// purpose: "what I wrote down stays").
+constexpr double kMemoryAgentWeight = 0.90;
+/// A confirmation of an existing note raises its weight instead of duplicating
+/// it; the boost is what makes remembering something twice worth doing.
+constexpr double kMemoryMergeBonus = 0.20;
+constexpr std::size_t kMemoryManualCap = 20;
+constexpr std::size_t kMemoryAgentCap = 100;
+constexpr std::size_t kMemoryStrongBudget = 24;
+constexpr std::size_t kMemoryMediumBudget = 14;
+constexpr std::size_t kMemoryWeakPick = 2;
+/// How often a confirmation may reset the age. Past it the note keeps the
+/// weight boost but keeps ageing: repeating it forever is not a way to live
+/// forever.
+constexpr int kMemoryRenewMax = 6;
+constexpr int64_t kMemoryRenewWindowMs = 24LL * 60 * 60 * 1000;
+/// Similarity: after normalisation an exact match always merges. Otherwise the
+/// texts have to be long enough to be compared and share enough 2-grams. The
+/// length guard is not cosmetic: "note-00" and "note-01" share 5 of 7 bigrams
+/// (Jaccard 0.71), and a batch of such notes would collapse into one.
+constexpr double kMemorySimilarJaccard = 0.60;
+constexpr std::size_t kMemorySimilarMinChars = 12;
+constexpr std::size_t kMemorySimilarMinShared = 6;
+/// How much of a medium note the conversation has to mention for it to count as
+/// relevant.
+constexpr double kMemoryRelevanceMin = 0.30;
+/// A merge keeps what the note used to say; that trace is bounded.
+constexpr std::size_t kMemoryMergeTraceMax = 20;
+/// The eviction audit keeps the newest lines only.
+constexpr std::size_t kMemoryEvictedKeep = 200;
+const char* const kMemoryAuditFileName = "evicted.jsonl";
+
+/// ISO-8601 -> unix ms (0 when the string is not a timestamp).
+int64_t memory_iso_ms(const std::string& s) {
+  int64_t ms = 0;
+  if (!s.empty() && iso8601_to_unix_ms(s, &ms)) return ms;
+  return 0;
+}
+
+std::string memory_later(const std::string& a, const std::string& b) {
+  if (b.empty()) return a;
+  if (a.empty()) return b;
+  return memory_iso_ms(b) > memory_iso_ms(a) ? b : a;
+}
+
+std::string memory_str(const nlohmann::json& j, const char* key) {
+  auto it = j.find(key);
+  if (it != j.end() && it->is_string()) return it->get<std::string>();
+  return std::string();
+}
+
+int memory_int(const nlohmann::json& j, const char* key) {
+  auto it = j.find(key);
+  if (it != j.end() && it->is_number()) return it->get<int>();
+  return 0;
+}
+
+/// UTF-8 -> code points. An invalid byte becomes U+FFFD one byte at a time: a
+/// note somebody pasted must never make the comparison throw.
+std::vector<char32_t> memory_code_points(const std::string& s) {
+  std::vector<char32_t> out;
+  out.reserve(s.size());
+  for (std::size_t i = 0; i < s.size();) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    char32_t cp = 0xFFFD;
+    std::size_t len = 1;
+    if (c < 0x80) {
+      cp = static_cast<char32_t>(c);
+    } else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) {
+      cp = (static_cast<char32_t>(c & 0x1F) << 6) |
+           static_cast<char32_t>(static_cast<unsigned char>(s[i + 1]) & 0x3F);
+      len = 2;
+    } else if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) {
+      cp = (static_cast<char32_t>(c & 0x0F) << 12) |
+           (static_cast<char32_t>(static_cast<unsigned char>(s[i + 1]) & 0x3F) << 6) |
+           static_cast<char32_t>(static_cast<unsigned char>(s[i + 2]) & 0x3F);
+      len = 3;
+    } else if ((c & 0xF8) == 0xF0 && i + 3 < s.size()) {
+      cp = (static_cast<char32_t>(c & 0x07) << 18) |
+           (static_cast<char32_t>(static_cast<unsigned char>(s[i + 1]) & 0x3F) << 12) |
+           (static_cast<char32_t>(static_cast<unsigned char>(s[i + 2]) & 0x3F) << 6) |
+           static_cast<char32_t>(static_cast<unsigned char>(s[i + 3]) & 0x3F);
+      len = 4;
+    }
+    out.push_back(cp);
+    i += len;
+  }
+  return out;
+}
+
+/// What the comparison sees: full-width folded to half-width, ASCII lower-cased,
+/// whitespace collapsed. The stored text is never rewritten - only compared.
+std::vector<char32_t> memory_normalized(const std::string& text) {
+  std::vector<char32_t> out;
+  out.reserve(text.size());
+  bool space_pending = false;
+  for (char32_t cp : memory_code_points(text)) {
+    if (cp >= 0xFF01 && cp <= 0xFF5E) {
+      cp -= 0xFEE0;
+    } else if (cp == 0x3000) {
+      cp = ' ';
+    }
+    if (cp == ' ' || cp == '\t' || cp == '\r' || cp == '\n') {
+      space_pending = !out.empty();
+      continue;
+    }
+    if (cp >= 'A' && cp <= 'Z') cp = cp - 'A' + 'a';
+    if (space_pending) {
+      out.push_back(' ');
+      space_pending = false;
+    }
+    out.push_back(cp);
+  }
+  return out;
+}
+
+std::set<uint64_t> memory_bigrams(const std::vector<char32_t>& cps) {
+  std::set<uint64_t> out;
+  for (std::size_t i = 0; i + 1 < cps.size(); ++i) {
+    out.insert((static_cast<uint64_t>(cps[i]) << 32) |
+               static_cast<uint64_t>(cps[i + 1]));
+  }
+  return out;
+}
+
+/// The numbers in a note are usually the fact itself (a port, a path, a
+/// version, a budget). `本项目默认端口用 8080` and `... 9090` are 85% the same
+/// string and two different facts, so they must not merge.
+std::vector<std::string> memory_numbers(const std::vector<char32_t>& cps) {
+  std::vector<std::string> out;
+  std::string run;
+  for (const char32_t cp : cps) {
+    if (cp >= U'0' && cp <= U'9') {
+      run += static_cast<char>(cp);
+      continue;
+    }
+    if (!run.empty()) {
+      out.push_back(run);
+      run.clear();
+    }
+  }
+  if (!run.empty()) out.push_back(run);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+/// 0 when the two notes are not the same note; otherwise the Jaccard score
+/// (1.0 for an exact match after normalisation).
+double memory_similarity(const std::vector<char32_t>& a,
+                         const std::vector<char32_t>& b) {
+  if (a.empty() || b.empty()) return 0.0;
+  if (a == b) return 1.0;
+  if (std::min(a.size(), b.size()) < kMemorySimilarMinChars) return 0.0;
+  if (memory_numbers(a) != memory_numbers(b)) return 0.0;
+  const std::set<uint64_t> ga = memory_bigrams(a);
+  const std::set<uint64_t> gb = memory_bigrams(b);
+  if (ga.empty() || gb.empty()) return 0.0;
+  std::size_t shared = 0;
+  for (const uint64_t g : ga) {
+    if (gb.count(g)) ++shared;
+  }
+  if (shared < kMemorySimilarMinShared) return 0.0;
+  const std::size_t uni = ga.size() + gb.size() - shared;
+  const double jaccard = static_cast<double>(shared) / static_cast<double>(uni);
+  return jaccard >= kMemorySimilarJaccard ? jaccard : 0.0;
+}
+
+/// How much of the note the focus text covers (shared bigrams / the note's own
+/// bigrams). A one-character note covers nothing - there is nothing to compare.
+double memory_relevance(const std::vector<char32_t>& note,
+                        const std::vector<char32_t>& focus) {
+  const std::set<uint64_t> note_grams = memory_bigrams(note);
+  if (note_grams.empty()) return 0.0;
+  const std::set<uint64_t> focus_grams = memory_bigrams(focus);
+  if (focus_grams.empty()) return 0.0;
+  std::size_t shared = 0;
+  for (const uint64_t g : note_grams) {
+    if (focus_grams.count(g)) ++shared;
+  }
+  return static_cast<double>(shared) / static_cast<double>(note_grams.size());
+}
+
+uint64_t memory_seed_hash(const std::string& s) {
+  uint64_t h = 1469598103934665603ull;  // FNV-1a
+  for (const unsigned char c : s) {
+    h ^= c;
+    h *= 1099511628211ull;
+  }
+  return h ? h : 1;
+}
+
+/// xorshift64: the weak tier is sampled, but the sample has to be reproducible
+/// (same seed -> same notes), or the prompt changes every turn for no reason.
+struct MemoryRng {
+  uint64_t state;
+  uint64_t next() {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return state;
+  }
+};
+
+double memory_decay(double base, int64_t anchor_ms, int64_t now) {
+  if (anchor_ms <= 0 || now <= anchor_ms) return base;
+  const double days = static_cast<double>(now - anchor_ms) / 86400000.0;
+  return base * std::pow(0.5, days / kMemoryHalfLifeDays);
+}
+
+/// Recompute everything that is derived: effective weight, tier, age, and the
+/// "last confirmed" stamp the caps sort on.
+void memory_refresh(MemoryNote* n, int64_t now) {
+  if (n->created_at.empty()) n->created_at = n->decay_anchor;
+  if (n->created_at.empty()) n->created_at = now_iso8601();
+  if (n->decay_anchor.empty()) n->decay_anchor = n->created_at;
+  const int64_t anchor_ms = memory_iso_ms(n->decay_anchor);
+  n->age_days = (anchor_ms > 0 && now > anchor_ms)
+                    ? static_cast<double>(now - anchor_ms) / 86400000.0
+                    : 0.0;
+  if (n->source == "user") {
+    // A person's note does not fade: its weight is the promise, not a score.
+    n->weight_base = 1.0;
+    n->weight_effective = 1.0;
+    n->tier = "manual";
+  } else {
+    if (n->weight_base <= 0.0) n->weight_base = kMemoryAgentWeight;
+    n->weight_effective = memory_decay(n->weight_base, anchor_ms, now);
+    n->tier = n->weight_effective >= kMemoryTierStrong
+                  ? "strong"
+                  : (n->weight_effective > kMemoryTierMedium ? "medium" : "weak");
+  }
+  n->last_write = memory_later(n->created_at, n->last_merge_at);
+}
+
+/// The note as the file holds it. Unknown fields survive, because memory.json
+/// is also hand-edited and read by other tools.
+nlohmann::json memory_note_json(const MemoryNote& n) {
+  nlohmann::json j = n.raw.is_object() ? n.raw : nlohmann::json::object();
+  j["id"] = n.id;
+  j["text"] = n.text;
+  j["source"] = n.source;
+  j["weight_base"] = n.weight_base;
+  j["created_at"] = n.created_at;
+  j["decay_anchor"] = n.decay_anchor;
+  if (n.last_merge_at.empty()) {
+    j.erase("last_merge_at");
+  } else {
+    j["last_merge_at"] = n.last_merge_at;
+  }
+  if (n.merge_count > 0) j["merge_count"] = n.merge_count; else j.erase("merge_count");
+  if (n.renew_count > 0) j["renew_count"] = n.renew_count; else j.erase("renew_count");
+  return j;
+}
+
+/// A note is one bullet: a multi-line note must not break the list shape.
+std::string memory_bullet(const std::string& text) {
+  std::string out;
+  out.reserve(text.size() + 8);
+  for (const char c : text) {
+    out += c;
+    if (c == '\n') out += "  ";
+  }
+  return out;
+}
+
+}  // namespace
+
+std::string Workspace::memory_audit_file() const {
+  return path_join(path_join(run_dir_, "memory"), kMemoryAuditFileName);
+}
+
 std::vector<nlohmann::json> Workspace::load_memory(std::string* err) const {
   std::vector<nlohmann::json> notes;
   bool ok = false;
@@ -2354,53 +2645,411 @@ std::vector<nlohmann::json> Workspace::load_memory(std::string* err) const {
   return notes;
 }
 
-nlohmann::json Workspace::add_memory_note(const std::string& text, std::string* err) const {
-  // Read-load-append-write: the whole point of the lock. Two turns remembering
-  // something at the same time must both survive.
-  StateLock lock(state_mutex());
-  const std::string trimmed = trim(text);
-  if (trimmed.empty()) {
-    if (err) *err = "memory text is empty";
-    return nlohmann::json();
+std::vector<MemoryNote> Workspace::load_memory_notes(std::string* err) const {
+  const std::vector<nlohmann::json> raw = load_memory(err);
+  const int64_t now = now_ms();
+  std::vector<MemoryNote> out;
+  out.reserve(raw.size());
+  for (std::size_t i = 0; i < raw.size(); ++i) {
+    MemoryNote n;
+    n.raw = raw[i].is_object() ? raw[i] : nlohmann::json::object();
+    n.id = memory_str(n.raw, "id");
+    n.text = memory_str(n.raw, "text");
+    n.created_at = memory_str(n.raw, "created_at");
+    n.decay_anchor = memory_str(n.raw, "decay_anchor");
+    n.last_merge_at = memory_str(n.raw, "last_merge_at");
+    n.merge_count = memory_int(n.raw, "merge_count");
+    n.renew_count = memory_int(n.raw, "renew_count");
+    // An entry without a source predates the weight rules. It is read as a
+    // person's note: that is the only reading which cannot silently weaken
+    // something a user wrote down.
+    n.source = memory_str(n.raw, "source") == "agent" ? "agent" : "user";
+    double base = 0.0;
+    auto weight = n.raw.find("weight_base");
+    if (weight != n.raw.end() && weight->is_number()) base = weight->get<double>();
+    if (!(base > 0.0)) base = n.source == "user" ? 1.0 : kMemoryAgentWeight;
+    if (base > 1.0) base = 1.0;
+    n.weight_base = base;
+    memory_refresh(&n, now);
+    out.push_back(n);
   }
-  std::vector<nlohmann::json> notes = load_memory(nullptr);
-  nlohmann::json note = nlohmann::json::object();
-  note["id"] = make_id("n_");
-  note["text"] = trimmed;
-  note["created_at"] = now_iso8601();
-  notes.push_back(note);
-
-  nlohmann::json mem = nlohmann::json::object();
-  nlohmann::json arr = nlohmann::json::array();
-  for (std::size_t i = 0; i < notes.size(); ++i) arr.push_back(notes[i]);
-  mem["notes"] = arr;
-  mem["updated_at"] = now_iso8601();
-  if (!write_file_atomic(memory_file(), dump_json(mem, 2) + "\n", err)) return nlohmann::json();
-  return note;
+  return out;
 }
 
-bool Workspace::delete_memory_note(const std::string& note_id, std::string* err) const {
-  StateLock lock(state_mutex());
-  std::vector<nlohmann::json> notes = load_memory(nullptr);
+bool Workspace::save_memory_notes(const std::vector<MemoryNote>& notes,
+                                  std::string* err) const {
   nlohmann::json arr = nlohmann::json::array();
-  bool removed = false;
-  for (std::size_t i = 0; i < notes.size(); ++i) {
-    auto id_it = notes[i].find("id");
-    if (id_it != notes[i].end() && id_it->is_string() && id_it->get<std::string>() == note_id) {
-      removed = true;
-      continue;
-    }
-    arr.push_back(notes[i]);
-  }
-  if (!removed) {
-    if (err) *err = "memory note not found: " + note_id;
-    return false;
-  }
+  for (const MemoryNote& n : notes) arr.push_back(memory_note_json(n));
   nlohmann::json mem = nlohmann::json::object();
   mem["notes"] = arr;
   mem["updated_at"] = now_iso8601();
   return write_file_atomic(memory_file(), dump_json(mem, 2) + "\n", err);
 }
+
+MemoryWrite Workspace::add_memory_note(const std::string& text,
+                                       const std::string& source,
+                                       std::string* err) const {
+  // Read-load-change-write under the process-wide lock: two turns remembering
+  // something at the same time must both survive.
+  MemoryWrite result;
+  StateLock lock(state_mutex());
+  const std::string trimmed = trim(text);
+  if (trimmed.empty()) {
+    if (err) *err = "memory text is empty";
+    return result;
+  }
+  const std::string who = source == "user" ? "user" : "agent";
+  const int64_t now = now_ms();
+  const std::string now_s = now_iso8601();
+  std::vector<MemoryNote> notes = load_memory_notes(nullptr);
+  const std::vector<char32_t> incoming = memory_normalized(trimmed);
+
+  std::size_t best = 0;
+  double best_score = 0.0;
+  bool merge = false;
+  for (std::size_t i = 0; i < notes.size(); ++i) {
+    const double score = memory_similarity(incoming, memory_normalized(notes[i].text));
+    if (score > best_score) {
+      best_score = score;
+      best = i;
+      merge = true;
+    }
+  }
+
+  std::string target_id;
+  if (merge) {
+    MemoryNote& note = notes[best];
+    if (!note.raw.is_object()) note.raw = nlohmann::json::object();
+    nlohmann::json trace = nlohmann::json::object();
+    trace["id"] = note.id;
+    trace["at"] = now_s;
+    bool traced = false;
+    if (note.source == "user") {
+      // A person's wording wins. An agent restating the note must not rewrite
+      // what the user wrote: the restatement is only kept as a trace.
+      if (memory_normalized(trimmed) != memory_normalized(note.text)) {
+        trace["text"] = trimmed;
+        trace["source"] = who;
+        traced = true;
+      }
+    } else {
+      trace["text"] = note.text;
+      trace["source"] = note.source;
+      traced = true;
+      note.text = trimmed;
+      if (who == "user") note.source = "user";  // what a person writes is permanent
+    }
+    if (traced) {
+      nlohmann::json& history = note.raw["merged_from"];
+      if (!history.is_array()) history = nlohmann::json::array();
+      history.push_back(trace);
+      while (history.size() > kMemoryMergeTraceMax) history.erase(history.begin());
+    }
+    const double base = who == "user" ? 1.0 : kMemoryAgentWeight;
+    note.weight_base = std::min(1.0, std::max(note.weight_base, base) + kMemoryMergeBonus);
+    note.merge_count += 1;
+    note.last_merge_at = now_s;
+    // A confirmation also renews the note - the one thing the absolute age
+    // would otherwise never forgive. Capped, and at most once a day: repeating
+    // a note is not a way to keep it alive forever.
+    if (note.source != "user" && note.renew_count < kMemoryRenewMax) {
+      const int64_t anchor = memory_iso_ms(note.decay_anchor);
+      if (anchor <= 0 || now - anchor >= kMemoryRenewWindowMs) {
+        note.decay_anchor = now_s;
+        note.renew_count += 1;
+      }
+    }
+    memory_refresh(&note, now);
+    target_id = note.id;
+    result.merged_into = note.id;
+  } else {
+    MemoryNote note;
+    note.id = make_id("n_");
+    note.text = trimmed;
+    note.source = who;
+    note.weight_base = who == "user" ? 1.0 : kMemoryAgentWeight;
+    note.created_at = now_s;
+    note.decay_anchor = now_s;
+    note.raw = nlohmann::json::object();
+    memory_refresh(&note, now);
+    target_id = note.id;
+    notes.push_back(note);
+  }
+
+  // The caps are enforced after every write, so a hand-edited file that grew
+  // past them is corrected by the next note rather than never.
+  result.evicted = enforce_memory_caps(&notes, now);
+
+  std::string write_err;
+  if (!save_memory_notes(notes, &write_err)) {
+    if (err) *err = write_err.empty() ? "cannot write memory file" : write_err;
+    result.evicted.clear();
+    return result;
+  }
+  for (const MemoryNote& n : notes) {
+    if (n.id != target_id) continue;
+    result.note = memory_note_json(n);
+    result.note["tier"] = n.tier;
+    result.note["weight_effective"] = n.weight_effective;
+    break;
+  }
+  return result;
+}
+
+std::vector<nlohmann::json> Workspace::enforce_memory_caps(
+    std::vector<MemoryNote>* notes, int64_t now) const {
+  std::vector<nlohmann::json> evicted;
+  for (MemoryNote& n : *notes) memory_refresh(&n, now);
+
+  auto drop = [&](std::size_t index, const char* reason) {
+    const MemoryNote& n = (*notes)[index];
+    nlohmann::json e = nlohmann::json::object();
+    e["id"] = n.id;
+    e["text"] = n.text;
+    e["source"] = n.source;
+    e["created_at"] = n.created_at;
+    e["last_write"] = n.last_write;
+    e["weight_base"] = n.weight_base;
+    e["weight_effective"] = n.weight_effective;
+    e["evicted_at"] = now_iso8601();
+    e["reason"] = reason;
+    evicted.push_back(e);
+    notes->erase(notes->begin() + static_cast<std::ptrdiff_t>(index));
+  };
+
+  // Manual notes: the cap is about how many a person is willing to keep, so the
+  // one that was confirmed longest ago goes first. A note restated yesterday is
+  // still current; one nobody looked at since it was written is not.
+  for (;;) {
+    std::size_t count = 0;
+    std::size_t oldest = 0;
+    int64_t oldest_ms = 0;
+    for (std::size_t i = 0; i < notes->size(); ++i) {
+      if ((*notes)[i].source != "user") continue;
+      const int64_t ms = memory_iso_ms((*notes)[i].last_write);
+      if (count == 0 || ms < oldest_ms) {
+        oldest = i;
+        oldest_ms = ms;
+      }
+      ++count;
+    }
+    if (count <= kMemoryManualCap) break;
+    drop(oldest, "manual_cap");
+  }
+
+  // Agent notes: the weakest goes first, oldest among equals - the same order
+  // the prompt uses, so what nobody ever sees is what is dropped.
+  for (;;) {
+    std::size_t count = 0;
+    std::size_t weakest = 0;
+    double weakest_weight = 0.0;
+    int64_t weakest_ms = 0;
+    for (std::size_t i = 0; i < notes->size(); ++i) {
+      const MemoryNote& n = (*notes)[i];
+      if (n.source == "user") continue;
+      const int64_t ms = memory_iso_ms(n.last_write);
+      const bool worse = count == 0 || n.weight_effective < weakest_weight ||
+                         (n.weight_effective == weakest_weight && ms < weakest_ms);
+      if (worse) {
+        weakest = i;
+        weakest_weight = n.weight_effective;
+        weakest_ms = ms;
+      }
+      ++count;
+    }
+    if (count <= kMemoryAgentCap) break;
+    drop(weakest, "agent_cap");
+  }
+
+  // The audit goes first: a crash after this line leaves a note that is still
+  // in memory.json but already listed as evicted (harmless, and the next
+  // eviction logs it again), while losing the line would mean losing the note
+  // without a trace.
+  if (!evicted.empty()) append_memory_audit(evicted);
+  return evicted;
+}
+
+bool Workspace::append_memory_audit(const std::vector<nlohmann::json>& evicted) const {
+  if (evicted.empty()) return true;
+  const std::string path = memory_audit_file();
+  std::string existing;
+  read_file(path, &existing);
+  std::vector<std::string> lines;
+  for (const std::string& line : split_lines(existing)) {
+    if (!trim(line).empty()) lines.push_back(line);
+  }
+  for (const nlohmann::json& e : evicted) lines.push_back(dump_json(e));
+  if (lines.size() > kMemoryEvictedKeep) {
+    lines.erase(lines.begin(), lines.begin() + static_cast<std::ptrdiff_t>(lines.size() - kMemoryEvictedKeep));
+  }
+  std::string data;
+  for (const std::string& line : lines) {
+    data += line;
+    data += "\n";
+  }
+  make_dirs(path_parent(path));
+  return write_file_atomic(path, data);
+}
+
+bool Workspace::delete_memory_note(const std::string& note_id, std::string* err) const {
+  StateLock lock(state_mutex());
+  const std::vector<MemoryNote> notes = load_memory_notes(nullptr);
+  std::vector<MemoryNote> kept;
+  kept.reserve(notes.size());
+  bool removed = false;
+  for (const MemoryNote& n : notes) {
+    if (n.id == note_id) {
+      removed = true;
+      continue;
+    }
+    kept.push_back(n);
+  }
+  if (!removed) {
+    if (err) *err = "memory note not found: " + note_id;
+    return false;
+  }
+  return save_memory_notes(kept, err);
+}
+
+MemoryPrompt Workspace::select_memory_for_prompt(const std::string& focus,
+                                                 const std::string& seed) const {
+  MemoryPrompt out;
+  const std::vector<MemoryNote> notes = load_memory_notes(nullptr);
+  const std::vector<char32_t> focus_cps = memory_normalized(focus);
+
+  std::vector<std::size_t> manual, strong, medium, weak;
+  for (std::size_t i = 0; i < notes.size(); ++i) {
+    const std::string& tier = notes[i].tier;
+    if (tier == "manual") manual.push_back(i);
+    else if (tier == "strong") strong.push_back(i);
+    else if (tier == "medium") medium.push_back(i);
+    else weak.push_back(i);
+  }
+
+  auto by_last_write = [&notes](std::size_t a, std::size_t b) {
+    const int64_t am = memory_iso_ms(notes[a].last_write);
+    const int64_t bm = memory_iso_ms(notes[b].last_write);
+    if (am != bm) return am > bm;
+    return notes[a].id < notes[b].id;
+  };
+  auto by_weight = [&notes, &by_last_write](std::size_t a, std::size_t b) {
+    if (notes[a].weight_effective != notes[b].weight_effective) {
+      return notes[a].weight_effective > notes[b].weight_effective;
+    }
+    return by_last_write(a, b);
+  };
+
+  std::sort(manual.begin(), manual.end(), by_last_write);
+  out.manual = static_cast<int>(manual.size());
+
+  std::sort(strong.begin(), strong.end(), by_weight);
+  out.strong_total = static_cast<int>(strong.size());
+  if (strong.size() > kMemoryStrongBudget) {
+    out.truncated_strong = static_cast<int>(strong.size() - kMemoryStrongBudget);
+    strong.resize(kMemoryStrongBudget);
+  }
+  out.strong = static_cast<int>(strong.size());
+
+  out.medium_total = static_cast<int>(medium.size());
+  std::vector<std::pair<double, std::size_t>> matched;
+  for (const std::size_t idx : medium) {
+    const double relevance = memory_relevance(memory_normalized(notes[idx].text), focus_cps);
+    if (relevance >= kMemoryRelevanceMin) matched.push_back(std::make_pair(relevance, idx));
+  }
+  out.medium_matched = static_cast<int>(matched.size());
+  std::vector<std::size_t> chosen_medium;
+  if (matched.empty()) {
+    // Nothing in this conversation touches the medium notes: fall back to the
+    // strongest ones instead of injecting an arbitrary slice.
+    std::sort(medium.begin(), medium.end(), by_weight);
+    for (std::size_t i = 0; i < medium.size() && i < kMemoryMediumBudget; ++i) {
+      chosen_medium.push_back(medium[i]);
+    }
+  } else {
+    std::sort(matched.begin(), matched.end(),
+              [&by_weight](const std::pair<double, std::size_t>& a,
+                           const std::pair<double, std::size_t>& b) {
+                if (a.first != b.first) return a.first > b.first;
+                return by_weight(a.second, b.second);
+              });
+    for (std::size_t i = 0; i < matched.size() && i < kMemoryMediumBudget; ++i) {
+      chosen_medium.push_back(matched[i].second);
+    }
+  }
+  out.medium = static_cast<int>(chosen_medium.size());
+
+  out.weak_total = static_cast<int>(weak.size());
+  std::vector<std::size_t> chosen_weak;
+  {
+    // Sorted by id first so the walk is reproducible, then weighted by the
+    // effective weight: a note that is only just fading beats one that is
+    // nearly gone.
+    std::sort(weak.begin(), weak.end(), [&notes](std::size_t a, std::size_t b) {
+      return notes[a].id < notes[b].id;
+    });
+    MemoryRng rng{memory_seed_hash(seed)};
+    std::vector<std::size_t> pool = weak;
+    while (!pool.empty() && chosen_weak.size() < kMemoryWeakPick) {
+      double total = 0.0;
+      for (const std::size_t idx : pool) total += notes[idx].weight_effective;
+      const bool weighted = total > 0.0;
+      if (!weighted) total = static_cast<double>(pool.size());
+      const double r =
+          (static_cast<double>(rng.next() % 1000000ull) / 1000000.0) * total;
+      std::size_t pick = pool.size() - 1;
+      double run = 0.0;
+      for (std::size_t i = 0; i < pool.size(); ++i) {
+        run += weighted ? notes[pool[i]].weight_effective : 1.0;
+        if (r < run) {
+          pick = i;
+          break;
+        }
+      }
+      chosen_weak.push_back(pool[pick]);
+      out.weak_ids.push_back(notes[pool[pick]].id);
+      pool.erase(pool.begin() + static_cast<std::ptrdiff_t>(pick));
+    }
+  }
+  out.weak = static_cast<int>(chosen_weak.size());
+
+  // The tiers are emitted in a fixed order (manual, strong, medium, weak). It is
+  // the order the model should trust them in, and a stable order keeps the
+  // prompt prefix cacheable when only one tier changes.
+  std::ostringstream body;
+  auto emit = [&body, &notes](const char* title, const std::vector<std::size_t>& indexes) {
+    if (indexes.empty()) return;
+    body << title << "\n";
+    for (const std::size_t idx : indexes) {
+      body << "- " << memory_bullet(notes[idx].text) << "\n";
+    }
+  };
+  emit("Written down by the user (always in force):", manual);
+  emit("Confirmed here:", strong);
+  emit("Possibly relevant to this conversation:", chosen_medium);
+  emit("Older notes (kept, not confirmed recently):", chosen_weak);
+  if (!body.str().empty()) {
+    out.text = "\nWorkspace memory (durable notes previously stored for this workspace)\n" +
+               body.str();
+  }
+  return out;
+}
+
+std::vector<nlohmann::json> Workspace::recent_evictions(std::size_t max) const {
+  std::vector<nlohmann::json> out;
+  std::string data;
+  if (!read_file(memory_audit_file(), &data)) return out;
+  std::vector<nlohmann::json> all;
+  for (const std::string& line : split_lines(data)) {
+    const std::string trimmed = trim(line);
+    if (trimmed.empty()) continue;
+    nlohmann::json j = nlohmann::json::parse(trimmed, nullptr, false);
+    if (!j.is_discarded()) all.push_back(j);
+  }
+  const std::size_t start = all.size() > max ? all.size() - max : 0;
+  for (std::size_t i = start; i < all.size(); ++i) out.push_back(all[i]);
+  return out;
+}
+
 
 std::vector<std::string> Workspace::tail_log(std::size_t max_lines) const {
   std::vector<std::string> lines;

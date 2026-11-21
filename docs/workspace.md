@@ -69,6 +69,36 @@ bool write_file_atomic(const std::string& path, const std::string& data, std::st
 16 个会话创建，中间还挂着一轮正在跑的对话，最后核对「每个 200 都在盘上」「index.json 与
 会话文件一一对应」「没有残留 `.tmp-*`」。用修复前的二进制跑会挂 4 项——24 个写入只剩 2 条。
 
+### 记忆的权重：会衰减，也会被重申加强
+
+`memory.json` 的条目不只是文本，还带一个权重。**年龄按绝对时间算**（从 `decay_anchor`
+起，被读取、被注入都不刷新它），半衰期 14 天：
+
+    weight_effective = weight_base × 0.5^(age / 14 天)
+
+| 档位 | 条件 | 怎么注入 |
+| --- | --- | --- |
+| 手动 | `source=user` | `w=1`、永不衰减、**每轮全注入**（≤20 条，不占强档预算） |
+| 强 | `≥ 0.75` | 每轮注入，按权重降序取前 24 条 |
+| 中 | `0.5 < w < 0.75` | 按相关性注入 ≤14 条（与最近一条用户消息 / 本轮任务做 2-gram 覆盖率，≥0.30；一条都不命中时按权重降序） |
+| 弱 | `≤ 0.5` | 每轮抽 2 条（伪随机，`seed = 工作区 id + UTC 日期`，按权重加权） |
+
+- **谁写的决定永久的还是不永久的**：记忆页 / `POST /api/workspaces/{id}/memory` 是**人**
+  写的（`source=user`）；`toolkit_memory op=add` 是 **agent** 写的（`w0=0.90`，会衰减）。
+- **相似就合并，不新增**：归一化后完全相同，或 `min(长度) ≥ 12` 且 2-gram Jaccard ≥ 0.60
+  且共享 2-gram ≥ 6 时合并；**数字不同的两条不算相似**（「端口 8080」和「端口 9090」是两个
+  事实），长度 < 12 的短记事只认完全相同（否则 `note-00` / `note-01` 会被并成一条）。合并后
+  `w_base = min(1, max(两条) + 0.20)`，年龄基准一并前移——**最多 24 小时一次、累计 6 次**：
+  重申能让一条记忆活下来，但不是无限续命。agent 的条目采用新表述；**手动条目永远保留用户
+  的原文**，agent 的表述进 `merged_from`。
+- **条数上限**：手动 ≤ 20（超出时挤出「最久没被确认」的一条），自动 ≤ 100（超出时淘汰
+  `weight_effective` 最低的，平手淘汰更久没被确认的）。挤出不等于消失：被挤出的条目写进
+  `memory/evicted.jsonl`（保留最近 200 行），`GET …/memory` 的 `evicted` 和记忆页的
+  「已挤出」都能查。
+- **老文件直接能用**：没有 `source` / `weight_base` 的条目按「人写的、永久」解释，`GET`
+  不改写磁盘；下一次写入才把这些字段固化下来。
+- 回归：`python tests/smoke_memory_weights.py`（见文件头的清单）。
+
 ### agent.md：工作区的「经验」，而不只是「事实」
 
 `memory.json` 记的是**事实与偏好**（「这个项目用 yarn，不用 npm」）；`agent.md` 记的是
@@ -339,7 +369,7 @@ python tools/merge_work_area.py /old/project/.tea_agent_run ./.tea_agent_run
 | 类别 | 合并方式 |
 | --- | --- |
 | `sessions/` | 会话文件拷过去，`index.json` 用两边的会话重建；**目标里已有的会话 id 会改名**（`--conflict skip` / `overwrite` 可换策略），分叉会话的 `forked_from` 跟着改成新 id，它的轨迹文件也一起改名 |
-| `memory/memory.json` | 记忆条目追加；**同 id 或同文本的条目不重复** |
+| `memory/memory.json` | 记忆条目追加；**同 id 或同文本的条目不重复**。同文本的两条取更强的 `weight_base`，但**不续期**（拷贝一份存档不等于用户又确认了一次）；合并后超过 20/100 条只报告、不删除 |
 | `trajectories/<sid>.jsonl` | 轨迹按轮合并（同一个 `turn_id` 取新的一条），记录里的 `session_id` / `workspace_id` 改成目标工作区的 |
 | `agent.md` | 按小节合并，**已有的行不重复**；超过 32 KB 上限时保持目标原样并报错 |
 | `artifacts/` | 把合并进来的对话引用的图片拷过去（`--copy-all-artifacts` 拷整个目录） |

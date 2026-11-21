@@ -850,6 +850,19 @@ button{font-family:inherit}
 }
 .note .txt{flex:1 1 auto;white-space:pre-wrap;word-break:break-word;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px}
 .note .meta{font-size:11px;color:var(--dsw-alias-label-caption);margin-top:4px}
+/* 记忆条目：档位徽标 + 生效权重 + 最近确认时间（见 /memory 的 tier / weight_effective）。 */
+.note-hint{font-size:11px;color:var(--dsw-alias-label-caption);margin:0 0 10px}
+.note-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:4px}
+.note-head .badge{margin-left:0}
+.note-w{font-size:11px;color:var(--dsw-alias-label-caption)}
+.note-text{white-space:pre-wrap;word-break:break-word}
+.badge.tier-manual{color:var(--dsw-alias-state-success-primary)}
+.badge.tier-strong{color:var(--dsw-alias-state-success-primary)}
+.badge.tier-medium{color:var(--dsw-alias-label-secondary)}
+.badge.tier-weak{color:var(--dsw-alias-label-caption)}
+.note-evicted{margin-top:14px}
+.note-evicted summary{cursor:pointer;font-size:12px;color:var(--dsw-alias-label-caption);margin-bottom:8px}
+.note-evicted .note{opacity:.7}
 .note .del{border:0;background:transparent;color:var(--dsw-alias-label-caption);cursor:pointer;font-size:12px;padding:2px 6px;border-radius:4px}
 .note .del:hover{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-interactive-bg-hover)}
 

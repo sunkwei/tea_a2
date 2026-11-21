@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`1.7.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
+| `GET` | `/api/health` | 探活、版本（`1.8.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
@@ -46,7 +46,7 @@
 | `POST` | `/api/turns/{turn_id}/stop` | **精确停这一轮**（不用知道 session_id）。回答 `{"ok":true,"cancelled":true,"state":"stopping"}`；停是**请求**，不是保证：模型或工具要到下一个边界才会真的停下来 |
 | `GET` | `/api/turns/{turn_id}/events?since=` | **这一轮的事件流**：回放 `since` 之后的事件（`since` 省略 = 全部），然后继续直播；轮次已经跑完也能读（回放缓冲区还在）。每一帧带 `seq`，断线以后拿最后一个 `seq` 接回来就行 |
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`，也即这一轮的**句柄**） |
-| `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆 |
+| `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆。`GET` 的每条带 `tier`（`manual`/`strong`/`medium`/`weak`）、`source`、`weight_base`、`weight_effective`（14 天半衰）、`age_days`、`last_write`、`merge_count`；顶层带 `limits`（`manual_cap` 20 / `agent_cap` 100 / 注入预算 24+14+2）与 `evicted`（最近 20 条被挤出的）。`POST {"text":"…"}` 是**人写的记忆**（永久、不衰减），返回 `note` / `merged_into`（相似条目被合并时的 id）/ `evicted`。`DELETE …/memory/{id}` 删一条 |
 | `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
 | `POST` | `/api/chat` | agent loop 本身；带 `task_id` + `task_context` 时，这一轮就是「在做某个排队任务」，模型会用 `toolkit_task` 汇报进度。带 **`Idempotency-Key`** 时，同一个键的同一个请求**只做一次**（见下「幂等键」） |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |

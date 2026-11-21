@@ -73,7 +73,7 @@
     files: { dir: '', entries: [], path: null, content: '', original: '', truncated: false, readOnly: false, preview: false, size: 0, search: null },
     /// 侧栏里的历史搜索（对话 + 轨迹）。null = 没在搜。
     sessionSearch: null,
-    memory: [], logsTimer: null, logsAutoScroll: true,
+    memory: [], memoryLimits: null, memoryEvicted: [], logsTimer: null, logsAutoScroll: true,
     /// 当前会话的任务列表（todo）：agent 用 toolkit_todo 维护，SSE 的 todo 事件
     /// 实时推送。done/total 用于「3/7」这样的进度显示。
     todos: [], todoDone: 0, todoTotal: 0, todoCollapsed: false,
@@ -5794,6 +5794,8 @@
     loadAgentDoc();                       // 经验文件与记忆一起刷新
     return api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/memory').then(function (d) {
       state.memory = d.notes || [];
+      state.memoryLimits = d.limits || null;
+      state.memoryEvicted = d.evicted || [];
       renderMemory();
     }, function (e) { toast('读取记忆失败：' + e.message); });
   }
@@ -6260,15 +6262,46 @@
     });
   }
 
+  // 档位：手动条目永久、每轮注入；其余按 14 天半衰分强/中/弱。
+  var MEMORY_TIER_LABEL = { manual: '手动·永久', strong: '强', medium: '中', weak: '弱' };
+  var MEMORY_EVICT_REASON = { manual_cap: '手动超过 20 条', agent_cap: '自动超过 100 条' };
+  function memoryWeight(n) {
+    return typeof n.weight_effective === 'number' ? n.weight_effective : 0;
+  }
   function renderMemory() {
     var box = $('memory-list');
     clear(box);
+    var lim = state.memoryLimits;
+    var hint = $('memory-hint');
+    if (hint) {
+      hint.textContent = lim
+        ? '手动记忆 ' + lim.manual_used + '/' + lim.manual_cap +
+          '（不衰减、每轮注入；超出时挤出最久未确认的一条）· 自动记忆 ' +
+          lim.agent_used + '/' + lim.agent_cap +
+          '（半衰期 14 天；强记忆每轮注入，中等的按相关注入，弱的每轮抽 2 条）'
+        : '';
+    }
+    renderEvicted();
     if (!state.memory.length) { box.appendChild(el('div', 'empty-note', '还没有记忆条目')); return; }
-    state.memory.forEach(function (n) {
+    // 按注入顺序展示：手动在前，其余按权重从强到弱。
+    var rows = state.memory.slice().sort(function (a, b) {
+      var am = a.tier === 'manual' ? 1 : 0, bm = b.tier === 'manual' ? 1 : 0;
+      if (am !== bm) return bm - am;
+      if (memoryWeight(a) !== memoryWeight(b)) return memoryWeight(b) - memoryWeight(a);
+      return String(b.last_write || '').localeCompare(String(a.last_write || ''));
+    });
+    rows.forEach(function (n) {
       var row = el('div', 'note');
       var left = el('div', 'txt');
-      left.appendChild(el('div', null, n.text));
-      left.appendChild(el('div', 'meta', fmtTime(n.created_at) + ' · ' + n.id));
+      var head = el('div', 'note-head');
+      head.appendChild(el('span', 'badge tier-' + (n.tier || 'weak'),
+                          MEMORY_TIER_LABEL[n.tier] || n.tier || '?'));
+      if (n.tier !== 'manual') head.appendChild(el('span', 'note-w', 'w ' + memoryWeight(n).toFixed(2)));
+      if (n.merge_count) head.appendChild(el('span', 'note-w', '合并 ' + n.merge_count + ' 次'));
+      left.appendChild(head);
+      left.appendChild(el('div', 'note-text', n.text));
+      var when = fmtTime(n.last_write) || fmtTime(n.created_at);
+      left.appendChild(el('div', 'meta', '最近确认 ' + when + ' · ' + n.id));
       row.appendChild(left);
       row.appendChild(btn('del', '删除', function () {
         api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/memory/' + encodeURIComponent(n.id), { method: 'DELETE' })
@@ -6277,12 +6310,37 @@
       box.appendChild(row);
     });
   }
+  function renderEvicted() {
+    var wrap = $('memory-evicted-wrap');
+    var box = $('memory-evicted');
+    if (!wrap || !box) return;
+    clear(box);
+    var list = state.memoryEvicted || [];
+    wrap.hidden = !list.length;
+    var summary = $('memory-evicted-summary');
+    if (summary) summary.textContent = '已挤出（最近 ' + list.length + ' 条，内容还在 memory/evicted.jsonl）';
+    list.slice().reverse().forEach(function (e) {
+      var row = el('div', 'note');
+      var left = el('div', 'txt');
+      left.appendChild(el('div', 'note-text', e.text || ''));
+      left.appendChild(el('div', 'meta',
+                          (MEMORY_EVICT_REASON[e.reason] || e.reason || '挤出') + ' · ' + fmtTime(e.evicted_at)));
+      row.appendChild(left);
+      box.appendChild(row);
+    });
+  }
   function addMemory() {
     var ta = $('memory-input');
     var text = ta.value.trim();
     if (!text || !state.workspace) return;
     api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/memory', { method: 'POST', body: { text: text } })
-      .then(function () { ta.value = ''; loadMemory(); toast('已添加'); }, function (e) { toast('添加失败：' + e.message); });
+      .then(function (d) {
+        ta.value = '';
+        loadMemory();
+        var msg = d && d.merged_into ? '已合并进已有记忆' : '已添加';
+        if (d && d.evicted && d.evicted.length) msg += '，挤出 ' + d.evicted.length + ' 条最久未确认的';
+        toast(msg);
+      }, function (e) { toast('添加失败：' + e.message); });
   }
 
   /* ---------- 11) 日志视图 ---------- */

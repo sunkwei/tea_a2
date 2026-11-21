@@ -223,13 +223,28 @@ providers:
         check("%d concurrent memory adds are all accepted" % MEMORY_ADDS,
               len(ok_adds) == MEMORY_ADDS, adds[:2])
 
+        # A note written through this route is a person's note and permanent,
+        # but only 20 of them are kept (see docs/workspace.md): 24 racing
+        # writers therefore leave 20 on disk and 4 in the eviction audit. The
+        # failure this test exists for is still visible - before the lock, 24
+        # racing writers left exactly ONE note.
+        MANUAL_CAP = 20
         notes = read_json(memory_path)["notes"]
         texts = [n.get("text") for n in notes]
-        check("every accepted note is on disk",
-              len(ok_adds) <= len(notes), "accepted=%d stored=%d" % (len(ok_adds), len(notes)))
+        audit_path = os.path.join(run_dir, "memory", "evicted.jsonl")
+        audit = []
+        if os.path.isfile(audit_path):
+            with open(audit_path, encoding="utf-8") as f:
+                audit = [json.loads(line) for line in f.read().splitlines() if line.strip()]
+        check("every accepted note is on disk or in the eviction audit",
+              len(notes) + len(audit) == len(ok_adds) and len(notes) == MANUAL_CAP,
+              "accepted=%d stored=%d audited=%d" % (len(ok_adds), len(notes), len(audit)))
         check("no note was overwritten by a racing writer",
-              len(set(texts)) == len(ok_adds),
-              "accepted=%d unique=%d" % (len(ok_adds), len(set(texts))))
+              len(set(texts)) == len(notes) and len(set(texts)) == MANUAL_CAP,
+              "stored=%d unique=%d" % (len(notes), len(set(texts))))
+        check("the evicted notes say why they went",
+              all(a.get("reason") == "manual_cap" for a in audit),
+              [a.get("reason") for a in audit])
         check("memory.json is still valid JSON (atomic replace)",
               isinstance(notes, list), type(notes).__name__)
 

@@ -547,13 +547,33 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
     out << session.summary << "\n";
   }
 
-  std::vector<nlohmann::json> notes = workspace.load_memory(nullptr);
-  if (!notes.empty()) {
-    out << "\nWorkspace memory (durable notes previously stored for this workspace)\n";
-    const std::size_t limit = notes.size() > 40 ? 40 : notes.size();
-    for (std::size_t i = 0; i < limit; ++i) {
-      out << "- " << notes[i].value("text", std::string()) << "\n";
+  // The memory block. What a person wrote down comes first (always in force),
+  // then what the agent has reason to trust, then what looks relevant to this
+  // conversation, then a deterministic sample of the fading notes. The order is
+  // fixed by the workspace (see select_memory_for_prompt) so the block stays
+  // cacheable; the tier of a note, not its position in the file, decides where
+  // it goes.
+  std::string memory_focus;
+  for (std::size_t i = session.messages.size(); i > 0; --i) {
+    const Message& m = session.messages[i - 1];
+    if (m.role == "user" && !m.content.empty()) {
+      memory_focus = m.content;
+      break;
     }
+  }
+  if (!task_context.empty()) {
+    if (!memory_focus.empty()) memory_focus += "\n";
+    memory_focus += task_context;
+  }
+  if (memory_focus.size() > 8192) memory_focus = truncate_utf8(memory_focus, 8192);
+  const MemoryPrompt memory = workspace.select_memory_for_prompt(
+      memory_focus, workspace.id() + "|" + now_iso8601().substr(0, 10));
+  out << memory.text;
+  if (memory.truncated_strong > 0) {
+    workspace.log("warn", "memory: " + std::to_string(memory.strong_total) +
+                              " strong notes, " + std::to_string(memory.strong) +
+                              " fit the prompt budget (truncated " +
+                              std::to_string(memory.truncated_strong) + ")");
   }
 
   // The task list is last on purpose: it is the one block that changes during a
