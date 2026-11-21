@@ -1585,6 +1585,21 @@ int main(int argc, char** argv) {
     }
   }).detach();
 
+  // ---- say something now and then -----------------------------------------
+  // The broker drops a sidecar that has been silent for ten minutes: a
+  // half-open link (power loss, a dead NAT mapping, a sleeping laptop) would
+  // otherwise keep the room occupied for ever, and the next side is told "the
+  // peer is here" and waits for an offer that never comes. A quiet sidecar -
+  // the agent side waiting for its peer - is exactly such a silence, so it
+  // pings. The broker answers "pong"; both count as traffic, and the answer
+  // also says that the broker is still there.
+  std::thread([&]() {
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::seconds(30));
+      if (signal.alive()) signal.send_line({{"type", "ping"}});
+    }
+  }).detach();
+
   // ---- how long do we wait for the peer? ---------------------------------
   // The agent side waits forever by default: the peer may show up at any
   // time, and giving up would leave a device with a dead tunnel and no

@@ -23,6 +23,10 @@ constexpr int kTeaNoSignal = 0;
 // Half-close: Windows calls it SD_SEND, POSIX calls it SHUT_WR (the values
 // are the same, but the names are not).
 constexpr int kTeaShutdownSend = SD_SEND;
+// Both directions. This is how another thread wakes a reader that is blocked in
+// recv(): close() does not do it on POSIX, and on Windows closesocket() from a
+// second thread is a race against the descriptor.
+constexpr int kTeaShutdownBoth = SD_BOTH;
 
 /// Bring up Winsock. Must be called once before any socket call.
 inline int tea_net_init() {
@@ -70,8 +74,10 @@ inline int tea_net_recv(tea_socket_t s, void* data, std::size_t len) {
 using tea_socket_t = int;
 constexpr tea_socket_t kTeaInvalidSocket = -1;
 constexpr int kTeaNoSignal = MSG_NOSIGNAL;
-// Half-close: the POSIX name for what Windows calls SD_SEND.
+// Half-close: POSIX calls SD_SEND SHUT_WR.
 constexpr int kTeaShutdownSend = SHUT_WR;
+// Both directions: wakes a reader blocked in recv() in another thread.
+constexpr int kTeaShutdownBoth = SHUT_RDWR;
 
 inline int tea_net_init() { return 0; }
 
@@ -106,6 +112,13 @@ inline int tea_net_recv(tea_socket_t s, void* data, std::size_t len) {
 /// buffer and then sees the end of the stream.
 inline int tea_net_shutdown_send(tea_socket_t s) {
   return ::shutdown(s, kTeaShutdownSend);
+}
+
+/// Shut both directions down: a reader that is blocked in recv() in another
+/// thread returns right away. Closing the descriptor alone does not wake it on
+/// POSIX, and on Windows it races against that reader.
+inline int tea_net_shutdown_both(tea_socket_t s) {
+  return ::shutdown(s, kTeaShutdownBoth);
 }
 
 /// The last socket error, as a message.

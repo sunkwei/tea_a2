@@ -174,6 +174,7 @@ sysctl net.core.rmem_default net.core.wmem_default
 | `--relay-begin <n>` | 49160 | TURN 中继端口池的起点（必须在 49152-65535 内） |
 | `--relay-end <n>` | 50175 | TURN 中继端口池的终点 |
 | `--max-peer-pair <n>` | 256 | **能力上限**：多少对 peers。0 = 不限（端口池说了算）。所有 TURN 账号共用 |
+| `--peer-idle-timeout <s>` | 600 | 侧载多久没说话就放掉（0 = 永不）。半断的链路会一直占着房间，见「半断的链路」一节 |
 | `--realm <name>` | a2 | TURN 的 realm |
 | `--token <secret>` | 无 | 给所有房间定一个令牌（不设就每房间自己定） |
 | `--turn-user <name>` | 内置 | TURN 账号 |
@@ -187,6 +188,23 @@ sysctl net.core.rmem_default net.core.wmem_default
 **写法**：`--flag value` 和 `--flag=value` 都行（`--max_peer_pair` 是 `--max-peer-pair`
 的别名）。**写错不会把 broker 搞崩**：它打印原因、退出码 2，
 不会变成 systemd 的崩溃循环。
+
+### 半断的链路：10 分钟没动静就放掉
+
+信令是「谁有话说谁才说话」，一条**半断**的链路（对端断电、家用路由回收了 NAT 映射、
+笔记本睡了）在 broker 眼里和一条安静的好链路**一模一样**：`recv` 一直阻塞着，
+没有数据可超时，也没开 `SO_KEEPALIVE`。后果是房间看着被占着——对面新来的那条被告诉
+「对方在」，然后干等一个永远不来的 offer。
+
+所以：
+
+- **侧载每 30 秒发一句 `{"type":"ping"}`**，broker 回 `{"type":"pong"}`——两边都算「有话说」；
+- broker 里有个清扫线程：**`--peer-idle-timeout`（默认 600 秒 = 10 分钟）没收到任何一行**就
+  `shutdown` 掉它（`recv` 立刻返回，`drop_peer` 把房间腾出来），日志里写
+  `a peer in room X has been silent for Ns - dropping it`；
+- **为什么是 10 分钟而不是 1 分钟**：`--peer-idle-timeout` 内的中断，**还是同一条 TCP 连接**——
+  网络回来就接着用。断得太早只会让一个能用的隧道重新协商一遍，比等着更糟；
+- **只清扫会 ping 的侧载**：老版本侧载（不认识 ping）保持原来的行为，不会被每 10 分钟踢一次。
 
 ---
 

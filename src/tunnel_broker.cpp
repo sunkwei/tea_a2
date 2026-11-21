@@ -141,7 +141,20 @@ struct Peer {
   std::string room;
   std::mutex out;        // serialises writes to the socket
   std::atomic<bool> alive{true};
+  /// When a line last arrived (steady clock, ms). A half-open link is otherwise
+  /// indistinguishable from a quiet one - see the idle sweep in main().
+  std::atomic<long long> last_rx_ms{0};
+  /// The client sends `{"type":"ping"}`: this is a sidecar that knows about the
+  /// idle sweep. An older one says nothing when it has nothing to say, and
+  /// dropping it every ten minutes would renegotiate a tunnel that works.
+  std::atomic<bool> speaks_ping{false};
 };
+
+long long now_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 std::mutex g_rooms_mu;
 std::map<std::string, std::vector<std::shared_ptr<Peer>>> g_rooms;
@@ -190,6 +203,15 @@ void drop_peer(const std::shared_ptr<Peer>& p) {
 }
 
 void handle_line(const std::shared_ptr<Peer>& p, const json& j) {
+  p->last_rx_ms.store(now_ms());
+  // The sidecar's keepalive. A quiet sidecar (the agent side waiting for its
+  // peer) has nothing to say for hours, and a link that died in the meantime
+  // looks exactly like that: something has to be said on purpose.
+  if (j.value("type", std::string()) == "ping") {
+    p->speaks_ping.store(true);
+    send_line(p, {{"type", "pong"}});
+    return;
+  }
   // The first line joins a room; everything after that is relayed.
   if (j.contains("room") && j.contains("token")) {
     const std::string token = j.value("token", "");
@@ -348,6 +370,10 @@ struct BrokerOptions {
   bool usage_only = false;
   bool use_tls = true;
   bool mqtt = false;
+  /// Drop a sidecar that has said nothing for this many seconds (0 = never).
+  /// Ten minutes by default: a link that comes back inside that window is still
+  /// the same connection, and dropping it only renegotiates a working tunnel.
+  int peer_idle_timeout_s = 600;
   std::vector<std::string> cert_names;
 };
 
@@ -595,6 +621,11 @@ bool parse_number(const std::string& text, long* out) {
         "  The signalling port speaks TLS by default; the certificate is made\n"
         "  on the first start and kept in %s.\n"
         "\n"
+        "  --peer-idle-timeout <s>  drop a sidecar that has said nothing for\n"
+        "                   <s> seconds (default 600 = 10 minutes; 0 = never).\n"
+        "                   A half-open link keeps its room occupied until it is\n"
+        "                   dropped; a link that comes back inside the window is\n"
+        "                   still the same connection.\n"
         "  --max-peer-pair <n>  how many peer pairs the broker serves at the\n"
         "                   same time (one pair = two sidecars = two relay\n"
         "                   allocations). 0 means no limit from this flag.\n"
@@ -667,6 +698,8 @@ bool parse_options(int argc, char** argv, BrokerOptions* opts) {
       opts->relay_end = static_cast<uint16_t>(take_number(0, 65535));
     } else if (name == "--max-peer-pair" || name == "--max_peer_pair") {
       opts->max_peer_pair = static_cast<int>(take_number(0, 1000000));
+    } else if (name == "--peer-idle-timeout" || name == "--peer_idle_timeout") {
+      opts->peer_idle_timeout_s = static_cast<int>(take_number(0, 86400));
     } else if (name == "--realm") {
       opts->realm = take_value();
     } else if (name == "--turn-user") {
@@ -1021,6 +1054,54 @@ int main(int argc, char** argv) {
       print_capacity_snapshot(capacity, &g_usage);
     }
   }).detach();
+
+  // ---- the idle sweep -----------------------------------------------------
+  // A half-open link - the peer lost power, the NAT mapping died, the laptop
+  // slept - leaves a room that looks occupied: the next side is told "the peer
+  // is here" and waits for an offer that never comes. TCP says nothing about it
+  // (there is no data to time out, and nothing here sets SO_KEEPALIVE), so the
+  // sidecars ping (see tunnel_sidecar.cpp) and this is the other half: a peer
+  // that has said nothing for the timeout is dropped.
+  //
+  // Ten minutes by default, not one: a link that comes back inside that window
+  // is still the same TCP connection, and dropping it means renegotiating the
+  // tunnel - worse than waiting. Only peers that ping are swept: an older
+  // sidecar has no keepalive to answer with, and it keeps the old behaviour.
+  if (opts.peer_idle_timeout_s > 0) {
+    const long long limit_ms = static_cast<long long>(opts.peer_idle_timeout_s) * 1000;
+    long long tick_ms = limit_ms / 4;
+    if (tick_ms < 1000) tick_ms = 1000;
+    if (tick_ms > 30000) tick_ms = 30000;
+    std::thread([limit_ms, tick_ms]() {
+      while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(tick_ms));
+        const long long now = now_ms();
+        std::vector<std::shared_ptr<Peer> > gone;
+        {
+          std::lock_guard<std::mutex> lock(g_rooms_mu);
+          for (std::map<std::string, std::vector<std::shared_ptr<Peer> > >::const_iterator room =
+                   g_rooms.begin();
+               room != g_rooms.end(); ++room) {
+            for (size_t i = 0; i < room->second.size(); ++i) {
+              const std::shared_ptr<Peer>& peer = room->second[i];
+              if (!peer->alive || !peer->speaks_ping) continue;
+              if (now - peer->last_rx_ms.load() > limit_ms) gone.push_back(peer);
+            }
+          }
+        }
+        for (size_t i = 0; i < gone.size(); ++i) {
+          std::fprintf(stderr,
+                       "broker: a peer in room %s has been silent for %llds - dropping it\n",
+                       gone[i]->room.c_str(),
+                       static_cast<long long>((now - gone[i]->last_rx_ms.load()) / 1000));
+          gone[i]->alive = false;
+          // Wakes the reader in peer_loop: it returns 0 and drop_peer() runs
+          // there, so the room list is only ever changed by its owner.
+          tea_net_shutdown_both(gone[i]->conn->fd);
+        }
+      }
+    }).detach();
+  }
 
   while (true) {
     tea_socket_t fd = ::accept(lfd, nullptr, nullptr);
