@@ -47,7 +47,7 @@ $Exe = (Resolve-Path $Exe).Path
 if (-not $TeaHome) { $TeaHome = Join-Path $env:USERPROFILE '.tea_agent' }
 
 # A free port: the agent itself refuses a port that is taken, so pick one that
-# nobody holds. The first try is the default (8282), then the next ones.
+# nobody holds. The first try is the default (8383), then the next ones.
 function Test-PortFree([int]$p) {
     $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $p)
     try {
@@ -61,10 +61,10 @@ function Test-PortFree([int]$p) {
 }
 
 if ($Port -le 0) {
-    $Port = 8282
-    while (-not (Test-PortFree $Port) -and $Port -lt 8299) { $Port++ }
+    $Port = 8383
+    while (-not (Test-PortFree $Port) -and $Port -lt 8399) { $Port++ }
     if (-not (Test-PortFree $Port)) {
-        Write-Host "no free port between 8282 and 8299; pass -Port <n>" -ForegroundColor Red
+        Write-Host "no free port between 8383 and 8399; pass -Port <n>" -ForegroundColor Red
         exit 1
     }
 } elseif (-not (Test-PortFree $Port)) {

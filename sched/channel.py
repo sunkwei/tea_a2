@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import task_order  # noqa: E402
 from a2_ext_py import ApiError, Client, Queue as _Queue  # noqa: E402
 
-DEFAULT_AGENT = "http://127.0.0.1:8282"
+DEFAULT_AGENT = "http://127.0.0.1:8383"
 DEFAULT_TASKS = "http://127.0.0.1:8283"
 
 # A file bigger than this is not worth moving around.

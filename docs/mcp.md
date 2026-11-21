@@ -80,7 +80,7 @@ servers:
 ### 3. 起 agent，看状态
 
 ```powershell
-tea_agent.exe --config $env:USERPROFILE\.tea_agent\provider.yaml --port 8282
+tea_agent.exe --config $env:USERPROFILE\.tea_agent\provider.yaml --port 8383
 ```
 
 另开一个窗口：
@@ -144,9 +144,9 @@ pwsh -File scripts\mcp-check.ps1 -Tool mcp__uiautomation__SearchElements `
 | `POST /api/mcp/servers/{name}/call` | 不用模型，直接调一个工具 |
 
 ```bash
-curl -s http://127.0.0.1:8282/api/mcp/servers
-curl -s -X POST http://127.0.0.1:8282/api/mcp/refresh
-curl -s -X POST http://127.0.0.1:8282/api/mcp/servers/uiautomation/call \
+curl -s http://127.0.0.1:8383/api/mcp/servers
+curl -s -X POST http://127.0.0.1:8383/api/mcp/refresh
+curl -s -X POST http://127.0.0.1:8383/api/mcp/servers/uiautomation/call \
      -H 'Content-Type: application/json' \
      -d '{"tool":"mcp__uiautomation__SearchElements","arguments":{"name":"OK"}}'
 ```
@@ -156,7 +156,7 @@ curl -s -X POST http://127.0.0.1:8282/api/mcp/servers/uiautomation/call \
 协议就是 JSON-RPC 2.0 over stdio，四步：
 
 ```
--> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tea_agent","version":"1.7.0"}}}
+-> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tea_agent","version":"1.7.1"}}}
 <- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"my-server","version":"1.0"}}}
 -> {"jsonrpc":"2.0","method":"notifications/initialized"}
 -> {"jsonrpc":"2.0","id":2,"method":"tools/list"}

@@ -335,7 +335,7 @@ python3 sched/asr_server.py                   # 监听 127.0.0.1:8284
 - `url` 必须是 http(s)，别的协议会在启动时 WARN，配置视作没配。
 - `api_key` 走 `Authorization: Bearer`；本地服务不需要，就别写。
 - 浏览器只在**安全上下文**（https 或 localhost）里给麦克风权限。用
-  `http://192.168.x.x:8282` 访问设备时，浏览器不给麦克风，界面因此也不显示按钮——
+  `http://192.168.x.x:8383` 访问设备时，浏览器不给麦克风，界面因此也不显示按钮——
   这是浏览器的规矩，不是这个程序的选择。
 
 ### MCP 服务器（`mcp.yaml`）
@@ -417,7 +417,7 @@ servers:
 自己试一个工具（不用模型）：
 
 ```bash
-curl -X POST localhost:8282/api/mcp/servers/uiautomation/call \
+curl -X POST localhost:8383/api/mcp/servers/uiautomation/call \
   -H 'Content-Type: application/json' \
   -d '{"tool":"mcp__uiautomation__SearchElements","arguments":{"name":"OK"}}'
 ```
@@ -576,7 +576,7 @@ providers:
 查询接口与 UI：
 
 ```bash
-curl -s http://127.0.0.1:8282/api/providers/minimax/usage
+curl -s http://127.0.0.1:8383/api/providers/minimax/usage
 ```
 
 ```json

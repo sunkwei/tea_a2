@@ -3,7 +3,7 @@
 tea_a2 本体是一个 C++ 单二进制（`src/`，Web UI 构建期嵌进去）。`sched/` 是**跑在它旁边的
 Python 进程**，专门装那些「不该塞进二进制」的东西：任务队列、聊天前端、机群运维、语音转写。
 
-两边的关系是**单向的**：Python 侧通过 HTTP 调 agent（`http://127.0.0.1:8282`），
+两边的关系是**单向的**：Python 侧通过 HTTP 调 agent（`http://127.0.0.1:8383`），
 agent 完全不知道 Python 侧的存在。所以：
 
 - agent 单独就能跑，一个 Python 进程都没有也不影响任何功能；
@@ -134,7 +134,7 @@ cat ~/.tea_agent/router/speech.jsonl       # router 都说了什么
 得有个外面的人看。
 
 ```bash
-python3 sched/watchdog.py --tasks http://127.0.0.1:8283 --agent http://127.0.0.1:8282
+python3 sched/watchdog.py --tasks http://127.0.0.1:8283 --agent http://127.0.0.1:8383
 python3 sched/watchdog.py --stall-after 3 --once      # 3 分钟没动静就算卡住，只跑一遍
 python3 sched/watchdog.py --auto --action fail        # 允许它把卡死的任务判死（默认只告警）
 python3 sched/watchdog.py --fleet http://127.0.0.1:8290   # 连带看机群设备
@@ -161,7 +161,7 @@ python3 sched/watchdog.py --fleet http://127.0.0.1:8290   # 连带看机群设�
 ```python
 from a2_ext_py import Client, Queue
 
-client = Client("http://127.0.0.1:8282")   # agent：模型调用、provider、额度、工作区
+client = Client("http://127.0.0.1:8383")   # agent：模型调用、provider、额度、工作区
 quota = client.usage("minimax")             # 还剩多少
 limits = client.limits()                    # 这一轮的预算（机制层的上限）
 q = Queue("http://127.0.0.1:8283")          # 队列：任务记录、事件
@@ -388,7 +388,7 @@ sha256，远端留一份 `release-manifest.json`。`--keep 5` 让网盘上只留
 
 | 端口 | 谁 | 环境变量 |
 |---|---|---|
-| 8282 | tea_a2 agent（默认） | `--port` |
+| 8383 | tea_a2 agent（默认） | `--port` |
 | 8283 | 任务队列 | `TEA_TASK_PORT` |
 | 8284 | 语音转写侧车 | `TEA_ASR_PORT` |
 | 8290 | 机群控制面 | `TEA_FLEET_PORT` |

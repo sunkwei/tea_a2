@@ -74,7 +74,7 @@
 所以加了一条最朴素的通道：
 
 ```bash
-curl -X POST http://device:8282/api/exec \
+curl -X POST http://device:8383/api/exec \
      -H "Authorization: Bearer $TOKEN" \
      -d '{"command": "apt-get -y upgrade", "timeout_ms": 600000}'
 ```
@@ -100,7 +100,7 @@ Windows/POSIX 的差异都处理好了），只是**不经过模型**。
 
 ```bash
 # 设备上
-a2 --host 0.0.0.0 --port 8282 --api-token "$(cat /etc/tea/fleet-token)"
+a2 --host 0.0.0.0 --port 8383 --api-token "$(cat /etc/tea/fleet-token)"
 ```
 
 > **注意**：`--host 0.0.0.0` 之后，除了机群通道，设备上的其它 API（`/api/chat`
@@ -116,12 +116,12 @@ a2 --host 0.0.0.0 --port 8282 --api-token "$(cat /etc/tea/fleet-token)"
 
 ```json
 {
-  "defaults": { "port": 8282 },
+  "defaults": { "port": 8383 },
   "devices": [
     {
       "name": "class-a-01",
       "host": "192.168.10.31",
-      "port": 8282,
+      "port": 8383,
       "group": "classroom-a",
       "labels": { "room": "3-201", "model": "pi4" },
       "enabled": true,
@@ -395,7 +395,7 @@ chmod 600 ~/.tea_agent/fleet/token ~/.tea_agent/fleet/device-token
 
 ```bash
 # 每台设备：开一个只属于机群的 a2 实例，绑到局域网，带令牌
-a2 --host 0.0.0.0 --port 8282 --api-token "$(cat /etc/tea/fleet-token)"
+a2 --host 0.0.0.0 --port 8383 --api-token "$(cat /etc/tea/fleet-token)"
 ```
 
 token 要**一样**：机群服务访问设备时带的那个（`device-token`），

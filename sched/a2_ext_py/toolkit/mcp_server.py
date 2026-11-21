@@ -21,7 +21,7 @@ A module may answer with more than text: a dict
 Usage (as a2 starts it):
 
     python3 -m a2_ext_py.toolkit.mcp_server --modules ~/.tea_agent/ext \\
-            --agent-url http://127.0.0.1:8282
+            --agent-url http://127.0.0.1:8383
 
 `--agent-url` is optional: with it, a reload also asks a2 to re-read the
 tool list (`POST /api/mcp/refresh`), so the new tool is usable in the next

@@ -12,7 +12,7 @@
 #   python3 sched/task_server.py --submit-order <这个文件>
 #   交上去以后：GET /api/tasks/{id} 看它，/api/tasks 看队列
 #
-# 队列默认问 8282 上的 agent 认不认得这个工作区；本机还有别的 agent 时加
+# 队列默认问 8383 上的 agent 认不认得这个工作区；本机还有别的 agent 时加
 #   --agent http://127.0.0.1:8383
 # 对不上会直接说「agent 里没有这个工作区」，并把那个 agent 认识的列出来。
 #

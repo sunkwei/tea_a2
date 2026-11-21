@@ -214,7 +214,7 @@ Windows 服务不适合这个程序：它跑在 session 0，看不到用户桌�
 scripts\install-autostart.bat
 
 :: 注册并立刻启动一次；后面的参数原样透传给 tea_agent
-scripts\install-autostart.bat -Start --port 8282 --workspace C:\work\proj
+scripts\install-autostart.bat -Start --port 8383 --workspace C:\work\proj
 
 :: 查看 / 停止 / 卸载
 scripts\install-autostart.bat -Status
@@ -229,10 +229,12 @@ scripts\install-autostart.bat -DryRun
 
 **它做了什么**
 
-- **隐藏窗口**：任务计划程序直接跑控制台程序会留一个黑窗口。脚本生成
-  `%TEA_AGENT_HOME%\autostart\start-hidden.vbs`，由 `wscript.exe` 用 `SW_HIDE` 起进程——
-  这正是「登录后悄悄跑起来的后台服务」应有的样子。`--no-console` 也会自动补上，
-  日志照旧写 `~/.tea_agent/logs/tea_agent.log`。
+- **没有黑窗口**：Windows 上的 a2.exe 本身就是**Windows 应用**（不是控制台程序），
+  双击、快捷方式、自启动都不会弹出控制台。脚本仍然生成
+  `%TEA_AGENT_HOME%\autostart\start-hidden.vbs`，但那是为了下一条的崩溃重启；
+  `--no-console` 会自动补上，日志照旧写 `~/.tea_agent/logs/tea_agent.log`。
+  从终端里跑（`a2.exe --version`、`--gc`）输出照常可见——程序会挂到父进程的控制台上；
+  输出被重定向（管道、日志文件）时一概不动。
 - **崩溃重启**：VBS 在退出码非 0 时 3 秒后重拉；任务本身还配了 `<RestartOnFailure>`
   （1 分钟一次，最多 999 次），两者叠加接近 `Restart=always`。
 - **单实例**：`<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`，拨弄两下
@@ -243,8 +245,8 @@ scripts\install-autostart.bat -DryRun
 
 **注意**
 
-- 端口默认仍是 `127.0.0.1:8282`。要在局域网访问就加 `--host 0.0.0.0`，并先读「安全须知」。
-  启动信息会把该网卡的活跃地址（如 `http://192.168.1.38:8282`）直接打印出来。
+- 端口默认仍是 `127.0.0.1:8383`。要在局域网访问就加 `--host 0.0.0.0`，并先读「安全须知」。
+  启动信息会把该网卡的活跃地址（如 `http://192.168.1.38:8383`）直接打印出来。
 - 自启动用的参数固定在任务里。改参数就重新跑一次脚本（`/F` 会覆盖同名任务）。
 - `-NoHide` 可让任务直接执行 exe（调试时想看到控制台就用它）。
 - 注销/重启时进程随会话结束；下次登录由触发器重新拉起。

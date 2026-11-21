@@ -18,7 +18,7 @@ import urllib.request
 
 from .errors import ApiError
 
-DEFAULT_BASE = "http://127.0.0.1:8282"
+DEFAULT_BASE = "http://127.0.0.1:8383"
 DEFAULT_AGENT = DEFAULT_BASE
 
 

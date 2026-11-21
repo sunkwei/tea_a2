@@ -6,7 +6,7 @@
 - 隧道断了知道怎么查；
 - 知道哪些东西不能外传。
 
-> 术语：**a2**（`tea_agent`）= 那台机器上的 llm agent，支持 **web终端** ， 默认使用 http://localhost:8282 访问；**侧载**（`a2_tunnel`）=
+> 术语：**a2**（`tea_agent`）= 那台机器上的 llm agent，支持 **web终端** ， 默认使用 http://localhost:8383 访问；**侧载**（`a2_tunnel`）=
 > 蹲在 a2 旁边的一个小进程，负责把外网的连接转到 a2 上。
 > 侧载**不是** a2 的一部分——a2 停了、侧载没起，a2 照常工作。
 
@@ -186,7 +186,7 @@ a2_tunnel --role client --session 488c9f7af34d9d2f40c92721e4b52536
 
 | 参数 | 说明 |
 | --- | --- |
-| `--port <n>` | 监听端口（默认 8282；部署里一般用 8383） |
+| `--port <n>` | 监听端口（默认 8383） |
 | `--host <addr>` | 监听地址（默认 127.0.0.1，**别改成 0.0.0.0**，除非你清楚后果） |
 | `--api-token <secret>` | 打开「fleet 通道」(`/api/exec`、`/api/peer/*`) 并要求令牌 |
 | `--config <path>` | provider 配置（默认 `~/.tea_agent/provider.yaml`） |

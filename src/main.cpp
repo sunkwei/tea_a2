@@ -64,6 +64,42 @@ void install_signal_handlers() {
 }
 #endif
 
+#ifdef _WIN32
+/// A Windows application is not attached to a console. Started from Explorer, a
+/// shortcut or the autostart entry it must not pop a black window - that is the
+/// point of being one. But started from a terminal (`a2.exe --version`) it would
+/// print nothing at all, because its stdout is connected to nothing. So attach
+/// to the console of whoever started us - **unless** stdout/stderr were already
+/// redirected (a pipe from the tray host, a log file, the test runner): those
+/// are valid handles, and reopening CONOUT$ would throw their output away.
+void attach_parent_console() {
+  const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+  const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+  const bool have_out = out != nullptr && out != INVALID_HANDLE_VALUE;
+  const bool have_err = err != nullptr && err != INVALID_HANDLE_VALUE;
+  if (have_out && have_err) return;
+  if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;  // nobody to talk to
+  if (!have_out) {
+#if defined(_MSC_VER)
+    FILE* reopened = nullptr;
+    freopen_s(&reopened, "CONOUT$", "w", stdout);
+#else
+    std::freopen("CONOUT$", "w", stdout);
+#endif
+  }
+  if (!have_err) {
+#if defined(_MSC_VER)
+    FILE* reopened = nullptr;
+    freopen_s(&reopened, "CONOUT$", "w", stderr);
+#else
+    std::freopen("CONOUT$", "w", stderr);
+#endif
+  }
+}
+#else
+void attach_parent_console() {}
+#endif
+
 struct Args {
   std::map<std::string, std::vector<std::string> > values;
 
@@ -106,7 +142,7 @@ void print_usage() {
                   "\n"
                   "Server\n"
                   "  --host <addr>              bind address (default 127.0.0.1)\n"
-                  "  --port <n>                 listen port (default 8282)\n"
+                  "  --port <n>                 listen port (default 8383)\n"
                   "  --web-dir <path>           serve the UI from disk instead of the embedded copy\n"
                   "  --api-token <secret>       enable the fleet channel (/api/exec, /api/status) and\n"
                   "                             require this token for it (env: TEA_AGENT_API_TOKEN)\n"
@@ -223,6 +259,7 @@ void agent_request_stop() {
 }
 
 int tea_agent_main(int argc, char** argv) {
+  attach_parent_console();
   Args args;
   for (int i = 1; i < argc; ++i) {
     std::string token = argv[i];
@@ -375,7 +412,7 @@ int tea_agent_main(int argc, char** argv) {
     // console by default); here only the actionable hint for a human. Same URL
     // expansion as the banner: with `--host 0.0.0.0` the address to type is the
     // machine's, not its loopback.
-    const std::string setup_port = args.get("port", "8282");
+    const std::string setup_port = args.get("port", "8383");
     const std::vector<std::string> setup_urls =
         reachable_urls(args.get("host", "127.0.0.1"), std::atoi(setup_port.c_str()));
     console_write_line("hint: open " +
@@ -535,7 +572,7 @@ int tea_agent_main(int argc, char** argv) {
     if (env && *env) options.api_token = env;
   }
   try {
-    options.port = std::stoi(args.get("port", "8282"));
+    options.port = std::stoi(args.get("port", "8383"));
   } catch (const std::exception&) {
     console_write_line("error: --port must be a number");
     return 1;
@@ -791,5 +828,29 @@ int tea_agent_main(int argc, char** argv) {
 // (TEA_AGENT_NO_MAIN): there the agent is a shared library and the APK
 // calls tea_agent_main() from JNI.
 #ifndef TEA_AGENT_NO_MAIN
+#ifdef _WIN32
+// The agent is a Windows application (CMakeLists: add_executable(... WIN32)):
+// there is no `main`, and the command line the CRT offers in its place is the
+// **ANSI** one - a `--log-file C:\用户\...` would arrive mangled. Take the wide
+// command line, split it the way the shell does, and hand over UTF-8, which is
+// what the rest of the program speaks.
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+  int wide_count = 0;
+  LPWSTR* wide = CommandLineToArgvW(GetCommandLineW(), &wide_count);
+  std::vector<std::string> args;
+  if (wide) {
+    for (int i = 0; i < wide_count; ++i) args.push_back(wide_to_utf8(wide[i]));
+    LocalFree(wide);
+  }
+  std::vector<char*> argv;
+  argv.reserve(args.size() + 1);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    argv.push_back(const_cast<char*>(args[i].c_str()));
+  }
+  argv.push_back(nullptr);
+  return tea::tea_agent_main(static_cast<int>(args.size()), argv.data());
+}
+#else
 int main(int argc, char** argv) { return tea::tea_agent_main(argc, argv); }
+#endif
 #endif

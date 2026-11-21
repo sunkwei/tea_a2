@@ -18,7 +18,7 @@ this server is optional.
 
 Usage:
 
-  # serve the task API (default: agent on 8282, this server on 8283)
+  # serve the task API (default: agent on 8383, this server on 8283)
   python3 sched/task_server.py
 
   # put a task in the queue (no server needed: it writes straight into the store)
@@ -81,7 +81,7 @@ except ImportError:  # Python 3.6
         """The 3.6 spelling of http.server.ThreadingHTTPServer."""
         daemon_threads = True
 
-DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8282")
+DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8383")
 DEFAULT_PORT = int(os.environ.get("TEA_TASK_PORT", "8283"))
 DEFAULT_WORKSPACE_PATH = os.path.expanduser(os.environ.get(
     "TEA_TASK_WORKSPACE", os.path.join("~", ".tea_agent", "task-workspace")))
@@ -131,7 +131,7 @@ AGGREGATE_SYSTEM = planning.AGGREGATE_SYSTEM
 
 # Which queue this is. The client asks before it speaks (see the
 # client's _tasks_prefix): the version segment arrived in 0.21.0.
-QUEUE_VERSION = "1.7.0"
+QUEUE_VERSION = "1.7.1"
 
 QUEUED = "queued"
 RUNNING = "running"

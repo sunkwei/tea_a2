@@ -28,18 +28,18 @@ servers:
     command: "python3"
     args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
            "--modules", "/home/you/.tea_agent/ext",
-           "--agent-url", "http://127.0.0.1:8282"]
+           "--agent-url", "http://127.0.0.1:8383"]
 ```
 
 ```sh
-curl -s -X POST http://127.0.0.1:8282/api/mcp/refresh
+curl -s -X POST http://127.0.0.1:8383/api/mcp/refresh
 ```
 
 **Windows**：
 
 ```bat
 copy sched\a2_ext_py\examples\toolkit_*.py  %USERPROFILE%\.tea_agent\ext\
-curl -s -X POST http://127.0.0.1:8282/api/mcp/refresh
+curl -s -X POST http://127.0.0.1:8383/api/mcp/refresh
 ```
 
 ## Linux 的三个前提

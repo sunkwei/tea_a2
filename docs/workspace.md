@@ -247,7 +247,7 @@ agent 自带五个角色，**工作区第一次打开时写进 `roles/`**（已�
 这种工作区在列表里会标出来（下拉里那一行写「只读」，悬停能看到原因）：
 
 ```bash
-curl -s http://127.0.0.1:8282/api/workspaces | jq '.workspaces[] | {name, writable, write_error}'
+curl -s http://127.0.0.1:8383/api/workspaces | jq '.workspaces[] | {name, writable, write_error}'
 # {"name":"proj","writable":true}
 # {"name":"locked","writable":false,"write_error":"cannot create /srv/locked/.tea_agent_run: Windows error 5: 拒绝访问。"}
 ```
@@ -379,7 +379,7 @@ python tools/merge_work_area.py /old/project/.tea_agent_run ./.tea_agent_run
 
 ```bash
 # 这两条是同一个工作区（$HOME 在服务端展开）
-curl -X POST http://127.0.0.1:8282/api/workspaces \
+curl -X POST http://127.0.0.1:8383/api/workspaces \
      -H 'Content-Type: application/json' -d '{"path":"$HOME/projects/demo"}'
 build/bin/tea_agent --workspace '$HOME/projects/demo'
 ```
@@ -391,7 +391,7 @@ build/bin/tea_agent --workspace '$HOME/projects/demo'
 
 ```bash
 # 手动加一个真正的项目目录（命令行也一样）
-curl -X POST http://127.0.0.1:8282/api/workspaces \
+curl -X POST http://127.0.0.1:8383/api/workspaces \
      -H 'Content-Type: application/json' -d '{"path":"/home/me/project"}'
 ```
 
@@ -410,7 +410,7 @@ curl -X POST http://127.0.0.1:8282/api/workspaces \
 
 ```bash
 # 同样的事，命令行也行
-curl -X DELETE http://127.0.0.1:8282/api/workspaces/<id>
+curl -X DELETE http://127.0.0.1:8383/api/workspaces/<id>
 ```
 
 ### 销毁：把这个 agent 留下的痕迹全部删掉
@@ -429,9 +429,9 @@ curl -X DELETE http://127.0.0.1:8282/api/workspaces/<id>
 
 ```bash
 # 先看会删什么（不动文件）
-curl -s http://127.0.0.1:8282/api/destroy | jq
+curl -s http://127.0.0.1:8383/api/destroy | jq
 # 再确认执行；不带 confirm 一律 400，有轮次在跑则 409
-curl -s -X POST http://127.0.0.1:8282/api/destroy   -H 'Content-Type: application/json' -d '{"confirm":"destroy"}'
+curl -s -X POST http://127.0.0.1:8383/api/destroy   -H 'Content-Type: application/json' -d '{"confirm":"destroy"}'
 # {"ok":true,"tea_home":"/home/me/.tea_agent","removed":[…],"skipped":[…],"failed":[]}
 ```
 
@@ -495,7 +495,7 @@ CSS 变量，深色只在 `:root` 上覆盖——早期版本把深色规则写�
 
 ```bash
 # 把导出的 .html 原样 POST 回去，恢复成一个新会话
-curl -s -X POST http://127.0.0.1:8282/api/workspaces/<ws_id>/sessions/import \
+curl -s -X POST http://127.0.0.1:8383/api/workspaces/<ws_id>/sessions/import \
   -H 'Content-Type: text/html' --data-binary @tea_agent-xxx.html
 # {"ok":true,"session":{"id":"s_...","title":"..."},"messages":7}
 ```

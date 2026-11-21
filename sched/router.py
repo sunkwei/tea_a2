@@ -36,7 +36,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_TASKS = os.environ.get("TEA_TASK_URL", "http://127.0.0.1:8283")
-DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8282")
+DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8383")
 DEFAULT_DATA_DIR = os.environ.get(
     "TEA_ROUTER_DATA", os.path.join("~", ".tea_agent", "router"))
 

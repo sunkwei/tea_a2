@@ -123,8 +123,8 @@ tea_agent（C++，基础能力）              task server（Python，可选伴�
 一个只用标准库的 HTTP 服务（设备上没有 pip 也能跑），默认听 `127.0.0.1:8283`：
 
 ```bash
-# 起服务（agent 默认在 8282）
-python3 sched/task_server.py --agent http://127.0.0.1:8282 --port 8283
+# 起服务（agent 默认在 8383）
+python3 sched/task_server.py --agent http://127.0.0.1:8383 --port 8283
 
 **开机自启（systemd user unit）**：`scripts/a2_task.service` 是一份现成的模板，装到
 `~/.config/systemd/user/a2_task.service` 之后：
@@ -151,7 +151,7 @@ agent 还没起来时它不会退出，只是每轮重试（服务化以后「�
 浏览器里把「设置 → 任务服务（可选）」填成 `http://127.0.0.1:8283`，后台任务跑完时标签页就会闪。
 
 # 排一个任务（不用起服务也能排：直接写进记录）
-# 它要先问 agent「有哪些工作区」，所以 agent 不在默认的 8282 上时要指路：
+# 它要先问 agent「有哪些工作区」，所以 agent 不在默认的 8383 上时要指路：
 python3 sched/task_server.py --agent http://127.0.0.1:8383 --submit "把 README 里的例子都跑一遍"
 #   （等价写法：TEA_AGENT_URL=http://127.0.0.1:8383 python3 sched/task_server.py --submit "…"）
 
@@ -595,8 +595,8 @@ meta:
 python3 sched/task_server.py --submit-order 我的任务单.txt     # 命令行
 ```
 
-`workspace:` 里写的工作区必须是**这个 agent** 认识的（路径或 id 都行）：队列默认问 8282 上的
-agent，这台机器上还有别的 agent（比如 8383 上那个）时加 `--agent http://127.0.0.1:8383`。
+`workspace:` 里写的工作区必须是**这个 agent** 认识的（路径或 id 都行）：队列默认问 8383 上的
+agent，这台机器上还有别的 agent（比如 8282 上那个）时加 `--agent http://127.0.0.1:8282`。
 对不上就会直说「agent（http://…）里没有这个工作区」并列出它认识的那些，不会把任务排进错的地方。
 
 或者**把文件发给微信 bot**（文件名以 `.order` 结尾，或名字里有「任务单」）：bot 读它、排队，
@@ -793,7 +793,7 @@ provider.yaml 的 `task_model:` 说的（没写就是 minimax），也是**真�
 **只有余量够的时候才开工**：
 
 ```
-2026-10-22 07:38:47  agent up: http://127.0.0.1:8282 (provider minimax, model MiniMax-M3.1-Flash)
+2026-10-22 07:38:47  agent up: http://127.0.0.1:8383 (provider minimax, model MiniMax-M3.1-Flash)
 2026-10-22 07:38:47  quota of 'minimax': 95.0% left - going to work
 2026-10-22 07:38:47    started task t_66fc879b3089 (调度器冒烟)
 2026-10-22 07:38:53    task t_66fc879b3089: running 100% - 已在工作区根目录创建 notes.txt…

@@ -81,7 +81,7 @@ sidecar: ready. Waiting in room "s43910a0a" for the other side.
 它默认连本机的 a2（`127.0.0.1:8383`）。a2 在别的端口就写上：
 
 ```bash
-a2_tunnel --role agent --target 127.0.0.1:8282
+a2_tunnel --role agent --target 127.0.0.1:8383
 ```
 
 ### 要一个终端（不是 a2 的网页）

@@ -56,7 +56,7 @@ DEFAULT_TOKEN_FILE = os.path.join(DEFAULT_DATA_DIR, "token")
 # The token the fleet service shows the DEVICES - a different secret from the
 # one its own callers present.
 DEFAULT_DEVICE_TOKEN_FILE = os.path.join(DEFAULT_DATA_DIR, "device-token")
-DEFAULT_PORT = int(os.environ.get("TEA_FLEET_DEVICE_PORT", "8282"))
+DEFAULT_PORT = int(os.environ.get("TEA_FLEET_DEVICE_PORT", "8383"))
 DEFAULT_TIMEOUT = float(os.environ.get("TEA_FLEET_TIMEOUT", "15"))
 # How many devices are talked to at once. The school server has 40 of them
 # and they are all on the same LAN, so this is high enough to finish in

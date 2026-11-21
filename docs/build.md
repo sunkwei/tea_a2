@@ -206,7 +206,7 @@ CMakeLists.txt 在 configure 阶段就会拦下两种「看起来像交叉、其
 ### 校验产物
 
 ```bash
-file build-win64/bin/tea_agent.exe   # PE32+ executable (console) x86-64, for MS Windows, 19 sections
+file build-win64/bin/tea_agent.exe   # PE32+ executable (GUI) x86-64, for MS Windows, 19 sections
 file build-static/bin/tea_agent      # ELF 64-bit LSB executable, x86-64, statically linked
 readelf -d build-static/bin/tea_agent | head -1
                                      # There is no dynamic section in this file.   ← 全静态
@@ -226,7 +226,7 @@ grep -c "BEGIN CERTIFICATE" build-arm64/generated/ca_bundle.cpp
 aarch64 产物在宿主上跑不了，装了 qemu-user 可以先冒烟一次，再拿到真机上验证：
 
 ```bash
-qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 1.7.0
+qemu-aarch64-static build-arm64/bin/tea_agent --version     # tea_agent 1.7.1
 ```
 
 ### 常见错误的对照表

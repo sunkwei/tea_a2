@@ -57,7 +57,7 @@ mkdir -p ~/.tea_agent
 cp provider.example.yaml ~/.tea_agent/provider.yaml
 $EDITOR ~/.tea_agent/provider.yaml          # 填 api_url / api_key / model
 
-# 启动（默认 127.0.0.1:8282），把当前目录注册为工作区
+# 启动（默认 127.0.0.1:8383），把当前目录注册为工作区
 build/bin/tea_agent --workspace . --open
 ```
 
@@ -66,7 +66,7 @@ build/bin/tea_agent --workspace . --open
 > （`scripts/build.sh --static` 等价）。静态版不依赖目标机的 glibc，详见
 > [部署](docs/deploy.md#单文件部署完全静态)。
 
-浏览器打开 <http://127.0.0.1:8282> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置、终端。
+浏览器打开 <http://127.0.0.1:8383> 就是内置 UI：对话、文件浏览编辑、记忆、日志、设置、终端。
 
 第一次跑（配置模式、快捷开始、各家 provider 的 key 怎么填、常用参数、curl 配方）见
 **[使用手册](docs/tea_a2_manual.md)**；构建细节（交叉编译、Windows、常见错误）见

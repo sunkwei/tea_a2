@@ -22,7 +22,7 @@ std::vector<std::string> reachable_urls(const std::string& bind_host, int port);
 
 struct ServerOptions {
   std::string host = "127.0.0.1";
-  int port = 8282;
+  int port = 8383;
   /// Optional directory holding index.html/app.js/app.css/tokens.css. When
   /// empty (or when a file is missing) the assets embedded in the binary are
   /// used instead.

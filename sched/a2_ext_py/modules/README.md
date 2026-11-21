@@ -20,9 +20,9 @@ servers:
     command: "python3"
     args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
            "--modules", "/home/you/.tea_agent/ext",
-           "--agent-url", "http://127.0.0.1:8282"]
+           "--agent-url", "http://127.0.0.1:8383"]
     env:
-      TEA_AGENT_URL: "http://127.0.0.1:8282"   # 模块要自己找 agent
+      TEA_AGENT_URL: "http://127.0.0.1:8383"   # 模块要自己找 agent
       TEA_HOME: "/home/you/.tea_agent"          # 计划落在 <TEA_HOME>/plans
 ```
 

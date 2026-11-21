@@ -48,7 +48,7 @@ import plans  # noqa: E402
 import planning  # noqa: E402
 
 DEFAULT_TASKS = os.environ.get("TEA_TASK_URL", "http://127.0.0.1:8283")
-DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8282")
+DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8383")
 
 # The wording of the plan is the shared one (planning.PLANNER_SYSTEM): the
 # queue's plan and the extension layer's plan are asked for in the same

@@ -9,7 +9,7 @@
   directly, without a model in the loop - the quickest way to find out whether
   the server itself works.
 
-  The agent must already be running (tea_agent.exe --port 8282 ...).
+  The agent must already be running (tea_agent.exe --port 8383 ...).
 
 .EXAMPLE
   pwsh -File scripts\mcp-check.ps1
@@ -19,7 +19,7 @@
         -Tool mcp__uiautomation__SearchElements -Arguments '{"name":"OK"}'
 #>
 param(
-  [string]$Base = "http://127.0.0.1:8282",
+  [string]$Base = "http://127.0.0.1:8383",
   [string]$Server = "",
   [string]$Tool = "",
   [string]$Arguments = "{}",
@@ -33,7 +33,7 @@ function Get-Json([string]$Url) {
     return Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 30
   } catch {
     Write-Host "cannot reach $Url : $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "is the agent running? (tea_agent.exe --port 8282)" -ForegroundColor Yellow
+    Write-Host "is the agent running? (tea_agent.exe --port 8383)" -ForegroundColor Yellow
     exit 2
   }
 }

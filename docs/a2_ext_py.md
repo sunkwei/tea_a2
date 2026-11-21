@@ -63,7 +63,7 @@ servers:
     command: "python3"
     args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
            "--modules", "/home/you/.tea_agent/ext",
-           "--agent-url", "http://127.0.0.1:8282"]
+           "--agent-url", "http://127.0.0.1:8383"]
 ```
 
 然后 `POST /api/mcp/refresh`（网页上的「刷新」也是它），新工具就进模型的手里了。
@@ -137,7 +137,7 @@ MCP 服务器「你现在能做什么」（`McpRegistry::refresh_tools()`，见 
 ```python
 from a2_ext_py import Client, Queue
 
-client = Client("http://127.0.0.1:8282")
+client = Client("http://127.0.0.1:8383")
 quota = client.usage("minimax")        # provider 的额度
 limits = client.limits()               # 这一轮的预算（机制层的上限）
 workspaces = client.workspaces()
@@ -167,9 +167,9 @@ servers:
     command: "python3"
     args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
            "--modules", "/home/you/.tea_agent/ext",
-           "--agent-url", "http://127.0.0.1:8282"]
+           "--agent-url", "http://127.0.0.1:8383"]
     env:
-      TEA_AGENT_URL: "http://127.0.0.1:8282"   # 模块要自己找 agent
+      TEA_AGENT_URL: "http://127.0.0.1:8383"   # 模块要自己找 agent
       TEA_HOME: "/home/you/.tea_agent"          # 计划落在 <TEA_HOME>/plans
 ```
 

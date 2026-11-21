@@ -31,7 +31,7 @@ set(TEA_AGENT_VERSION "${_tea_version_numeric}")
 if(NOT TEA_AGENT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR
     "cannot read the version out of ${TEA_VERSION_SOURCE}; expected\n"
-    "  const char* const kVersionString = \"1.7.0\"")
+    "  const char* const kVersionString = \"1.7.1\"")
 endif()
 # The version is read here, at configure time: changing it has to re-run the
 # configure step, so make the file a configure dependency.
@@ -119,9 +119,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# MinGW-w64 (gcc) is the only compiler this project is built with on Windows:
-# its dependency tracking works on its own, so none of the MSVC workarounds
-# are needed here.
+# MinGW-w64 (gcc) is the only compiler this project is built with on Windows -
+# MSVC is **not supported** (no build directory in the tree, no CI, no
+# workarounds; the Windows 7 API guard below relies on the mingw-w64 headers).
+# Its dependency tracking works on its own, so none of the MSVC workarounds are
+# needed here.
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 if(WIN32)
@@ -515,7 +517,17 @@ else()
   list(APPEND TEA_SOURCES src/shell_posix.cpp)
 endif()
 
-add_executable(tea_agent ${TEA_SOURCES})
+# The Windows build is a **Windows application**, not a console program: on a
+# machine that runs the agent as a service, starting it (a shortcut, the
+# autostart entry, a double-click) must not leave a black console window behind.
+# It still talks to a terminal - tea_agent_main() attaches to the console of
+# whoever started it, and a redirected stdout/stderr (a pipe, a log file, the
+# test runner) is left alone (src/main.cpp).
+if(WIN32)
+  add_executable(tea_agent WIN32 ${TEA_SOURCES})
+else()
+  add_executable(tea_agent ${TEA_SOURCES})
+endif()
 
 # NOTE: src/ is deliberately NOT on the include path. It would make the
 # compiler resolve system headers such as <process.h> (pulled in by <thread>)
@@ -540,6 +552,11 @@ if(MINGW)
   # compiled in any more (the commit lives in tea_agent.buildinfo next to the
   # binary), so with this flag two builds produce the very same bytes.
   target_link_options(tea_agent PRIVATE -Wl,--no-insert-timestamp)
+  # The entry point of the Windows application is the **wide** one (wWinMain):
+  # the command line carries paths with Chinese in them. Without -municode the
+  # mingw CRT looks for the ANSI WinMain and the link fails with
+  # "undefined reference to `WinMain'".
+  target_link_options(tea_agent PRIVATE -municode)
 endif()
 
 find_package(Threads REQUIRED)

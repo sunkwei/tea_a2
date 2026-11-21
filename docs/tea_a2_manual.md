@@ -36,7 +36,7 @@ README 讲的是「这是什么、为什么这么设计」；[HTTP 接口](api.m
 # 起服务，把当前目录注册成工作区，打开浏览器
 build/bin/tea_agent --workspace . --open
 
-# 换个端口（本机默认 8282）
+# 换个端口（本机默认 8383）
 build/bin/tea_agent --port 9000
 
 # 换 provider / 模型（临时，不改配置）
@@ -55,7 +55,7 @@ HTTP 引擎、可用工具、工作区列表。地址那行就是要打开的。
 | 参数 | 作用 | 默认 |
 | --- | --- | --- |
 | `--host <addr>` | 监听地址。`0.0.0.0` = 所有网卡（**见下面的安全须知**） | `127.0.0.1` |
-| `--port <n>` | 端口。必须是 1–65535 的数字，写错直接报错退出 | `8282` |
+| `--port <n>` | 端口。必须是 1–65535 的数字，写错直接报错退出 | `8383` |
 | `--web-dir <path>` | 从磁盘目录伺服界面，而不是用嵌在二进制里的那份（改前端时用） | 用内置的 |
 | `--open` | 启动后用默认浏览器打开界面 | 不打开 |
 
@@ -161,26 +161,26 @@ WARNING 顶出屏幕。排查时 `--console-level debug` 就能在终端跟着�
 
 ```bash
 # 快捷开始：只填 key
-curl -X POST http://127.0.0.1:8282/api/config/quickstart \
+curl -X POST http://127.0.0.1:8383/api/config/quickstart \
      -H 'Content-Type: application/json' \
      -d '{"provider":"deepseek","api_key":"sk-..."}'
 # → {"ok":true,"provider":"DeepSeek","model":"deepseek-flash",
 #    "models":["deepseek-flash","deepseek-chat","deepseek-reasoner"],"path":"..."}
 
 # 小米 MiMo：key 的形状决定网关（sk-… 按量付费，tp-…/ttp-… Token Plan）
-curl -X POST http://127.0.0.1:8282/api/config/quickstart \
+curl -X POST http://127.0.0.1:8383/api/config/quickstart \
      -H 'Content-Type: application/json' \
      -d '{"provider":"mimo","api_key":"tp-..."}'
 # → {"ok":true,"provider":"mimo","model":"mimo-v2.6-flash",
 #    "models":["mimo-v2.6-flash","mimo-v2.6-pro"],"path":"..."}
 
 # 上传完整配置
-curl -X POST http://127.0.0.1:8282/api/config \
+curl -X POST http://127.0.0.1:8383/api/config \
      -H 'Content-Type: application/json' \
      -d '{"yaml":"version: 1\nproviders:\n  ..."}'
 
 # 重新读一遍磁盘上的 provider.yaml（文件是手写/拷过来的时候用）
-curl -X POST http://127.0.0.1:8282/api/config/reload
+curl -X POST http://127.0.0.1:8383/api/config/reload
 # → {"ok":true,"path":"...","providers":["DeepSeek"],"active":{...}}
 #    文件不存在 → 404 config_missing；文件坏了 → 400 invalid_config（当前配置不动）
 ```
@@ -194,17 +194,17 @@ curl -X POST http://127.0.0.1:8282/api/config/reload
 
 ## 2. agent 的 HTTP 命令
 
-接口在 `127.0.0.1:8282`（或你给的 `--port`）。下面的 `$B` 就是它：
+接口在 `127.0.0.1:8383`（或你给的 `--port`）。下面的 `$B` 就是它：
 
 ```bash
-B=http://127.0.0.1:8282
+B=http://127.0.0.1:8383
 ```
 
 ### 2.1 探活与自检
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"1.7.0","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"1.7.1","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
@@ -733,7 +733,7 @@ curl -s -X POST $B/api/asr/transcribe -H 'Content-Type: audio/wav' \
 
 1. provider.yaml 里没有 `asr:` 段（或者 url 不是 http(s)）——查 `GET /api/asr/status`。
 2. 浏览器只在**安全上下文**里给麦克风权限：https 或 localhost。用
-   `http://192.168.x.x:8282` 访问设备时浏览器不给权限，所以按钮不出现。
+   `http://192.168.x.x:8383` 访问设备时浏览器不给权限，所以按钮不出现。
 3. 浏览器不支持 `MediaRecorder`（很老的浏览器）。
 
 ### 2.16 MCP 服务器
@@ -817,14 +817,14 @@ curl -s -X POST http://peer:8383/api/peer/chat/stop \
 ### 3.1 起队列服务
 
 ```bash
-python3 sched/task_server.py --agent http://127.0.0.1:8282 --port 8283
+python3 sched/task_server.py --agent http://127.0.0.1:8383 --port 8283
 ```
 
 参数全表（`python3 sched/task_server.py --help` 是权威版本）：
 
 | 参数 | 作用 | 默认 |
 | --- | --- | --- |
-| `--agent <url>` | agent 的 HTTP API 地址 | `http://127.0.0.1:8282` |
+| `--agent <url>` | agent 的 HTTP API 地址 | `http://127.0.0.1:8383` |
 | `--host <addr>` | 队列自己监听哪 | `127.0.0.1` |
 | `--port <n>` | 队列自己监听哪个端口 | `8283` |
 | `--data-dir <path>` | 任务记录放在哪 | `<workspace-path>/tasks` |
@@ -1085,7 +1085,7 @@ TEA_AGENT_URL=http://127.0.0.1:8383 python3 sched/task_server.py --submit "..."
 
 | 变量 | 作用 | 默认 |
 | --- | --- | --- |
-| `TEA_AGENT_URL` | agent 的地址 | `http://127.0.0.1:8282` |
+| `TEA_AGENT_URL` | agent 的地址 | `http://127.0.0.1:8383` |
 | `TEA_TASK_PORT` | 队列自己监听哪个端口 | `8283` |
 | `TEA_TASK_WORKSPACE` | 队列独占的工作区目录 | `~/.tea_agent/task-workspace` |
 | `TEA_TASK_DATA` | 任务记录放在哪 | `<工作区>/tasks` |
@@ -1115,7 +1115,7 @@ python3 sched/wechat_bot.py --agent http://localhost:8383 --tasks http://127.0.0
 
 | 参数 | 作用 | 默认 |
 | --- | --- | --- |
-| `--agent <url>` | agent 的 HTTP API | `http://127.0.0.1:8282` |
+| `--agent <url>` | agent 的 HTTP API | `http://127.0.0.1:8383` |
 | `--tasks <url>` | 队列的 HTTP API | `http://127.0.0.1:8283` |
 | `--base-url <url>` | iLink 服务器 | `https://ilinkai.weixin.qq.com` |
 | `--account <name>` | 这个微信账号的名字（多账号时用；来源名变成 `wechat:<名字>`） | 只有一个（`wechat`） |
@@ -1259,7 +1259,7 @@ python3 sched/telegram_bot.py --token 123456:ABC --allow-chat 12345 \
 | `--print-chat-id` | 打印等着 bot 的消息来自哪些 chat，然后退出 | |
 | `--check` | 检查 token（我是谁），然后退出 | |
 | `--api-url <url>` | Bot API 的地址 | `https://api.telegram.org` |
-| `--agent <url>` | agent 的 HTTP API | `http://127.0.0.1:8282` |
+| `--agent <url>` | agent 的 HTTP API | `http://127.0.0.1:8383` |
 | `--tasks <url>` | 队列的 HTTP API | `http://127.0.0.1:8283` |
 | `--state-dir <path>` | token 与 update offset 放哪 | `~/.tea_agent/telegram` |
 | `--workspace-path <path>` | Telegram 任务在哪个工作区做 | `~/.tea_agent/telegram-workspace` |
@@ -1303,7 +1303,7 @@ import sys
 sys.path.insert(0, "sched")
 from tea_api import Tea, Queue
 
-tea = Tea("http://127.0.0.1:8282")       # agent：模型、provider、额度、工作区
+tea = Tea("http://127.0.0.1:8383")       # agent：模型、provider、额度、工作区
 queue = Queue("http://127.0.0.1:8283")   # 队列：任务记录、事件
 
 # ---- agent 这一层 ----

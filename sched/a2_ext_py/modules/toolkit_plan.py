@@ -35,7 +35,7 @@ Install it like any other extension module:
 
     cp toolkit_plan.py ~/.tea_agent/ext/
     # and tell it where the agent is:
-    #   env: {TEA_AGENT_URL: "http://127.0.0.1:8282"} in ~/.tea_agent/mcp.yaml
+    #   env: {TEA_AGENT_URL: "http://127.0.0.1:8383"} in ~/.tea_agent/mcp.yaml
 """
 
 import calendar
@@ -91,7 +91,7 @@ except ImportError as exc:  # the loader reports this as a broken module
     raise ImportError("the planning core (planning.py) was not found - set "
                       "TEA_A2_SCHED to the directory that holds it: %s" % exc)
 
-DEFAULT_AGENT_URL = "http://127.0.0.1:8282"
+DEFAULT_AGENT_URL = "http://127.0.0.1:8383"
 
 # One plan per workspace per minute. The model asked for work; it does not
 # get to ask for work every time it feels like it.

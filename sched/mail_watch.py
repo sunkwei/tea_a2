@@ -96,7 +96,7 @@ DEFAULTS = {
     "max_per_round": "10",
     "interval": "300",
     # 判读
-    "agent": "http://127.0.0.1:8282",
+    "agent": "http://127.0.0.1:8383",
     "provider": "",
     "model": "",
     "rules": "",               # 额外的人话规则，原样塞进提示词

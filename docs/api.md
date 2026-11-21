@@ -9,7 +9,7 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 探活、版本（`1.7.0`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
+| `GET` | `/api/health` | 探活、版本（`1.7.1`）、当前 provider/model、传输引擎、`tea_home`、`config_loaded`、`tea_home_writable`（进程能不能写进 tea home）与 `tea_home_error`（不能写的原因）。另带 `limits`：**这一轮的预算**（`max_iterations` / `max_wall_ms` / `max_tool_calls` / `max_total_tokens`）——上层（任务队列）照着它给每个任务分预算 |
 | `GET` | `/api/doc` | **这份文档自己**。默认返回渲染好的网页（设备上没网、没仓库也能读）；`?format=md` 返回 Markdown 原文，`?format=json` 返回 `{ok, version, title, markdown, html}`。文档是**编译进二进制**的（`docs/api.md`），所以它跟这个二进制说的是同一件事 |
 | `POST` | `/api/tools/call` | **调一个网页工具，不要模型**：`{"tool":"toolkit_search","arguments":{"query":"…"}}` → `{ok, tool, provider, output, elapsed_ms}`。走的是 provider 自己的搜索端点（DeepSeek 的 `/v1/tools/search` 那一类）。只有 `toolkit_search` / `toolkit_fetch` 两个——别的工具要工作区、要会话，属于一轮对话，不属于一次调用 |
 | `GET` | `/api/status` | **机群通道**：这台设备的结构化快照（名称、版本、运行时长、系统、CPU、内存、磁盘、工作区数、进行中的轮次）。只读；没配 `--api-token` 时开放，配了就要带令牌 |
@@ -228,22 +228,22 @@ curl -s -X POST $B/api/chat -H 'Content-Type: application/json' \
 
 ```bash
 # 1) 提交完就走：202 + 句柄（不是流）
-curl -s -X POST http://127.0.0.1:8282/api/chat \
+curl -s -X POST http://127.0.0.1:8383/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"workspace_id":"ws_x","message":"把 README 翻译成英文","async":true}'
 # {"ok":true,"turn_id":"t_1a2b3c4d5e6f","session_id":"s_…","state":"running",
 #  "status_url":"/api/turns/t_1a2b3c4d5e6f","events_url":"/api/turns/t_1a2b3c4d5e6f/events"}
 
 # 2) 回头问：这一轮怎么样了
-curl -s http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f
+curl -s http://127.0.0.1:8383/api/turns/t_1a2b3c4d5e6f
 # {"ok":true,"state":"done","result":"…","usage":{…},"iterations":3,
 #  "trajectory_id":"t_1a2b3c4d5e6f","elapsed_ms":4213, …}
 
 # 3) 想看过程：事件流（回放 + 直播），断了拿最后一个 seq 接回来
-curl -s 'http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f/events?since=0'
+curl -s 'http://127.0.0.1:8383/api/turns/t_1a2b3c4d5e6f/events?since=0'
 
 # 4) 想停：精确停这一轮（不用知道 session_id）
-curl -s -X POST http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f/stop
+curl -s -X POST http://127.0.0.1:8383/api/turns/t_1a2b3c4d5e6f/stop
 ```
 
 几条约定：
@@ -280,18 +280,18 @@ curl -s -X POST http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f/stop
 
 ```bash
 # 这一轮现在怎么样？（**没正常结束的那一轮**，进程重启之后照样答得上）
-curl -s http://127.0.0.1:8282/api/turns/t_1a2b3c4d5e6f
+curl -s http://127.0.0.1:8383/api/turns/t_1a2b3c4d5e6f
 # {"ok":true,"turn_id":"t_…","state":"interrupted","running":false,"recovered":true,
 #  "partial":true,"iterations":2,"steps":5,"usage":{…},"files_changed":[…],
 #  "started_at":"2026-11-18T02:26:34.240Z","sources":["trajectory"]}
 
 # 哪些轮次没正常结束？
-curl -s http://127.0.0.1:8282/api/recovery
+curl -s http://127.0.0.1:8383/api/recovery
 # {"ok":true,"count":2,"turns":[{"turn_id":"t_…","state":"interrupted",…},
 #                                {"turn_id":"t_…","state":"failed","error":"HTTP 500: …",…}]}
 
 # 这个会话的上一轮怎么了？（没有轮次在跑的时候）
-curl -s 'http://127.0.0.1:8282/api/chat/turn?session_id=s_xxx'
+curl -s 'http://127.0.0.1:8383/api/chat/turn?session_id=s_xxx'
 # {"ok":true,"running":false,"session_id":"s_xxx",
 #  "recovered":{"state":"interrupted","pending_message":"把这一轮做完",
 #               "sources":["transcript","trajectory"], …}}
@@ -313,7 +313,7 @@ curl -s 'http://127.0.0.1:8282/api/chat/turn?session_id=s_xxx'
 才炸：
 
 ```bash
-curl -s http://127.0.0.1:8282/api/workspaces | jq '.workspaces[] | {name, writable, write_error}'
+curl -s http://127.0.0.1:8383/api/workspaces | jq '.workspaces[] | {name, writable, write_error}'
 # {"name":"proj","writable":true}
 # {"name":"locked","writable":false,"write_error":"cannot create /srv/locked/.tea_agent_run: Windows error 5: 拒绝访问。"}
 ```
@@ -364,7 +364,7 @@ curl -N -X POST http://peer:8383/api/peer/chat \
 ### 设备侧
 
 ```bash
-curl -X POST http://device:8282/api/exec \
+curl -X POST http://device:8383/api/exec \
      -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
      -d '{"command": "apt-get -y upgrade", "timeout_ms": 600000, "cwd": ""}'
 ```
@@ -423,7 +423,7 @@ curl -X POST http://device:8282/api/exec \
 （命令的输出在那里）。
 
 ```bash
-curl -s "http://127.0.0.1:8282/api/workspaces/$WS/sessions/search?q=水獭" | jq
+curl -s "http://127.0.0.1:8383/api/workspaces/$WS/sessions/search?q=水獭" | jq
 ```
 
 ```json
@@ -481,13 +481,13 @@ curl -s "http://127.0.0.1:8282/api/workspaces/$WS/sessions/search?q=水獭" | jq
 在工作区里搜文件：**文件名**和**文件内容**一起搜。
 
 ```bash
-curl -s "http://127.0.0.1:8282/api/workspaces/$WS/search?q=toolkit_workspace_search" | jq
+curl -s "http://127.0.0.1:8383/api/workspaces/$WS/search?q=toolkit_workspace_search" | jq
 ```
 
 **`regex=1`** 把查询串换成 ECMAScript 正则（只匹配**文件内容**，路径不参与）：
 
 ```bash
-curl -s "http://127.0.0.1:8282/api/workspaces/$WS/search?q=TODO%7CFIXME&scope=content&regex=1" | jq
+curl -s "http://127.0.0.1:8383/api/workspaces/$WS/search?q=TODO%7CFIXME&scope=content&regex=1" | jq
 ```
 
 正则编译不过 → `400 bad_request`（`invalid regular expression: …`）——**不会静默当成
@@ -612,10 +612,10 @@ MiniMax 的文档写得很直白（`platform.minimax.cn/docs/api-reference/text-
 
 ```bash
 # 1) 找到工作区
-curl -s http://device:8282/api/workspaces | jq -r '.workspaces[0].id'
+curl -s http://device:8383/api/workspaces | jq -r '.workspaces[0].id'
 
 # 2) 下发任务，边跑边收
-curl -N -X POST http://device:8282/api/chat \
+curl -N -X POST http://device:8383/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"workspace_id":"ws_xxx","message":"检查 /etc/tea 下的配置文件，把端口改成 9000 并重启服务"}'
 ```
@@ -655,7 +655,7 @@ SSE 每行 `data: {json}`，按 `type` 分派：
 一轮是循环：模型要工具 → 工具回答 → 模型再要工具。预算就是**这一轮最多能花多少**：
 
 ```bash
-curl -N -X POST http://127.0.0.1:8282/api/chat -H 'Content-Type: application/json' \
+curl -N -X POST http://127.0.0.1:8383/api/chat -H 'Content-Type: application/json' \
   -d '{"workspace_id":"ws_x","message":"把 README 的例子跑一遍",
        "limits":{"max_iterations":8,"max_wall_ms":300000,
                  "max_tool_calls":40,"max_total_tokens":200000}}'
@@ -692,7 +692,7 @@ curl -N -X POST http://127.0.0.1:8282/api/chat -H 'Content-Type: application/jso
 | `allow_paths` | 这一轮额外可以碰的目录（工作区本身一直可以） | 文件工具照旧被围栏挡住（`toolkit_exec` 不受此限） |
 
 ```bash
-curl -N -X POST http://127.0.0.1:8282/api/chat -H 'Content-Type: application/json' \
+curl -N -X POST http://127.0.0.1:8383/api/chat -H 'Content-Type: application/json' \
   -d '{"workspace_id":"ws_x","message":"只准用文件工具",
        "tools":["toolkit_file","toolkit_task"],
        "limits":{"max_iterations":8}}'
@@ -726,9 +726,9 @@ MCP 工具用那个 MCP 服务器在 `mcp.yaml` 里的 `timeout_ms`。
 所以 `docs/api.md` 在**编译期就进了二进制**（跟网页资源一起），`GET /api/doc` 从二进制里读出来：
 
 ```bash
-curl -s http://127.0.0.1:8282/api/doc | head -40          # 渲染好的网页
-curl -s http://127.0.0.1:8282/api/doc?format=md           # Markdown 原文
-curl -s http://127.0.0.1:8282/api/doc?format=json         # {ok, version, title, markdown, html}
+curl -s http://127.0.0.1:8383/api/doc | head -40          # 渲染好的网页
+curl -s http://127.0.0.1:8383/api/doc?format=md           # Markdown 原文
+curl -s http://127.0.0.1:8383/api/doc?format=json         # {ok, version, title, markdown, html}
 ```
 
 - 默认返回 **HTML**（自带的样式，深浅色跟着系统走），浏览器直接打开就能读；
@@ -759,12 +759,12 @@ curl -s http://127.0.0.1:8282/api/doc?format=json         # {ok, version, title,
 
 ```bash
 # 还在跑吗？跑到第几帧了？
-curl -s 'http://device:8282/api/chat/turn?session_id=s_xxx'
+curl -s 'http://device:8383/api/chat/turn?session_id=s_xxx'
 # {"ok":true,"running":true,"session_id":"s_xxx","last_seq":137,"oldest_seq":1,
 #  "buffered":137,"dropped":0,"pending":0,"started_at":"...","workspace_id":"ws_xxx"}
 
 # 接回去：从 seq 42 之后继续（0 或省略 = 从头回放）
-curl -N -X POST http://device:8282/api/chat/attach \
+curl -N -X POST http://device:8383/api/chat/attach \
   -H 'Content-Type: application/json' -d '{"session_id":"s_xxx","since":42}'
 ```
 
@@ -777,7 +777,7 @@ curl -N -X POST http://device:8282/api/chat/attach \
 页面**不会**被"谁在跑就跳到谁"拽走，而是在侧栏把正在跑的会话标成「· 进行中」，点一下才接上。
 
 ```bash
-curl -s http://device:8282/api/chat/turns
+curl -s http://device:8383/api/chat/turns
 # {"ok":true,"turns":[{"running":true,"session_id":"s_xxx","workspace_id":"ws_xxx",
 #   "started_at":"...","last_seq":137,"oldest_seq":1,"buffered":137,"dropped":0,
 #   "pending":0,"subscribers":2}]}
@@ -869,37 +869,37 @@ curl -s http://device:8282/api/chat/turns
 
 ```bash
 # 轮次进行中：200 + JSON，消息排队，没有新开轮次
-curl -s -X POST http://device:8282/api/chat \
+curl -s -X POST http://device:8383/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
 # {"ok":true,"session_id":"s_xxx","workspace_id":"ws_xxx","turn_running":true,
 #  "queued":{"id":"q_...","content":"...","insert":"after"},"pending":1}
 
 # 立即插入：同一轮在下一次模型请求之前采纳它
-curl -s -X POST http://device:8282/api/chat \
+curl -s -X POST http://device:8383/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"先别动那个文件","insert":"now"}'
 
 # 明确要求顶掉正在跑的那一轮（对所有人）：服务端先取消、等旧 worker 收尾并落盘，
 # 再重新读取会话、开始新一轮。15 秒内停不下来（比如卡在长工具里）返回 409 turn_still_running。
-curl -s -N -X POST http://device:8282/api/chat \
+curl -s -N -X POST http://device:8383/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"workspace_id":"ws_xxx","session_id":"s_xxx","message":"换个方向","interrupt":true}'
 
 # 只想排队，不需要 SSE 的客户端可以直接用这个接口
-curl -s -X POST http://device:8282/api/chat/queue \
+curl -s -X POST http://device:8383/api/chat/queue \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"s_xxx","message":"顺便把日志级别改成 debug"}'
 # {"ok":true,"queued":{"id":"q_...","content":"...","insert":"after"},"pending":1,
 #  "turn_running":true,"turn_id":"t_..."}
 
 # 采纳前可以取消：带 id 取消一条，不带 id 取消全部
-curl -s -X POST http://device:8282/api/chat/queue/cancel \
+curl -s -X POST http://device:8383/api/chat/queue/cancel \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"s_xxx","id":"q_..."}'
 
 # 队列里现在有什么
-curl -s 'http://device:8282/api/chat/queue?session_id=s_xxx'
+curl -s 'http://device:8383/api/chat/queue?session_id=s_xxx'
 # {"ok":true,"pending":1,"items":[{"id":"q_...","content":"...","insert":"after"}]}
 ```
 
@@ -1028,13 +1028,13 @@ firefox，可停止此页面」。内置 UI 现在按三条规则做：
 
 ```bash
 # SSE 的 done 事件直接给出 id，不需要轮询
-curl -N -X POST http://device:8282/api/chat -d '{"workspace_id":"ws_x","message":"..."}'
+curl -N -X POST http://device:8383/api/chat -d '{"workspace_id":"ws_x","message":"..."}'
 # data: {"type":"done",...,"trajectory_id":"t_1a2b3c4d5e6f"}
 
-curl -s http://device:8282/api/sessions/s_9f8e7d/trajectory            # 摘要，最新在前
-curl -s 'http://device:8282/api/sessions/s_9f8e7d/trajectory?full=1'   # 带 steps / files_changed
-curl -s http://device:8282/api/turns/t_1a2b3c4d5e6f/trajectory         # 单轮完整轨迹
-curl -s 'http://device:8282/api/sessions/s_9f8e7d/trajectory?format=jsonl'  # 原始 JSONL
+curl -s http://device:8383/api/sessions/s_9f8e7d/trajectory            # 摘要，最新在前
+curl -s 'http://device:8383/api/sessions/s_9f8e7d/trajectory?full=1'   # 带 steps / files_changed
+curl -s http://device:8383/api/turns/t_1a2b3c4d5e6f/trajectory         # 单轮完整轨迹
+curl -s 'http://device:8383/api/sessions/s_9f8e7d/trajectory?format=jsonl'  # 原始 JSONL
 ```
 
 默认视图（摘要）：
@@ -1192,7 +1192,7 @@ tea_agent --gc --max-age-days 30 --compress-after-days 7 --max-bytes 104857600
 `supports_tools`、`supports_reasoning`、`supports_vision`、`note`。
 
 ```bash
-curl -s -X PUT http://127.0.0.1:8282/api/providers/deepseek/models \
+curl -s -X PUT http://127.0.0.1:8383/api/providers/deepseek/models \
      -H 'Content-Type: application/json' \
      -d '{"models":[{"id":"deepseek-reasoner","max_context_tokens":131072,
                       "max_output_tokens":65536,"reasoning_effort":"high",
@@ -1224,9 +1224,9 @@ curl -s -X PUT http://127.0.0.1:8282/api/providers/deepseek/models \
 | `POST /api/mcp/servers/{name}/call` | 直接调一个工具 |
 
 ```bash
-curl -s http://127.0.0.1:8282/api/mcp/servers
-curl -s -X POST http://127.0.0.1:8282/api/mcp/refresh
-curl -s -X POST http://127.0.0.1:8282/api/mcp/servers/uiautomation/call \
+curl -s http://127.0.0.1:8383/api/mcp/servers
+curl -s -X POST http://127.0.0.1:8383/api/mcp/refresh
+curl -s -X POST http://127.0.0.1:8383/api/mcp/servers/uiautomation/call \
      -H 'Content-Type: application/json' \
      -d '{"tool":"mcp__uiautomation__SearchElements","arguments":{"name":"OK"}}'
 ```
@@ -1253,7 +1253,7 @@ servers:
     command: "python3"
     args: ["/path/to/tea_a2/sched/a2_ext_py/toolkit/mcp_server.py",
            "--modules", "/home/you/.tea_agent/ext",
-           "--agent-url", "http://127.0.0.1:8282"]
+           "--agent-url", "http://127.0.0.1:8383"]
 ```
 
 模块的约定只有两条：文件叫 `toolkit_<名字>.py`，里面有两个东西——函数
@@ -1289,7 +1289,7 @@ Web UI 的麦克风按钮把录好的音频交给服务端转写，转写服务�
 ```bash
 # 转写一个 wav 文件
 curl --data-binary @hello.wav -H 'Content-Type: audio/wav' \
-     http://127.0.0.1:8282/api/asr/transcribe
+     http://127.0.0.1:8383/api/asr/transcribe
 # {"ok":true,"text":"开饭时间早上9点至下午5点。","elapsed_ms":181}
 ```
 
@@ -1427,7 +1427,7 @@ curl -s -X POST $B/api/llm/chat -H 'Content-Type: application/json' \
 ```python
 from tea_api import Tea, Queue
 
-tea = Tea("http://127.0.0.1:8282")
+tea = Tea("http://127.0.0.1:8383")
 quota = tea.usage("minimax")              # 额度
 
 queue = Queue("http://127.0.0.1:8283")

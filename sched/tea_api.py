@@ -26,7 +26,7 @@ the queue, so a script that wants the tasks talks to `Queue`, not to `Client`.
 
   from a2_ext_py import Client, Queue
 
-  client = Client("http://127.0.0.1:8282")
+  client = Client("http://127.0.0.1:8383")
   quota = client.usage("minimax")            # how much is left
 
   queue = Queue("http://127.0.0.1:8283")
