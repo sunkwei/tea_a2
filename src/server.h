@@ -23,6 +23,10 @@ std::vector<std::string> reachable_urls(const std::string& bind_host, int port);
 struct ServerOptions {
   std::string host = "127.0.0.1";
   int port = 8383;
+  /// When the port is taken by a live listener, wait this many seconds for it
+  /// to be free instead of refusing to start. That is the handover: the
+  /// previous instance is shutting down and lets go of the port in a moment.
+  int wait_for_port_seconds = 0;
   /// Optional directory holding index.html/app.js/app.css/tokens.css. When
   /// empty (or when a file is missing) the assets embedded in the binary are
   /// used instead.

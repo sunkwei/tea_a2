@@ -100,6 +100,123 @@ void attach_parent_console() {
 void attach_parent_console() {}
 #endif
 
+#ifdef _WIN32
+/// The file this process was started from - the *path*, not the image handle.
+std::string self_exe_path() {
+  wchar_t buffer[MAX_PATH * 4];
+  const DWORD length =
+      GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])));
+  if (length == 0 || length >= sizeof(buffer) / sizeof(buffer[0])) return std::string();
+  return wide_to_utf8(std::wstring(buffer, length));
+}
+
+/// (mtime, size) of a file: the cheap way to see "this is a different file
+/// now". An empty string means "no such file" - a build that renames the binary
+/// aside leaves a gap between the rename and the new link.
+std::string file_stamp(const std::string& path) {
+  WIN32_FILE_ATTRIBUTE_DATA data;
+  const std::wstring wide = utf8_to_wide(path);
+  if (!GetFileAttributesExW(wide.c_str(), GetFileExInfoStandard, &data)) return std::string();
+  const unsigned long long size =
+      (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+  const unsigned long long mtime =
+      (static_cast<unsigned long long>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+      data.ftLastWriteTime.dwLowDateTime;
+  return std::to_string(mtime) + ":" + std::to_string(size);
+}
+
+/// Quote one argument for a Windows command line (the rules the CRT uses when
+/// it splits one: a space or a quote in the argument needs the quotes around
+/// it, and a quote inside needs a backslash in front of it).
+std::string quote_cmdline_arg(const std::string& arg) {
+  if (!arg.empty() && arg.find_first_of(" \t\"") == std::string::npos) return arg;
+  std::string out = "\"";
+  for (std::size_t i = 0; i < arg.size(); ++i) {
+    std::size_t backslashes = 0;
+    while (i < arg.size() && arg[i] == '\\') { ++backslashes; ++i; }
+    if (i == arg.size()) {
+      out.append(backslashes * 2, '\\');
+      break;
+    }
+    if (arg[i] == '"') {
+      out.append(backslashes * 2 + 1, '\\');
+      out.push_back('"');
+    } else {
+      out.append(backslashes, '\\');
+      out.push_back(arg[i]);
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+/// Start this program again - the new build - and let it take the port over.
+/// The new instance is told to wait for the port; this one stops right after,
+/// so the two never serve at the same time.
+bool spawn_takeover(const std::string& exe_path, const std::vector<std::string>& args) {
+  std::string command = quote_cmdline_arg(exe_path);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == "--takeover") continue;   // exactly one, at the end
+    command += " " + quote_cmdline_arg(args[i]);
+  }
+  command += " --takeover";
+  const std::wstring wide_command = utf8_to_wide(command);
+  std::vector<wchar_t> buffer(wide_command.begin(), wide_command.end());
+  buffer.push_back(L'\0');
+  STARTUPINFOW startup = {};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION info = {};
+  // CREATE_NO_WINDOW: the new instance is a Windows application, it must not
+  // flash a console window on the way in.
+  if (!CreateProcessW(nullptr, &buffer[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                      nullptr, &startup, &info)) {
+    return false;
+  }
+  CloseHandle(info.hThread);
+  CloseHandle(info.hProcess);
+  return true;
+}
+
+/// Watch our own binary: when it changes on disk (a rebuild replaced it), the
+/// new build takes this one's port over and this instance goes away.
+///
+/// The rule that matters: the file has to exist and to have *stopped* changing
+/// before we act. The linker writes the new exe in pieces, and starting half a
+/// binary is worse than staying on the old one.
+void watch_own_binary(std::string exe_path, std::string start_stamp,
+                       const std::vector<std::string>& args) {
+  std::string previous = start_stamp;
+  int settled = 0;
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const std::string now = file_stamp(exe_path);
+    if (now.empty() || now == start_stamp) {
+      previous = now;
+      settled = 0;
+      continue;                       // no file (a build in progress), or the same one
+    }
+    if (now != previous) {
+      previous = now;
+      settled = 0;
+      continue;                       // still being written
+    }
+    if (++settled < 2) continue;      // one more poll before we believe it
+    LOG_INFO("main: the binary changed on disk - the new build takes over");
+    if (!spawn_takeover(exe_path, args)) {
+      LOG_ERROR("main: could not start the new build; keeping this one");
+      start_stamp = now;              // do not try again on every poll
+      previous = now;
+      settled = 0;
+      continue;
+    }
+    g_stop.store(true);               // the drain runs, then this instance exits
+    return;
+  }
+}
+#else
+void watch_own_binary(std::string, std::string, const std::vector<std::string>&) {}
+#endif
+
 struct Args {
   std::map<std::string, std::vector<std::string> > values;
 
@@ -118,7 +235,7 @@ struct Args {
 
 const char* kBooleanFlags[] = {"help", "version", "selftest", "open", "no-console", "quiet",
                                "allow-outside-workspace", "no-color", "insecure",
-                               "gc", "gc-dry-run"};
+                               "gc", "gc-dry-run", "takeover", "no-reload-on-rebuild"};
 
 bool is_log_level_name(const std::string& value) {
   const std::string v = to_lower(trim(value));
@@ -172,6 +289,8 @@ void print_usage() {
                   "                             trace|debug|info|warn|error|off (default warn)\n"
                   "  --log-file <path>          global log file (default $HOME/.tea_agent/logs/tea_agent.log)\n"
                   "  --no-console               do not echo log lines to the console at all\n"
+"  --no-reload-on-rebuild     do not hand the port over when the binary changes\n"
+"                            (Windows: by default a rebuilt binary takes over)\n"
                   "  --quiet                    same as --no-console\n"
                   "  --help                     show this help\n"
                   "  --version                  show the version\n"
@@ -581,6 +700,11 @@ int tea_agent_main(int argc, char** argv) {
     console_write_line("error: --port must be between 1 and 65535");
     return 1;
   }
+  // A handover: the previous instance is still holding the port and is about to
+  // let it go (the binary was rebuilt under it). Wait for it instead of
+  // refusing to start - and wait longer than that instance's drain, or the
+  // handover would give up while the old one is still finishing a turn.
+  if (args.has("takeover")) options.wait_for_port_seconds = drain_seconds_from_env() + 60;
 
   // ---- the MQTT control channel (opt-in) --------------------------------
   // All four values are needed. A partial set is reported and the channel
@@ -758,6 +882,26 @@ int tea_agent_main(int argc, char** argv) {
   // The banner is written straight to the console (not through the logger), so
   // --quiet has to skip it explicitly; it is a greeting, not a diagnostic.
   if (args.has("open")) open_browser(server.url());
+
+  // ---- watch our own binary ----------------------------------------------
+  //
+  // A rebuild replaces the exe while this instance is running (the build moves
+  // the old file aside so the linker can write a new one). The new build is
+  // started, waits for the port, and this instance drains and exits - so
+  // "compile and it takes effect" works on a machine that runs the agent
+  // straight from the build tree. --no-reload-on-rebuild turns it off.
+  if (!args.has("no-reload-on-rebuild")) {
+    const std::string exe_path = self_exe_path();
+    if (!exe_path.empty()) {
+      const std::string stamp = file_stamp(exe_path);
+      std::vector<std::string> own_args;
+      for (int i = 0; i < argc; ++i) own_args.push_back(argv[i] ? argv[i] : "");
+      std::thread watcher([exe_path, stamp, own_args]() {
+        watch_own_binary(exe_path, stamp, own_args);
+      });
+      watcher.detach();
+    }
+  }
 
   install_signal_handlers();
   while (!g_stop.load()) {

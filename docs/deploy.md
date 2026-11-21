@@ -235,6 +235,9 @@ scripts\install-autostart.bat -DryRun
   `--no-console` 会自动补上，日志照旧写 `~/.tea_agent/logs/tea_agent.log`。
   从终端里跑（`a2.exe --version`、`--gc`）输出照常可见——程序会挂到父进程的控制台上；
   输出被重定向（管道、日志文件）时一概不动。
+- **重建后不用手动重启**：Windows 上跑着的 agent 会盯着自己的二进制，重新编译之后
+  新版本接管端口、旧版本排空后退出（见 docs/build.md「重新构建之后，跑着的那个自己
+  换成新版本」）。`--no-reload-on-rebuild` 可以关掉。
 - **崩溃重启**：VBS 在退出码非 0 时 3 秒后重拉；任务本身还配了 `<RestartOnFailure>`
   （1 分钟一次，最多 999 次），两者叠加接近 `Restart=always`。
 - **单实例**：`<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`，拨弄两下

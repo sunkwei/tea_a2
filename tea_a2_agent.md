@@ -44,7 +44,9 @@
 7. **别用 `git add -A`**。工作区里可能有**别的会话**暂存的东西；提交前先看 `git status` 的第一列，
    自己只 `git add` 明确的文件。
 8. **运行中的 exe 覆盖不了**（Windows）。`cmake/free-running-exe.cmake` 会在链接前把旧 exe 改名
-   让位、链接后删掉，所以「程序开着也能构建」。
+   让位、链接后删掉，所以「程序开着也能构建」。**而且跑着的那个会自己换成新版本**：agent 盯着
+   自己的二进制，文件变了就起新版本、等端口，旧版本排空（`TEA_AGENT_DRAIN_SECONDS`，默认 600 秒，
+   正在跑的那一轮会跑完）后退出。`--no-reload-on-rebuild` 关掉；只在 Windows 上有。
 9. **长构建要前台跑**。`start /b` / `start /min` 起的后台进程会随着命令结束被杀；用
    `cmd /c scripts\build-mingw.bat > log 2>&1` 前台跑，再单独去看 log。
 10. **浏览器测试需要 `CHROME_BIN`**。没装 Chrome 时 Edge 也是 Chromium：

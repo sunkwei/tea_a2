@@ -7901,7 +7901,19 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
       impl_->config ? port_file_path(impl_->config->tea_home) : std::string();
   {
     std::string why;
-    if (!port_is_free(host, options_.port, &why) && port_has_listener(options_.port)) {
+    // A handover waits for the port instead of refusing: the previous instance
+    // is shutting down and lets go of it within a second or two.
+    const int wait_seconds = options_.wait_for_port_seconds > 0 ? options_.wait_for_port_seconds : 0;
+    const int64_t deadline = now_ms() + static_cast<int64_t>(wait_seconds) * 1000;
+    bool taken = false;
+    for (;;) {
+      if (port_is_free(host, options_.port, &why)) { taken = false; break; }
+      if (!port_has_listener(options_.port)) { taken = false; break; }  // only TIME_WAIT
+      taken = true;
+      if (now_ms() >= deadline) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    if (taken) {
       std::string message =
           "port " + std::to_string(options_.port) + " is already in use";
       const nlohmann::json holder = read_port_file(port_record);
