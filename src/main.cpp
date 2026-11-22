@@ -213,8 +213,6 @@ void watch_own_binary(std::string exe_path, std::string start_stamp,
     return;
   }
 }
-#else
-void watch_own_binary(std::string, std::string, const std::vector<std::string>&) {}
 #endif
 
 struct Args {
@@ -890,6 +888,11 @@ int tea_agent_main(int argc, char** argv) {
   // started, waits for the port, and this instance drains and exits - so
   // "compile and it takes effect" works on a machine that runs the agent
   // straight from the build tree. --no-reload-on-rebuild turns it off.
+#ifdef _WIN32
+  // (Windows only: on Linux the service manager restarts the agent, and the
+  // helpers above - self_exe_path / file_stamp / spawn_takeover - do not
+  // exist there. --no-reload-on-rebuild is still accepted, it just has
+  // nothing to turn off.)
   if (!args.has("no-reload-on-rebuild")) {
     const std::string exe_path = self_exe_path();
     if (!exe_path.empty()) {
@@ -902,6 +905,7 @@ int tea_agent_main(int argc, char** argv) {
       watcher.detach();
     }
   }
+#endif
 
   install_signal_handlers();
   while (!g_stop.load()) {
