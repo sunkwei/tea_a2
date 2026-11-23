@@ -546,9 +546,21 @@ void Server::Impl::session_loop(std::shared_ptr<Session> session, std::string bu
   const std::string will_payload = session->will_payload;
   const bool will_retain = session->will_retain;
   forget(session);
-  if (session->role == "device") touch_device(session->client_id, session->user, false);
+  const bool is_device = session->role == "device" && !session->client_id.empty();
+  if (is_device) touch_device(session->client_id, session->user, false);
   session->conn.reset();
-  if (send_will) broadcast(will_topic, will_payload, will_retain);
+  if (send_will) {
+    broadcast(will_topic, will_payload, will_retain);
+  } else if (is_device) {
+    // A clean DISCONNECT sends no will, so the retained registration would go
+    // on saying "online" forever and the operator's list would keep a device
+    // that is already gone. Publish the offline state ourselves.
+    nlohmann::json offline;
+    offline["name"] = session->client_id;
+    offline["online"] = false;
+    offline["ts"] = static_cast<long long>(std::time(nullptr));
+    broadcast("mt_register/" + session->client_id, offline.dump(), true);
+  }
 }
 
 Server::Server() : impl_(new Impl()) {}
@@ -557,6 +569,9 @@ Server::~Server() = default;
 bool Server::start(const Options& options, std::string* err) {
   impl_->options = options;
   if (!impl_->open_database(options.db_path, err)) return false;
+  // Nothing is connected yet: every row in the table is from the previous run.
+  std::lock_guard<std::mutex> lock(impl_->db_mutex);
+  sqlite3_exec(impl_->db, "UPDATE mqtt_devices SET online = 0", nullptr, nullptr, nullptr);
   return true;
 }
 
