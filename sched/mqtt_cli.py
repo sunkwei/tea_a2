@@ -453,7 +453,32 @@ def simple_command(args, action):
 
 
 # --------------------------------------------------------------------- main
+# Options that take a value, so the scan below does not mistake their value
+# for the subcommand.
+VALUE_OPTIONS = ("--broker", "--user", "--pass", "--fingerprint", "--ca")
+
+
+def _normalize_command(argv):
+    """Accept `lIst` as `list`. Only the subcommand is case-folded: device
+    names are case-sensitive, and an option's value must not be touched."""
+    out = list(argv)
+    skip_next = False
+    for index, token in enumerate(out):
+        if skip_next:
+            skip_next = False
+            continue
+        if token in VALUE_OPTIONS:
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        out[index] = token.lower()
+        break
+    return out
+
+
 def main(argv=None):
+    argv = _normalize_command(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         prog="mqtt_cli.py",
         description="list the devices an a2_broker knows, and wake a tunnel on one of them")
