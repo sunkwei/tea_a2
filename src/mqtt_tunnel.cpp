@@ -316,11 +316,11 @@ TunnelController::Status TunnelController::start(const std::string& broker, int 
   impl_->status.state = kStarting;
   impl_->status.broker = broker;
   impl_->output.clear();
-  LOG_INFO("mqtt", "tunnel.start: spawning " + impl_->executable + " (target " + impl_->target +
+  LOG_INFO("mqtt: ", "tunnel.start: spawning " + impl_->executable + " (target " + impl_->target +
                        ", wait " + std::to_string(wait_timeout_s) + "s)");
   if (!impl_->spawn(broker, wait_timeout_s)) {
     impl_->status.state = kFailed;
-    LOG_INFO("mqtt", "tunnel.start: spawn failed: " + impl_->status.error);
+    LOG_INFO("mqtt: ", "tunnel.start: spawn failed: " + impl_->status.error);
     return impl_->status;
   }
   impl_->ready_cv.wait_for(lock, std::chrono::seconds(25), [this]() {
@@ -332,7 +332,7 @@ TunnelController::Status TunnelController::start(const std::string& broker, int 
     impl_->status.error = "the sidecar did not print a session code";
     impl_->kill_now();
   }
-  LOG_INFO("mqtt", "tunnel.start: state=" + impl_->status.state +
+  LOG_INFO("mqtt: ", "tunnel.start: state=" + impl_->status.state +
                        (impl_->status.error.empty() ? std::string()
                                                     : " error=" + impl_->status.error));
   return impl_->status;
@@ -438,7 +438,7 @@ struct CommandHandler::Impl {
     if (seen != answers.end()) return seen->second;
 
     const std::string action = request.value("action", std::string());
-    LOG_INFO("mqtt", "command " + id + " action=" + action);
+    LOG_INFO("mqtt: ", "command " + id + " action=" + action);
     const long long ts = request.value("ts", 0LL);
     const int ttl = request.value("ttl", 0);
     const long long now = static_cast<long long>(std::time(nullptr));
@@ -506,7 +506,7 @@ struct CommandHandler::Impl {
       const std::string record = execute(payload);
       if (record.empty()) continue;
       const bool online = client && client->connected();
-      LOG_INFO("mqtt", "answer " + options.resp_topic + " (" +
+      LOG_INFO("mqtt: ", "answer " + options.resp_topic + " (" +
                            (online ? "connected" : "offline") + "): " + record);
       if (online) client->publish(options.resp_topic, record, 1);
     }

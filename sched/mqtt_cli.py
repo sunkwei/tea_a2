@@ -120,7 +120,8 @@ class MqttClient(object):
         code = packet[2][1] if len(packet[2]) > 1 else 255
         if code != 0:
             if code == 4:
-                raise MqttError("the broker refused the credentials (wrong user or password)")
+                raise MqttError("the broker rejected the credentials for user %r "
+                                "(wrong user or password)" % self.user)
             if code == 5:
                 raise MqttError("the broker refused the connection (not authorized)")
             raise MqttError("the broker refused the connection (CONNACK %d)" % code)

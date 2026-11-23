@@ -390,8 +390,31 @@ struct MqttClient::Impl {
       return false;
     }
     uint8_t code = 0;
-    if (!mqtt::parse_connack(packet.body, &code) || code != 0) {
-      set_error("the broker refused the connection (CONNACK code " + std::to_string(code) + ")");
+    if (!mqtt::parse_connack(packet.body, &code)) {
+      set_error("the broker sent a malformed CONNACK");
+      close_mqtt_socket(fd);
+      return false;
+    }
+    if (code != 0) {
+      std::string why;
+      if (code == 4) {
+        why = "the broker rejected the credentials for user \"" + config.user +
+              "\" (wrong user or password)";
+      } else if (code == 5) {
+        why = "the broker refused the connection (not authorized)";
+      } else if (code == 1) {
+        why = "the broker refused the protocol level";
+      } else if (code == 2) {
+        why = "the broker refused the client id";
+      } else if (code == 3) {
+        why = "the broker is not available";
+      } else {
+        why = "the broker refused the connection (CONNACK " + std::to_string(code) + ")";
+      }
+      set_error(why);
+      // A credential problem is not a network blip: say it on the console
+      // (the default console level is warn) instead of retrying in silence.
+      LOG_WARN("mqtt: ", why);
       close_mqtt_socket(fd);
       return false;
     }
@@ -430,7 +453,7 @@ struct MqttClient::Impl {
 
     connected.store(true);
     set_error(std::string());
-    LOG_INFO("mqtt", "connected to " + config.host + ":" + std::to_string(config.port) + " as " +
+    LOG_INFO("mqtt: ", "connected to " + config.host + ":" + std::to_string(config.port) + " as " +
                          config.client_id);
 
     auto last_rx = std::chrono::steady_clock::now();
@@ -499,7 +522,7 @@ struct MqttClient::Impl {
       run_session();
       if (stopping.load()) break;
       const std::string why = get_error();
-      if (!why.empty()) LOG_INFO("mqtt", "disconnected: " + why);
+      if (!why.empty()) LOG_INFO("mqtt: ", "disconnected: " + why);
       // Back off 1, 2, 4 ... 60 seconds with a little jitter, so 100 devices
       // coming back after a broker restart do not arrive in lockstep.
       const int sleep_ms = backoff_s * 1000 + (static_cast<int>(std::rand()) % 500);
