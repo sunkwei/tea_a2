@@ -19,13 +19,16 @@ overridden by flags or by the same names in the environment:
 One file, standard library only, Python 3.6+. It speaks the same small MQTT
 3.1.1 subset the agent does: CONNECT/SUBSCRIBE/PUBLISH/PUBACK/PINGREQ.
 
-Note on the certificate: the broker's self-signed certificate carries the
-address in its CN, and Python refuses to match an IP address against a CN
-(only IP SANs count). So the chain is verified (CERT_REQUIRED) but the name
-is not (check_hostname = False). --insecure drops the chain check too.
+Certificate: the default broker's certificate is pinned in this file (its
+SHA-256), so nothing has to be configured and a man in the middle cannot
+impersonate it. If the broker certificate is rotated, the tool says so and
+prints the new fingerprint; pass --fingerprint (or --ca) for a one-off, or
+update DEFAULT_FINGERPRINT. A different broker needs --fingerprint or --ca.
+--insecure skips both checks.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -36,11 +39,11 @@ import sys
 import time
 
 DEFAULT_BROKER = "103.232.92.54:8382"
-DEFAULT_CA_CANDIDATES = (
-    "~/.tea_agent/ca-bundle/cacert-mqtt.pem",
-    "~/.tea_agent/ca-bundle/cacert.pem",
-    "~/.tea_agent/tunnel/broker.crt",
-)
+# SHA-256 of the broker's self-signed certificate. Pinning the certificate is
+# stronger than a CA file (one identity, no chain to build) and it means the
+# operator does not have to carry a PEM around. Rotate it here when the broker
+# certificate is replaced; --fingerprint and --ca both still override it.
+DEFAULT_FINGERPRINT = "4db67e133f11db0a4216788cf16edd42ec6cf63bd2c3943e956ea2913d90f2f4"
 MAX_PACKET = 300 * 1024
 
 
@@ -71,7 +74,7 @@ class MqttError(Exception):
 
 class MqttClient(object):
     def __init__(self, host, port, user, password, client_id, ca=None, insecure=False,
-                 connect_timeout=10):
+                 fingerprint=None, connect_timeout=10):
         self.host = host
         self.port = port
         self.user = user
@@ -79,6 +82,7 @@ class MqttClient(object):
         self.client_id = client_id
         self.ca = ca
         self.insecure = insecure
+        self.fingerprint = fingerprint
         self.connect_timeout = connect_timeout
         self.sock = None
         self.buffer = b""
@@ -104,23 +108,40 @@ class MqttClient(object):
         context.check_hostname = False
         if self.insecure:
             context.verify_mode = ssl.CERT_NONE
-        else:
+        elif self.ca:
+            # An explicit CA means "verify the chain"; the name is not checked
+            # because the broker's address lives in the CN and Python only
+            # matches IP addresses against IP SANs.
             context.verify_mode = ssl.CERT_REQUIRED
-            if not self.ca:
-                raw.close()
-                raise MqttError("the broker uses a self-signed certificate; pass --ca <pem> "
-                                "(or set TEA_MQTT_CA)")
             try:
                 context.load_verify_locations(cafile=self.ca)
             except (OSError, ssl.SSLError) as exc:
                 raw.close()
                 raise MqttError("cannot read the CA file %s (%s)" % (self.ca, exc))
+        else:
+            # The default: no chain, but the certificate must be the pinned one.
+            context.verify_mode = ssl.CERT_NONE
         try:
             self.sock = context.wrap_socket(raw, server_hostname=self.host)
         except ssl.SSLError as exc:
             raw.close()
-            raise MqttError("TLS failed: %s (is --ca the broker's current certificate?)" % exc)
+            raise MqttError("TLS failed: %s" % exc)
         self.sock.settimeout(1.0)
+        if not self.insecure and not self.ca:
+            if not self.fingerprint:
+                raw.close()
+                self.sock.close()
+                raise MqttError("this broker is not the one this tool knows; pass "
+                                "--fingerprint <sha256> or --ca <pem>")
+            der = self.sock.getpeercert(binary_form=True)
+            actual = hashlib.sha256(der).hexdigest() if der else ""
+            if actual != self.fingerprint:
+                self.sock.close()
+                raise MqttError(
+                    "the broker's certificate is not the pinned one\n"
+                    "  pinned : %s\n  got    : %s\n"
+                    "if it was rotated on purpose, pass --fingerprint %s "
+                    "(or --ca <pem>)" % (self.fingerprint, actual, actual))
 
         flags = 0x02
         if self.user:
@@ -266,14 +287,6 @@ def split_endpoint(text):
         raise SystemExit("error: --broker needs HOST:PORT (got %r)" % text)
 
 
-def default_ca():
-    for candidate in DEFAULT_CA_CANDIDATES:
-        path = os.path.expanduser(candidate)
-        if os.path.isfile(path):
-            return path
-    return None
-
-
 def build_client(args):
     endpoint = args.broker or os.environ.get("TEA_MQTT_BROKER") or DEFAULT_BROKER
     host, port = split_endpoint(endpoint)
@@ -284,10 +297,15 @@ def build_client(args):
         # password is a password that leaks the moment it is copied around.
         raise SystemExit("error: --user and --pass are required (this tool has no built-in "
                          "account); or set TEA_MQTT_USER / TEA_MQTT_PASS")
-    ca = args.ca or os.environ.get("TEA_MQTT_CA") or default_ca()
+    # Only an explicitly given CA is used: probing ~/.tea_agent would pick up
+    # a stale certificate from an older broker and break the pinned default.
+    ca = args.ca or os.environ.get("TEA_MQTT_CA") or ""
+    fingerprint = args.fingerprint or os.environ.get("TEA_MQTT_FINGERPRINT") or ""
+    if not ca and not fingerprint and endpoint == DEFAULT_BROKER:
+        fingerprint = DEFAULT_FINGERPRINT
     client = MqttClient(host, port, user, password,
                         "mqtt-cli-%d-%04x" % (os.getpid(), random.randint(0, 0xFFFF)),
-                        ca=ca, insecure=args.insecure)
+                        ca=ca, insecure=args.insecure, fingerprint=fingerprint)
     return client
 
 
@@ -490,7 +508,10 @@ def main(argv=None):
     parser.add_argument("--user", help="operator account (or TEA_MQTT_USER)")
     parser.add_argument("--pass", dest="password",
                         help="password (or TEA_MQTT_PASS; prefer the environment)")
-    parser.add_argument("--ca", help="PEM with the broker certificate (or TEA_MQTT_CA)")
+    parser.add_argument("--ca", help="PEM with the broker certificate (or TEA_MQTT_CA); "
+                        "not needed for the default broker")
+    parser.add_argument("--fingerprint",
+                        help="sha256 of the broker certificate (or TEA_MQTT_FINGERPRINT)")
     parser.add_argument("--insecure", action="store_true", help="do not verify the certificate")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
 

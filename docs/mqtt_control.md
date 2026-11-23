@@ -146,7 +146,6 @@ mosquitto_pub ... -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/cmd' \
 ```bash
 export TEA_MQTT_USER=zonekey          # 账号不内置，必须显式给
 export TEA_MQTT_PASS='<secret>'       # 放环境变量，不进 ps 历史
-export TEA_MQTT_CA=~/broker.crt       # broker 的自签证书
 
 python3 sched/mqtt_cli.py list                  # 在线设备（完整注册名）
 python3 sched/mqtt_cli.py list --all --json     # 含离线 + 机器可读
@@ -180,9 +179,10 @@ next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034
 
 重复 `wake` 不会起第二个 sidecar：设备会返回**现有的** session。
 
-> 证书说明：broker 的证书是自签的，地址写在 CN 里。Python 不认「CN 当 IP」，
-> 所以 CLI 只验证书链（`CERT_REQUIRED`）不验名字（`check_hostname=False`）；
-> `--insecure` 连链也不验。CA 用 broker 的 `broker.crt`。
+> 证书：CLI 里存了 broker 证书的 SHA-256（和侧载的 `--tls-pin` 是同一个思路），
+> 连上后比对指纹，所以**不用带 CA 文件**，也挡得住中间人。证书轮换时它会报错并
+> 打出新指纹：确认无误后 `--fingerprint <新指纹>` 临时用，或更新 CLI 里的常量。
+> `--ca <pem>` 仍然可用（走证书链验证），`--insecure` 则什么都不验。
 
 ## 五、安全边界（读一遍再上线）
 

@@ -89,7 +89,10 @@ struct TunnelController::Impl {
   int output_fd = -1;
 #endif
 
-  ~Impl() { kill_now(); }
+  ~Impl() {
+    kill_now(true);
+    if (reader.joinable()) reader.join();
+  }
 
   void set_state(const std::string& state, const std::string& error = std::string()) {
     status.state = state;
@@ -97,7 +100,9 @@ struct TunnelController::Impl {
   }
 
   bool spawn(const std::string& broker, int wait_timeout_s);
-  void kill_now();
+  /// SIGTERM (or SIGKILL with `force`). The reader thread notices the pipe end
+  /// and exits; the caller joins it outside the lock.
+  void kill_now(bool force = false);
 };
 
 #ifndef _WIN32
@@ -179,10 +184,11 @@ bool TunnelController::Impl::spawn(const std::string& broker, int wait_timeout_s
   return true;
 }
 
-void TunnelController::Impl::kill_now() {
+void TunnelController::Impl::kill_now(bool force) {
   if (child_pid > 0) {
-    ::kill(-static_cast<pid_t>(child_pid), SIGTERM);
-    ::kill(static_cast<pid_t>(child_pid), SIGTERM);
+    const int signal_number = force ? SIGKILL : SIGTERM;
+    ::kill(-static_cast<pid_t>(child_pid), signal_number);
+    ::kill(static_cast<pid_t>(child_pid), signal_number);
   }
 }
 #else
@@ -272,7 +278,8 @@ bool TunnelController::Impl::spawn(const std::string& broker, int wait_timeout_s
   return true;
 }
 
-void TunnelController::Impl::kill_now() {
+void TunnelController::Impl::kill_now(bool force) {
+  (void)force;  // TerminateJobObject has no gentle mode
   if (job) {
     TerminateJobObject(job, 1);
     CloseHandle(job);
@@ -297,6 +304,14 @@ TunnelController::Status TunnelController::start(const std::string& broker, int 
     impl_->ready_cv.wait_for(lock, std::chrono::seconds(7),
                              [this]() { return impl_->status.state != kStopping; });
   }
+  // The previous reader may still exist (a stop just happened). Assigning a
+  // new std::thread over a joinable one calls std::terminate, so reap it
+  // first - outside the lock, because the reader takes the same lock to
+  // notice the pipe end and exit.
+  const bool join_old = impl_->reader.joinable();
+  lock.unlock();
+  if (join_old) impl_->reader.join();
+  lock.lock();
   impl_->status = Status();
   impl_->status.state = kStarting;
   impl_->status.broker = broker;
@@ -331,12 +346,24 @@ TunnelController::Status TunnelController::stop() {
     return impl_->status;
   }
   impl_->status.state = kStopping;
-  impl_->kill_now();
-  impl_->ready_cv.wait_for(lock, std::chrono::seconds(6), [this]() {
+  impl_->kill_now(false);
+  const bool exited = impl_->ready_cv.wait_for(lock, std::chrono::seconds(5), [this]() {
     return impl_->status.state == kStopped || impl_->status.state == kFailed;
   });
+  if (!exited) {
+    // A sidecar that ignores SIGTERM would keep the reader blocked forever;
+    // the whole agent has to be able to stop.
+    impl_->kill_now(true);
+    impl_->ready_cv.wait_for(lock, std::chrono::seconds(2), [this]() {
+      return impl_->status.state == kStopped || impl_->status.state == kFailed;
+    });
+  }
   impl_->status.state = kStopped;
   impl_->status.session.clear();
+  const bool join_reader = impl_->reader.joinable();
+  lock.unlock();
+  if (join_reader) impl_->reader.join();
+  lock.lock();
   return impl_->status;
 }
 
