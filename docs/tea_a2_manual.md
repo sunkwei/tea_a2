@@ -71,6 +71,23 @@ HTTP 引擎、可用工具、工作区列表。地址那行就是要打开的。
 | `--ca-bundle <path>` | 信任的根证书 PEM | 二进制里嵌的那份 |
 | `--insecure` | 不校验 TLS 证书（**只用于测试**） | 校验 |
 
+**MQTT 控制通道**（可选；详见 [mqtt_control.md](mqtt_control.md)）
+
+内网设备没人守着也能被召唤出一条隧道：a2 注册到一个 `a2_broker`，运维在对面
+发 `tunnel.start`，设备自己拉起 `a2_tunnel`，把 session 码回执过去。
+
+| 参数 | 作用 | 默认 |
+| --- | --- | --- |
+| `--mqtt <host:port>` | 启用控制通道，连这个 broker（**只接受 TLS**） | 不启用 |
+| `--mqtt_user <user>` | broker 上的账号（`mqtt_accounts` 表，role=device） | — |
+| `--mqtt_pass <pass>` | 口令（会出现在 `ps` 与 unit 文件里，unit 记得 `chmod 600`） | — |
+| `--mqtt_name <name>` | 名字；注册名是 `<name>@<IPv4>-<MAC>`（MAC 取默认路由网卡） | — |
+| `--tunnel-broker <host:port>` | 侧载连的隧道 broker（可以和 MQTT broker 不是同一台） | `103.232.92.54:8382` |
+| `--print-registration` | 只打印注册名就退出，部署时用它填 `mqtt_accounts.device_name` | — |
+
+四个 `--mqtt*` 必须同时给；缺一个只报错、不启用控制通道。注册名变了（换网卡）
+就要重建账号，否则认证能过、订阅会被 ACL 拒。
+
 **工作区**
 
 | 参数 | 作用 |
@@ -204,7 +221,7 @@ B=http://127.0.0.1:8383
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"1.8.0","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"1.8.1","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
