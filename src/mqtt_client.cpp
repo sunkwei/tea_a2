@@ -22,8 +22,13 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <ipifcons.h>
 #else
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -163,6 +168,81 @@ std::string find_primary_ipv4() {
 }  // namespace
 
 std::string primary_ipv4() { return find_primary_ipv4(); }
+
+#ifdef _WIN32
+std::string find_primary_mac() {
+  ULONG size = 0;
+  DWORD rc = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                               GAA_FLAG_SKIP_DNS_SERVER,
+                                  nullptr, nullptr, &size);
+  if (rc != ERROR_BUFFER_OVERFLOW) return std::string();
+  std::vector<unsigned char> buffer(size);
+  IP_ADAPTER_ADDRESSES* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+  if (GetAdaptersAddresses(AF_INET, 0, nullptr, addresses, &size) != NO_ERROR) {
+    return std::string();
+  }
+  const std::string wanted = find_primary_ipv4();
+  for (IP_ADAPTER_ADDRESSES* adapter = addresses; adapter; adapter = adapter->Next) {
+    if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+    if (adapter->PhysicalAddressLength < 6) continue;
+    bool match = wanted.empty();
+    for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress; unicast;
+         unicast = unicast->Next) {
+      if (!unicast->Address.lpSockaddr) continue;
+      if (unicast->Address.lpSockaddr->sa_family != AF_INET) continue;
+      const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(unicast->Address.lpSockaddr);
+      char text[INET_ADDRSTRLEN] = {0};
+      if (!::inet_ntop(AF_INET, &ipv4->sin_addr, text, sizeof(text))) continue;
+      if (text == wanted) {
+        match = true;
+        break;
+      }
+    }
+    if (!match) continue;
+    char hex[13];
+    std::snprintf(hex, sizeof(hex), "%02x%02x%02x%02x%02x%02x", adapter->PhysicalAddress[0],
+                  adapter->PhysicalAddress[1], adapter->PhysicalAddress[2],
+                  adapter->PhysicalAddress[3], adapter->PhysicalAddress[4],
+                  adapter->PhysicalAddress[5]);
+    return hex;
+  }
+  return std::string();
+}
+#else
+std::string find_primary_mac() {
+  const std::string wanted = find_primary_ipv4();
+  ifaddrs* list = nullptr;
+  if (getifaddrs(&list) != 0) return std::string();
+  std::string result;
+  for (ifaddrs* it = list; it; it = it->ifa_next) {
+    if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET) continue;
+    if (!it->ifa_name) continue;
+    const sockaddr_in* addr = reinterpret_cast<const sockaddr_in*>(it->ifa_addr);
+    char text[INET_ADDRSTRLEN] = {0};
+    if (!::inet_ntop(AF_INET, &addr->sin_addr, text, sizeof(text))) continue;
+    if (!wanted.empty() && wanted != text) continue;
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) break;
+    ifreq request;
+    std::memset(&request, 0, sizeof(request));
+    std::strncpy(request.ifr_name, it->ifa_name, IFNAMSIZ - 1);
+    if (::ioctl(fd, SIOCGIFHWADDR, &request) == 0) {
+      const unsigned char* mac = reinterpret_cast<const unsigned char*>(request.ifr_hwaddr.sa_data);
+      char hex[13];
+      std::snprintf(hex, sizeof(hex), "%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3],
+                    mac[4], mac[5]);
+      result = hex;
+    }
+    ::close(fd);
+    if (!result.empty()) break;
+  }
+  ::freeifaddrs(list);
+  if (result == "000000000000") result.clear();
+  return result;
+}
+#endif
+
+std::string primary_mac() { return find_primary_mac(); }
 
 struct MqttClient::Impl {
   Config config;

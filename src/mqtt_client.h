@@ -19,6 +19,14 @@ namespace tea {
 /// mode, no route): the caller then says "unknown" instead of failing.
 std::string primary_ipv4();
 
+/// The MAC address of the interface that carries the default route, as 12
+/// lower-case hex digits (no separators). Empty when it cannot be read.
+///
+/// The registration name carries it because an IPv4 address is not unique
+/// across customer networks: two sites may both have 192.168.1.5 and both
+/// call the machine "a2". The MAC is.
+std::string primary_mac();
+
 class MqttClient {
  public:
   struct Config {

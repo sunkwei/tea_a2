@@ -517,7 +517,9 @@ struct MqttSettings {
   std::string user;
   std::string password;
   std::string name;         // what the operator typed
-  std::string client_name;  // "<name>@<ipv4>", the topic key
+  std::string ip;           // the interface IPv4 (a label, not an address)
+  std::string mac;          // 12 hex digits, the part that is unique
+  std::string client_name;  // "<name>@<ipv4>-<mac>", the topic key
   std::string ca_bundle;
   /// The tunnel broker the sidecar talks to. It is not the MQTT broker: the
   /// MQTT one may be an EMQX, while the tunnel one is a2_broker.

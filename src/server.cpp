@@ -8032,10 +8032,12 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
 
     const std::string name = settings.client_name;
     const int a2_port = options_.port;
-    auto registration = [name, a2_port](bool online) {
+    auto registration = [name, a2_port, settings](bool online) {
       nlohmann::json j;
       j["name"] = name;
       j["version"] = std::string(tea::version_string());
+      j["ip"] = settings.ip;
+      j["mac"] = settings.mac;
       j["port"] = a2_port;
       j["actions"] = {"tunnel.start", "tunnel.stop", "status"};
       j["online"] = online;

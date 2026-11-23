@@ -38,9 +38,27 @@ a2 --mqtt 103.232.92.54:8382 \
 |---|---|
 | `--mqtt HOST:PORT` | 只接受 TLS；`HOST` 必须是**证书里有名字**的那个（域名，或证书带 IP SAN） |
 | `--mqtt_user` / `--mqtt_pass` | broker 上 `mqtt_accounts` 里的账号；口令会出现在 `ps` 与 unit 文件里（已知限制，部署侧收紧权限） |
-| `--mqtt_name` | 只能是 `A-Z a-z 0-9 . _ -`；注册名 = `<name>@<本机网卡 IPv4>` |
+| `--mqtt_name` | 只能是 `A-Z a-z 0-9 . _ -`；注册名 = `<name>@<本机网卡 IPv4>-<网卡 MAC>` |
 | `--tunnel-broker` | 隧道 broker（默认 `103.232.92.54:8382`）；MQTT broker 与它可以是同一台，也可以是别的（例如客户的 EMQX） |
 | `--ca-bundle` | 信任的根证书。broker 自签时指向它的 `broker.crt` |
+
+### 注册名里的 MAC
+
+`<名字>@<IPv4>-<MAC>` 里的 IPv4 **只是标签**：两个客户的内网都可能有一台 `192.168.1.5`，
+两台都叫 `a2` 的话，注册名会相同 —— 一台会被另一台踢掉，命令也会发错人。
+MAC（默认路由网卡，12 位小写十六进制）才是唯一的那个。
+
+部署时先把账号建对，再起服务：
+
+```bash
+a2 --mqtt 103.232.92.54:8382 --mqtt_user plant-a-01 --mqtt_pass x \
+   --mqtt_name plant-a-01 --print-registration
+# → plant-a-01@192.168.12.12-3c7c3f0a1b2c
+```
+
+把这个字符串填进 broker 的 `mqtt_accounts.device_name`，然后用同样的四个参数启动。
+
+> 换网卡/换机器 = 换注册名 = 要重建账号；单纯换 IP 不再影响注册名（MAC 不变）。
 
 启动后 `/api/status` 里有：
 
@@ -93,19 +111,19 @@ mosquitto_sub -h 103.232.92.54 -p 8382 --cafile ca.pem \
 # 2. 召唤一条隧道
 mosquitto_pub -h 103.232.92.54 -p 8382 --cafile ca.pem \
   -u ops -P '<secret>' -q 1 \
-  -t 'mt_control/plant-a-01@192.168.12.12/cmd' \
+  -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/cmd' \
   -m '{"id":"c-0001","action":"tunnel.start","args":{"wait_timeout":1800},"ttl":120}'
 
 # 3. 读回执（session 码在里面）
 mosquitto_sub -h 103.232.92.54 -p 8382 --cafile ca.pem \
-  -u ops -P '<secret>' -t 'mt_control/plant-a-01@192.168.12.12/resp' -C 1
+  -u ops -P '<secret>' -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/resp' -C 1
 
 # 4. 拿回执里的 session 码，在本机接管
 a2_tunnel --role client --session <码>
 #    本机多一个 127.0.0.1:9931，浏览器打开就是那台内网 a2
 
 # 5. 用完关掉
-mosquitto_pub ... -t 'mt_control/plant-a-01@192.168.12.12/cmd' \
+mosquitto_pub ... -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/cmd' \
   -m '{"id":"c-0002","action":"tunnel.stop"}'
 ```
 

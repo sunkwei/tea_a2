@@ -760,9 +760,22 @@ int tea_agent_main(int argc, char** argv) {
       }
       if (ok) {
         const std::string ip = tea::primary_ipv4();
+        const std::string mac = tea::primary_mac();
+        mqtt.ip = ip;
+        mqtt.mac = mac;
+        // The IPv4 address is only a label: two customer sites may both be
+        // 192.168.1.5. The MAC keeps two devices apart, and it survives a
+        // DHCP lease change.
         mqtt.client_name = mqtt.name + "@" + (ip.empty() ? std::string("unknown") : ip);
+        if (!mac.empty()) mqtt.client_name += "-" + mac;
         mqtt.enabled = true;
       }
+    }
+    // Deployment helper: print the name the broker account must use, then
+    // exit. No broker connection, no side effects.
+    if (args.has("print-registration") && mqtt.enabled) {
+      console_write_line(mqtt.client_name);
+      return 0;
     }
   }
 

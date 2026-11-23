@@ -550,8 +550,9 @@ target_include_directories(tea_agent PRIVATE ${TEA_GEN_DIR} ${CMAKE_CURRENT_SOUR
 target_link_libraries(tea_agent PRIVATE tea_3rd)
 
 if(WIN32)
-  # winhttp: https via schannel; ws2_32: sockets; advapi32: mbedTLS entropy
-  target_link_libraries(tea_agent PRIVATE winhttp ws2_32 advapi32)
+  # winhttp: https via schannel; ws2_32: sockets; advapi32: mbedTLS entropy;
+  # iphlpapi: GetAdaptersAddresses (the MAC in the MQTT registration name)
+  target_link_libraries(tea_agent PRIVATE winhttp ws2_32 advapi32 iphlpapi)
 endif()
 
 if(MINGW)
