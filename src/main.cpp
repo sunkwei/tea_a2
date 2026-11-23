@@ -779,6 +779,12 @@ int tea_agent_main(int argc, char** argv) {
         mqtt.client_name = mqtt.name + "@" + (ip.empty() ? std::string("unknown") : ip);
         if (!mac.empty()) mqtt.client_name += "-" + mac;
         mqtt.enabled = true;
+        // The sidecar joins the same broker unless the operator says
+        // otherwise: on the default deployment a2_broker is MQTT *and* the
+        // tunnel rendezvous, on one port.
+        if (mqtt.tunnel_broker.empty()) {
+          mqtt.tunnel_broker = mqtt.host + ":" + std::to_string(mqtt.port);
+        }
       }
     }
     // Deployment helper: print the name the broker account must use, then

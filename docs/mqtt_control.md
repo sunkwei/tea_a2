@@ -39,7 +39,7 @@ a2 --mqtt 103.232.92.54:8382 \
 | `--mqtt HOST:PORT` | 只接受 TLS；`HOST` 必须是**证书里有名字**的那个（域名，或证书带 IP SAN） |
 | `--mqtt_user` / `--mqtt_pass` | broker 上 `mqtt_accounts` 里的账号；口令会出现在 `ps` 与 unit 文件里（已知限制，部署侧收紧权限） |
 | `--mqtt_name` | 只能是 `A-Z a-z 0-9 . _ -`；注册名 = `<name>@<本机网卡 IPv4>-<网卡 MAC>` |
-| `--tunnel-broker` | 隧道 broker（默认 `103.232.92.54:8382`）；MQTT broker 与它可以是同一台，也可以是别的（例如客户的 EMQX） |
+| `--tunnel-broker` | 隧道 broker；**默认跟随 `--mqtt`**（默认部署里 a2_broker 一个进程既是 MQTT 又是隧道中枢、同一个端口）。MQTT 用客户的 EMQX 时才需要单独给 |
 | `--ca-bundle` | 信任的根证书。broker 自签时指向它的 `broker.crt` |
 
 ### 注册名里的 MAC

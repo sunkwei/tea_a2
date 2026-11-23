@@ -82,7 +82,7 @@ HTTP 引擎、可用工具、工作区列表。地址那行就是要打开的。
 | `--mqtt_user <user>` | broker 上的账号（`mqtt_accounts` 表，role=device） | — |
 | `--mqtt_pass <pass>` | 口令（会出现在 `ps` 与 unit 文件里，unit 记得 `chmod 600`） | — |
 | `--mqtt_name <name>` | 名字；注册名是 `<name>@<IPv4>-<MAC>`（MAC 取默认路由网卡） | — |
-| `--tunnel-broker <host:port>` | 侧载连的隧道 broker（可以和 MQTT broker 不是同一台） | `103.232.92.54:8382` |
+| `--tunnel-broker <host:port>` | 侧载连的隧道 broker（**默认跟随 `--mqtt`**；MQTT 用别的 broker 时才需要给） | 同 `--mqtt` |
 | `--print-registration` | 只打印注册名就退出，部署时用它填 `mqtt_accounts.device_name` | — |
 
 四个 `--mqtt*` 必须同时给；缺一个只报错、不启用控制通道。注册名变了（换网卡）

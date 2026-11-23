@@ -521,9 +521,10 @@ struct MqttSettings {
   std::string mac;          // 12 hex digits, the part that is unique
   std::string client_name;  // "<name>@<ipv4>-<mac>", the topic key
   std::string ca_bundle;
-  /// The tunnel broker the sidecar talks to. It is not the MQTT broker: the
-  /// MQTT one may be an EMQX, while the tunnel one is a2_broker.
-  std::string tunnel_broker = "103.232.92.54:8382";
+  /// The tunnel broker the sidecar talks to. Empty means "the MQTT endpoint
+  /// above": on the default deployment one a2_broker is both. Set it
+  /// explicitly when the MQTT broker is somebody else's (e.g. an EMQX).
+  std::string tunnel_broker;
 };
 
 struct AppConfig {  std::string path;      // provider.yaml that was loaded
