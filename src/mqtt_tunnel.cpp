@@ -107,6 +107,12 @@ struct TunnelController::Impl {
 
 #ifndef _WIN32
 bool TunnelController::Impl::spawn(const std::string& broker, int wait_timeout_s) {
+  // Fail early and say which path: a missing sidecar would otherwise surface
+  // only as "exited before printing a session code", which says nothing.
+  if (::access(executable.c_str(), X_OK) != 0) {
+    set_state(kFailed, "cannot run " + executable + ": " + std::strerror(errno));
+    return false;
+  }
   int fds[2];
   if (::pipe(fds) != 0) {
     set_state(kFailed, "pipe() failed");
@@ -193,6 +199,11 @@ void TunnelController::Impl::kill_now(bool force) {
 }
 #else
 bool TunnelController::Impl::spawn(const std::string& broker, int wait_timeout_s) {
+  const DWORD attributes = GetFileAttributesW(widen(executable).c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    set_state(kFailed, "cannot run " + executable + " (not found)");
+    return false;
+  }
   SECURITY_ATTRIBUTES sa;
   std::memset(&sa, 0, sizeof(sa));
   sa.nLength = sizeof(sa);
