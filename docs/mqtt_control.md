@@ -75,6 +75,17 @@ a2 --mqtt 103.232.92.54:8382 --mqtt_user plant-a-01 --mqtt_pass x \
 a2_broker --mqtt --cert-name plant-a-01.example.com
 ```
 
+公网机器上的布局约定：**三个可执行文件都放 `$HOME/bin/`** —— `tea_a2`（a2 本体）、
+`a2_tunnel`、`a2_broker`，`tea_agent.buildinfo` 也放同一个目录（a2 从二进制旁边读它）。
+a2 找侧载的规则是「自己所在目录 + `a2_tunnel`」，所以这两者必须同目录：
+
+```text
+~/bin/tea_a2       a2 本体（systemd: ExecStart=%h/bin/tea_a2）
+~/bin/a2_tunnel    sidecar（被 a2 拉起）
+~/bin/a2_broker    MQTT + 隧道中枢（systemd: ExecStart=%h/bin/a2_broker）
+~/bin/tea_agent.buildinfo
+```
+
 - MQTT 与信令**共用 `--signal-port`（默认 8382）**，不新增监听端口。
 - 账号在 `a2_broker.db` 的 `mqtt_accounts` 表（每次 CONNECT 查库，**改库即生效，不用重启 broker**）。
 - `--mqtt` 与 `--no-tls` 互斥：不提供明文 MQTT。
