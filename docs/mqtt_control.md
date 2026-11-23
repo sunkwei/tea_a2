@@ -89,7 +89,7 @@ VALUES ('plant-a-01', '<secret>', 'device', 'plant-a-01@192.168.12.12', 1);
 
 -- 运维：能订阅目录、能给任何设备下命令
 INSERT INTO mqtt_accounts(user, pass, role, device_name, enabled)
-VALUES ('ops', '<secret>', 'operator', NULL, 1);
+VALUES ('zonekey', '<secret>', 'operator', NULL, 1);
 SQL
 ```
 
@@ -106,17 +106,17 @@ SQL
 ```bash
 # 1. 看谁在线（retained 注册消息）
 mosquitto_sub -h 103.232.92.54 -p 8382 --cafile ca.pem \
-  -u ops -P '<secret>' -t 'mt_register/#' -v
+  -u zonekey -P '<secret>' -t 'mt_register/#' -v
 
 # 2. 召唤一条隧道
 mosquitto_pub -h 103.232.92.54 -p 8382 --cafile ca.pem \
-  -u ops -P '<secret>' -q 1 \
+  -u zonekey -P '<secret>' -q 1 \
   -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/cmd' \
   -m '{"id":"c-0001","action":"tunnel.start","args":{"wait_timeout":1800},"ttl":120}'
 
 # 3. 读回执（session 码在里面）
 mosquitto_sub -h 103.232.92.54 -p 8382 --cafile ca.pem \
-  -u ops -P '<secret>' -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/resp' -C 1
+  -u zonekey -P '<secret>' -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/resp' -C 1
 
 # 4. 拿回执里的 session 码，在本机接管
 a2_tunnel --role client --session <码>
@@ -138,6 +138,51 @@ mosquitto_pub ... -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/cmd' \
 `rejected` 的原因：`unsupported_action | expired | not_allowed`。
 
 ---
+
+## 五、运维 CLI：`sched/mqtt_cli.py`
+
+单文件、纯标准库（Python 3.6+），拷到任意机器就能用。
+
+```bash
+export TEA_MQTT_USER=zonekey          # 账号不内置，必须显式给
+export TEA_MQTT_PASS='<secret>'       # 放环境变量，不进 ps 历史
+export TEA_MQTT_CA=~/broker.crt       # broker 的自签证书
+
+python3 sched/mqtt_cli.py list                  # 在线设备（完整注册名）
+python3 sched/mqtt_cli.py list --all --json     # 含离线 + 机器可读
+python3 sched/mqtt_cli.py wake <device_name>    # 召唤隧道，等 session
+python3 sched/mqtt_cli.py status <device_name>
+python3 sched/mqtt_cli.py stop <device_name>
+```
+
+`wake` 的输出：
+
+```
+device  : qdbot-31@172.16.1.31-00044bdf176f (1.8.0, 2026-11-23 09:16:05)
+state   : starting
+state   : ready
+session : 41b457649298c7ef027e6f6aa4567034
+broker  : 103.232.92.54:8382
+listen  : 127.0.0.1:9931
+expires : 120s
+next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034
+```
+
+失败时退出码 1，并说清是哪一类：
+
+| 情况 | 输出 |
+|---|---|
+| 设备不在线 | `error: device "x" is not online (no retained registration)` |
+| 口令错 | `error: the broker refused the credentials (wrong user or password)` |
+| 没给账号 | `error: --user and --pass are required (this tool has no built-in account)` |
+| 设备起了 sidecar 但失败 | 回执里的 `state=failed` + `error`（例如 `listen_port_in_use`） |
+| 设备不回答 | `error: no answer from x within 60s`（`--timeout` 可调） |
+
+重复 `wake` 不会起第二个 sidecar：设备会返回**现有的** session。
+
+> 证书说明：broker 的证书是自签的，地址写在 CN 里。Python 不认「CN 当 IP」，
+> 所以 CLI 只验证书链（`CERT_REQUIRED`）不验名字（`check_hostname=False`）；
+> `--insecure` 连链也不验。CA 用 broker 的 `broker.crt`。
 
 ## 五、安全边界（读一遍再上线）
 
