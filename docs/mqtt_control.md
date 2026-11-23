@@ -79,19 +79,35 @@ a2_broker --mqtt --cert-name plant-a-01.example.com
 - 账号在 `a2_broker.db` 的 `mqtt_accounts` 表（每次 CONNECT 查库，**改库即生效，不用重启 broker**）。
 - `--mqtt` 与 `--no-tls` 互斥：不提供明文 MQTT。
 
-建账号（两种角色）：
+建账号（两种角色）。**账号只回答「谁能登录」，不绑定某一台设备**：
 
 ```bash
 sqlite3 ~/.tea_agent/tunnel/a2_broker.db <<'SQL'
--- 设备：device_name 必须等于它注册时用的名字
-INSERT INTO mqtt_accounts(user, pass, role, device_name, enabled)
-VALUES ('plant-a-01', '<secret>', 'device', 'plant-a-01@192.168.12.12', 1);
+-- 设备账号：可以被多台设备共用，每台用自己的注册名
+INSERT INTO mqtt_accounts(user, pass, role, enabled)
+VALUES ('va', '<secret>', 'device', 1);
 
--- 运维：能订阅目录、能给任何设备下命令
-INSERT INTO mqtt_accounts(user, pass, role, device_name, enabled)
-VALUES ('zonekey', '<secret>', 'operator', NULL, 1);
+-- 运维账号：能订阅目录、能给任何设备下命令
+INSERT INTO mqtt_accounts(user, pass, role, enabled)
+VALUES ('zonekey', '<secret>', 'operator', 1);
 SQL
 ```
+
+> `mqtt_accounts.device_name` 列还在（旧库兼容），但**已经不用了**：设备能碰哪些
+> topic，由它 CONNECT 时声明的 client_id（注册名）决定 —— 见下面的实例表。
+
+**设备实例表 `mqtt_devices`**（broker 自己维护，不用手写）：
+
+| 列 | 含义 |
+|---|---|
+| `client_id` | 注册名 `<name>@<ipv4>-<mac12>`，主键 |
+| `account` | 哪个 `mqtt_user` 在用它（多台设备可以共用一个账号） |
+| `ip` / `mac` / `version` / `port` | 从注册消息里取 |
+| `online` | 当前是否连着（断开时置 0） |
+| `first_seen` / `last_seen` | broker 时钟，比设备自报的 `ts` 可靠 |
+
+所以：**认证 = user + pass；权限 = 自己声明的注册名；实例 = 表里的一行。**
+设备掉线、broker 重启都不会丢这条记录（retained 消息不落盘，这张表落盘）。
 
 > `turn_accounts`（TURN 中继账号）与 `mqtt_accounts` 是**两张表**：能蹭中继的账号
 > **不能**连 MQTT。文档里公开的那对内置账号 `1hblsqt./2ghlmcl,` 只保护带宽，不是钥匙。
@@ -188,7 +204,8 @@ next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034
 | 项 | 说明 |
 |---|---|
 | 谁能下命令 | 只有 `role='operator'` 的账号，且只能发到 `mt_control/<某个名字>/cmd` |
-| 设备能干什么 | 只能订阅**自己**的命令、发布**自己**的回执与注册；订阅别人的 topic 会被拒 |
+| 设备能干什么 | 只能订阅**自己注册名**的命令、发布**自己**的回执与注册；订阅别人的 topic 会被拒 |
+| 一个账号多台设备 | 可以。账号只决定「能不能登录」，注册名决定「能碰哪些 topic」 |
 | 目标端口 | `tunnel.start` 的 `args.target` 默认被忽略（锁定 a2 自己的端口）；想放开需要改代码里的白名单 |
 | 终端 | 不能通过这条通道开 `--target terminal`（那是远端 shell） |
 | 日志 | broker 只记 topic 与结果，**不记 payload**（session 码就是房间钥匙） |

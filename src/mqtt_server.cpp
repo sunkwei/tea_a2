@@ -37,10 +37,12 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+/// What an account is allowed to do. The device name is NOT part of it: one
+/// account may be used by many devices (each with its own registration name),
+/// and a device may only touch the topics of the client id it presented.
 struct Account {
   std::string user;
   std::string role;
-  std::string device_name;
   bool enabled = false;
 };
 
@@ -49,7 +51,6 @@ struct Session {
   std::string client_id;
   std::string user;
   std::string role;
-  std::string device_name;
   std::string will_topic;
   std::string will_payload;
   bool will_retain = false;
@@ -69,28 +70,31 @@ struct Session {
     Account a;
     a.user = user;
     a.role = role;
-    a.device_name = device_name;
     a.enabled = true;
     return a;
   }
 };
 
-bool allowed_subscribe(const Account& account, const std::string& filter) {
+bool allowed_subscribe(const Account& account, const std::string& filter,
+                       const std::string& client_id) {
   if (account.role == "operator") {
     return filter == "mt_register/#" || filter == "mt_control/+/resp" ||
            filter == "mt_control/+/cmd";
   }
-  if (account.role == "device" && !account.device_name.empty()) {
-    return filter == "mt_control/" + account.device_name + "/cmd";
+  // A device may only listen to the name it registered with. Many devices can
+  // share one account; the name they present is what keeps them apart.
+  if (account.role == "device" && !client_id.empty()) {
+    return filter == "mt_control/" + client_id + "/cmd";
   }
   return false;
 }
 
-bool allowed_publish(const Account& account, const std::string& topic) {
+bool allowed_publish(const Account& account, const std::string& topic,
+                     const std::string& client_id) {
   if (account.role == "operator") return topic_matches("mt_control/+/cmd", topic);
-  if (account.role == "device" && !account.device_name.empty()) {
-    return topic == "mt_control/" + account.device_name + "/resp" ||
-           topic == "mt_register/" + account.device_name;
+  if (account.role == "device" && !client_id.empty()) {
+    return topic == "mt_control/" + client_id + "/resp" ||
+           topic == "mt_register/" + client_id;
   }
   return false;
 }
@@ -133,6 +137,10 @@ struct Server::Impl {
 
   bool open_database(const std::string& path, std::string* err);
   bool authenticate(const std::string& user, const std::string& password, Account* out);
+  /// Remember that this registration name is (or was) online, and who used it.
+  void touch_device(const std::string& client_id, const std::string& account, bool online);
+  /// Fill in ip/mac/version/port from the retained registration message.
+  void update_device_info(const std::string& client_id, const std::string& payload);
 
   bool write_all(Session* session, const std::string& frame);
   bool flush(Session* session);
@@ -160,7 +168,17 @@ bool Server::Impl::open_database(const std::string& path, std::string* err) {
       " enabled INTEGER NOT NULL DEFAULT 1,"
       " note TEXT,"
       " created_at TEXT);"
-      "CREATE INDEX IF NOT EXISTS idx_mqtt_accounts_user ON mqtt_accounts(user);";
+      "CREATE INDEX IF NOT EXISTS idx_mqtt_accounts_user ON mqtt_accounts(user);"
+      // One row per registration name. The account column says who is allowed
+      // to use it; several devices may share one account. This is the part
+      // that survives a broker restart (retained messages do not).
+      "CREATE TABLE IF NOT EXISTS mqtt_devices ("
+      " client_id TEXT PRIMARY KEY,"
+      " account TEXT NOT NULL,"
+      " ip TEXT, mac TEXT, version TEXT, port INTEGER,"
+      " online INTEGER NOT NULL DEFAULT 0,"
+      " first_seen TEXT, last_seen TEXT, note TEXT);"
+      "CREATE INDEX IF NOT EXISTS idx_mqtt_devices_account ON mqtt_devices(account);";
   char* message = nullptr;
   if (sqlite3_exec(db, ddl, nullptr, nullptr, &message) != SQLITE_OK) {
     *err = std::string("cannot create mqtt_accounts: ") + (message ? message : "unknown");
@@ -181,20 +199,17 @@ bool Server::Impl::authenticate(const std::string& user, const std::string& pass
     return false;
   }
   sqlite3_stmt* statement = nullptr;
-  const char* sql =
-      "SELECT pass, role, COALESCE(device_name, ''), enabled FROM mqtt_accounts WHERE user = ?";
+  const char* sql = "SELECT pass, role, enabled FROM mqtt_accounts WHERE user = ?";
   if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) return false;
   sqlite3_bind_text(statement, 1, user.c_str(), -1, SQLITE_TRANSIENT);
   bool ok = false;
   if (sqlite3_step(statement) == SQLITE_ROW) {
     const char* stored = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
     const char* role = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
-    const char* device_name = reinterpret_cast<const char*>(sqlite3_column_text(statement, 2));
-    const int enabled = sqlite3_column_int(statement, 3);
+    const int enabled = sqlite3_column_int(statement, 2);
     if (enabled != 0 && stored && password == stored) {
       out->user = user;
       out->role = role ? role : "";
-      out->device_name = device_name ? device_name : "";
       out->enabled = true;
       ok = true;
       failures.erase(user);
@@ -208,6 +223,69 @@ bool Server::Impl::authenticate(const std::string& user, const std::string& pass
     failure.second = now + (1 << shift);
   }
   return ok;
+}
+
+namespace {
+std::string iso_now() {
+  const std::time_t now = std::time(nullptr);
+  std::tm parts;
+#ifdef _WIN32
+  gmtime_s(&parts, &now);
+#else
+  gmtime_r(&now, &parts);
+#endif
+  char text[32] = {0};
+  std::strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &parts);
+  return text;
+}
+}  // namespace
+
+void Server::Impl::touch_device(const std::string& client_id, const std::string& account,
+                                bool online) {
+  if (client_id.empty()) return;
+  std::lock_guard<std::mutex> lock(db_mutex);
+  const char* sql =
+      "INSERT INTO mqtt_devices(client_id, account, online, first_seen, last_seen) "
+      "VALUES(?,?,?,?,?) "
+      "ON CONFLICT(client_id) DO UPDATE SET account=excluded.account, "
+      "online=excluded.online, last_seen=excluded.last_seen";
+  sqlite3_stmt* statement = nullptr;
+  if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) return;
+  const std::string now = iso_now();
+  sqlite3_bind_text(statement, 1, client_id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 2, account.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(statement, 3, online ? 1 : 0);
+  sqlite3_bind_text(statement, 4, now.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 5, now.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_step(statement);
+  sqlite3_finalize(statement);
+}
+
+void Server::Impl::update_device_info(const std::string& client_id, const std::string& payload) {
+  nlohmann::json data;
+  try {
+    data = nlohmann::json::parse(payload);
+  } catch (...) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(db_mutex);
+  const char* sql =
+      "UPDATE mqtt_devices SET ip=?, mac=?, version=?, port=?, last_seen=? WHERE client_id=?";
+  sqlite3_stmt* statement = nullptr;
+  if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) return;
+  const std::string ip = data.value("ip", std::string());
+  const std::string mac = data.value("mac", std::string());
+  const std::string version = data.value("version", std::string());
+  const int port = data.value("port", 0);
+  const std::string now = iso_now();
+  sqlite3_bind_text(statement, 1, ip.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 2, mac.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 3, version.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(statement, 4, port);
+  sqlite3_bind_text(statement, 5, now.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 6, client_id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_step(statement);
+  sqlite3_finalize(statement);
 }
 
 bool Server::Impl::write_all(Session* session, const std::string& frame) {
@@ -295,7 +373,7 @@ bool Server::Impl::handle(Session* session, const Packet& packet) {
       bool allowed = true;
       for (size_t i = 0; i < request.filters.size(); ++i) {
         if (!valid_topic_filter(request.filters[i]) ||
-            !allowed_subscribe(account, request.filters[i])) {
+            !allowed_subscribe(account, request.filters[i], session->client_id)) {
           allowed = false;
           break;
         }
@@ -342,9 +420,12 @@ bool Server::Impl::handle(Session* session, const Packet& packet) {
       PublishInfo publish;
       if (!parse_publish(packet.flags, packet.body, &publish)) return false;
       const Account account = session->account();
-      if (!allowed_publish(account, publish.topic)) {
+      if (!allowed_publish(account, publish.topic, session->client_id)) {
         rejected.fetch_add(1);
         return false;  // the spec says: close the connection
+      }
+      if (publish.topic == "mt_register/" + session->client_id) {
+        update_device_info(session->client_id, publish.payload);
       }
       broadcast(publish.topic, publish.payload, publish.retain);
       if (publish.qos == 1) return write_all(session, make_puback(publish.packet_id));
@@ -399,7 +480,6 @@ void Server::Impl::session_loop(std::shared_ptr<Session> session, std::string bu
   session->client_id = info.client_id;
   session->user = account.user;
   session->role = account.role;
-  session->device_name = account.device_name;
   session->keepalive_s = info.keepalive;
   session->will_topic = info.will_topic;
   session->will_payload = info.will_payload;
@@ -420,6 +500,7 @@ void Server::Impl::session_loop(std::shared_ptr<Session> session, std::string bu
     forget(session);
     return;
   }
+  if (session->role == "device") touch_device(session->client_id, session->user, true);
 
   // ---- the session loop --------------------------------------------------
   while (!session->closed.load()) {
@@ -465,6 +546,7 @@ void Server::Impl::session_loop(std::shared_ptr<Session> session, std::string bu
   const std::string will_payload = session->will_payload;
   const bool will_retain = session->will_retain;
   forget(session);
+  if (session->role == "device") touch_device(session->client_id, session->user, false);
   session->conn.reset();
   if (send_will) broadcast(will_topic, will_payload, will_retain);
 }
