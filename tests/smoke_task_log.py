@@ -29,6 +29,10 @@ if SCHED not in sys.path:
 import task_server as ts  # noqa: E402
 
 TODAY = time.strftime("%Y-%m-%d")
+# 归档名里的日子必须是「窗口内」的一天：prune() 按**名字里的日子**算年龄，
+# 写死一个过去的日期（比如 2026-11-19），过了保质期这个测试就会自己挂掉
+# ——2026-11-23 起就是这样失败的（基线红里的一项）。
+DAY = TODAY
 
 
 def main():
@@ -67,12 +71,12 @@ def main():
     folder = tempfile.mkdtemp(prefix="tea_log_")
     path = os.path.join(folder, "a2_task.log")
     live = open(path, "a+")
-    live.write("2026-11-19  line one\n")
+    live.write("%s  line one\n" % DAY)
     live.flush()
     rot = ts.LogRotator(path, keep_days=5, interval=60)
     with contextlib.redirect_stdout(live):
-        rotated = rot.rotate("2026-11-19")
-    archive = path + ".2026-11-19"
+        rotated = rot.rotate(DAY)
+    archive = path + "." + DAY
     check("rotate archives the lines under their day", rotated is True and os.path.exists(archive))
     if os.path.exists(archive):
         with open(archive, encoding="utf-8") as f:
@@ -87,10 +91,10 @@ def main():
           repr(live_text[:120]))
 
     # 同一天再轮转一次（服务重启过）：并进同一个归档，而不是覆盖
-    live.write("2026-11-19  line two\n")
+    live.write("%s  line two\n" % DAY)
     live.flush()
     with contextlib.redirect_stdout(live):
-        rot.rotate("2026-11-19")
+        rot.rotate(DAY)
     with open(archive, encoding="utf-8") as f:
         both = f.read()
     check("the same day is appended to the same archive",
@@ -101,7 +105,7 @@ def main():
     live.flush()
     elsewhere = tempfile.TemporaryFile(mode="w+")
     with contextlib.redirect_stdout(elsewhere):
-        refused = rot.rotate("2026-11-19")
+        refused = rot.rotate(DAY)
     check("a log file that is not stdout is left alone",
           refused is False and os.path.getsize(path) > 0)
 

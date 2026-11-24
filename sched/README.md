@@ -419,6 +419,12 @@ agent / 队列：`TEA_AGENT_URL`、`TEA_AGENT_WORKSPACE`、`TEA_TASK_URL`、`TEA
 - **密钥不写进代码**：provider.yaml 里的 key、放行白名单（`--allow-chat`）、机群的两个 token
   都从环境变量或独立文件读。
 - **日志**：写 `~/.tea_agent/logs/`，systemd 单元已配好 `ExecStartPre` 建目录。
+  队列的日志（`a2_task.log`）**按天轮转**：一天一个文件（`a2_task.log.2026-11-19` 那样），
+  默认只留 5 天（`--log-rotate-days`，今天算一天），旧的天数自动删掉；轮转用
+  「复制 + 清空」，文件的名字和 inode 都不变，写日志的进程不用重启。
+  重复的轮询行（"nothing queued"、"quota … going to work"、
+  "the last run is still going - skipped"）**最多每 `--log-throttle` 秒
+  （默认 300）写一行**，不再每 2 秒刷一行（一天 4 万多行 → 288 行）。
 
 ### systemd 单元
 
