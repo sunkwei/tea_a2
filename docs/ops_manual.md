@@ -1458,9 +1458,13 @@ chmod 600 ~/.tea_agent/tunnel/a2_broker.db
 - 禁用账号：`UPDATE mqtt_accounts SET enabled=0 WHERE user='ops';`
 - 改口令：`UPDATE mqtt_accounts SET pass='新口令' WHERE user='ops';`
 - 设备掉线/重启 broker 不会丢 `mqtt_devices` 记录（表落盘）；
-- **zone**：设备用 `--mqtt_oper_name` 报一个 operator 账号的名字（默认 `zonekey`），
-  broker 只认自己库里 role=operator 的账号，没有就落回 `zonekey`。**只有这个 operator
-  账号能 list / wake / stop / status 这台设备**；运维 CLI 要用这个账号登录。
+- **zone（设备组）**：设备用 `--mqtt_oper_name` 报一个 operator 账号的名字（默认
+  `zonekey`），broker 只认自己库里 role=operator 的账号，没有就落回 `zonekey`。
+  **只有这个 operator 账号能 list / wake / stop / status 这台设备**；运维 CLI 要用这个
+  账号登录 —— 用别的 operator 登录，列表是空的。
+- **分组跟着设备走**：划组 = 改设备端的 `--mqtt_oper_name` + 重启 agent（重连即换组）。
+  `mqtt_devices.oper_name` 只是 broker 记下来的归属，直接改它会在设备下次注册时被
+  设备自报的值覆盖。
 
 #### 5.4.2 看谁在线
 

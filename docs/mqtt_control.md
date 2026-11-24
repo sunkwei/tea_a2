@@ -63,6 +63,14 @@ broker 在自己的 `mqtt_accounts` 里查这个名字：**必须是 role=operat
 查不到就自动落回 `zonekey`。只有这个名字的 operator 账号能 `list` / `wake` / `stop` /
 `status` 这台设备 —— 别的 operator 看不见它，也命令不了它。
 
+> **分组跟着设备走。** 归属由设备端声明，所以：
+>
+> - 「把这台设备划给谁」= 改设备端的 `--mqtt_oper_name`（unit 文件里那一行）+ 重启 agent；
+>   agent 重连时重新注册，broker 当场换组（`mqtt_devices.oper_name` 同步更新）。
+> - `mqtt_devices.oper_name` 是 broker **记下来的**归属，不是控制面：直接改它，
+>   会在设备下次注册时被设备自报的值覆盖。要改归属请改设备端。
+> - 一个 operator 账号 = 一个组。要让一个账号管两批设备，就建两个 operator 账号。
+
 > 换网卡/换机器 = 换注册名 = 要重建账号；单纯换 IP 不再影响注册名（MAC 不变）。
 
 ### 心跳：1~5 分钟随机

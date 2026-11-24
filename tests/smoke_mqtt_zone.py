@@ -143,6 +143,16 @@ def command_accepted(port, user, password, device, seconds=3.0):
         client.close()
 
 
+def register_device(port, client_id, oper_name, seconds=3.0):
+    """A device (re)connects and reports the operator that manages it."""
+    conn = connect(port, "dev", "pwd", client_id)
+    conn.publish("mt_register/" + client_id, registration(client_id, oper_name),
+                 retain=True)
+    time.sleep(0.4)
+    conn.close()
+    time.sleep(0.4)
+
+
 def zone_of(db, client_id):
     conn = sqlite3.connect(db)
     try:
@@ -219,6 +229,18 @@ def main():
               not command_accepted(port, "zoneB", "pwB", device_a))
         check("the operator of zonekey may command the device that fell back to it",
               command_accepted(port, "zonekey", "pwk", device_b))
+
+        # The group belongs to the device: it reports the operator. When it
+        # comes back under another name, the broker moves it.
+        register_device(port, device_a, "zoneB")
+        check("a device that reports another operator moves to that group",
+              sees_registration(port, "zoneB", "pwB", device_a) and
+              not sees_registration(port, "zoneA", "pwA", device_a))
+        check("the moved device is stored under the new operator",
+              zone_of(db, device_a) == "zoneB",
+              "stored as %s" % zone_of(db, device_a))
+        check("the old operator may not command the moved device",
+              not command_accepted(port, "zoneA", "pwA", device_a))
     finally:
         if proc.poll() is None:
             proc.terminate()
