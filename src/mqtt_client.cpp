@@ -12,12 +12,14 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "ca_bundle.h"
 #include "log.h"
 #include "mqtt_codec.h"
 #include "tls.h"
+#include "util.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -59,6 +61,32 @@ void close_mqtt_socket(mqtt_socket_t s) {
 #endif
 
 constexpr size_t kMaxPacketBytes = 300 * 1024;
+
+// ---------------------------------------------------------------------------
+// The heartbeat
+// ---------------------------------------------------------------------------
+// A PINGREQ goes out every **random** one to five minutes. Many devices sit
+// behind the same broker; if they all pinged at the same second the broker
+// would get a burst every minute, and a hundred devices would look like a
+// thundering herd. The interval is drawn again after every ping, so the
+// devices drift apart.
+//
+// The keepalive advertised in CONNECT has to cover the longest gap: the
+// broker drops a session that stays silent for 1.5x keepalive
+// (src/mqtt_server.cpp). So the advertised keepalive is the upper bound
+// (five minutes) and a ping always arrives well before the limit.
+constexpr int kPingMinSeconds = 60;
+constexpr int kPingMaxSeconds = 300;
+
+/// The window the next ping may fall into, clamped by the advertised
+/// keepalive: a caller that lowers the keepalive cannot promise the broker
+/// more silence than it tolerates.
+std::pair<int, int> ping_window(int keepalive_s) {
+  const int ceiling =
+      (keepalive_s > 0 && keepalive_s < kPingMaxSeconds) ? keepalive_s : kPingMaxSeconds;
+  const int floor = (kPingMinSeconds < ceiling) ? kPingMinSeconds : ceiling;
+  return std::make_pair(floor, ceiling);
+}
 
 bool set_send_timeout(mqtt_socket_t s, int ms) {
 #ifdef _WIN32
@@ -457,9 +485,20 @@ struct MqttClient::Impl {
                          config.client_id);
 
     auto last_rx = std::chrono::steady_clock::now();
-    auto last_ping = last_rx;
     auto last_register = last_rx;
-    const auto keepalive = std::chrono::seconds(config.keepalive_s > 0 ? config.keepalive_s : 30);
+    // The keepalive we advertise and the silence we tolerate are the same
+    // number: the broker drops a session after 1.5x keepalive, so we use
+    // the same bound on both sides.
+    const int keepalive_s = (config.keepalive_s > 0) ? config.keepalive_s : kPingMaxSeconds;
+    const auto keepalive = std::chrono::seconds(keepalive_s);
+    // The heartbeat: a random gap of 1..5 minutes, drawn again after every
+    // ping. It is the first ping that waits a full gap - the broker is
+    // fresh anyway right after the connect.
+    const std::pair<int, int> window = ping_window(keepalive_s);
+    auto next_ping = std::chrono::steady_clock::now() +
+                     std::chrono::seconds(random_int(window.first, window.second));
+    LOG_DEBUG("mqtt: ", "the heartbeat is a random " + std::to_string(window.first) + ".." +
+                         std::to_string(window.second) + " seconds");
 
     while (!stopping.load()) {
       flush_outbox(stream.get(), &err);
@@ -485,10 +524,14 @@ struct MqttClient::Impl {
       }
 
       const auto now = std::chrono::steady_clock::now();
-      if (now - last_ping >= keepalive / 2) {
+      if (now >= next_ping) {
         const std::string ping = mqtt::make_pingreq();
         if (!write_frame(stream.get(), ping, &err)) break;
-        last_ping = now;
+        // Draw the next gap: the devices behind one broker should not ping
+        // in lockstep.
+        const int gap = random_int(window.first, window.second);
+        next_ping = std::chrono::steady_clock::now() + std::chrono::seconds(gap);
+        LOG_DEBUG("mqtt: ", "ping sent, the next one in " + std::to_string(gap) + " seconds");
       }
       if (now - last_register >= std::chrono::seconds(60)) {
         const std::string registration_now = take_registration();

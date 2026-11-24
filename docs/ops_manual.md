@@ -728,6 +728,10 @@ curl -s http://127.0.0.1:8383/api/chat/turns
 a2 的 MQTT 客户端**不校验证书**（broker 是自签的），TLS 只负责加密；
 口令才是门。所以 `--mqtt` 必须配合强口令和可信网络。
 
+心跳是 **1~5 分钟随机**（每发一次重抽一次），CONNECT 里声明的 keepalive 是 300 秒；
+broker 按 `keepalive × 1.5 = 450 秒` 判超时 → **设备突然断电时，broker 最多 450 秒后
+才把 `mqtt_devices.online` 置 0**（设备有 will 的会立刻发 offline 的 retained 注册）。
+
 ![MQTT 召唤一条隧道的流程](images/tunnel/ops_tunnel_wake.png)
 
 > 图的 dot 源文件：[`images/tunnel/ops_tunnel_wake.dot`](images/tunnel/ops_tunnel_wake.dot)。

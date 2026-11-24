@@ -99,6 +99,9 @@ bool base64_decode(const std::string& text, std::string* out);
 // --------------------------------------------------------------------------
 std::string uuid4();
 std::string random_hex(size_t nbytes);
+/// A random integer in [lo, hi] (both inclusive). Used for the randomized
+/// MQTT heartbeat, so that many devices do not ping the broker in lockstep.
+int random_int(int lo, int hi);
 std::string make_id(const std::string& prefix);
 
 // --------------------------------------------------------------------------

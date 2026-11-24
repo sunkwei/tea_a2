@@ -60,6 +60,33 @@ a2 --mqtt 103.232.92.54:8382 --mqtt_user plant-a-01 --mqtt_pass x \
 
 > 换网卡/换机器 = 换注册名 = 要重建账号；单纯换 IP 不再影响注册名（MAC 不变）。
 
+### 心跳：1~5 分钟随机
+
+设备侧的 MQTT 客户端**每隔一段随机时间发一个 PINGREQ**：间隔在 **1~5 分钟之间随机抽**，
+每发一次就**重新抽**（所以设备之间会越走越散，不会齐步走）。
+
+为什么不是固定值：同一个 broker 后面可能挂着几百台设备，它们都是同一时刻上线、
+同一时刻重连的 —— 固定心跳会让 broker 每分钟挨一次「整点暴击」。
+随机化把这一百次 ping 摊开到五分钟里。
+
+两个配套的数字（改的时候要一起看）：
+
+| 数字 | 值 | 谁用 | 说明 |
+| --- | --- | --- | --- |
+| CONNECT 里的 keepalive | **300 秒** | broker | broker 按 **keepalive × 1.5 = 450 秒** 判超时（`src/mqtt_server.cpp`），所以最长的 5 分钟心跳也永远踩不到线 |
+| 实际心跳间隔 | **60~300 秒随机** | a2 | 每抽一次都用它 |
+| 注册重发 | 60 秒 | a2 | 跟心跳无关：它刷新的是 retained 的在线状态（`mt_register/<注册名>`） |
+
+> broker 侧的离线判定也看这个 keepalive：设备突然断电时，broker 最多 450 秒后
+> 才把 `mqtt_devices.online` 置 0（设备有 will 的话会立刻收到 offline 的 retained 注册）。
+
+调试时用 `--log-level debug` 能看到抽到的值：
+
+```
+[DEBUG] mqtt: the heartbeat is a random 60..300 seconds
+[DEBUG] mqtt: ping sent, the next one in 173 seconds
+```
+
 启动后 `/api/status` 里有：
 
 ```json

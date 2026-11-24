@@ -534,6 +534,12 @@ bool base64_decode(const std::string& text, std::string* out) {
 // ---------------------------------------------------------------------------
 // ids
 // ---------------------------------------------------------------------------
+int random_int(int lo, int hi) {
+  if (hi <= lo) return lo;
+  std::uniform_int_distribution<int> dist(lo, hi);
+  return dist(rng());
+}
+
 std::string random_hex(size_t nbytes) {
   std::uniform_int_distribution<int> dist(0, 15);
   std::string out;
