@@ -4719,6 +4719,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         queue, state, listener = self.app.events.subscribe()
         idle = 0.0
+        quiet = 0.0
         try:
             while state["alive"]:
                 if queue:
@@ -4729,13 +4730,27 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(frame.encode("utf-8"))
                     self.wfile.flush()
                     idle = 0.0
+                    quiet = 0.0
                 else:
                     time.sleep(0.3)
                     idle += 0.3
+                    quiet += 0.3
                     # A client that is gone (a closed tab, a dead network) must
                     # not keep a thread of this server for ever.
                     if self._client_gone():
                         break
+                    # A keepalive every few seconds. Without it the stream
+                    # says nothing for as long as nothing happens, and the
+                    # **client's** read timeout (an hour by default) fires
+                    # first: the watcher on the other end gives up and logs
+                    # "task watcher: timed out" every single hour. A comment
+                    # line is invisible to the SSE parsers - they only read
+                    # the "data:" ones - and it keeps the connection alive
+                    # through the proxies in between.
+                    if self.app.args.sse_keepalive > 0 and quiet >= self.app.args.sse_keepalive:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        quiet = 0.0
                     if idle >= self.app.args.sse_idle_timeout:
                         log("event stream idle for %d s - closing it"
                             % self.app.args.sse_idle_timeout)
@@ -5566,6 +5581,11 @@ def main(argv=None):
     parser.add_argument("--chat-timeout", type=float, default=3600.0,
                         help="how long a turn may take before the queue gives up on it "
                              "(seconds; 0 = no limit)")
+    parser.add_argument("--sse-keepalive", type=float, default=30.0,
+                        help="seconds between the keepalive comments on the event "
+                             "stream (0 turns them off). Without them the stream "
+                             "is silent while nothing happens and the client's "
+                             "read timeout fires")
     parser.add_argument("--sse-idle-timeout", type=float, default=3600.0,
                         help="how long an event stream may stay quiet before it is closed "
                              "(seconds)")

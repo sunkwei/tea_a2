@@ -40,6 +40,7 @@ Usage:
 import argparse
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -177,6 +178,15 @@ class Telegram:
         except urllib.error.URLError as exc:
             raise channel.ChannelError("cannot reach %s: %s"
                                        % (self.url(method), exc.reason)) from None
+        except (socket.timeout, TimeoutError) as exc:
+            # A read that times out is **not** wrapped in URLError: urllib only
+            # wraps the failures of the request itself, and the answer comes
+            # afterwards. The long poll to Telegram hits this whenever the
+            # network hiccups - and it must not kill the bot: the run loop
+            # only knows ChannelError, so an escaping TimeoutError ends the
+            # process and systemd starts it again (the log showed the bot
+            # restarting every few minutes for a whole afternoon).
+            raise channel.ChannelError("telegram: the answer took too long: %s" % exc) from None
         try:
             payload = json.loads(raw) if raw else {}
         except ValueError:
@@ -400,8 +410,21 @@ class TelegramBot(channel.TaskChannel):
         try:
             me = self.telegram.get_me()
         except channel.ChannelError as exc:
-            log("the token does not work: %s" % exc)
-            return 2
+            if getattr(exc, "status", 0):
+                # Telegram answered (401 and friends): the token is wrong.
+                log("the token does not work: %s" % exc)
+                return 2
+            # The route to Telegram is broken, not the token. Exiting here
+            # only makes systemd start the bot again every few seconds, and
+            # the same broken route answers again - wait it out instead.
+            log("cannot reach telegram: %s" % exc)
+            while True:
+                time.sleep(30)
+                try:
+                    me = self.telegram.get_me()
+                    break
+                except channel.ChannelError as exc2:
+                    log("cannot reach telegram: %s" % exc2)
         self.bot_username = me.get("username") or ""
         log("telegram bot: @%s (%s)"
             % (self.bot_username, me.get("first_name") or ""))

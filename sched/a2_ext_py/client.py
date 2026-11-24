@@ -56,6 +56,14 @@ class Client:
             raise ApiError(exc.code, message or str(exc.reason), raw) from None
         except urllib.error.URLError as exc:
             raise ApiError(0, "cannot reach %s: %s" % (url, exc.reason)) from None
+        except OSError as exc:
+            # What happens **after** the request went out is not wrapped by
+            # urllib: a connection that is reset (the other side restarted
+            # while the answer was on its way) or a read that times out
+            # arrives raw. Those must become an ApiError too - otherwise the
+            # caller dies with them (the task queue used to die when the
+            # agent restarted under it).
+            raise ApiError(0, "cannot reach %s: %s" % (url, exc)) from None
         if not raw:
             return {}
         try:
