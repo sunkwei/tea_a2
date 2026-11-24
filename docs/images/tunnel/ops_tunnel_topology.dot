@@ -1,0 +1,190 @@
+// 内网穿透整体网络结构图：tea_a2 + a2_tunnel + a2_broker
+// 渲染：dot -Tpng -Gdpi=150 ops_tunnel_topology.dot -o ops_tunnel_topology.png
+digraph ops_tunnel_topology {
+  graph [
+    rankdir=LR,
+    fontname="Noto Sans CJK SC",
+    fontsize=13,
+    bgcolor="white",
+    pad=0.35,
+    nodesep=0.45,
+    ranksep=1.0,
+    compound=true,
+    labelloc="b",
+    label="实线：控制 / 信令 / 数据    虚线：回执 / 兜底中继    ①–⑦ 与正文对照",
+    fontsize=10,
+    fontcolor="#666666"
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Noto Sans CJK SC",
+    fontsize=11,
+    margin="0.18,0.11",
+    color="#5b6770",
+    fillcolor="#f7f9fb"
+  ];
+  edge [
+    fontname="Noto Sans CJK SC",
+    fontsize=9,
+    color="#5b6770",
+    arrowsize=0.7
+  ];
+
+  subgraph cluster_ops {
+    label="运维侧（办公室 / 家里，无需公网 IP）";
+    fontsize=12;
+    fontcolor="#1f4e79";
+    color="#8fb8d8";
+    style="rounded,dashed";
+    margin=16;
+
+    ops_browser [
+      label="浏览器 / curl\nhttp://127.0.0.1:9931",
+      fillcolor="#e8f1fb"
+    ];
+    ops_client [
+      label="a2_tunnel --role client\n本地代理 127.0.0.1:9931",
+      fillcolor="#d6e6f7",
+      penwidth=1.5
+    ];
+    mqtt_cli [
+      label="运维 CLI\nsched/mqtt_cli.py\nlist / wake / stop / status",
+      fillcolor="#eef7ee"
+    ];
+  }
+
+  subgraph cluster_public {
+    label="公网 VPS（唯一需要公网 IP 的角色）";
+    fontsize=12;
+    fontcolor="#7b3f00";
+    color="#e0b080";
+    style="rounded,dashed";
+    margin=16;
+
+    broker [
+      label="a2_broker\n\nTCP 8382（TLS）：信令 + MQTT\nUDP 3478：STUN / TURN\nUDP 49160-50175：中继端口池",
+      fillcolor="#fff1d6",
+      penwidth=2
+    ];
+    db [
+      label="a2_broker.db（sqlite）\nmqtt_accounts / mqtt_devices\nturn_accounts / turn_usage",
+      shape=cylinder,
+      fillcolor="#f3ead9"
+    ];
+    cert [
+      label="broker.crt / broker.key\n首次启动自签，重启不变",
+      shape=note,
+      fillcolor="#faf4e6"
+    ];
+    broker -> db [label="账号 / 在线状态", style=dotted, arrowhead=none];
+    broker -> cert [label="TLS 证书", style=dotted, arrowhead=none];
+  }
+
+  subgraph cluster_device {
+    label="客户内网设备（无需公网 IP）";
+    fontsize=12;
+    fontcolor="#2d5a2d";
+    color="#9cc79c";
+    style="rounded,dashed";
+    margin=16;
+
+    a2 [
+      label="tea_a2\n127.0.0.1:8383\nWeb UI + HTTP/SSE API",
+      fillcolor="#e6f4e6",
+      penwidth=1.5
+    ];
+    agent [
+      label="a2_tunnel --role agent\n被 a2 拉起（或人工启动）\n默认等 300 秒",
+      fillcolor="#d8edd8",
+      penwidth=1.5
+    ];
+    device_user [
+      label="设备本机用户",
+      shape=ellipse,
+      fillcolor="#f2f8f2"
+    ];
+    device_user -> a2 [label="本机访问", style=dotted, constraint=false];
+  }
+
+  // 控制面
+  mqtt_cli -> broker [
+    label="① MQTT / TLS 8382\nmt_control/<注册名>/cmd",
+    color="#2e7d32",
+    fontcolor="#2e7d32",
+    penwidth=1.4
+  ];
+  broker -> mqtt_cli [
+    label="回执\nmt_control/<注册名>/resp",
+    style=dashed,
+    color="#2e7d32",
+    fontcolor="#2e7d32",
+    constraint=false
+  ];
+  a2 -> broker [
+    label="② MQTT / TLS 8382\n注册 + 订阅 cmd",
+    color="#2e7d32",
+    fontcolor="#2e7d32",
+    penwidth=1.4
+  ];
+  broker -> a2 [
+    label="命令",
+    style=dashed,
+    color="#2e7d32",
+    fontcolor="#2e7d32"
+  ];
+  a2 -> agent [
+    label="③ 拉起 sidecar\n抓 session 码",
+    style=dashed,
+    color="#2e7d32",
+    fontcolor="#2e7d32",
+    constraint=false
+  ];
+
+  // 信令面
+  ops_client -> broker [
+    label="④ 信令 TLS 8382",
+    color="#1565c0",
+    fontcolor="#1565c0",
+    penwidth=1.4
+  ];
+  agent -> broker [
+    label="⑤ 信令 TLS 8382",
+    color="#1565c0",
+    fontcolor="#1565c0",
+    penwidth=1.4
+  ];
+
+  // 数据面
+  ops_client -> agent [
+    label="⑥ WebRTC 数据通道（DTLS 加密）",
+    color="#c62828",
+    fontcolor="#c62828",
+    penwidth=2.4,
+    constraint=false
+  ];
+
+  // 中继兜底
+  agent -> broker [
+    label="⑦ TURN 中继兜底",
+    style=dashed,
+    color="#8e24aa",
+    fontcolor="#8e24aa",
+    constraint=false
+  ];
+  ops_client -> broker [
+    label="⑦ 中继",
+    style=dashed,
+    color="#8e24aa",
+    fontcolor="#8e24aa",
+    constraint=false
+  ];
+
+  // 数据落点
+  agent -> a2 [
+    label="HTTP 127.0.0.1:8383",
+    color="#c62828",
+    fontcolor="#c62828",
+    penwidth=1.8
+  ];
+}

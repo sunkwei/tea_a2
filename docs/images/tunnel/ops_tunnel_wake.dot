@@ -1,0 +1,78 @@
+// MQTT 召唤一条隧道的流程（运维视角）
+// 渲染：dot -Tpng -Gdpi=150 ops_tunnel_wake.dot -o ops_tunnel_wake.png
+digraph ops_tunnel_wake {
+  graph [
+    rankdir=TB,
+    fontname="Noto Sans CJK SC",
+    fontsize=12,
+    bgcolor="white",
+    pad=0.3,
+    nodesep=0.35,
+    ranksep=0.55
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Noto Sans CJK SC",
+    fontsize=10,
+    margin="0.15,0.09",
+    color="#5b6770",
+    fillcolor="#f7f9fb"
+  ];
+  edge [
+    fontname="Noto Sans CJK SC",
+    fontsize=9,
+    color="#5b6770"
+  ];
+
+  start [
+    label="0. 运维机\n导出 TEA_MQTT_USER / PASS",
+    fillcolor="#eef7ee"
+  ];
+  list [
+    label="1. mqtt_cli.py list\n查在线设备与完整注册名",
+    fillcolor="#eef7ee"
+  ];
+  broker_reg [
+    label="a2_broker\nretained 注册表\nmt_register/#",
+    fillcolor="#fff1d6"
+  ];
+  wake [
+    label="2. mqtt_cli.py wake <注册名>\n--wait-timeout 1800",
+    fillcolor="#eef7ee"
+  ];
+  broker_cmd [
+    label="a2_broker\n转发 cmd\nmt_control/<名>/cmd",
+    fillcolor="#fff1d6"
+  ];
+  a2 [
+    label="3. 设备 tea_a2\n收到 tunnel.start",
+    fillcolor="#e6f4e6"
+  ];
+  sidecar [
+    label="4. a2 拉起 a2_tunnel --role agent\n拿到 session 码",
+    fillcolor="#d8edd8"
+  ];
+  resp [
+    label="5. 回执 resp\nstate=ready, session=<码>",
+    fillcolor="#fff1d6"
+  ];
+  cli_out [
+    label="6. CLI 打印 session\n和 next 命令行",
+    fillcolor="#eef7ee"
+  ];
+  client [
+    label="7. 运维机跑\na2_tunnel --role client --session <码>",
+    fillcolor="#d6e6f7"
+  ];
+  ready [
+    label="8. 本地 127.0.0.1:9931\n浏览器 / curl 访问设备 a2",
+    fillcolor="#e8f1fb"
+  ];
+
+  start -> list -> broker_reg [label="订阅"];
+  list -> wake [label="拿到名字", constraint=false];
+  wake -> broker_cmd -> a2 -> sidecar -> resp -> cli_out;
+  cli_out -> client [label="人工执行"];
+  client -> ready [label="数据通道打开"];
+}

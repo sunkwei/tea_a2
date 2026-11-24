@@ -1,5 +1,7 @@
 # a2_broker 配置手册
 
+> 三件套（tea_a2 + a2_tunnel + a2_broker）怎么配合、三分钟怎么跑通：见 [内网穿透运维手册](ops_manual.md)。
+
 > broker 是隧道的中枢：**STUN + 信令 + TURN 中继**，一个进程。
 > 它是整个方案里**唯一必须站在公网上的东西**。
 >

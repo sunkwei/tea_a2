@@ -118,7 +118,7 @@ build/bin/tea_agent --workspace . --open
 | **两段式插话**（`insert`） | 一轮还在跑的时候再发一条：**默认等这轮结束**（它自己开新一轮，正在跑的那一轮一点不受影响）；也可以要求**立即插入**（插到这一轮里，下一次工具调用之前生效）。见 [设计](docs/insert.md) · [API](docs/api.md) |
 | **角色**（工作区的阶段档案） | 分析 / 设计 / 开发 / 测试各写一份：人设、阶段规矩、工具、命令围栏、模型、预算。**只有使用者能切**（网页或另一个 a2 调 API），切换从下一轮生效。见 [角色](docs/workspace.md#角色这个工作区的阶段档案) |
 | **级联**（`toolkit_peer`） | 一台 tea_a2 直接控制另一台。见 [级联](docs/peer.md) |
-| **隧道侧载**（`a2_broker` + `a2_tunnel`） | **外网访问内网的 a2**：设备旁多一个侧载，把外网的连接转到 a2 上；a2 本体零改动，隧道断了也不影响它照常工作。见 [隧道](docs/tunnel.md) · [运维手册](docs/ops_manual.md) |
+| **内网穿透**（`a2_broker` + `tea_a2` + `a2_tunnel`） | **外网访问内网的 a2**：设备旁多一个侧载，把外网的连接转到 a2 上；a2 本体零改动。设备无人值守时还能用 **MQTT 召唤**：运维发一条命令，设备自己拉起侧载并回传 session 码。见 [隧道](docs/tunnel.md) · [运维手册](docs/ops_manual.md) |
 | **机群**（`sched/fleet_server.py`） | 一台服务器管 40 台设备：台账、每日采集、灰度升级、审计。见 [机群运维](docs/fleet.md) |
 | **看门狗 / Router**（`sched/watchdog.py`、`sched/router.py`） | 在外面盯着卡住的任务与跑偏的 worker；把分开的工作区会话串成一条线索。见 [Router 与 Watchdog](docs/router-watchdog.md) |
 | **扩展层**（`sched/a2_ext_py/`） | 一个 .py 文件就是一件新工具，不用改 C++、不用发版，模型自己也能写。现成三件套：**截图 / 鼠标 / 键盘**（Windows 与 Linux 都能用）。见 [扩展层](docs/a2_ext_py.md) |
@@ -141,7 +141,7 @@ build/bin/tea_agent --workspace . --open
 | [部署](docs/deploy.md) | 嵌入式设备、静态单文件、TLS、systemd 单元、Windows 自启 |
 | [手机上的 a2（Android APK）](docs/android.md) | 同一个 agent 编成 APK：不用 root、不用 Termuku；通知 / 位置 / 剪贴板 / 截图 / 界面操作（靠 Shizuku） |
 | [设备运维手册](docs/device_ops_manual.md) | 给运维/售后的图文手册：设备上的 a2（配 key → 建工作区 → 排错表） |
-| [运维手册：a2 + 隧道侧载](docs/ops_manual.md) | 给运维同事：设备上起 a2 与侧载、一条命令从外网连进去、排错表、安全须知 |
+| [内网穿透运维手册](docs/ops_manual.md) | 给运维同事：三个程序的分工与整体网络图、**三分钟部署实例**、a2 / a2_tunnel / a2_broker 逐项用法、MQTT 召唤、排错与安全清单 |
 | [多级协同与机群运维](docs/fleet.md) | 一台服务器管 40 台设备：台账、灰度升级、审计、让设备自己判断 |
 | [级联](docs/peer.md) | `peers:` 配置、`toolkit_peer`、`/api/peer/*`、安全边界 |
 | [隧道：外网访问内网](docs/tunnel.md) | 侧载方案、WebRTC 数据通道、STUN/TURN、端口与安全边界 |

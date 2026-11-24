@@ -800,6 +800,30 @@ broker 按注册名做 topic ACL：
 
 所以一个客户/一个站点用一个 `device` 账号即可，不必一台设备一个账号。
 
+#### 3.5.6 一台设备上能同时开几条隧道？
+
+**通过 MQTT 召唤：只有一条。** 重复 `wake` 不会起第二个侧载——设备返回**现有的** session
+（`TunnelController::start()` 在状态是 `starting`/`ready` 时直接返回当前状态，
+源码 `src/mqtt_tunnel.cpp:313`）。所以「唤醒第二条」这条路是**不通的**，
+它给的是同一把钥匙。
+
+**手工在设备上起：可以起多个。** 进程层面没有限制，每个侧载生成自己的房间和 session，
+互不干扰。但有几个坑：
+
+| 事项 | 说明 |
+| --- | --- |
+| a2 不认识手工起的侧载 | 之后再发 `tunnel.start`，a2 会**再拉起一个**（设备上于是有 2 个 agent 侧载）；`tunnel.stop` 只杀 a2 拉起的那一个，手工起的要自己 `kill` |
+| a2 重启/退出 | a2 拉起的侧载会**一起被带走**（Linux 用 `PR_SET_PDEATHSIG`，Windows 用 Job Object 的 `KILL_ON_JOB_CLOSE`）；**手工起的不会**，它会一直等到 `--wait-timeout` 到点自己退出（默认 300 秒；MQTT 拉起的默认 1800 秒） |
+| client 侧端口 | 冲突在**运维机**这边：默认都是 9931，同时开两条要 `--port 9931` / `--port 9932` |
+| broker 容量 | 每个侧载在 broker 上占 1 条信令连接 + 1 个 TURN 分配 + 1 个中继端口（口径见 [5.3](#53-容量规划)） |
+| 目标 | 手工侧载可以指向不同的 a2（`--target 127.0.0.1:9000`）；MQTT 通道的 target 锁定 a2 自己，不给改 |
+
+**建议**：一台设备一条隧道，用完 `tunnel.stop`。
+
+多人同时要用时，各自 `wake` 拿到的是**同一把钥匙**（同一个 session），没有身份区分——
+一个人能做的事别人也能做。要真正的隔离，就给每个人手工起一条（各自 `--port`），
+或者按顺序用。
+
 ### 3.6 把 a2 装成 systemd 服务（设备侧）
 
 模板在 `scripts/a2.service`，带 MQTT 的版本如下。`%h` 是运行用户的 home：
@@ -978,6 +1002,9 @@ a2_tunnel --role agent --target terminal
 | MQTT 召唤 | a2 收到 `tunnel.start` 后自动拉起，session 从 stdout 抓 |
 | 微信 bot | 给 bot 发 `/tunnel`，它回一条 client 命令 |
 | systemd（不推荐常驻） | 只在确实需要 7×24 可连时用 `--wait-timeout 0` |
+
+> 手工起的侧载 **a2 不知道它存在**：`tunnel.stop` 不会动它，a2 重启也不会带走它
+> （它会等到 `--wait-timeout` 到点自己退出）。详见 [3.5.6](#356-一台设备上能同时开几条隧道)。
 
 ### 4.3 client 侧（运维机）
 
