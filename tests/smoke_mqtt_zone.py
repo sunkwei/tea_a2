@@ -17,11 +17,13 @@ Local only: a throwaway broker in a temp directory, no TURN traffic.
 """
 import json
 import os
+import random
 import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,27 +46,74 @@ def find_binary(build, name):
     return ""
 
 
-def free_port():
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-    finally:
-        s.close()
+def free_port(low=0, high=0):
+    """A free TCP port.
 
-
-def wait_for_port(port, proc, seconds=20):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            return False
+    With a range given, the port comes from it: the broker refuses to start
+    when its relay pool is outside 49152-65535, so the pool this test hands
+    it has to come from there. Ports are checked by binding them - a port
+    that is free now can be taken by the next process that asks for one.
+    """
+    for _ in range(200):
+        if high:
+            port = random.randint(low, high)
+        else:
+            s = socket.socket()
+            try:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            finally:
+                s.close()
+            return port
+        s = socket.socket()
         try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=1)
-            s.close()
-            return True
+            # The broker binds INADDR_ANY with SO_REUSEADDR, so the check has
+            # to do the same: a port that is free on 127.0.0.1 can still be
+            # taken on another address.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", port))
+            return port
         except OSError:
-            time.sleep(0.2)
-    return False
+            continue
+        finally:
+            s.close()
+    raise RuntimeError("no free port in %d-%d" % (low, high))
+
+
+class BrokerLog(object):
+    """The broker's output, read in the background.
+
+    Two reasons: a pipe that nobody reads fills up and blocks the broker,
+    and "the port accepts a connection" is not a readiness signal here - the
+    ephemeral range is full of listeners of other processes, so a connect can
+    succeed against something that is not our broker. The line the broker
+    prints when it starts listening is the honest signal.
+    """
+
+    def __init__(self, proc):
+        self.lines = []
+        self._proc = proc
+        self._thread = threading.Thread(target=self._pump)
+        self._thread.daemon = True
+        self._thread.start()
+
+    def _pump(self):
+        for raw in iter(self._proc.stdout.readline, b""):
+            self.lines.append(raw.decode("utf-8", "replace"))
+
+    def wait_for(self, needle, seconds=20):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            for line in list(self.lines):
+                if needle in line:
+                    return True
+            if self._proc.poll() is not None:
+                return False
+            time.sleep(0.1)
+        return False
+
+    def text(self):
+        return "".join(self.lines)
 
 
 def add_accounts(db):
@@ -172,22 +221,29 @@ def main():
 
     work = tempfile.mkdtemp(prefix="a2-zone-")
     db = os.path.join(work, "a2_broker.db")
-    port = free_port()
-    stun = free_port()
-    relay = free_port()
+    # The signal and STUN ports come from below the ephemeral range
+    # (32768-60999 by default): inside it, other processes on this machine
+    # hold listeners on ports that look free, and the broker then cannot
+    # bind them.
+    port = free_port(20000, 32000)
+    stun = free_port(20000, 32000)
+    # The relay pool has to sit inside 49152-65535 or the broker refuses to
+    # start ("the relay port pool must be inside ..."). The pool is never
+    # bound here: this test relays nothing.
+    relay = free_port(49200, 65400)
     env = dict(os.environ)
     env["TEA_AGENT_HOME"] = work
-    # A small relay pool: the broker wants two ports per allocation, and this
-    # test never relays anything.
     cmd = [exe, "--mqtt", "--signal-port", str(port), "--stun-port", str(stun),
            "--max-peer-pair", "2",
            "--relay-begin", str(relay), "--relay-end", str(relay + 4),
            "--turn-db", db]
     proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    log = BrokerLog(proc)
 
     try:
-        if not wait_for_port(port, proc):
+        if not log.wait_for("signalling on tcp/%d" % port):
             print("the broker did not come up on port %d" % port)
+            print(log.text())
             return 1
         add_accounts(db)
 
@@ -213,6 +269,22 @@ def main():
             client.close()
         check("an unknown operator name falls back to zonekey",
               zone_of(db, device_b) == "zonekey", zone_of(db, device_b))
+
+        # An agent older than 1.8.4 does not report an operator at all: it
+        # registers without the field and stays in the default zone.
+        device_old = "devOld@10.0.0.3-ccddeeff0011"
+        client = connect(port, "dev", "pwd", device_old)
+        try:
+            payload = json.loads(registration(device_old, ""))
+            del payload["oper_name"]
+            client.publish("mt_register/" + device_old, json.dumps(payload), retain=True)
+            time.sleep(0.6)
+        finally:
+            client.close()
+        check("a device that reports no operator (an older a2) stays in zonekey",
+              zone_of(db, device_old) == "zonekey", zone_of(db, device_old))
+        check("the zonekey operator sees the device that reported no operator",
+              sees_registration(port, "zonekey", "pwk", device_old))
 
         check("the operator of zone A sees the device of zone A",
               sees_registration(port, "zoneA", "pwA", device_a))
