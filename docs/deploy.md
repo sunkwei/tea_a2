@@ -136,7 +136,8 @@ __nss_configure_lookup("hosts", "files dns");   // 仅静态构建
 - 其它平台走内置 mbedTLS，根证书**编译进二进制**（`3rd/ca-bundle/cacert.pem` 由
   `tools/embed_ca_bundle.cpp` 生成 `ca_bundle.cpp`），所以单文件部署不需要随附 PEM。
   启动日志会写 `tls: CA bundle embedded in the binary (N bytes)`。
-- 覆盖顺序：`--ca-bundle <pem>` 优先（便于不重新编译就更新根证书）→ 内嵌证书 → 磁盘查找
+- 覆盖顺序：内嵌证书 → 磁盘查找（**没有 `--ca-bundle` 这个开关了**：MQTT 不验证书，
+  https:// 用编译进二进制的那份根证书）
   （同级 `ca-bundle/cacert.pem`、同级 `cacert.pem`、`../3rd/ca-bundle/cacert.pem`、
   工作目录 `3rd/ca-bundle/cacert.pem`、`$TEA_AGENT_HOME/ca-bundle/cacert.pem`）。
   最后这层只对「构建时没有 vendored 证书」的构建有意义。

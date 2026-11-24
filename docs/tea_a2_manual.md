@@ -68,7 +68,6 @@ HTTP 引擎、可用工具、工作区列表。地址那行就是要打开的。
 | `--provider <name>` | 这一轮用哪个 provider | 配置文件里的第一个 |
 | `--model <name>` | 用哪个模型 | 该 provider 的第一个模型 |
 | `--http-engine <name>` | `auto` / `socket` / `winhttp` | `auto` |
-| `--ca-bundle <path>` | 信任的根证书 PEM | 二进制里嵌的那份 |
 | `--insecure` | 不校验 TLS 证书（**只用于测试**） | 校验 |
 
 **MQTT 控制通道**（可选；详见 [mqtt_control.md](mqtt_control.md)）
@@ -82,6 +81,7 @@ HTTP 引擎、可用工具、工作区列表。地址那行就是要打开的。
 | `--mqtt_user <user>` | broker 上的账号（`mqtt_accounts` 表，role=device） | — |
 | `--mqtt_pass <pass>` | 口令（会出现在 `ps` 与 unit 文件里，unit 记得 `chmod 600`） | — |
 | `--mqtt_name <name>` | 名字；注册名是 `<name>@<IPv4>-<MAC>`（MAC 取默认路由网卡） | — |
+| `--mqtt_oper_name <name>` | 哪个 operator 账号能管这台设备（broker 那边没有这个名字就落回 `zonekey`） | `zonekey` |
 | `--tunnel-broker <host:port>` | 侧载连的隧道 broker（**默认跟随 `--mqtt`**；MQTT 用别的 broker 时才需要给） | 同 `--mqtt` |
 | `--print-registration` | 只打印注册名就退出，部署时用它填 `mqtt_accounts.device_name` | — |
 

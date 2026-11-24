@@ -271,8 +271,6 @@ void print_usage() {
                   "  --provider <name>          provider to use\n"
                   "  --model <name>             model to use\n"
                   "  --http-engine <name>       auto | socket | winhttp\n"
-                  "  --ca-bundle <path>         PEM file with trusted roots (default: the bundle\n"
-                  "                             compiled into this binary)\n"
                   "  --insecure                 do not verify TLS certificates (testing only)\n"
                   "\n"
                   "MQTT control channel (opt-in; docs/mqtt_control.md)\n"
@@ -281,8 +279,12 @@ void print_usage() {
                   "  --mqtt_user <user>         broker account (mqtt_accounts, role=device)\n"
                   "  --mqtt_pass <pass>         its password (visible in ps: keep the unit 0600)\n"
                   "  --mqtt_name <name>         base name; the registration is <name>@<ipv4>-<mac>\n"
-                  "  --tunnel-broker <host:port> where the sidecar connects (default\n"
-                  "                             103.232.92.54:8382; may differ from the MQTT broker)\n"
+                  "  --mqtt_oper_name <name>    the operator account that may command this\n"
+                  "                             device (default zonekey; the broker falls\n"
+                  "                             back to it when the name is not an operator\n"
+                  "                             account there)\n"
+                  "  --tunnel-broker <host:port> where the sidecar connects (default: the\n"
+                  "                             MQTT endpoint above; may differ from it)\n"
                   "  --print-registration       print the registration name and exit\n"
                   "\n"
                   "Workspaces\n"
@@ -489,19 +491,16 @@ int tea_agent_main(int argc, char** argv) {
   // ---- TLS ---------------------------------------------------------------
   TlsOptions tls;
   tls.verify_peer = !args.has("insecure");
-  // Root resolution, in order: --ca-bundle (explicit) > embedded bundle >
-  // a PEM found on disk. The embedded one is the default so that copying a
-  // single ELF to a device is enough for https:// to work; the file search
-  // remains for builds without a vendored bundle and for operators who want to
-  // refresh the roots without rebuilding.
-  tls.ca_bundle = args.get("ca-bundle");
-  if (tls.ca_bundle.empty()) {
-    const char* pem = embedded_ca_bundle_pem();
-    if (pem != nullptr && embedded_ca_bundle_size() > 0) {
-      tls.ca_pem.assign(pem, embedded_ca_bundle_size());
-    } else {
-      tls.ca_bundle = find_ca_bundle(tea_home);
-    }
+  // Root resolution: the bundle embedded at build time first, a PEM found on
+  // disk as the fallback. The embedded one is the default so that copying a
+  // single binary to a device is enough for https:// to work; the file search
+  // remains for builds without a vendored bundle. There is no flag for it any
+  // more: --insecure is the only knob (no verification at all).
+  const char* pem = embedded_ca_bundle_pem();
+  if (pem != nullptr && embedded_ca_bundle_size() > 0) {
+    tls.ca_pem.assign(pem, embedded_ca_bundle_size());
+  } else {
+    tls.ca_bundle = find_ca_bundle(tea_home);
   }
   if (!tls.ca_bundle.empty()) tls.ca_bundle = path_absolute(tls.ca_bundle);
   http_set_tls_config(tls);
@@ -514,7 +513,7 @@ int tea_agent_main(int argc, char** argv) {
   } else {
     LOG_WARN(
         "tls: no CA bundle found; https:// through the bundled TLS backend will fail "
-        "(pass --ca-bundle <pem> or --insecure)");
+        "(use --insecure to skip the check)");
   }
 
   // ---- configuration -----------------------------------------------------
@@ -728,8 +727,11 @@ int tea_agent_main(int argc, char** argv) {
     if (mqtt.name.empty()) mqtt.name = args.get("mqtt-name");
     const std::string tunnel_broker = args.get("tunnel-broker");
     if (!tunnel_broker.empty()) mqtt.tunnel_broker = tunnel_broker;
-    const std::string ca_bundle = args.get("ca-bundle");
-    if (!ca_bundle.empty()) mqtt.ca_bundle = ca_bundle;
+    // The operator account that may command this device. The broker resolves
+    // it: a name that is not an operator account there falls back to zonekey.
+    mqtt.oper_name = args.get("mqtt_oper_name");
+    if (mqtt.oper_name.empty()) mqtt.oper_name = args.get("mqtt-oper-name");
+    if (mqtt.oper_name.empty()) mqtt.oper_name = "zonekey";
 
     const bool asked = !mqtt.host.empty() || !mqtt.user.empty() || !mqtt.password.empty() ||
                        !mqtt.name.empty();
@@ -765,6 +767,15 @@ int tea_agent_main(int argc, char** argv) {
                           (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
         if (!good) {
           console_write_line("error: --mqtt_name may only use A-Z a-z 0-9 . _ -");
+          ok = false;
+        }
+      }
+      for (std::size_t i = 0; ok && i < mqtt.oper_name.size(); ++i) {
+        const char c = mqtt.oper_name[i];
+        const bool good = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (!good) {
+          console_write_line("error: --mqtt_oper_name may only use A-Z a-z 0-9 . _ -");
           ok = false;
         }
       }

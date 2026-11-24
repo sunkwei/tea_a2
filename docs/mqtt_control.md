@@ -30,17 +30,17 @@
 a2 --mqtt 103.232.92.54:8382 \
    --mqtt_user plant-a-01 --mqtt_pass '<secret>' \
    --mqtt_name plant-a-01 \
-   --tunnel-broker 103.232.92.54:8382 \
-   --ca-bundle ~/.tea_agent/ca-bundle/cacert.pem
+   --mqtt_oper_name zonekey \
+   --tunnel-broker 103.232.92.54:8382
 ```
 
 | 参数 | 说明 |
 |---|---|
-| `--mqtt HOST:PORT` | 只接受 TLS；`HOST` 必须是**证书里有名字**的那个（域名，或证书带 IP SAN） |
+| `--mqtt HOST:PORT` | 只接受 TLS。**证书不校验**（broker 自签），口令才是门 |
 | `--mqtt_user` / `--mqtt_pass` | broker 上 `mqtt_accounts` 里的账号；口令会出现在 `ps` 与 unit 文件里（已知限制，部署侧收紧权限） |
 | `--mqtt_name` | 只能是 `A-Z a-z 0-9 . _ -`；注册名 = `<name>@<本机网卡 IPv4>-<网卡 MAC>` |
 | `--tunnel-broker` | 隧道 broker；**默认跟随 `--mqtt`**（默认部署里 a2_broker 一个进程既是 MQTT 又是隧道中枢、同一个端口）。MQTT 用客户的 EMQX 时才需要单独给 |
-| `--ca-bundle` | 信任的根证书。broker 自签时指向它的 `broker.crt` |
+| `--mqtt_oper_name` | 哪个 operator 账号能管这台设备（默认 `zonekey`）。broker 只认**它自己库里存在的 operator 账号**，没有这个名字就自动落回 `zonekey` |
 
 ### 注册名里的 MAC
 
@@ -57,6 +57,11 @@ a2 --mqtt 103.232.92.54:8382 --mqtt_user plant-a-01 --mqtt_pass x \
 ```
 
 把这个字符串填进 broker 的 `mqtt_accounts.device_name`，然后用同样的四个参数启动。
+
+**谁能管这台设备**：设备用 `--mqtt_oper_name`（默认 `zonekey`）报一个 operator 账号的名字。
+broker 在自己的 `mqtt_accounts` 里查这个名字：**必须是 role=operator 且 enabled 的账号**，
+查不到就自动落回 `zonekey`。只有这个名字的 operator 账号能 `list` / `wake` / `stop` /
+`status` 这台设备 —— 别的 operator 看不见它，也命令不了它。
 
 > 换网卡/换机器 = 换注册名 = 要重建账号；单纯换 IP 不再影响注册名（MAC 不变）。
 
@@ -141,10 +146,12 @@ SQL
 | `client_id` | 注册名 `<name>@<ipv4>-<mac12>`，主键 |
 | `account` | 哪个 `mqtt_user` 在用它（多台设备可以共用一个账号） |
 | `ip` / `mac` / `version` / `port` | 从注册消息里取 |
+| `oper_name` | 这台设备归哪个 operator 账号管（broker 解析后的结果，不是设备自报的那个） |
 | `online` | 当前是否连着（断开时置 0） |
 | `first_seen` / `last_seen` | broker 时钟，比设备自报的 `ts` 可靠 |
 
-所以：**认证 = user + pass；权限 = 自己声明的注册名；实例 = 表里的一行。**
+所以：**认证 = user + pass；权限 = 自己声明的注册名 + 设备报的 operator 账号（zone）；
+实例 = 表里的一行。**
 设备掉线、broker 重启都不会丢这条记录（retained 消息不落盘，这张表落盘）。
 
 > `turn_accounts`（TURN 中继账号）与 `mqtt_accounts` 是**两张表**：能蹭中继的账号
@@ -241,9 +248,9 @@ next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034
 
 | 项 | 说明 |
 |---|---|
-| 谁能下命令 | 只有 `role='operator'` 的账号，且只能发到 `mt_control/<某个名字>/cmd` |
+| 谁能下命令 | 只有 `role='operator'` 的账号，且只能发到 `mt_control/<某个名字>/cmd`；**而且那个账号的名字必须等于设备的 zone**（设备用 `--mqtt_oper_name` 报的，默认 `zonekey`）——别的 operator 看得见列表之外什么也做不了 |
 | 设备能干什么 | 只能订阅**自己注册名**的命令、发布**自己**的回执与注册；订阅别人的 topic 会被拒 |
-| 一个账号多台设备 | 可以。账号只决定「能不能登录」，注册名决定「能碰哪些 topic」 |
+| 一个账号多台设备 | 可以。账号只决定「能不能登录」，注册名决定「能碰哪些 topic」，zone 决定「哪个 operator 能管它」 |
 | 目标端口 | `tunnel.start` 的 `args.target` 默认被忽略（锁定 a2 自己的端口）；想放开需要改代码里的白名单 |
 | 终端 | 不能通过这条通道开 `--target terminal`（那是远端 shell） |
 | 日志 | broker 只记 topic 与结果，**不记 payload**（session 码就是房间钥匙） |

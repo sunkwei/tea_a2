@@ -35,8 +35,6 @@ class MqttClient {
     std::string user;
     std::string password;
     std::string client_id;  // the registered name: "<name>@<ipv4>"
-    std::string ca_bundle;
-    bool verify_peer = true;
     /// The keepalive advertised in CONNECT. It must be at least as long as
     /// the longest gap between two pings: the broker drops a session that
     /// stays silent for 1.5x keepalive (src/mqtt_server.cpp). The heartbeat

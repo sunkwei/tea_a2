@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "ca_bundle.h"
 #include "log.h"
 #include "mqtt_codec.h"
 #include "tls.h"
@@ -375,12 +374,10 @@ struct MqttClient::Impl {
     set_send_timeout(fd, 3000);
 
     TlsOptions options;
-    options.verify_peer = config.verify_peer;
-    if (!config.ca_bundle.empty()) {
-      options.ca_bundle = config.ca_bundle;
-    } else if (embedded_ca_bundle_size() > 0) {
-      options.ca_pem.assign(embedded_ca_bundle_pem(), embedded_ca_bundle_size());
-    }
+    // The broker's certificate is self-signed (its address is in the CN), so
+    // there is no chain to walk: the connection is encrypted, not verified. The
+    // password is the gate - the same rule the operator CLI follows.
+    options.verify_peer = false;
     std::unique_ptr<TlsStream> stream =
         tls_wrap_socket(static_cast<std::intptr_t>(fd), options, &err);
     if (!stream) {

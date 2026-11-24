@@ -8039,6 +8039,9 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
       j["ip"] = settings.ip;
       j["mac"] = settings.mac;
       j["port"] = a2_port;
+      // The operator account that may command this device. The broker falls
+      // back to "zonekey" when it is not an operator account there.
+      j["oper_name"] = settings.oper_name;
       j["actions"] = {"tunnel.start", "tunnel.stop", "status"};
       j["online"] = online;
       j["ts"] = static_cast<long long>(std::time(nullptr));
@@ -8051,11 +8054,6 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
     client_config.user = settings.user;
     client_config.password = settings.password;
     client_config.client_id = settings.client_name;
-    client_config.ca_bundle = settings.ca_bundle;
-    // The broker's certificate is self-signed (its address lives in the CN),
-    // so chain verification would fail on every device that does not carry a
-    // copy of it. The password is the gate - same rule as the operator CLI.
-    client_config.verify_peer = false;
     client_config.subscribe_topic = "mt_control/" + settings.client_name + "/cmd";
     client_config.will_topic = "mt_register/" + settings.client_name;
     client_config.will_payload = registration(false);

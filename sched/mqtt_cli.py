@@ -21,6 +21,11 @@ One file, standard library only, Python 3.6+. It speaks the same small MQTT
 TLS is encryption only: the broker's self-signed certificate is not verified
 (no CA file, no pinning). The password is the gate. Use it on trusted
 networks; a man in the middle could otherwise impersonate the broker.
+
+The operator account must be the one the devices name: a device reports its
+operator with --mqtt_oper_name (default zonekey), and only an operator
+account with that name may list or command it. Another operator account sees
+an empty list.
 """
 
 import argparse
@@ -137,12 +142,12 @@ class MqttClient(object):
         if len(packet[2]) > 2 and packet[2][2] == 0x80:
             raise MqttError("the broker refused the subscription to %s" % ", ".join(filters))
 
-    def publish(self, topic, payload, qos=1):
+    def publish(self, topic, payload, qos=1, retain=False):
         body = enc_str(topic)
         if qos:
             body += struct.pack("!H", self._next_id())
         body += payload.encode("utf-8")
-        self._send(frame(3, qos << 1, body))
+        self._send(frame(3, (qos << 1) | (1 if retain else 0), body))
 
     def close(self):
         try:

@@ -559,7 +559,6 @@ tea_a2 --mqtt 203.0.113.10:8382 --mqtt_user u --mqtt_pass p \
 | `--provider <name>` | 配置里的第一个 | 这一轮用哪个 provider |
 | `--model <name>` | 该 provider 的第一个 | 用哪个模型 |
 | `--http-engine <name>` | `auto` | `auto` / `socket` / `winhttp` |
-| `--ca-bundle <path>` | 内置根证书 | 信任的根证书 PEM |
 | `--insecure` | 关 | 不校验 TLS（**只用于测试**） |
 
 #### 3.2.4 MQTT 控制通道参数
@@ -1158,7 +1157,8 @@ pin=<broker 启动时打印的 sha256 指纹，可选>
 #### 4.5.2 证书与指纹
 
 - broker 的证书是**自签**的，客户端**不验证书链**；
-- `--ca-bundle` 对 broker 没用（留着只是为了老命令行不报错）；
+- MQTT 通道**没有** `--ca-bundle` 了：broker 的证书本来就不验，命令行里也没这个开关；
+  sidecar（`a2_tunnel`）那边还留着，同样没用；
 - `--tls-pin <sha256>` 只**看**不拦：对不上会提示，但继续用；
 - **真正的门是房间令牌**（session 码），不是证书。
 
@@ -1437,7 +1437,7 @@ sysctl net.core.rmem_default net.core.wmem_default
 | `turn_accounts(user, pass)` | TURN 中继账号（**启动时加载**） | 人手工加 |
 | `turn_usage` / `turn_usage_daily` | 中继用量 | broker |
 | `mqtt_accounts(user, pass, role, enabled, ...)` | MQTT 登录账号（**每次 CONNECT 查库**） | 人手工加 |
-| `mqtt_devices(client_id, account, ip, mac, version, port, online, first_seen, last_seen)` | 设备实例与在线状态 | broker |
+| `mqtt_devices(client_id, account, ip, mac, version, port, oper_name, online, first_seen, last_seen)` | 设备实例、在线状态与所属 zone | broker |
 
 #### 5.4.1 建 MQTT 账号
 
@@ -1457,7 +1457,10 @@ chmod 600 ~/.tea_agent/tunnel/a2_broker.db
 - **改库即生效**，不用重启 broker（MQTT 每次 CONNECT 查库）；
 - 禁用账号：`UPDATE mqtt_accounts SET enabled=0 WHERE user='ops';`
 - 改口令：`UPDATE mqtt_accounts SET pass='新口令' WHERE user='ops';`
-- 设备掉线/重启 broker 不会丢 `mqtt_devices` 记录（表落盘）。
+- 设备掉线/重启 broker 不会丢 `mqtt_devices` 记录（表落盘）；
+- **zone**：设备用 `--mqtt_oper_name` 报一个 operator 账号的名字（默认 `zonekey`），
+  broker 只认自己库里 role=operator 的账号，没有就落回 `zonekey`。**只有这个 operator
+  账号能 list / wake / stop / status 这台设备**；运维 CLI 要用这个账号登录。
 
 #### 5.4.2 看谁在线
 

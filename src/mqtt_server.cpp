@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <deque>
@@ -25,6 +26,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #else
+#include <cerrno>
 #include <sys/time.h>
 #endif
 
@@ -99,6 +101,42 @@ bool allowed_publish(const Account& account, const std::string& topic,
   return false;
 }
 
+/// The zone a device belongs to when it names no operator account (or names
+/// one that does not exist): the account every deployment has.
+const char* const kDefaultZone = "zonekey";
+
+/// The device name inside the topics we know: "mt_register/<name>" and
+/// "mt_control/<name>/resp" (also "/cmd"). Empty when the topic names none.
+std::string device_of_topic(const std::string& topic) {
+  const std::string kRegister = "mt_register/";
+  const std::string kControl = "mt_control/";
+  if (topic.compare(0, kRegister.size(), kRegister) == 0) {
+    return topic.substr(kRegister.size());
+  }
+  if (topic.compare(0, kControl.size(), kControl) == 0) {
+    const std::string rest = topic.substr(kControl.size());
+    const std::string::size_type slash = rest.find('/');
+    return slash == std::string::npos ? rest : rest.substr(0, slash);
+  }
+  return std::string();
+}
+
+/// Did the read fail because the socket timed out?
+///
+/// The session socket has a short recv timeout (the keepalive check runs on a
+/// tick). On POSIX the timeout comes back as EAGAIN and mbedtls turns it into
+/// WANT_READ - a tick. On Windows the same timeout is WSAETIMEDOUT, which
+/// mbedtls reports as a hard network error: a healthy but quiet session would
+/// be killed after one timeout.
+bool read_timed_out(int error) {
+  if (error != MBEDTLS_ERR_NET_RECV_FAILED) return false;
+#ifdef _WIN32
+  return WSAGetLastError() == WSAETIMEDOUT;
+#else
+  return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
 void set_send_timeout(tea_socket_t s, int ms) {
 #ifdef _WIN32
   DWORD tv = static_cast<DWORD>(ms);
@@ -121,6 +159,11 @@ struct Server::Impl {
   std::mutex db_mutex;
   std::map<std::string, std::pair<int, long long>> failures;
 
+  /// Which operator account owns which device (client_id -> account). The
+  /// table survives a broker restart, the retained registrations do not.
+  std::mutex zones_mutex;
+  std::map<std::string, std::string> zones;
+
   std::mutex registry_mutex;
   std::map<std::string, std::shared_ptr<Session>> sessions;
   std::map<std::string, std::string> retained;
@@ -139,8 +182,18 @@ struct Server::Impl {
   bool authenticate(const std::string& user, const std::string& password, Account* out);
   /// Remember that this registration name is (or was) online, and who used it.
   void touch_device(const std::string& client_id, const std::string& account, bool online);
-  /// Fill in ip/mac/version/port from the retained registration message.
-  void update_device_info(const std::string& client_id, const std::string& payload);
+  /// Fill in ip/mac/version/port/zone from the retained registration message.
+  void update_device_info(const std::string& client_id, const std::string& account,
+                          const std::string& payload);
+  /// The operator account a device asks for, resolved: the name must be an
+  /// operator account in mqtt_accounts, anything else falls back to zonekey.
+  std::string resolve_oper_name(const std::string& requested);
+  /// The operator account that owns a device. A device we do not know yet
+  /// belongs to the default zone.
+  std::string zone_of(const std::string& client_id);
+  /// May this account touch that topic? An operator only reaches the devices
+  /// of its own zone.
+  bool zone_allows(const Account& account, const std::string& topic);
 
   bool write_all(Session* session, const std::string& frame);
   bool flush(Session* session);
@@ -176,6 +229,7 @@ bool Server::Impl::open_database(const std::string& path, std::string* err) {
       " client_id TEXT PRIMARY KEY,"
       " account TEXT NOT NULL,"
       " ip TEXT, mac TEXT, version TEXT, port INTEGER,"
+      " oper_name TEXT,"
       " online INTEGER NOT NULL DEFAULT 0,"
       " first_seen TEXT, last_seen TEXT, note TEXT);"
       "CREATE INDEX IF NOT EXISTS idx_mqtt_devices_account ON mqtt_devices(account);";
@@ -184,6 +238,34 @@ bool Server::Impl::open_database(const std::string& path, std::string* err) {
     *err = std::string("cannot create mqtt_accounts: ") + (message ? message : "unknown");
     if (message) sqlite3_free(message);
     return false;
+  }
+  // The zone column came later: a table that exists already gets it now.
+  {
+    bool has_zone = false;
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA table_info(mqtt_devices)", -1, &statement, nullptr) ==
+        SQLITE_OK) {
+      while (sqlite3_step(statement) == SQLITE_ROW) {
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
+        if (name && std::string(name) == "oper_name") {
+          has_zone = true;
+          break;
+        }
+      }
+      sqlite3_finalize(statement);
+    }
+    if (!has_zone) {
+      // A failure here is not fatal (the broker still runs), but the device
+      // info would stop being stored - so say it out loud.
+      char* why = nullptr;
+      if (sqlite3_exec(db, "ALTER TABLE mqtt_devices ADD COLUMN oper_name TEXT", nullptr,
+                       nullptr, &why) != SQLITE_OK) {
+        std::printf("broker: cannot add the oper_name column to mqtt_devices: %s\n",
+                    why ? why : "unknown");
+        std::fflush(stdout);
+      }
+      if (why) sqlite3_free(why);
+    }
   }
   return true;
 }
@@ -261,31 +343,93 @@ void Server::Impl::touch_device(const std::string& client_id, const std::string&
   sqlite3_finalize(statement);
 }
 
-void Server::Impl::update_device_info(const std::string& client_id, const std::string& payload) {
+std::string Server::Impl::resolve_oper_name(const std::string& requested) {
+  std::string user = requested.empty() ? std::string(kDefaultZone) : requested;
+  bool found = false;
+  {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT 1 FROM mqtt_accounts WHERE user = ? AND role = 'operator' "
+                           "AND enabled = 1",
+                           -1, &statement, nullptr) == SQLITE_OK) {
+      sqlite3_bind_text(statement, 1, user.c_str(), -1, SQLITE_TRANSIENT);
+      found = (sqlite3_step(statement) == SQLITE_ROW);
+      sqlite3_finalize(statement);
+    }
+  }
+  if (!found) {
+    if (user != kDefaultZone) {
+      std::printf("broker: the operator account \"%s\" is not an operator here - the device "
+                  "joins the zone \"%s\"\n",
+                  user.c_str(), kDefaultZone);
+      std::fflush(stdout);
+    }
+    user = kDefaultZone;
+  }
+  return user;
+}
+
+std::string Server::Impl::zone_of(const std::string& client_id) {
+  // The map is filled when a device registers and when the broker starts (the
+  // table survives a restart, the retained registrations do not), so there is
+  // no database round trip here: this runs on every message.
+  std::lock_guard<std::mutex> lock(zones_mutex);
+  std::map<std::string, std::string>::const_iterator it = zones.find(client_id);
+  if (it != zones.end()) return it->second;
+  return kDefaultZone;  // a device we do not know yet belongs to the default zone
+}
+
+bool Server::Impl::zone_allows(const Account& account, const std::string& topic) {
+  // A device stays in its own topics (the filters already limit it).
+  if (account.role != "operator") return true;
+  const std::string device = device_of_topic(topic);
+  if (device.empty()) return true;  // not a device topic
+  return zone_of(device) == account.user;
+}
+
+void Server::Impl::update_device_info(const std::string& client_id, const std::string& account,
+                                      const std::string& payload) {
   nlohmann::json data;
   try {
     data = nlohmann::json::parse(payload);
   } catch (...) {
     return;
   }
-  std::lock_guard<std::mutex> lock(db_mutex);
-  const char* sql =
-      "UPDATE mqtt_devices SET ip=?, mac=?, version=?, port=?, last_seen=? WHERE client_id=?";
-  sqlite3_stmt* statement = nullptr;
-  if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) return;
+  // The operator the device names: it must be an operator account here,
+  // otherwise the device falls back to the default zone.
+  const std::string zone = resolve_oper_name(data.value("oper_name", std::string()));
   const std::string ip = data.value("ip", std::string());
   const std::string mac = data.value("mac", std::string());
   const std::string version = data.value("version", std::string());
   const int port = data.value("port", 0);
   const std::string now = iso_now();
-  sqlite3_bind_text(statement, 1, ip.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(statement, 2, mac.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(statement, 3, version.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(statement, 4, port);
-  sqlite3_bind_text(statement, 5, now.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(statement, 6, client_id.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_step(statement);
-  sqlite3_finalize(statement);
+  {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    const char* sql =
+        "INSERT INTO mqtt_devices(client_id, account, ip, mac, version, port, oper_name, "
+        "first_seen, last_seen) VALUES(?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(client_id) DO UPDATE SET account=excluded.account, ip=excluded.ip, "
+        "mac=excluded.mac, version=excluded.version, port=excluded.port, "
+        "oper_name=excluded.oper_name, last_seen=excluded.last_seen";
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_text(statement, 1, client_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 3, ip.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 4, mac.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 5, version.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 6, port);
+    sqlite3_bind_text(statement, 7, zone.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 8, now.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 9, now.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(statement);
+    sqlite3_finalize(statement);
+  }
+  {
+    std::lock_guard<std::mutex> lock(zones_mutex);
+    zones[client_id] = zone;
+  }
 }
 
 bool Server::Impl::write_all(Session* session, const std::string& frame) {
@@ -330,6 +474,8 @@ void Server::Impl::broadcast(const std::string& topic, const std::string& payloa
        it != sessions.end(); ++it) {
     Session* session = it->second.get();
     if (session->closed.load()) continue;
+    // An operator only receives what belongs to its own zone.
+    if (!zone_allows(session->account(), topic)) continue;
     bool match = false;
     {
       std::lock_guard<std::mutex> session_lock(session->mutex);
@@ -403,6 +549,14 @@ bool Server::Impl::handle(Session* session, const Packet& packet) {
           }
         }
       }
+      // An operator only sees the devices of its own zone.
+      {
+        std::vector<std::pair<std::string, std::string>> visible;
+        for (size_t i = 0; i < pending.size(); ++i) {
+          if (zone_allows(session->account(), pending[i].first)) visible.push_back(pending[i]);
+        }
+        pending.swap(visible);
+      }
       for (size_t i = 0; i < pending.size(); ++i) {
         uint16_t id = 0;
         {
@@ -420,12 +574,13 @@ bool Server::Impl::handle(Session* session, const Packet& packet) {
       PublishInfo publish;
       if (!parse_publish(packet.flags, packet.body, &publish)) return false;
       const Account account = session->account();
-      if (!allowed_publish(account, publish.topic, session->client_id)) {
+      if (!allowed_publish(account, publish.topic, session->client_id) ||
+          !zone_allows(account, publish.topic)) {
         rejected.fetch_add(1);
         return false;  // the spec says: close the connection
       }
       if (publish.topic == "mt_register/" + session->client_id) {
-        update_device_info(session->client_id, publish.payload);
+        update_device_info(session->client_id, session->user, publish.payload);
       }
       broadcast(publish.topic, publish.payload, publish.retain);
       if (publish.qos == 1) return write_all(session, make_puback(publish.packet_id));
@@ -504,7 +659,9 @@ void Server::Impl::session_loop(std::shared_ptr<Session> session, std::string bu
 
   // ---- the session loop --------------------------------------------------
   while (!session->closed.load()) {
-    if (!flush(session.get())) break;
+    if (!flush(session.get())) {
+      break;
+    }
     char chunk[4096];
     const int n = mbedtls_ssl_read(&session->conn->ssl,
                                    reinterpret_cast<unsigned char*>(chunk), sizeof(chunk));
@@ -527,14 +684,17 @@ void Server::Impl::session_loop(std::shared_ptr<Session> session, std::string bu
         }
       }
       if (session->closed.load()) break;
-    } else if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_TIMEOUT) {
+    } else if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_TIMEOUT ||
+               read_timed_out(n)) {
       // a tick: the keepalive check below still runs
     } else {
       break;
     }
     if (session->keepalive_s > 0) {
       const std::chrono::seconds limit(session->keepalive_s + session->keepalive_s / 2);
-      if (Clock::now() - session->last_rx > limit) break;
+      if (Clock::now() - session->last_rx > limit) {
+        break;
+      }
     }
   }
 
@@ -570,8 +730,31 @@ bool Server::start(const Options& options, std::string* err) {
   impl_->options = options;
   if (!impl_->open_database(options.db_path, err)) return false;
   // Nothing is connected yet: every row in the table is from the previous run.
-  std::lock_guard<std::mutex> lock(impl_->db_mutex);
-  sqlite3_exec(impl_->db, "UPDATE mqtt_devices SET online = 0", nullptr, nullptr, nullptr);
+  std::map<std::string, std::string> known_zones;
+  {
+    std::lock_guard<std::mutex> lock(impl_->db_mutex);
+    sqlite3_exec(impl_->db, "UPDATE mqtt_devices SET online = 0", nullptr, nullptr, nullptr);
+    // The zones of the devices we know: the table survives a broker restart,
+    // the retained registrations do not.
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(impl_->db, "SELECT client_id, COALESCE(oper_name, '') FROM mqtt_devices",
+                           -1, &statement, nullptr) == SQLITE_OK) {
+      while (sqlite3_step(statement) == SQLITE_ROW) {
+        const char* id = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+        const char* zone = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
+        if (!id || !*id) continue;
+        known_zones[id] = (zone && *zone) ? zone : kDefaultZone;
+      }
+      sqlite3_finalize(statement);
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl_->zones_mutex);
+    for (std::map<std::string, std::string>::const_iterator it = known_zones.begin();
+         it != known_zones.end(); ++it) {
+      impl_->zones[it->first] = it->second;
+    }
+  }
   return true;
 }
 

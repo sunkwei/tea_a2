@@ -520,7 +520,9 @@ struct MqttSettings {
   std::string ip;           // the interface IPv4 (a label, not an address)
   std::string mac;          // 12 hex digits, the part that is unique
   std::string client_name;  // "<name>@<ipv4>-<mac>", the topic key
-  std::string ca_bundle;
+  /// The operator account that may command this device. The broker falls back
+  /// to "zonekey" when the name is not an operator account in its database.
+  std::string oper_name = "zonekey";
   /// The tunnel broker the sidecar talks to. Empty means "the MQTT endpoint
   /// above": on the default deployment one a2_broker is both. Set it
   /// explicitly when the MQTT broker is somebody else's (e.g. an EMQX).
