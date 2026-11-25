@@ -387,6 +387,12 @@ class Workspace {
   bool fork_session(const std::string& id, long long message_index, const std::string& title,
                     Session* out, std::string* err) const;
 
+  /// Is agent.md still the untouched template?
+  ///
+  /// A fresh workspace gets one, and it says nothing - so a restore may put
+  /// the other device's experience in its place without losing anything. A
+  /// file with content of its own is not pristine.
+  bool agent_doc_is_pristine() const;
   /// Replace agent.md wholesale. The caller is expected to have compacted it;
   /// a hard byte cap keeps a runaway append from bloating every later prompt.
   bool save_agent_doc(const std::string& content, std::string* err) const;
@@ -434,6 +440,18 @@ class Workspace {
   MemoryWrite add_memory_note(const std::string& text, const std::string& source,
                               std::string* err) const;
   bool delete_memory_note(const std::string& note_id, std::string* err) const;
+  /// Merge notes that came from another device into this workspace's memory.
+  ///
+  /// A note whose id is already here is a **conflict**: the local one wins and
+  /// the other device's version is dropped (not merged in - a restore must not
+  /// rewrite what this device has been using). The caps are enforced
+  /// afterwards, exactly as when a note is added here, and whatever is evicted
+  /// lands in the audit.
+  ///
+  /// Returns how many notes were added; `conflicts` (optional) gets the ids
+  /// that were kept.
+  int import_memory_notes(const std::vector<nlohmann::json>& notes,
+                          std::vector<std::string>* conflicts, std::string* err) const;
   /// The memory block of the system prompt: manual notes first, then strong,
   /// medium (matched against `focus`) and a deterministic sample of the weak
   /// ones. `seed` is stable for a whole UTC day, so a re-run sees the same

@@ -19,6 +19,9 @@ std::vector<ErrorInfo> build_catalog() {
   entries.push_back({"asr_not_configured", 400, false, 0,
                       "there is no speech recognition configured on this machine",
                       "add an `asr:` section to provider.yaml (see docs/api.md)"});
+  entries.push_back({"bad_bundle", 400, false, 0,
+                      "the file is not a workspace bundle",
+                      "export a bundle first (GET /api/workspaces/{id}/bundle) and send that file"});
   entries.push_back({"bad_export", 400, false, 0,
                       "the export cannot be built from this request",
                       "check the format and the ids in the request"});
@@ -175,6 +178,9 @@ std::vector<ErrorInfo> build_catalog() {
   entries.push_back({"too_many_turns", 429, true, 5,
                       "this server is already running as many turns as it allows",
                       "wait for one to finish, then try again"});
+  entries.push_back({"bundle_failed", 500, false, 0,
+                      "the bundle could not be built",
+                      "the message says what went wrong; nothing was changed"});
   entries.push_back({"archive_failed", 500, false, 0,
                       "the archive could not be written",
                       "check the path and the free space"});

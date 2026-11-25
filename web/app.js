@@ -5195,13 +5195,76 @@
     }).then(restore, restore);
   }
 
+  /// 下载这个工作区的「工作区包」：全部主题（会话）+ 每轮的轨迹 + 贴过的图片 +
+  /// 记忆 + agent.md，打成一个 zip。拿到另一台设备上导入，那边的会话列表就多出
+  /// 这些主题，而且 topic id 不变（主题链接还是原来那个）。
+  function downloadWorkspaceBundle() {
+    if (!state.workspace) { toast('请先选择工作区'); return; }
+    var b = $('bundle-download');
+    var label = b.textContent;
+    var restore = function () { b.disabled = false; b.textContent = label; };
+    b.disabled = true; b.textContent = '打包中…';
+    fetch(apiUrl('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/bundle'))
+      .then(function (r) { return r.ok ? r : httpError(r); })
+      .then(function (r) { return saveBlobResponse(r, 'workspace-bundle.zip'); })
+      .then(function (d) {
+        toast('已导出 ' + d.head.name + '（' + fmtBytes(d.blob.size) +
+          (d.head.sessions ? '，' + d.head.sessions + ' 个主题' : '') + '）');
+      }, function (e) {
+        toast('导出失败：' + (e && e.message ? e.message : String(e)));
+      }).then(restore, restore);
+  }
+
+  /// 导入一个工作区包（另一台设备导出的 zip）。
+  ///
+  /// 服务端的规矩是「本地说了算」：本地已有的主题不会被覆盖，报告里说清搬过来
+  /// 几个、留下几个。所以导入同一个包两次，第二次什么也不会变。
+  function importWorkspaceBundle(file) {
+    if (!file || !state.workspace) return;
+    var wsid = state.workspace.id;
+    toast('正在导入 ' + file.name + '…');
+    var reader = new FileReader();
+    reader.onload = function () {
+      fetch(apiUrl('api/workspaces/' + encodeURIComponent(wsid) + '/bundle/import'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        body: reader.result
+      }).then(function (r) {
+        return r.text().then(function (t) {
+          var data = null;
+          try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
+          if (!r.ok) {
+            throw new Error((data && data.error && (data.error.message || data.error.code)) ||
+              ('HTTP ' + r.status));
+          }
+          return data;
+        });
+      }).then(function (d) {
+        var msg = '导入完成：搬过来 ' + (d.sessions || 0) + ' 个主题';
+        if (d.trajectories) msg += '、' + d.trajectories + ' 条轨迹';
+        if (d.images) msg += '、' + d.images + ' 张图片';
+        if (d.notes) msg += '、' + d.notes + ' 条记忆';
+        if (d.sessions_conflict || d.notes_conflict) {
+          msg += '；保留本地 ' + (d.sessions_conflict || 0) + ' 个主题、' +
+            (d.notes_conflict || 0) + ' 条记忆';
+        }
+        toast(msg, 4000);
+        return loadSessions();
+      }, function (e) {
+        toast('导入失败：' + (e && e.message ? e.message : String(e)));
+      });
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
   /// 把一段 fetch 响应存成文件（导出的 HTML、归档 zip 都走这里）。用 blob 而不是让
   /// 浏览器直接打开 URL：服务端报错时能就地说明原因，而不是存下一个 JSON 错误体。
   function saveBlobResponse(r, fallbackName) {
     var head = {
       name: dispositionFilename(r.headers.get('Content-Disposition'), fallbackName),
       entries: r.headers.get('X-Archive-Entries'),
-      skipped: r.headers.get('X-Archive-Skipped')
+      skipped: r.headers.get('X-Archive-Skipped'),
+      sessions: r.headers.get('X-Bundle-Sessions')
     };
     return r.blob().then(function (blob) {
       var objUrl = URL.createObjectURL(blob);
@@ -5501,6 +5564,9 @@
     $('files-revert').disabled = !f.path || !dirty || isImagePath(f.path);
     // 下载的是服务端那个工作区的 .tea_agent_run：没有工作区就没什么可打包。
     $('files-download').disabled = !state.workspace;
+    // 工作区包也一样：它是「这个工作区的全部内容」。
+    $('bundle-download').disabled = !state.workspace;
+    $('bundle-import').disabled = !state.workspace;
     renderFilePane();
   }
   function fileExt(p) { var m = /\.([A-Za-z0-9]+)\s*$/.exec(String(p || '')); return m ? m[1].toLowerCase() : ''; }
@@ -8144,6 +8210,18 @@
     });
     $('files-save').onclick = saveFile;
     $('files-download').onclick = downloadRunArchive;
+    $('bundle-download').onclick = downloadWorkspaceBundle;
+    $('bundle-import').onclick = function () {
+      if (!state.workspace) { toast('请先选择工作区'); return; }
+      var input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.zip,application/zip';
+      input.onchange = function () {
+        var f = input.files && input.files[0];
+        if (f) importWorkspaceBundle(f);
+      };
+      input.click();
+    };
     $('files-revert').onclick = function () {
       state.files.content = state.files.original;
       $('files-editor').value = state.files.original;

@@ -845,6 +845,12 @@ std::string Workspace::load_agent_doc(bool* truncated) const {
   return text;
 }
 
+bool Workspace::agent_doc_is_pristine() const {
+  std::string text;
+  if (!read_file(agent_doc_file(), &text)) return true;  // no file at all
+  return trim(text) == trim(kAgentDocTemplate);
+}
+
 bool Workspace::save_agent_doc(const std::string& content, std::string* err) const {
   StateLock lock(state_mutex());
   if (content.size() > kAgentDocMaxBytes) {
@@ -2889,6 +2895,63 @@ bool Workspace::append_memory_audit(const std::vector<nlohmann::json>& evicted) 
   }
   make_dirs(path_parent(path));
   return write_file_atomic(path, data);
+}
+
+int Workspace::import_memory_notes(const std::vector<nlohmann::json>& incoming,
+                                    std::vector<std::string>* conflicts,
+                                    std::string* err) const {
+  StateLock lock(state_mutex());
+  // The raw notes are kept as they are: a note that came from another device
+  // can carry fields this build does not know, and a restore must not drop
+  // them on the way in.
+  std::vector<nlohmann::json> notes = load_memory(nullptr);
+  std::set<std::string> ids;
+  for (std::size_t i = 0; i < notes.size(); ++i) {
+    const std::string id = memory_str(notes[i], "id");
+    if (!id.empty()) ids.insert(id);
+  }
+  int added = 0;
+  for (std::size_t i = 0; i < incoming.size(); ++i) {
+    if (!incoming[i].is_object()) continue;
+    nlohmann::json note = incoming[i];
+    std::string id = memory_str(note, "id");
+    if (id.empty()) {
+      id = make_id("m");
+      note["id"] = id;
+    }
+    if (ids.count(id) > 0) {
+      // The local note wins: it is the one this device has been using.
+      if (conflicts != nullptr) conflicts->push_back(id);
+      continue;
+    }
+    ids.insert(id);
+    notes.push_back(note);
+    ++added;
+  }
+  if (added == 0) return 0;
+
+  nlohmann::json mem = nlohmann::json::object();
+  mem["notes"] = notes;
+  mem["updated_at"] = now_iso8601();
+  if (!write_file_atomic(memory_file(), dump_json(mem, 2) + "\n", err)) return 0;
+
+  // The caps are the same ones a normal write enforces: too many manual notes
+  // lose the oldest confirmation first, too many agent notes lose the
+  // weakest. What is dropped lands in the audit.
+  std::vector<MemoryNote> loaded = load_memory_notes(nullptr);
+  enforce_memory_caps(&loaded, now_ms());
+  // Written back in their raw form, so the fields this build does not know
+  // stay in the file.
+  std::vector<nlohmann::json> kept;
+  kept.reserve(loaded.size());
+  for (std::size_t i = 0; i < loaded.size(); ++i) {
+    kept.push_back(loaded[i].raw.is_object() ? loaded[i].raw : memory_note_json(loaded[i]));
+  }
+  nlohmann::json mem2 = nlohmann::json::object();
+  mem2["notes"] = kept;
+  mem2["updated_at"] = now_iso8601();
+  if (!write_file_atomic(memory_file(), dump_json(mem2, 2) + "\n", err)) return 0;
+  return added;
 }
 
 bool Workspace::delete_memory_note(const std::string& note_id, std::string* err) const {

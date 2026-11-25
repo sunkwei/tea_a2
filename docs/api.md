@@ -61,6 +61,8 @@
 | `GET` | `/api/destroy` | 预览「销毁」会删除的路径（tea home + 每个工作区的 `.tea_agent_run`），不动任何文件 |
 | `POST` | `/api/destroy` | **不可逆**：删除 tea home 与所有已索引工作区的 `.tea_agent_run`；必须带 `{"confirm":"destroy"}`，否则 400；有轮次在跑时 409 |
 | `GET` | `/api/workspaces/{id}/archive?path=` | 把目录打成 zip 下载（默认 `.tea_agent_run`）；`X-Archive-Entries` / `X-Archive-Skipped` / `X-Archive-Uncompressed` 报打包结果 |
+| `GET` | `/api/workspaces/{id}/bundle` | **工作区包**：这个工作区的全部内容（主题 / 轨迹 / 图片 / 记忆 / `agent.md`）打成一个 zip 下载；`X-Bundle-Sessions` / `X-Bundle-Trajectories` / `X-Bundle-Images` / `X-Bundle-Notes` 报装进去多少。见下「工作区包」 |
+| `POST` | `/api/workspaces/{id}/bundle/import` | **导入工作区包**：body 就是那个 zip。**冲突保留本地**（本地已有的主题、轨迹、记忆都不动），回答里说清搬过来几个、留下几个。见下「工作区包」 |
 | `GET` | `/api/tools` | 工具定义与 JSON Schema（**含 MCP 服务器提供的工具**，名字是 `mcp__<服务器>__<工具>`） |
 | `GET` | `/api/mcp/servers` | 每个 MCP 服务器的状态与它提供的工具：`{configured, enabled, path, file_exists, servers:[{name, command, args, enabled, connected, protocol_version, server_name, tool_count, tools:[…], error}]}`。`path` 是配置文件（和 provider.yaml 同目录的 `mcp.yaml`）；文件不在时 `file_exists:false` |
 | `POST` | `/api/mcp/refresh` | **重新读一遍 `mcp.yaml`** 并把所有 MCP 服务器停掉再启动一遍（改完文件后用），返回同上的状态。文件坏了 → 400 `invalid_mcp_config`（正在跑的服务器不受影响） |
@@ -331,6 +333,71 @@ curl -s http://127.0.0.1:8383/api/workspaces | jq '.workspaces[] | {name, writab
 
 回归：`python tests/smoke_workspace_writable.py`（6 项）、
 `python tests/smoke_workspace_add_warning.py`（13 项）。
+
+### 工作区包：把一个工作区搬到另一台设备
+
+一个**工作区包**是一个 zip，里面是这个工作区的全部对话资料：每个主题（会话）的完整记录、
+每一轮的轨迹、贴进对话里的图片、记忆条目，还有这个工作区的 `agent.md`。拷到另一台设备上
+导入，那边的会话列表就多出这些主题——**id 不变**，主题链接（`?s=…`）还是原来那个。
+
+| 动作 | 接口 | 说明 |
+| --- | --- | --- |
+| 导出 | `GET /api/workspaces/{id}/bundle` | 回答一个 zip（`Content-Disposition: attachment`）；响应头报装进去多少 |
+| 导入 | `POST /api/workspaces/{id}/bundle/import` | body 就是那个 zip；回答一份报告 |
+
+```bash
+# 导出
+curl -s -o ws.zip http://127.0.0.1:8383/api/workspaces/ws_x/bundle
+
+# 导入到另一台设备（同一个包可以导进多台）
+curl -s -X POST --data-binary @ws.zip \
+  -H 'Content-Type: application/zip' \
+  http://127.0.0.1:8383/api/workspaces/ws_y/bundle/import
+# {"ok":true,"sessions":12,"sessions_conflict":0,"trajectories":12,"images":3,
+#  "notes":8,"agent_doc":true,"conflicts":[],"warnings":[]}
+```
+
+**冲突保留本地的**：本地已经有的主题、轨迹、记忆条目**都不动**，报告里说清留了哪些
+（`sessions_conflict` / `notes_conflict` / `conflicts[]`）。所以同一个包导入两次，第二次
+什么也不会变；把 A 设备的主题搬进 B 设备，B 设备自己的同名主题还在。
+
+包里有什么（自己写脚本时按这个来）：
+
+```
+manifest.json              清单：导出时间、工作区、每个主题的元信息
+sessions/<id>.json         主题的完整记录（消息 / 计划 / 摘要 / 产出），与磁盘上逐字节相同
+trajectories/<id>.jsonl    每轮的轨迹（工具名、原始参数、输出）
+images/<topic>/<name>      贴进对话里的图片（消息里只存路径，字节在这里）
+memory.json                记忆条目
+agent.md                   这个工作区的经验
+```
+
+导入时有两处会**改写**（其余逐字节还原）：
+
+- **图片的路径**：消息里存的是「这张图在这台机器上的哪儿」。导入时按本机的位置改写，
+  所以一份从别的设备搬来的包也能用。本地已经有同名但内容不同的图时，导入的那张另存一个
+  名字，两张都在（报告的 `warnings` 里说）。
+- **记忆条目**：按 id 合并，本地有同 id 的就保留本地那份。
+
+`agent.md` 特殊一点：新工作区的 `agent.md` 是**空模板**（什么都没说），这时导入的那份会
+放进去；本地已经有内容了，就保留本地的。
+
+界面上是文件页右上角的「导出工作区包」与「导入工作区包」（见 [用起来](using.md)）。
+
+**同一个格式也有一个独立的命令行工具**：`tools/workspace_bundle.py`（纯标准库，
+设备上有 Python 就能用，不用升级 agent）。它与服务端说的是同一种包——工具导出的包，
+服务端能导入；服务端导出的包，工具能导入：
+
+```bash
+python tools/workspace_bundle.py export /path/to/workspace -o ws.zip
+python tools/workspace_bundle.py inspect ws.zip          # 看看包里有什么
+python tools/workspace_bundle.py import /path/to/other    ws.zip
+```
+
+规矩一样：**本地的数据说了算**（本地已有的主题、轨迹、记忆都不动，报告里说清留了哪些）。
+
+回归：`python tests/smoke_workspace_bundle.py`（49 项，服务端那一半）、
+`python tests/smoke_workspace_bundle_tool.py`（36 项，工具那一半 + 两边互通）。
 
 ## 机器对机器的通道（级联：一台 a2 控制另一台）
 

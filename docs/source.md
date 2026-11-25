@@ -23,6 +23,9 @@ src/
                             都是完全字符串匹配，见 [api.md](api.md#工作区搜索get-ap-workspacesidsearch)；
                             历史搜索见 [api.md](api.md#历史搜索get-ap-workspacesidsessionssearch)；
                             并发写用进程级锁 + 原子替换（见 [并发](workspace.md#并发同一个工作区可以同时跑好几轮)）
+  workspace_bundle.{h,cpp}   工作区包：把一个工作区导成一个 zip（主题 + 轨迹 + 图片 + 记忆 +
+                             agent.md），导入时本地优先（冲突保留本地），
+                             见 [api.md](api.md#工作区包把一个工作区搬到另一台设备)
   html_export.{h,cpp}       会话 → 自包含 HTML（内联 CSS/图片、可导入的 JSON 区块）
   server.{h,cpp}            HTTP 路由、SSE 泵、内置资源；/api/peer/* 是机器对机器的
                             令牌版镜像（级联的对端通道）
@@ -46,7 +49,8 @@ tea_agent.example.yaml         tea_agent.yaml 的模板（设置：输出上限�
 mcp.yaml.example            mcp.yaml 的模板（MCP 服务器：程序、参数、环境变量）
 docs/                       文档：构建、部署、接口、工具、配置、队列、源码、测试
 tools/                      embed_assets.cpp、embed_ca_bundle.cpp、host_embed/（宿主工具子项目）、mock_*.mjs、
-                            merge_work_area.py（把一份 .tea_agent_run 合并进另一份）
+                            merge_work_area.py（把一份 .tea_agent_run 合并进另一份）、
+                            workspace_bundle.py（把工作区打成 zip / 从 zip 还原；与服务端同一个格式）
 tests/mock_mcp_server.py    一个假的 MCP 服务器（stdio 上的 JSON-RPC），用来测 MCP 客户端
 tests/e2e.ps1              端到端测试（157 项）；tests/sse_probe.mjs 严格流客户端
 scripts/                    build.sh / build-mingw.bat /

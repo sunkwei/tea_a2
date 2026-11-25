@@ -262,6 +262,13 @@
               <!-- 把这台设备上、这个工作区的 .tea_agent_run 打成 zip 下载 -->
               <button class="btn" id="files-download" type="button"
                       title="下载该设备上这个工作区的 .tea_agent_run（会话 / 轨迹 / 日志 / 记忆 / agent.md，zip 打包）">下载 .tea_agent_run</button>
+              <!-- 工作区包：这个工作区的全部内容（主题 / 轨迹 / 图片 / 记忆 / agent.md）打成
+                   一个 zip。拿到另一台设备上导入，那边的会话列表就多出这些主题。 -->
+              <button class="btn" id="bundle-download" type="button"
+                      title="导出这个工作区的全部内容（主题 / 轨迹 / 图片 / 记忆 / agent.md，zip 打包）">导出工作区包</button>
+              <!-- 导入别处导出的工作区包。本地已有的主题不会被覆盖（本地说了算）。 -->
+              <button class="btn" id="bundle-import" type="button"
+                      title="导入别处导出的工作区包（本地已有的主题不会被覆盖）">导入工作区包</button>
               <button class="btn hidden" id="files-preview-toggle" type="button">预览</button>
               <button class="btn" id="files-revert" type="button">还原</button>
               <button class="btn primary" id="files-save" type="button">保存</button>

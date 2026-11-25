@@ -132,7 +132,10 @@ python3 tests/smoke_export_html.py                        # 导出会话为单�
 python3 tests/smoke_export_merge.py                        # 导出合并：中断的一轮与接着做完的那一轮并成一条会话
 node tests/ui_session_export.mjs                          # 导出按钮 → 下载 → 离线打开 → 导入（需 google-chrome）
 python3 tests/smoke_run_archive.py                        # 工作区归档下载：真 zip / 沙箱 / 超限跳过
+python3 tests/smoke_workspace_bundle.py                     # 工作区包：导出→另一台设备导入→冲突保留本地
+python3 tests/smoke_workspace_bundle_tool.py                 # 工作区包（独立工具）：导出/导入/本地优先 + 与服务端互通
 node tests/ui_files_download.mjs                          # 文件页「下载」按钮真的产出 zip（需 google-chrome）
+node tests/ui_workspace_bundle.mjs                        # 文件页「导出/导入工作区包」：真的产出 zip / 真的收下 zip（需 google-chrome）
 node tests/ui_workspace_search.mjs                      # 文件页搜索框：结果/点开文件/完全匹配/返回目录（需 google-chrome）
 node tests/ui_history_search.mjs                       # 侧栏历史搜索：结果/跳到命中的那条/Esc 返回（需 google-chrome）
 node tests/ui_stream_guard.mjs                            # 生成期间切换/新建被明确拒绝
@@ -279,6 +282,24 @@ Esc 回到普通会话列表，搜索框同时清空。
 搜不到工作区外面的文件、`path=` 只搜指定子目录、缺 `q` 与未知 `scope` 报 400、未知工作区 404；
 最后用一轮真对话确认 `toolkit_workspace_search` 工具跑得起来、结果里带着命中行号，而且这个工具
 确实出现在给模型的工具表里。
+
+`tests/smoke_workspace_bundle.py` 覆盖「把这个工作区搬到另一台设备」：导出的 zip 里有清单、
+主题文件、轨迹、记忆与 `agent.md`（用 Python 的 `zipfile` 当场拆开看）；导入到**另一个工作区**
+之后，那个主题**逐字节**还原（消息在、id 不变、轨迹文件在、记忆与 `agent.md` 也搬过去了）；
+贴过图片的主题，图片的字节搬过去了，主题里的路径也改写成本机的位置；本地已经有的主题
+**不被覆盖**（第二次导入报告 `sessions_conflict`，本地那份一个字没动）；不是工作区包的
+文件被 400 `bad_bundle` 挡下。
+
+`tests/ui_workspace_bundle.mjs` 在浏览器里点文件页那两个新按钮：导出真的交给浏览器一个 zip
+（`PK\x03\x04`、`application/zip`），toast 说清导出了什么；导入那一步把页面临时建的
+`<input type="file">` 截下来（用 DataTransfer 塞进一个 zip 再派发 change），页面收下文件后
+toast 说「导入完成」并说清**保留本地**了几个主题。
+
+`tests/smoke_workspace_bundle_tool.py` 覆盖独立工具 `tools/workspace_bundle.py`：导出的包里有
+清单、主题、轨迹、图片、记忆与 `agent.md`；导入到另一个工作区后主题**逐字节**还原、侧栏
+索引也更新了；本地已有的主题**不被覆盖**（第二次导入报告冲突，本地那份没动）；最后还
+**两边互通**——工具导出的包服务端能导入（服务端那边的主题列表里出现了它），服务端导出的
+包工具也能导入。
 
 `tests/smoke_workspace_writable.py` 覆盖「工作区读得到、写不进去」：列表里每个工作区都带
 `writable`；普通工作区是 true（而且真的能建会话），被 ACL 拒绝写的工作区是 false，并给出

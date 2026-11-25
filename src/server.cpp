@@ -55,6 +55,7 @@
 #include "usage.h"
 #include "util.h"
 #include "version.h"
+#include "workspace_bundle.h"
 #include "web_assets.h"
 
 namespace tea {
@@ -6550,6 +6551,81 @@ void ApiServer::Impl::install_routes() {
                      " B, ", archive.entries, " entries, ", archive.skipped.size(), " skipped)");
             res.set_content(archive.bytes, "application/zip");
           });
+
+  // ---- workspace bundle ---------------------------------------------------
+  // One ZIP with everything a workspace needs to be *the same workspace* on
+  // another device: every topic (session) with its transcript, the trajectory
+  // of every turn, the pictures that were pasted into the conversations, the
+  // memory notes and the workspace's agent.md.
+  //
+  // The import on the other side keeps whatever is already there: a topic that
+  // exists locally is not overwritten. So a bundle can be carried around and
+  // merged into a device that has data of its own, and importing the same
+  // bundle twice changes nothing the second time.
+  svr.Get(R"(/api/workspaces/([^/]+)/bundle)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const BundleExport bundle = export_workspace_bundle(ws);
+            if (!bundle.ok) {
+              send_error(res, 500, "bundle_failed", bundle.error);
+              return;
+            }
+            const std::string ascii = ascii_archive_name(path_filename(ws.root()), "bundle");
+            res.set_header("Content-Disposition",
+                           "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''" +
+                               rfc5987_name(ascii));
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Access-Control-Allow-Origin", "*");
+            // Lets a caller say what it got without unpacking: how many
+            // topics, trajectories, pictures and notes went in.
+            res.set_header("Access-Control-Expose-Headers",
+                           "Content-Disposition, X-Bundle-Sessions, X-Bundle-Trajectories, "
+                           "X-Bundle-Images, X-Bundle-Notes");
+            res.set_header("X-Bundle-Sessions", std::to_string(bundle.sessions));
+            res.set_header("X-Bundle-Trajectories", std::to_string(bundle.trajectories));
+            res.set_header("X-Bundle-Images", std::to_string(bundle.images));
+            res.set_header("X-Bundle-Notes", std::to_string(bundle.notes));
+            LOG_INFO("bundle: ", ws.id(), " -> ", ascii, " (", bundle.bytes.size(), " B, ",
+                     bundle.sessions, " topic(s))");
+            res.set_content(bundle.bytes, "application/zip");
+          });
+
+  // Import: the body is the .zip file itself. The answer says what was
+  // restored and what was kept, because "the local data wins" means the
+  // caller has to be told which ones those were.
+  svr.Post(R"(/api/workspaces/([^/]+)/bundle/import)",
+           [this](const httplib::Request& req, httplib::Response& res) {
+             Workspace ws;
+             std::string err;
+             if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+               send_error(res, 404, "not_found", err);
+               return;
+             }
+             if (req.body.empty()) {
+               send_error(res, 400, "bad_bundle", "send the .zip file as the body");
+               return;
+             }
+             if (req.body.size() > 256u * 1024u * 1024u) {
+               send_error(res, 413, "too_large", "the bundle must be smaller than 256 MB");
+               return;
+             }
+             BundleImport report;
+             if (!import_workspace_bundle(ws, req.body, &report, &err)) {
+               send_error(res, 400, "bad_bundle", err);
+               return;
+             }
+             nlohmann::json j = report.to_json();
+             j["ok"] = true;
+             j["workspace_id"] = ws.id();
+             LOG_INFO("bundle: imported into ", ws.id(), ": ", report.sessions,
+                      " topic(s) restored, ", report.sessions_conflict, " kept (local)");
+             send_json(res, j);
+           });
 
   // ---- chat (SSE) --------------------------------------------------------
   svr.Post("/api/chat", [this](const httplib::Request& req, httplib::Response& res) {

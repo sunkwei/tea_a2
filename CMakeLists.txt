@@ -489,6 +489,7 @@ set(TEA_SOURCES
   src/mqtt_tunnel.cpp
   src/tools.cpp
   src/workspace.cpp
+  src/workspace_bundle.cpp
   src/role.cpp
   src/role_builtin.cpp
   src/llm.cpp
