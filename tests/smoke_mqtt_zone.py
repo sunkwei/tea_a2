@@ -212,11 +212,24 @@ def zone_of(db, client_id):
         conn.close()
 
 
+def find_broker(argument):
+    """The broker binary, from a build directory or from the agent binary.
+
+    The suite runs every test with the agent binary as the only argument
+    (scripts/test-all.sh), while this test wants the broker: it sits next to
+    the agent in the same build directory.
+    """
+    if os.path.isdir(argument):
+        return find_binary(argument, "a2_broker")
+    beside = os.path.join(os.path.dirname(os.path.abspath(argument)), "a2_broker")
+    return beside if os.path.isfile(beside) else ""
+
+
 def main():
     build = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO_ROOT, "build-mingw")
-    exe = find_binary(build, "a2_broker")
+    exe = find_broker(build)
     if not exe:
-        print("no a2_broker in " + build)
+        print("no a2_broker next to %s" % build)
         return 1
 
     work = tempfile.mkdtemp(prefix="a2-zone-")
