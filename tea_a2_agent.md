@@ -3478,3 +3478,140 @@ planner 被要求的上限）、`tests/smoke_plan_parallel.py`（19：开关、�
 改完要重新 `cp` + `POST /api/mcp/refresh`；队列侧改的是 `sched/task_server.py`，要换
 那份文件再重启队列。P1-2 之后，**旧版 `a2_ext_py`（没有 `roles()` 接口）会让只读任务以
 `read_only_role_missing` 失败**——换二进制/模块时把 `client.py` 一起换。
+
+## HTTP 层的并发天花板：cc_task 能不能救 SSE（2026-11-27 评估）
+
+起因：看了 <https://github.com/ivan7wl/cc_task>（C 写的协程库，栈无关/栈有关两套，
+Apache-2.0），想拿它改进 `3rd/cpp-httplib`。结论先说：
+
+**能进这个仓，但解决不了我们真正的问题。** cc_task 本身没有 HTTP 服务器，它只是协程原语；
+而我们真正的瓶颈不是「线程太贵」，是**每条 SSE 会占住一个 httplib 工作线程直到流结束**，
+到 128 条时整个 API 停止应答。要解决它，要么改 vendored httplib 的写路径（路线 A），
+要么另起一个事件驱动的 SSE 服务（路线 B）。
+
+### 现状：SSE 与普通 API 抢同一个线程池
+
+- `3rd/cpp-httplib/httplib.h` 是 0.61.0。`Server::listen()` 每 accept 一个连接就往线程池
+  投一个任务（`httplib.h:14180`），**整个请求处理（含 chunked 的 provider）都在这个连接
+  线程里跑**（`process_and_close_socket` → `process_server_socket` → `process_request` →
+  `write_response`）。
+- 线程池：`CMakeLists.txt:156` 设 `CPPHTTPLIB_THREAD_POOL_COUNT=32`，上限是它的 4 倍
+  （`CPPHTTPLIB_THREAD_POOL_MAX_COUNT`）= **128 个线程**；超过就不再生线程，连接在队列里
+  排队等一个空闲线程。
+- 四个 SSE 端点全都是 `set_chunked_content_provider` + 阻塞 provider：
+  `src/server.cpp:1492`（chat attach）、`:4005`（llm web）、`:7073`（chat）、`:7298`
+  （turn events）。`ChatTurn::pump()`（`:1399`）在条件变量上等下一帧，最长 15 秒一次心跳。
+- 代码里其实已经写明了这个代价：`src/server.cpp:1209`「Each one pins an HTTP worker
+  thread for as long as it lives」。
+- 上限是自相矛盾的：`max_subscribers_per_turn()`=8（`TEA_AGENT_MAX_SUBSCRIBERS`）×
+  `max_active_turns()`=24（`TEA_AGENT_MAX_ACTIVE_TURNS`）= **192 条可能的 SSE > 128 个线程**。
+- 网页端每个标签页会开：1 条 chat 流（`web/app.js:3402` 用 fetch+getReader）+
+  **每个其它在跑的轮次一条 EventSource**（`web/app.js:1242`）。多标签页 × 并行轮次很容易
+  逼近 128。
+
+### 实测（脚本在 `.tea_agent_run/scripts/http_concurrency_bench/`）
+
+同样的两个接口（`GET /hello`、`GET /stream`），httplib 用 tea_a2 现在的线程池设置：
+
+| 并发 SSE | 线程数 | RSS | `/hello` 延迟 |
+| --- | --- | --- | --- |
+| 100 | 101 | 8.3 MB | 6 ms |
+| 127 | 128 | 9.4 MB | 14 ms |
+| **128** | 129 | 9.2 MB | **超时（>30 s）** |
+| 200 | 129（封顶） | 9.5 MB | **超时**，而且只有 128 条流拿到数据 |
+
+关掉**一条**流，空出一个线程，排队中的 `/hello` 立刻在 0.24 s 内返回。
+也就是说：**SSE 铺满时不是「流变慢」，是整个 API 变哑**——浏览器只会一直转圈。
+
+### cc_task 能不能进这个仓
+
+能，进来的成本很低：
+
+- **许可**：Apache-2.0，与 GPL-3.0-or-later 兼容（单向：Apache-2.0 → GPLv3）。
+  要把 `LICENSE` + `NOTICE` 收进 `3rd/cc_task/`，并在 `docs/license.md`、
+  `docs/source.md` 的表里加一行（和 mbedTLS 一样的处理）。
+- **编译**：它是 C 代码（`cc_task/*.c` + 头文件，共约 2600 行，其中 878 行是各架构的
+  汇编）。用 GCC 12 按项目现有 flag（`-std=gnu17 -Wall -Wextra -Werror`）**零警告**通过。
+  它**不能当 C++ 编**（`CC_NULL` 的 `void*` 转换），但 `CMakeLists.txt:39` 本来就是
+  `LANGUAGES C CXX`，把 `.c` 交给 C 编译器即可。
+- **交叉编译**：mingw-w64 与 aarch64 都能编。**MinGW 上有个坑**：`cc_port.c` 里
+  `cc_port_panic` 是 weak 符号，PE 链接器会把它丢掉 →
+  `undefined reference to cc_port_panic`。自己提供一个 strong 的 `cc_port_panic`
+  就好（README 也是这么建议的）。
+- **它的测试套件**在 GCC 下全过，只有一项过不了：`-Wconditional-uninitialized` 是
+  clang 独有的选项。也就是说**用 GCC 编译时，编译器不会告诉你「你在挂起点之后用了栈上
+  变量」**——栈无关协程最大的坑，少了护栏。
+- **它的价值定位**：它不是「快的协程」，是「小的协程」——单条任务 32 字节、无依赖、不需要
+  C++20。这一点对我们特别重要：项目要兼容 C++14（`CMakeLists.txt:102`），`co_await`
+  用不了；C++20 协程这条路要先把标准抬上去，而 cc_task 绕开了这个前提。
+
+### 原型：把 SSE 换成事件驱动（cc_task + epoll，单线程）
+
+`.tea_agent_run/scripts/http_concurrency_bench/bench_cc.c` 是一个最小原型：epoll +
+cc_task（conventional task，GCC 没有 `-fblocks`），每条连接一个协程，非阻塞读写，
+帧用定时器驱动。两个接口和 httplib 版一样，实测：
+
+| 并发 SSE | 线程数 | RSS | `/hello` 延迟 |
+| --- | --- | --- | --- |
+| 128 | **1** | 2.6 MB | 6 ms |
+| 500 | **1** | 5.6 MB | 110 ms |
+
+500 条流、1 个线程、API 照常应答。对照 httplib 的 128 条就哑。
+
+原型也暴露了真实成本：**协程库只占 2600 行，事件循环的胶水（部分写、背压、定时器、
+连接清理）才是大头**——原型里 epoll 前后处理、定时器扫描、连接链表大约 400 行 C，
+比协程库本身还多。
+
+### 三条路线
+
+**A. 改 vendored httplib，让 SSE 脱离线程池**（同端口，架构不动）
+
+要动的地方（都在我们已经在打补丁的 `3rd/cpp-httplib/httplib.h` 里）：
+`DataSink`（`:1513`）要能表达「暂时没数据」；`ContentProviderWithoutLength`（`:1556`）
+的返回值语义要扩展；`write_content_chunked`（`:8927`）要能中途让出；
+`process_server_socket`（`:6722`）里的 stream 是**栈对象**，要让连接能被挂起就必须把
+socket/stream 的所有权转移出去；`process_and_close_socket`（`:14949`）挂起时不能
+`drain_and_close_socket`。恢复时（新帧到达）再把这条连接交回写线程。
+
+- 成本：400～600 行补丁 + 200 行写循环 + 测试；风险中高（TLS 的 `SSLSocketStream`
+  所有权、keep-alive、httplib 升级时补丁要重打）。
+  注意 SSE 响应**会**被压缩：四个端点都用 `gzip_stream()`（`src/server.cpp:648`）包了
+  一层流式 gzip（浏览器都发 `Accept-Encoding: gzip`），压缩状态在 provider 的
+  `shared_ptr` 里，跟着 provider 一起搬走即可，但写路径上确实多一层状态。
+- 收益：SSE 线程数 → 0。
+
+**B. 另起一个事件驱动的 SSE 服务**（不动 httplib）
+
+把四个 SSE 端点搬到第二个端口的协程服务器（cc_task + epoll，或 C++20 协程），
+httplib 继续只服务普通 API。
+
+- 成本：自己写一小套 HTTP 解析 + chunked + keep-alive；跨端口要处理 CORS（响应里
+  已经有 `Access-Control-Allow-Origin: *`）与鉴权（`EventSource` 不能带自定义 header，
+  token 只能走 query）；端口可达性（防火墙、隧道、运维手册都要跟着改）。
+- 收益：SSE 与 API 彻底隔离；**升级 httplib 不用重打补丁**。
+
+**C. 不改架构，只把失败变好看**（几十行）
+
+1. 把「每轮 8 个订阅者 × 24 个在跑的轮次 = 192」和「线程池 128」对齐：加一个
+   **全局 SSE 上限**，超了立刻返回 503 + `Retry-After`，而不是让连接在队列里排队
+   （排队 = 浏览器无限等待 = 看起来像服务器死了）。
+2. 需要更多容量时先把 `CPPHTTPLIB_THREAD_POOL_COUNT` 调大（线程是贵，但实测 100 条
+   SSE 才 8.3 MB RSS，能扛）。
+3. **前端要配退避，否则 503 会变成压测**：`EventSource` 遇到非 200 响应按规范是
+   「彻底失败」，不会自己重连；本项目的 `es.onerror`（`web/app.js:1250`）直接把流关掉，
+   而并行面板每 2 秒刷新一次又会 `openParallelStream()` 重开（`web/app.js:972`）→
+   服务端越忙，越被 2 秒一次的重试打。快速失败必须配「记住失败、隔一段时间再试」。
+
+### 建议的顺序
+
+1. **先做 C**：它便宜、直击真正的故障形态（「整个 API 变哑」）。这件事跟引不引入
+   cc_task 无关，是本来就该有的护栏。
+2. **真的需要 >100 条并发流时再做 B**：那时 cc_task 才有用武之地——它是 C 的、不依赖
+   C++20、单线程能扛几百条流，正好是「一个专职 SSE 小服务」的形状。（也可以用纯
+   callback + epoll 写，cc_task 只是让代码好看一点。）
+3. **A 只在「不想开第二个端口」时才做**：它是把补丁打进第三方文件里，升级 httplib
+   就要重打，风险最高。
+
+**现在不引入 cc_task 到主二进制**：它解决不了当前的瓶颈（SSE 占线程），而我们真正缺
+的是「SSE 不再和 API 抢线程」这件事本身。原型证明这件事可做（500 条流 / 1 线程），
+但落地是路线 B 的一整套新服务，不是一个库的引入。
