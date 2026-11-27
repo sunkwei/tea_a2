@@ -428,16 +428,16 @@ state   : starting
 state   : ready
 session : 41b457649298c7ef027e6f6aa4567034
 broker  : 203.0.113.10:8382
-listen  : 127.0.0.1:9931
 expires : 1800s
-next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034
+next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034 --port 9931
+          (every tunnel needs its own --port: 9931, 9932, ...)
 ```
 
-照最后一行跑：
+照最后一行跑（**端口自己定**，每条隧道一个）：
 
 ```bash
 a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034 \
-  --broker 203.0.113.10:8382
+  --broker 203.0.113.10:8382 --port 9931
 ```
 
 看到 `sidecar: the data channel is open (client)` 就通了。
@@ -451,15 +451,24 @@ curl -s http://127.0.0.1:9931/api/health
 
 浏览器打开 `http://127.0.0.1:9931/`，就是设备上那台 a2 的界面。
 
-用完关掉：
+用完关掉（**必须带 session**：一台设备上可能同时有 4 条隧道）：
 
 ```bash
 python3 sched/mqtt_cli.py --broker 203.0.113.10:8382 stop \
-  plant-a-01@192.168.1.50-3c7c3f0a1b2c
-# state   : stopped
+  plant-a-01@192.168.1.50-3c7c3f0a1b2c --session 41b457649298c7ef027e6f6aa4567034
+# stopped : 41b457649298c7ef027e6f6aa4567034
 ```
 
 设备侧的 sidecar 会退出；a2 的 MQTT 长连接保持，**隧道不是常开的**。
+
+看一眼这台设备现在有哪几条隧道：
+
+```bash
+python3 sched/mqtt_cli.py --broker 203.0.113.10:8382 status \
+  plant-a-01@192.168.1.50-3c7c3f0a1b2c
+# tunnels :
+#   41b457649298c7ef027e6f6aa4567034  ready     expires in 1732s
+```
 
 ### 2.6 三分钟内容易踩的三个坑
 
@@ -805,27 +814,34 @@ broker 按注册名做 topic ACL：
 
 #### 3.5.6 一台设备上能同时开几条隧道？
 
-**通过 MQTT 召唤：只有一条。** 重复 `wake` 不会起第二个侧载——设备返回**现有的** session
-（`TunnelController::start()` 在状态是 `starting`/`ready` 时直接返回当前状态，
-源码 `src/mqtt_tunnel.cpp:313`）。所以「唤醒第二条」这条路是**不通的**，
-它给的是同一把钥匙。
+**通过 MQTT 召唤：最多 4 条。** 每次 `wake` 都**新建**一条隧道，给一个新的 session 码；
+第 5 次会被拒（`rejected: too_many_tunnels`，回执里带着现在这 4 条）。
+`stop` 必须带 session，所以只能停自己知道的那一条，不影响别人。
 
-**手工在设备上起：可以起多个。** 进程层面没有限制，每个侧载生成自己的房间和 session，
+想要「有就给我、没有才新建」：`wake --reuse`（或 MQTT 的
+`{"action":"tunnel.start","args":{"reuse":true}}`）。
+
+**隧道自己会退。** 连续 **30 分钟**没有任何数据通过，侧载就结束这条隧道（两侧都退），
+broker 上的房间、TURN 分配和中继端口一起放掉；窗口是滑动的，每过一字节重新计时。
+心跳（信令 ping、SSE 的空注释）**不算**数据。改时间：`a2 --mqtt_idle_timeout <秒>`
+（0 = 永不）、侧载的 `--idle-timeout <秒>`。
+
+**手工在设备上起：进程层面没有限制**，每个侧载生成自己的房间和 session，
 互不干扰。但有几个坑：
 
 | 事项 | 说明 |
 | --- | --- |
-| a2 不认识手工起的侧载 | 之后再发 `tunnel.start`，a2 会**再拉起一个**（设备上于是有 2 个 agent 侧载）；`tunnel.stop` 只杀 a2 拉起的那一个，手工起的要自己 `kill` |
+| a2 不认识手工起的侧载 | 之后再发 `tunnel.start`，a2 会**再拉起一个**（设备上于是有 2 个 agent 侧载）；`tunnel.stop` 只杀 session 对应的那一条，手工起的要自己 `kill` |
 | a2 重启/退出 | a2 拉起的侧载会**一起被带走**（Linux 用 `PR_SET_PDEATHSIG`，Windows 用 Job Object 的 `KILL_ON_JOB_CLOSE`）；**手工起的不会**，它会一直等到 `--wait-timeout` 到点自己退出（默认 300 秒；MQTT 拉起的默认 1800 秒） |
-| client 侧端口 | 冲突在**运维机**这边：默认都是 9931，同时开两条要 `--port 9931` / `--port 9932` |
+| client 侧端口 | 冲突在**运维机**这边：默认都是 9931，同时开两条要 `--port 9931` / `--port 9932`（`mqtt_cli.py` **不分配端口**，它只给 session，端口你自己定） |
 | broker 容量 | 每个侧载在 broker 上占 1 条信令连接 + 1 个 TURN 分配 + 1 个中继端口（口径见 [5.3](#53-容量规划)） |
 | 目标 | 手工侧载可以指向不同的 a2（`--target 127.0.0.1:9000`）；MQTT 通道的 target 锁定 a2 自己，不给改 |
 
-**建议**：一台设备一条隧道，用完 `tunnel.stop`。
+**建议**：一台设备一条隧道，用完 `tunnel.stop`（带 session）。
 
-多人同时要用时，各自 `wake` 拿到的是**同一把钥匙**（同一个 session），没有身份区分——
-一个人能做的事别人也能做。要真正的隔离，就给每个人手工起一条（各自 `--port`），
-或者按顺序用。
+多人同时要用时，各自 `wake` 现在拿到的是**各自的 session**（不同的房间，互不顶掉），
+但没有身份区分——一个人能做的事别人也能做，而且他们操作的是**同一个 a2**：
+同一套工作区、同一批会话历史、同一个终端（§3.5.7）。
 
 #### 3.5.7 多人共用一个 session 会发生什么？
 
@@ -848,7 +864,7 @@ replaces the old one）。所以：
 | **没有身份** | session 码就是钥匙（bearer）：谁拿到谁能进，进得去就能驱动 a2（`/api/chat` 不要令牌，终端页就是设备上的 shell） |
 | **查不出是谁** | broker 的 MQTT 服务**不打日志**；设备侧日志只有 `mqtt: command <id> action=tunnel.start`，消息里也没有发布者身份 → 隧道里的操作**无法审计** |
 | **共享同一个 a2 的状态** | 同一套工作区、同一份会话历史、同一批文件、同一个终端：会话列表互相可见，文件改动互相覆盖，终端会互相抢输入 |
-| **互相干扰** | 一个人 `tunnel.stop`（MQTT 的 stop 也是）→ 整条隧道没了，其他人立刻断；一个人让 agent 跑长任务或改文件，另一个人看到的是同一份结果 |
+| **互相干扰** | 多条隧道指向**同一个 a2**：一个人让 agent 跑长任务或改文件，另一个人看到的是同一份结果；MQTT 的 `stop` 现在按 session 停（只停那一条），但手工起的侧载仍要自己 `kill` |
 | **资源上限** | 同一轮最多 8 个订阅者（`TEA_AGENT_MAX_SUBSCRIBERS`）、同时 24 轮（`TEA_AGENT_MAX_ACTIVE_TURNS`）；超了返回 `429 too_many_subscribers` |
 | **带宽与中继** | 客户侧常常只能走 TURN 中继：流量全过 VPS；每个侧载在 broker 上占 1 个分配 + 1 个中继端口 + 1 条信令连接（[5.3](#53-容量规划)） |
 | **泄露面变大** | 码在微信/邮件/群里传来传去；侧载日志里含令牌（它自己会提醒） |
@@ -1563,8 +1579,8 @@ ACL 规则（`src/mqtt_server.cpp`）：
 | `starting` | 已收到，正在拉起侧载 |
 | `ready` | 侧载已就绪，`session` 可用 |
 | `stopping` / `stopped` | 正在停 / 已停 |
-| `failed` | 失败，`error` 说原因（如 `listen_port_in_use`） |
-| `rejected` | 被拒：`unsupported_action` / `expired` / `not_allowed` |
+| `failed` | 失败，`error` 说原因（起不来侧载之类） |
+| `rejected` | 被拒：`unsupported_action` / `expired` / `not_allowed` / `too_many_tunnels` / `session_required` / `unknown_session` |
 | `status` | `status` 命令的回答 |
 
 `status` 回答：
@@ -1619,9 +1635,9 @@ shell 历史。
 ```bash
 python3 sched/mqtt_cli.py list
 python3 sched/mqtt_cli.py list --all --json
-python3 sched/mqtt_cli.py wake  <注册名> [--wait-timeout 1800] [--timeout 60]
-python3 sched/mqtt_cli.py stop  <注册名> [--timeout 30]
-python3 sched/mqtt_cli.py status <注册名> [--timeout 30]
+python3 sched/mqtt_cli.py wake  <注册名> [--reuse] [--wait-timeout 1800] [--timeout 60]
+python3 sched/mqtt_cli.py stop  <注册名> --session <码> [--timeout 30]
+python3 sched/mqtt_cli.py status <注册名> [--session <码>] [--timeout 30]
 ```
 
 `list` 输出：
@@ -1639,9 +1655,17 @@ state   : starting
 state   : ready
 session : 09caefec5f54fb00fde5e11f90714dd7
 broker  : 127.0.0.1:18382
-listen  : 127.0.0.1:9931
 expires : 120s
-next    : a2_tunnel --role client --session 09caefec5f54fb00fde5e11f90714dd7
+next    : a2_tunnel --role client --session 09caefec5f54fb00fde5e11f90714dd7 --port 9931
+          (every tunnel needs its own --port: 9931, 9932, ...)
+```
+
+`status` 输出（不带 `--session` 时是这台设备的**全部**隧道）：
+
+```
+tunnels :
+  09caefec5f54fb00fde5e11f90714dd7  ready     expires in 1732s
+  3b0c7f2ea4d94c1b8f5e6a7d8c9b012  ready     expires in 900s
 ```
 
 `status --json` 输出（**前面会先打一行 `state : status`**，下面是 JSON）：
@@ -1650,9 +1674,12 @@ next    : a2_tunnel --role client --session 09caefec5f54fb00fde5e11f90714dd7
 {
   "id": "status-1795479725-846b",
   "mqtt": "connected",
-  "session": "09caefec5f54fb00fde5e11f90714dd7",
   "state": "status",
-  "tunnel": "ready"
+  "tunnel": "ready",
+  "tunnels": [
+    {"session": "09caefec5f54fb00fde5e11f90714dd7", "state": "ready",
+     "wait_timeout": 1800, "created_at": 1795479725, "expires_in": 1732}
+  ]
 }
 ```
 
@@ -1664,7 +1691,10 @@ next    : a2_tunnel --role client --session 09caefec5f54fb00fde5e11f90714dd7
 | 口令错 | `error: the broker refused the credentials (wrong user or password)`，1 |
 | 没给账号 | `error: --user and --pass are required ...`，1 |
 | 设备不回答 | `error: no answer from x within 60s`，1（`--timeout` 可调） |
-| 设备侧失败 | `state=failed` + `error`（如 `listen_port_in_use`），1 |
+| 设备侧失败 | `state=failed` + `error`，1 |
+| 设备已经有 4 条隧道 | `error: the device already runs 4 tunnels; stop one of them first` + 现有隧道列表，1 |
+| `stop` 忘了 `--session` | `error: --session is required: ...`（本地就拦住了，不发命令），1 |
+| session 不对 | `error: the device does not know that session`，1 |
 | 成功 | 0 |
 
 #### 5.6.4 证书说明
@@ -1858,7 +1888,9 @@ settings:
 | --- | --- |
 | `list` 空 | ②③：设备注册 |
 | `wake` 60s 超时 | ②③④：设备在线但没回执（常见：没 `a2_tunnel`） |
-| `state=failed` + `listen_port_in_use` | ⑤：设备上 9931 被占 |
+| `state=rejected` + `too_many_tunnels` | 设备上已经有 4 条隧道：先 `stop` 一条 |
+| `state=rejected` + `session_required` | `tunnel.stop` 忘了带 session |
+| `state=rejected` + `unknown_session` | session 不对（过期？别的设备的？） |
 | client 起来了但 `bad token` | ④⑤：码过期（重新 wake） |
 | `the data channel` 一直不 open | ⑥⑦：信令/中继端口/网络 |
 | 网页能开但很慢 | ⑦：走中继；正常，可尝试直连或换网络 |
@@ -1936,9 +1968,10 @@ curl -s http://127.0.0.1:8383/api/status | grep -A5 mqtt
 export TEA_MQTT_USER=ops TEA_MQTT_PASS='***'
 python3 sched/mqtt_cli.py --broker 203.0.113.10:8382 list
 python3 sched/mqtt_cli.py wake <注册名> --wait-timeout 1800
-a2_tunnel --role client --session <码> --broker 203.0.113.10:8382
+a2_tunnel --role client --session <码> --broker 203.0.113.10:8382 --port 9931
 curl -s http://127.0.0.1:9931/api/health
-python3 sched/mqtt_cli.py stop <注册名>
+python3 sched/mqtt_cli.py status <注册名>
+python3 sched/mqtt_cli.py stop <注册名> --session <码>
 
 # ---- broker ----
 ~/bin/a2_broker --mqtt --cert-name 203.0.113.10
@@ -2032,7 +2065,7 @@ tea_a2 --mqtt $BROKER \
 ```
 在运维端，查询注册的可管理设备
 ``` bash
-python sched/mqtt_client.py --broker $BROKER \
+python3 sched/mqtt_cli.py --broker $BROKER \
       --user zonekey \
       --pass ddkk1212 \
       list
@@ -2046,7 +2079,7 @@ sunkw_wsl2@172.16.1.219-000000000100           1.8.2    172.16.1.219    00000000
 
 拉起内网平台服务器上的隧道，如果成功，会显示 a2_tunnel --role client --session xxxxxxxxx
 ``` bash
-python sched/mqtt_client.py --broker $BROKER \
+python3 sched/mqtt_cli.py --broker $BROKER \
       --user zonekey \
       --pass ddkk1212 \
       wake <list 中返回的 device_name>
@@ -2057,9 +2090,9 @@ state   : starting
 state   : ready
 session : d8c572b660ca1e36b6d36f5ec880cd04
 broker  : 103.232.92.54:8382
-listen  : 127.0.0.1:9931
 expires : 1800s
-next    : a2_tunnel --role client --session d8c572b660ca1e36b6d36f5ec880cd04
+next    : a2_tunnel --role client --session d8c572b660ca1e36b6d36f5ec880cd04 --port 9931
+          (every tunnel needs its own --port: 9931, 9932, ...)
 ```
 
 本地启动 a2_tunnel --role client --session d8c572b660ca1e36b6d36f5ec880cd04，后，使用浏览器打开 http://localhost:9931 即可打开内网的 a2_agent。

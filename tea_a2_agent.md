@@ -3615,3 +3615,90 @@ httplib 继续只服务普通 API。
 **现在不引入 cc_task 到主二进制**：它解决不了当前的瓶颈（SSE 占线程），而我们真正缺
 的是「SSE 不再和 API 抢线程」这件事本身。原型证明这件事可做（500 条流 / 1 线程），
 但落地是路线 B 的一整套新服务，不是一个库的引入。
+
+---
+
+## MQTT 多隧道 + 隧道空闲自退（2026-11-27）
+
+需求：一台设备上**同时跑多条隧道**（上限 4），每次 `wake` 都新建一条（新的 session），
+`stop` 必须带 session；另加一条 `a2_tunnel --idle-timeout`：**连续 30 分钟没有数据传输
+就自己结束这条隧道**，把 broker 的房间、TURN 分配、中继端口和两端的进程放掉。
+
+### 设备侧：一张表，不是一个实例
+
+`TunnelController` 从「一个侧载」变成「一张表」：
+
+- `entries`：`id → Entry`（`id` 自增，**session 是后来才知道的**，侧载打印出来才有）。
+  所以查隧道有两条路：`find_by_session()`（给 `stop`/`status` 用）和 `list()`（给状态用）。
+- **墓碑**：侧载退出后条目**不立刻删**（否则 `wait_for()` 拿不到最终状态），改成
+  `state=stopped/failed` + `finished_at`，5 分钟后才 prune。`list()` 只吐活着的，
+  所以「已退出的隧道」在列表里看不见（符合需求：查不到就是 `unknown_session`）。
+- 上限 4 数的是**活着的**条目（`starting` 也占名额，因为它已经在拉侧载了）。
+
+**坑（老代码里踩过的）**：读侧载输出的线程不能被新线程覆盖 —— 给一个还 joinable 的
+`std::thread` 赋值会 `std::terminate`（设备日志里那句 "terminate called without an
+active exception" 就是它）。现在这些 reader 线程都存在 `Impl::readers` 这个 vector 里，
+`shutdown()` 时统一 join。
+
+### 命令处理：从一条队列变成一个小池
+
+以前 `CommandHandler` 只有**一个** worker，`tunnel.start` 会阻塞它最多 25 秒（等 session 码）。
+四条隧道一起唤醒时会排队，第 4 条可能撞上 CLI 的 60 秒超时。现在是 **4 个 worker**
+（= 上限的隧道数），谁抢到谁执行。
+
+**命令 id 的幂等必须留着**：MQTT QoS1 是「至少一次」，broker 会重投。同一个 id 重投
+**不能**再起一条隧道（那会白占一个名额）。做法是 `answers[id] → Slot{done, record}`：
+命中就直接回上次的记录，**不执行**。
+
+但注意：**重投时仍然要把回执再发一次** —— 运维可能没收到第一次。幂等的是「不执行」，
+不是「不回答」（第一版把回答也省了，测试直接超时）。
+
+### session 就是句柄
+
+`stop`/`status` 都用 session 定位隧道。带来的后果：
+
+- 别人的 session 一律 `unknown_session`（不能拿别的设备的 session 去停别人的隧道）。
+- `tunnel.stop` 忘了带 session → `rejected: session_required`。
+- **设备侧不监听任何端口**（9931 是客户端侧的），所以回执里那个写死的
+  `"listen": "127.0.0.1:9931"` 字段是误导，删了；`mqtt_cli.py` 改成打印
+  `--port 9931` 的命令模板，端口由使用者自己定（每条隧道一个）。
+
+### 三个计时器，别搞混
+
+| 计时器 | 语义 | 默认 |
+| --- | --- | --- |
+| `--wait-timeout`（侧载） | **等 peer** 的倒计时；隧道一旦打开就不计数了 | 300 秒（MQTT 拉起的是 1800） |
+| `--idle-timeout`（侧载，新增） | 隧道开着但**没有数据** → 整条隧道结束 | 1800 秒 |
+| broker 的 `--peer-idle-timeout` | **信令**静默就丢连接 | 600 秒 |
+
+broker 那个对侧载**实际不触发**：侧载每 30 秒发一次 `{"type":"ping"}`（信令不静默）。
+而且它管的是 broker 上的连接，不是端到端的业务数据。所以「隧道 30 分钟没人用就自己散」
+必须**新做**。
+
+**什么算「有数据」**：数据通道（和屏幕通道）上真正走过去的字节。心跳不算 —— 信令 ping、
+SSE 的空注释行都不算。（a2 自己的 SSE 不发 keepalive，所以「页面开着不动」= 真空闲，
+30 分钟后隧道会断、页面上的流被切断；这是需求要的效果，文档里写明。）
+
+**空闲自退的退出码 = 3**（`src/tunnel_idle.h` 里的 `kIdleExitCode`，两侧共用）。
+设备侧读到 3 就知道是「人走了」而不是「侧载崩了」，`/api/status` 里报成
+`mqtt.last_exit_reason = "idle"`。
+
+### broker 不用改
+
+每个 agent 侧载**每次启动都自己造一个 session**（`room = "s" + session 前 8 位`），
+所以四条隧道就是四个房间，天然隔离。broker 的「一个 agent + 一个 client」规则是
+**按房间**的，所以每条隧道各配一个 client 即可。
+
+### 测试
+
+- `tests/smoke_mqtt_multi.py`：真 broker + 真 a2，24 项 —— 四条并存、第 5 条被拒、
+  stop 按 session、status 列表/单条、命令 id 重投只起一条、`mqtt_cli.py` 的行为。
+- `tests/smoke_tunnel_idle.py`：6 项 —— 没数据的隧道自己退（退出码 3）、
+  `--idle-timeout 0` 不退、有流量的隧道不退。
+
+### 行为变更（发版时要写进 release notes）
+
+1. 重复 `wake` **不再**返回现有 session，而是**新建**一条（旧的语义作废）。
+2. `tunnel.stop` **必须**带 session（旧 CLI 的 `stop <device>` 对新设备会被拒）。
+3. `status` 不带 session 时返回**列表**（以前只有单数形态）。
+4. 回执里没有 `listen` 字段了。

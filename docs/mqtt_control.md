@@ -1,4 +1,4 @@
-# MQTT 控制通道：在内网设备上召唤一条隧道
+# MQTT 控制通道：在内网设备上召唤隧道
 
 > 给运维看的一页纸。设备在内网、没有人守着，也能被召唤出一条到你这边的隧道。
 > 设计定稿见 `docs/tunnel.md` 与需求说明 v1.3；实现是 `src/mqtt_*.{h,cpp}`。
@@ -20,6 +20,10 @@
   TLS 由 broker 自己终结，两者共用同一张证书。老侧载不需要升级。
 - **只做三件事**：`tunnel.start` / `tunnel.stop` / `status`。其它动作一律
   `rejected: unsupported_action`——这条通道永远不是远程命令执行。
+- **一台设备最多 4 条隧道**：每次 `tunnel.start` 都**新建**一条，各有各的 session 码；
+  `tunnel.stop` 用 session 指名道姓地停一条，不影响别的。
+- **隧道会自己退**：连续 30 分钟没有数据传输，侧载就结束这条隧道（两边都退），
+  把 broker 的房间、TURN 分配和中继端口放掉。
 - **不常开**：没有任何隧道时，设备上只有一个 MQTT 长连接；隧道只在被召唤时存在。
 
 ---
@@ -41,6 +45,7 @@ a2 --mqtt 103.232.92.54:8382 \
 | `--mqtt_name` | 只能是 `A-Z a-z 0-9 . _ -`；注册名 = `<name>@<本机网卡 IPv4>-<网卡 MAC>` |
 | `--tunnel-broker` | 隧道 broker；**默认跟随 `--mqtt`**（默认部署里 a2_broker 一个进程既是 MQTT 又是隧道中枢、同一个端口）。MQTT 用客户的 EMQX 时才需要单独给 |
 | `--mqtt_oper_name` | 哪个 operator 账号能管这台设备（默认 `zonekey`）。broker 只认**它自己库里存在的 operator 账号**，没有这个名字就自动落回 `zonekey` |
+| `--mqtt_idle_timeout <秒>` | 被召唤出来的隧道**多久没有数据就自己结束**（默认 1800 = 30 分钟；0 = 永不） |
 
 ### 注册名里的 MAC
 
@@ -104,8 +109,15 @@ broker 在自己的 `mqtt_accounts` 里查这个名字：**必须是 role=operat
 
 ```json
 "mqtt": {"enabled": true, "connected": true, "name": "plant-a-01@192.168.12.12",
-         "tunnel": "stopped", "last_error": ""}
+         "tunnel": "ready",
+         "tunnels": [{"session": "41b457649298c7ef027e6f6aa4567034", "state": "ready",
+                      "wait_timeout": 1800, "created_at": 1764230000, "expires_in": 1732}],
+         "last_exit_reason": "", "last_error": ""}
 ```
+
+`tunnel` 是老字段（还在）：任一条隧道是 `ready` 就是 `ready`，否则 `stopped`。
+`tunnels` 是这台设备上**所有还在跑的隧道**。`last_exit_reason` 说上一条隧道为什么
+结束的（`idle` = 空闲太久自己退了，`stopped` = 被 `tunnel.stop` 停的，`exited` = 侧载自己走了）。
 
 ---
 
@@ -188,23 +200,67 @@ mosquitto_sub -h 103.232.92.54 -p 8382 --cafile ca.pem \
   -u zonekey -P '<secret>' -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/resp' -C 1
 
 # 4. 拿回执里的 session 码，在本机接管
-a2_tunnel --role client --session <码>
+a2_tunnel --role client --session <码> --port 9931
 #    本机多一个 127.0.0.1:9931，浏览器打开就是那台内网 a2
 
-# 5. 用完关掉
+# 5. 用完关掉（必须带 session：说清停哪一条）
 mosquitto_pub ... -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/cmd' \
-  -m '{"id":"c-0002","action":"tunnel.stop"}'
+  -m '{"id":"c-0002","action":"tunnel.stop","args":{"session":"<码>"}}'
+
+# 6. 看这台设备现在有几条隧道
+mosquitto_pub ... -t 'mt_control/plant-a-01@192.168.12.12-3c7c3f0a1b2c/cmd' \
+  -m '{"id":"c-0003","action":"status"}'
 ```
+
+### 端口归你自己定
+
+设备那边**不监听**任何端口（9931 是**客户端侧**的端口）。所以每条隧道在你本机
+都要一个自己的端口：
+
+```bash
+a2_tunnel --role client --session <码1> --port 9931
+a2_tunnel --role client --session <码2> --port 9932
+```
+
+### 空闲 30 分钟，隧道自己散
+
+被召唤出来的隧道**连续 30 分钟一个字节都没过**就会自己结束：两侧的侧载都退出，
+broker 上的房间、TURN 分配和中继端口一起放掉。窗口是滑动的——每过一字节就重新
+开始计时。所以「开着页面不动」也会被回收。
+
+心跳不算数据（信令 ping、SSE 的空注释都不算），只有真正走过去的字节才算。
+
+要改这个时间：`a2 --mqtt_idle_timeout <秒>`（0 = 永不）；侧载自己也能带
+`--idle-timeout <秒>`。
 
 回执长这样：
 
 ```json
 {"id":"c-0001","state":"ready","session":"494e62055f89b321447b49e251598af2",
- "broker":"103.232.92.54:8382","listen":"127.0.0.1:9931","expires_in":1800}
+ "broker":"103.232.92.54:8382","expires_in":1800}
 ```
 
 `state` 的取值：`starting | ready | stopping | stopped | failed | rejected | status`。
-`rejected` 的原因：`unsupported_action | expired | not_allowed`。
+`rejected` 的原因：
+
+| 原因 | 什么时候 |
+|---|---|
+| `unsupported_action` | 动作不认识 |
+| `expired` | 命令太旧（`ttl` 过了） |
+| `not_allowed` | `args.target` 指到了别的地方（通道锁定 a2 自己） |
+| `too_many_tunnels` | 这台设备已经有 4 条隧道了；回执里带 `tunnels` 列出它们 |
+| `session_required` | `tunnel.stop` 没带 `args.session` |
+| `unknown_session` | 这个 session 不是这台设备的 |
+
+`status` 不带 `args.session` 时回的是**全部隧道**：
+
+```json
+{"id":"c-0003","state":"status","mqtt":"connected","tunnel":"ready",
+ "tunnels":[{"session":"41b4...","state":"ready","wait_timeout":1800,
+              "created_at":1764230000,"expires_in":1732}]}
+```
+
+带 `args.session` 时只回那一条（不认识就是 `unknown_session`）。
 
 ---
 
@@ -218,9 +274,11 @@ export TEA_MQTT_PASS='<secret>'       # 放环境变量，不进 ps 历史
 
 python3 sched/mqtt_cli.py list                  # 在线设备（完整注册名）
 python3 sched/mqtt_cli.py list --all --json     # 含离线 + 机器可读
-python3 sched/mqtt_cli.py wake <device_name>    # 召唤隧道，等 session
-python3 sched/mqtt_cli.py status <device_name>
-python3 sched/mqtt_cli.py stop <device_name>
+python3 sched/mqtt_cli.py wake <device_name>    # 召唤一条隧道，等 session
+python3 sched/mqtt_cli.py wake <device_name> --reuse   # 要一条已经在跑的
+python3 sched/mqtt_cli.py status <device_name>          # 这台设备的全部隧道
+python3 sched/mqtt_cli.py status <device_name> --session <码>   # 只看一条
+python3 sched/mqtt_cli.py stop <device_name> --session <码>      # 停一条
 ```
 
 `wake` 的输出：
@@ -231,9 +289,24 @@ state   : starting
 state   : ready
 session : 41b457649298c7ef027e6f6aa4567034
 broker  : 103.232.92.54:8382
-listen  : 127.0.0.1:9931
 expires : 120s
-next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034
+next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034 --port 9931
+          (every tunnel needs its own --port: 9931, 9932, ...)
+```
+
+`status` 的输出：
+
+```
+tunnels :
+  41b457649298c7ef027e6f6aa4567034  ready     expires in 1732s
+  8ac1e0d9b6f24c3f9012de45a7b8c111  ready     expires in 900s
+```
+
+`stop` **必须带 `--session`**：设备上可能同时有四条隧道，不说清楚停哪一条会误伤别人。
+漏了就在本地报错、根本不发命令：
+
+```
+error: --session is required: a device may run several tunnels, so the session says which one to stop
 ```
 
 失败时退出码 1，并说清是哪一类：
@@ -243,16 +316,30 @@ next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034
 | 设备不在线 | `error: device "x" is not online (no retained registration)` |
 | 口令错 | `error: the broker refused the credentials (wrong user or password)` |
 | 没给账号 | `error: --user and --pass are required (this tool has no built-in account)` |
-| 设备起了 sidecar 但失败 | 回执里的 `state=failed` + `error`（例如 `listen_port_in_use`） |
+| 设备起了 sidecar 但失败 | 回执里的 `state=failed` + `error` |
+| 设备已经有 4 条隧道 | `error: the device already runs 4 tunnels; stop one of them first` + 现有隧道列表 |
+| `stop` 忘了 `--session` | `error: --session is required: ...`（本地就拦住了，不发命令） |
+| session 不对 | `error: the device does not know that session` |
 | 设备不回答 | `error: no answer from x within 60s`（`--timeout` 可调） |
 
-重复 `wake` 不会起第二个 sidecar：设备会返回**现有的** session。
+重复 `wake` **会**再起一条隧道（每次都是新的 session 码）——设备上最多 4 条。
+想要「有就给我、没有才新建」就用 `wake --reuse`（或者 MQTT 的
+`{"action":"tunnel.start","args":{"reuse":true}}`）。
+
+第 5 条会被拒，回执里说清楚：
+
+```
+error   : the device already runs 4 tunnels; stop one of them first
+tunnels :
+  41b457649298c7ef027e6f6aa4567034  ready     expires in 1732s
+  ...
+```
 
 > 证书：**不校验**。TLS 只负责加密（broker 的证书是自签的，地址还写在 CN 里），
 > 口令才是门。所以这个工具适合在可信网络里用；公网上有中间人冒充 broker 的风险。
 > 要验证书就用 `a2_tunnel --tls-pin` 那一套，或者自己加。
 
-## 五、安全边界（读一遍再上线）
+## 六、安全边界（读一遍再上线）
 
 | 项 | 说明 |
 |---|---|
@@ -262,15 +349,23 @@ next    : a2_tunnel --role client --session 41b457649298c7ef027e6f6aa4567034
 | 目标端口 | `tunnel.start` 的 `args.target` 默认被忽略（锁定 a2 自己的端口）；想放开需要改代码里的白名单 |
 | 终端 | 不能通过这条通道开 `--target terminal`（那是远端 shell） |
 | 日志 | broker 只记 topic 与结果，**不记 payload**（session 码就是房间钥匙） |
-| 隧道常开？ | 不。`wait_timeout` 到期 sidecar 自己退；`tunnel.stop` 立刻退 |
+| 隧道常开？ | 不。`wait_timeout` 到期 sidecar 自己退；`tunnel.stop` 立刻退；**空闲 30 分钟也自己退** |
+| 一台设备几条隧道 | 最多 4 条同时活着。`stop` 必须带 session，所以只能停自己知道的那一条 |
+| 多条隧道之间 | 共享同一个 a2：同一套工作区、同一批会话历史、同一个终端。谁都能看见别人的操作 |
 
 ---
 
-## 六、自测
+## 七、自测
 
 ```bash
 # 端到端：起真 broker + 真 a2，用纯 Python 的 MQTT 客户端当运维
 python3 .tea_agent_run/scripts/mqtt_e2e.py
+
+# 多隧道：四条并存、第 5 条被拒、stop 按 session、status 列表
+python3 tests/smoke_mqtt_multi.py "$PWD/build"
+
+# 空闲自退：没数据的隧道自己走（退出码 3）、有数据的留着
+python3 tests/smoke_tunnel_idle.py "$PWD/build"
 
 # 既有隧道回归（MQTT 关掉时行为必须一模一样）
 python3 tests/smoke_tunnel.py "$PWD/build"

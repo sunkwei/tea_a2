@@ -340,6 +340,7 @@ a2_tunnel --role client --session <码> --broker 新地址:8382 --tls-pin 3f9a1c
 | `--ca-bundle <pem>` | 无 | **对 broker 没用**（它的证书是自签的）——留着只是为了老的命令行不报错 |
 | `--tls-pin <sha256>` | 无 | broker 证书的指纹，**只看不拦**：对不上会说一声，但不断隧道 |
 | `--wait-timeout <秒>` | 300 | agent 侧等多久没人连就退出（0 = 一直等） |
+| `--idle-timeout <秒>` | 1800 | 隧道连续多久**没有数据**就自己结束（0 = 永不）。窗口是滑动的：每过一字节重新计时；心跳（信令 ping）不算数据 |
 | `--verbose` | 关 | 打印 ICE 的详细日志 |
 | `--version` | — | 打印版本号（`a2_tunnel 1.5.2`），**和 a2 报的是同一个**（版本号只有一处真相：`src/version.cpp`） |
 
@@ -408,6 +409,7 @@ curl -s http://127.0.0.1:9931/api/health
 | 打开 9931 是终端不是 a2 | agent 侧用了 `--target terminal` | 想看 a2 就把它改回 `--target 127.0.0.1:8383` |
 | 端口起来了但连不上 | 隧道还没建好 | 等 `the data channel is open` |
 | 设备上侧载自己退出了 | 5 分钟没人连 | 正常；要一直等着加 `--wait-timeout 0` |
+| 隧道用着用着断了，两边都退了 | 30 分钟没有数据（`--idle-timeout`） | 正常：没人用的隧道自己散掉，把 broker 的房间和中继端口放掉；要一直留着加 `--idle-timeout 0` |
 | 中间断了 | broker 重启 / 网络抖 | **两边都会自己重连**，不用管 |
 | `there is no desktop on this platform` | Linux 上没装截图工具 | 装 `spectacle`（KDE）/ `grim`（wlroots）/ `gnome-screenshot` / `maim` 里任意一个 |
 | 画面能看但鼠标不动 | Linux 上没有 `/dev/uinput` 的写权限 | 把用户加进 `input` 组，或给 udev 规则 |
