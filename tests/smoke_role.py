@@ -144,7 +144,14 @@ class MockProvider(BaseHTTPRequestHandler):
                 last_user = m.get("content") or ""
                 break
         if "SCENARIO=exec_denied" in last_user:
-            self._tool_call("toolkit_exec", {"command": "git push origin main"}, "call_exec")
+            # A force push: every built-in stage fences it, and the command
+            # never reaches the network - a test must never really push.
+            self._tool_call("toolkit_exec", {"command": "git push --force origin main"}, "call_exec")
+        elif "SCENARIO=exec_git_read" in last_user:
+            self._tool_call("toolkit_exec", {"command": "git status"}, "call_exec")
+        elif "SCENARIO=exec_git_add" in last_user:
+            # --dry-run stages nothing: safe to run even in a real repository.
+            self._tool_call("toolkit_exec", {"command": "git add --dry-run ."}, "call_exec")
         elif "SCENARIO=file_write" in last_user:
             self._tool_call("toolkit_file",
                             {"op": "write", "path": "notes.txt", "content": "written"},
@@ -331,13 +338,12 @@ providers:
               by_id.get("analysis", {}).get("name") == "需求分析" and
               by_id.get("ops", {}).get("name") == "运维",
               [r.get("name") for r in (info.get("roles") or [])])
-        check("the analysis stage is read-only",
-              by_id.get("analysis", {}).get("read_only") is True,
-              by_id.get("analysis", {}).get("read_only"))
-        check("the other stages may write",
+        # Every built-in stage may write: the analysis stage produces its
+        # requirement document, the others their design, code and tests.
+        check("no built-in stage is read-only",
               all(by_id.get(k, {}).get("read_only") is False
-                  for k in ("design", "dev", "test", "ops")),
-              [k for k in ("design", "dev", "test", "ops")
+                  for k in ("analysis", "design", "dev", "test", "ops")),
+              [k for k in ("analysis", "design", "dev", "test", "ops")
                if by_id.get(k, {}).get("read_only") is not False])
         # A checklist that names a tool a2 does not have is a checklist the
         # model cannot follow: every name must be a real tool (or a family).
@@ -353,9 +359,22 @@ providers:
                     continue
                 unknown.append(role.get("id") + ":" + name)
         check("every tool the roles name really exists", not unknown, unknown)
-        check("the built-in roles fence the destructive commands",
-              "git push*" in (by_id.get("analysis", {}).get("exec") or {}).get("deny", []),
-              by_id.get("analysis", {}).get("exec"))
+        # The stages that produce work may add, commit and push; the force
+        # push stays fenced. The ops stage may only look at the repository.
+        def deny_of(role_id):
+            return (by_id.get(role_id, {}).get("exec") or {}).get("deny", [])
+
+        stages = ("analysis", "design", "dev", "test")
+        check("the stages that produce work may push",
+              all("git push*" not in deny_of(k) for k in stages),
+              [(k, deny_of(k)) for k in stages])
+        check("the force push stays fenced",
+              all("git push --force*" in deny_of(k) and "git push -f*" in deny_of(k)
+                  for k in stages),
+              [(k, deny_of(k)) for k in stages])
+        check("the ops stage may not change the repository",
+              all(p in deny_of("ops") for p in ("git add*", "git commit*", "git push*")),
+              deny_of("ops"))
 
         # ---- copying a built-in role -----------------------------------------
         # The built-in is a template: the way to get your own version of it is
@@ -474,20 +493,41 @@ providers:
         out = (results.get("toolkit_exec") or {}).get("output") or ""
         check("the fence refuses the command", "fence" in out or "forbids" in out, out[:200])
 
-        # ---- a read-only stage cannot write ----------------------------------
+        # ---- the analysis stage writes its document --------------------------
         call(agent_port, "POST", base + "/role", {"role": "analysis"})
         events = run_turn(agent_port, wid, "file_write")
         results = tool_results(events)
         out = (results.get("toolkit_file") or {}).get("output") or ""
-        check("a read-only stage may not write a file", "read-only" in out, out[:200])
-        check("the file was not created",
-              not os.path.exists(os.path.join(ws_dir, "notes.txt")), ws_dir)
+        check("the analysis stage may write its document", "wrote" in out, out[:200])
+        check("the document is on disk",
+              os.path.exists(os.path.join(ws_dir, "notes.txt")), ws_dir)
 
-        # ---- the analysis stage fences the destructive commands ---------------
+        # ---- a read-only git command is not fenced ---------------------------
+        events = run_turn(agent_port, wid, "exec_git_read")
+        results = tool_results(events)
+        out = (results.get("toolkit_exec") or {}).get("output") or ""
+        check("the analysis stage may run a read-only git command",
+              "fence" not in out and "forbids" not in out, out[:200])
+
+        # ---- the analysis stage fences the force push ------------------------
         events = run_turn(agent_port, wid, "exec_denied")
         results = tool_results(events)
         out = (results.get("toolkit_exec") or {}).get("output") or ""
-        check("the stage fence refuses git push", "fence" in out or "forbids" in out, out[:200])
+        check("the stage fence refuses the force push",
+              "fence" in out or "forbids" in out, out[:200])
+
+        # ---- the ops stage: git is read-only ----------------------------------
+        call(agent_port, "POST", base + "/role", {"role": "ops"})
+        events = run_turn(agent_port, wid, "exec_git_read")
+        results = tool_results(events)
+        out = (results.get("toolkit_exec") or {}).get("output") or ""
+        check("the ops stage may look at the repository",
+              "fence" not in out and "forbids" not in out, out[:200])
+        events = run_turn(agent_port, wid, "exec_git_add")
+        results = tool_results(events)
+        out = (results.get("toolkit_exec") or {}).get("output") or ""
+        check("the ops stage may not change the repository",
+              "fence" in out or "forbids" in out, out[:200])
         call(agent_port, "POST", base + "/role", {"role": "dev"})
 
         # ---- a tool outside the role is refused ------------------------------

@@ -94,6 +94,10 @@ providers:
   // checked below).
   fs.mkdirSync(path.join(tmp, 'proj_a', '.tea_agent_run', 'roles'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'proj_a', '.tea_agent_run', 'roles', 'qa.yaml'), OWN_ROLE);
+  // A read-only stage of the user: none of the built-in stages is read-only
+  // any more, but the badge still has to work for a role the user wrote.
+  fs.writeFileSync(path.join(tmp, 'proj_a', '.tea_agent_run', 'roles', 'ro.yaml'),
+    'name: 调研角色\ndescription: 只能看的阶段\nread_only: true\n');
 
   chrome = await acquireBrowser(tmp, 'chrome', { windowSize: '1440,900' });
 
@@ -160,8 +164,12 @@ providers:
   check('the role list shows the built-in roles',
     p && ['需求分析', '项目设计', '开发', '测试', '运维'].every((n) =>
       p.items.join('|').indexOf(n) >= 0), JSON.stringify(p && p.items));
-  check('the read-only stage is marked',
-    p && p.items.join('|').indexOf('只读') >= 0, JSON.stringify(p && p.items));
+  check('the built-in stages are not marked read-only',
+    p && p.items.filter((t) => t.indexOf('内置') >= 0).every((t) => t.indexOf('只读') < 0),
+    JSON.stringify(p && p.items));
+  check('a read-only stage of the user is marked',
+    p && p.items.some((t) => t.indexOf('调研角色') >= 0 && t.indexOf('只读') >= 0),
+    JSON.stringify(p && p.items));
   check('the built-in roles are marked',
     p && p.items.join('|').indexOf('内置') >= 0, JSON.stringify(p && p.items));
   check('the editor holds the YAML of a role',

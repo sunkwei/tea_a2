@@ -2811,9 +2811,10 @@ video_analyse 那一轮：08:25:54 / 08:27:59 / 08:30:38，每一次的轨迹都
 - `tools:` 白名单。名字要么是工具名，要么是**一族**（结尾一个 `*`）：`mcp__*` 是所有
   MCP 服务器的工具。过滤在 `agent.cpp` 的 `tool_allowed_by()`（原来只有全等比较）。
 - `read_only: true`：文件工具的 write/append/mkdir/delete/move **一律被拒**
-  （`ToolContext::read_only` → `tool_file()`）。「需求分析」这个阶段就是只读的——
-  分析阶段碰不到你的代码，靠的是工具层，不是靠模型记住那句「别改文件」。
-- `exec.deny:`：这个阶段不许跑的命令（`git push`、`rm -rf` 之类）。
+  （`ToolContext::read_only` → `tool_file()`）。这是**机制层**的只读——多 agent 的
+  `ro` 子任务靠它（`readonly` 角色）。内置的五个角色**都不再**用它：2026-11-26 起
+  「需求分析」也能写需求文档了（见下面的复评）。
+- `exec.deny:`：这个阶段不许跑的命令（`git push --force*`、`rm -rf` 之类）。
 
 **几个坑**：
 
@@ -2825,8 +2826,8 @@ video_analyse 那一轮：08:25:54 / 08:27:59 / 08:30:38，每一次的轨迹都
 - **内置角色的 id 用 ASCII**（`analysis` / `design` / `dev` / `test` / `ops`），中文放在
   `name:` 里：id 是文件名，中文文件名在某些文件系统/编码上是雷。
 - **`mcp.yaml` 在 provider.yaml 旁边，不在 tea home 里**（写测试时别搞反）。
-- 回归：`tests/smoke_role.py`（74 项：内置模板、复制、只读阶段、围栏、mcp__* 一族、
-  peer 通道）与 `tests/ui_role.mjs`（23 项，Chrome：内置只读 → 复制 → 可写）。
+- 回归：`tests/smoke_role.py`（内置模板、复制、五个阶段都可写、围栏矩阵、mcp__* 一族、
+  peer 通道）与 `tests/ui_role.mjs`（Chrome：内置模板只读 → 复制 → 可写、只读标记）。
 - **角色占了 run_dir 的字节 → 历史的清理器会把它们算进预算**（`smoke_gc.py` 抓到的）：
   角色是**用户的文件**（跟 `agent.md`、`settings.yaml` 一个性质），清理器不会删它们，
   却会因为它们占地方去删会话。修法：`tree_size(run_dir)` 减去 `tree_size(roles/)`，
@@ -2834,6 +2835,47 @@ video_analyse 那一轮：08:25:54 / 08:27:59 / 08:30:38，每一次的轨迹都
 - **内置角色是模板，不是文件**：所以 `set_current_role()` 不能只认文件（内置角色没有
   文件！）→ 要 `role_has_file(id) || builtin_role_text(id)` 才算数。
   「切换到内置角色」曾经直接 400，就是这个坑。
+
+### 复评：按积累的经验重写五个角色（2026-11-26）
+
+**为什么要改**：五个角色的提示词是 2026-11-13 写的，当时的围栏把 `git push` 全挡了，
+「需求分析」还是只读的。实际用下来三件事对不上：
+
+1. **产出出不了机器**：开发 / 测试 / 设计的成果要人手动推——而「提交和推送照常」正是
+   这套工作流的常态。
+2. **分析阶段的产出只在回答里**：下一阶段（设计）读不到，除非它能写文件。
+3. **踩过的坑没进提示词**：推之前先 `fetch` + `rebase`（远端随时有别的会话推上来的
+   提交）、老失败基线不算回归、测试里写死的日期会过期、替换运行中的二进制要用原子
+   替换 + 回读校验、发版是另一台机器的活——这些一条都没写进去。
+
+**改了什么**（`src/role_builtin.cpp`）：
+
+- **需求分析 / 项目设计 / 开发 / 测试** 四个阶段开放 `git add` / `commit` / `push`；
+  「需求分析」同时去掉 `read_only: true`（它要能写需求文档）；四个统一挡**强推**
+  （`git push --force*` + `git push -f*`）。
+- **运维** 改「git 只读」：能 `status` / `diff` / `log` / `show`，不能 `add` /
+  `commit` / `push` / `pull` / `merge` / `rebase` / `reset` / `checkout` / `switch` /
+  `restore` / `clean` / `stash` / `revert` / `cherry-pick` / `tag`。
+- 工具表跟上真工具：**测试**与**运维**加 `toolkit_load_image`（核对界面截图），
+  **运维**加 `toolkit_peer`（远程 a2）与 `toolkit_fleet`（机群）。
+- 五段提示词按上面的经验重写（每段 ~25 行）：验收标准要可测、改完要跟基线对比、
+  推之前先 `fetch` + `rebase`、只 `git add` 自己的文件、原子替换 + 回读校验、
+  不擅自打包发版。
+
+**几个要注意的机制细节**：
+
+- 围栏是**前缀匹配**（`exec_pattern_matches`，`tools.cpp`）：`git push --force*` 挡住
+  `git push --force origin main`，**挡不住** `git push --force-with-lease …`——
+  那是安全变体，故意放行。
+- 围栏是**声明不是沙箱**：`sudo git push …`、`bash -c 'git push …'`、`git -C dir push`
+  都绕得过去 → 所以提示词里必须写明「先 fetch + rebase、不要 --force」。
+- **需求分析阶段不再有机制层的只读保证**了（原来靠 `read_only: true`），现在只靠
+  提示词「只写需求说明、不改代码」。多 agent 的 `ro` 子任务不受影响：它用的是另一个
+  `readonly` 角色（`read_only: true` 仍在，`tools.cpp:424`）。
+- **测试里有一条真命令要改**：`tests/smoke_role.py` 的 mock 原来发
+  `git push origin main` 来验证「围栏挡住 push」——围栏一撤，这条用例会**真的推一次**。
+  改成 `git push --force origin main`（各角色仍然挡住它），另加两个场景：
+  `git status`（只读 git，四个阶段与运维都放行）和 `git add --dry-run .`（运维挡住）。
 
 ---
 

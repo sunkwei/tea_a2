@@ -245,28 +245,33 @@ Commands this stage must not run: git push *
 
 ### 内置的五个角色
 
-agent 自带五个角色，**工作区第一次打开时写进 `roles/`**（已有文件绝不覆盖，所以改过的
-角色不会被换回去，删掉的也不会长回来）：
+agent 自带五个角色，**它们是程序里的模板，不是工作区里的文件**：工作区只放你自己做的
+角色。要改内置角色，先**复制**一份（`POST /api/workspaces/{id}/roles/{name}/copy`）——
+副本落在 `roles/<新id>.yaml`，是**普通角色**（可写、可删、能当当前角色），显示名带
+「（副本）」；复制拿到的永远是**原始模板**。工作区里有一个与内置角色**同名**的文件时，
+那个文件就是你的版本（盖住模板）；删掉它，模板就回来。内置角色本身**不能删**
+（它不是文件）。
 
 | id | 名字 | 干什么 | 结构化的限制 |
 | --- | --- | --- | --- |
-| `analysis` | 需求分析 | 澄清需求、定义范围、拆用户故事、识别风险与验收标准 | **只读**（文件工具不能写）；围栏挡住 `rm` / `git reset` / `git commit` / `git push` |
-| `design` | 项目设计 | 把已确认的需求变成架构、模块、接口、数据模型与技术方案 | 围栏挡住 `rm -rf` / `git reset` / `git clean` / `git push` |
-| `dev` | 开发 | 按需求与设计实现代码，保证可运行、可读、可测 | 围栏挡住 `git push`；工具表里带 `mcp__*`（扩展层的工具照常用） |
-| `test` | 测试 | 测试计划、用例、执行验证、缺陷报告、回归跟踪 | 围栏挡住 `git push` 与 `git reset --hard` |
-| `ops` | 运维 | 部署、监控、告警、日志、容量、安全与回滚 | 围栏挡住 `git push` |
+| `analysis` | 需求分析 | 澄清需求、定义范围、拆用户故事、识别风险与验收标准 | 能写文件（产出需求说明）、能 `git add/commit/push`；围栏挡住 `rm` / `git reset` / `git clean` 与**强推** |
+| `design` | 项目设计 | 把已确认的需求变成架构、模块、接口、数据模型与技术方案 | 能写文件、能 `git add/commit/push`；围栏挡住 `rm -rf` / `git reset` / `git clean` 与**强推** |
+| `dev` | 开发 | 按需求与设计实现代码，保证可运行、可读、可测 | 能 `git add/commit/push`；围栏只挡**强推**；工具表里带 `mcp__*`（扩展层的工具照常用） |
+| `test` | 测试 | 测试计划、用例、执行验证、缺陷报告、回归跟踪 | 能写测试代码与报告、能 `git add/commit/push`；围栏挡住 `git reset --hard` 与**强推**；工具表里有 `toolkit_load_image`（核对界面截图） |
+| `ops` | 运维 | 部署、监控、告警、日志、容量、安全与回滚 | **git 只读**：能 `status` / `diff` / `log` / `show`，不能 `add` / `commit` / `push` / `pull` / `merge` / `rebase` / `reset` / `checkout` / `stash` / …；工具表里有 `toolkit_load_image`、`toolkit_peer`（远程 a2）、`toolkit_fleet`（机群） |
 
-它们是**普通角色**：想改就改（YAML 就在 `roles/<id>.yaml` 里），想删就删，想加就照着
-写一份新的。每个角色的「工具/能力」清单是按 a2 **真实存在**的工具写的
+每个角色的「工具/能力」清单是按 a2 **真实存在**的工具写的
 （`toolkit_exec` / `toolkit_file` / `toolkit_workspace_search` /
 `toolkit_history_search` / `toolkit_memory` / `toolkit_todo` / `toolkit_task` /
-`toolkit_agent_doc` / `toolkit_load_image` / `toolkit_search` / `toolkit_fetch`），
-写一个 a2 没有的工具，模型是没法照做的。
+`toolkit_agent_doc` / `toolkit_load_image` / `toolkit_search` / `toolkit_fetch` /
+`toolkit_peer` / `toolkit_fleet`），写一个 a2 没有的工具，模型是没法照做的。
 
 > 围栏是**前缀匹配**：模式 `"git push *"` 匹配 `git push origin main`，但**不**匹配
-> `sudo git push …`。围栏是「阶段不许做」的声明，不是沙箱。
+> `sudo git push …`，也**不**匹配 `git push --force-with-lease …`（安全变体，故意放行）。
+> 围栏是「阶段不许做」的声明，不是沙箱 —— 所以提示词里也写明了「推之前先 `fetch` +
+> `rebase`，不要 `--force`」。
 
-回归：`python3 tests/smoke_role.py`（60 项）、`node tests/ui_role.mjs`（19 项）。
+回归：`python3 tests/smoke_role.py`、`node tests/ui_role.mjs`。
 
 ### 只读的工作区：路径在，写不进去
 
