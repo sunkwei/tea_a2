@@ -527,6 +527,9 @@ struct MqttSettings {
   /// above": on the default deployment one a2_broker is both. Set it
   /// explicitly when the MQTT broker is somebody else's (e.g. an EMQX).
   std::string tunnel_broker;
+  /// How long a woken tunnel may carry no traffic before the sidecar gives
+  /// it up (seconds; 0 = never). Handed to the sidecar as --idle-timeout.
+  int idle_timeout = 1800;
 };
 
 struct AppConfig {  std::string path;      // provider.yaml that was loaded

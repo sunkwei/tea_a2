@@ -4,9 +4,14 @@
 """a2 MQTT tools: list the devices that are online, wake a tunnel, read it back.
 
     python3 sched/mqtt_cli.py list [--all] [--json]
-    python3 sched/mqtt_cli.py wake <device_name> [--wait-timeout 1800] [--timeout 60]
-    python3 sched/mqtt_cli.py stop <device_name>
-    python3 sched/mqtt_cli.py status <device_name>
+    python3 sched/mqtt_cli.py wake <device_name> [--reuse] [--wait-timeout 1800] [--timeout 60]
+    python3 sched/mqtt_cli.py stop <device_name> --session <code>
+    python3 sched/mqtt_cli.py status <device_name> [--session <code>]
+
+A device may run several tunnels at the same time (four), so the session
+code is the handle of a tunnel: `wake` makes a new one every time, `stop`
+needs the session of the tunnel it should end, and `status` lists them all
+unless it is given one.
 
 The broker is ours by default (103.232.92.54:8382). Everything can be
 overridden by flags or by the same names in the environment:
@@ -387,18 +392,49 @@ def wait_answer(client, name, command_id, timeout):
                      "broker; check both ends)" % (name, timeout))
 
 
+# What the device says, in words. The codes are the contract; this is only
+# for the operator in front of the terminal.
+ERROR_TEXT = {
+    "too_many_tunnels": "the device already runs 4 tunnels; stop one of them first",
+    "session_required": "the command needs a session",
+    "unknown_session": "the device does not know that session",
+    "not_allowed": "the device refused that target",
+    "unsupported_action": "the device does not know that action",
+    "expired": "the command was too old",
+    "failed": "the device could not do it",
+}
+
+
+def describe_error(code):
+    if not code:
+        return "unknown error"
+    return ERROR_TEXT.get(code, code)
+
+
 def print_tunnel(data):
     session = data.get("session")
     if session:
         print("session : %s" % session)
     if data.get("broker"):
         print("broker  : %s" % data["broker"])
-    if data.get("listen"):
-        print("listen  : %s" % data["listen"])
     if data.get("expires_in"):
         print("expires : %ss" % data["expires_in"])
     if session:
-        print("next    : a2_tunnel --role client --session %s" % session)
+        # The client side listens locally: every tunnel needs its own port,
+        # the default is 9931.
+        print("next    : a2_tunnel --role client --session %s --port 9931" % session)
+        print("          (every tunnel needs its own --port: 9931, 9932, ...)")
+
+
+def print_tunnel_list(tunnels):
+    if not tunnels:
+        print("tunnels : none")
+        return
+    print("tunnels :")
+    for item in tunnels:
+        print("  %-34s %-9s expires in %ss" % (item.get("session", "?"),
+                                                 item.get("state", "?"),
+                                                 item.get("expires_in", "?")))
 
 
 def cmd_wake(args):
@@ -415,7 +451,9 @@ def cmd_wake(args):
         payload = json.dumps({
             "id": command_id,
             "action": "tunnel.start",
-            "args": {"wait_timeout": args.wait_timeout},
+            # Every wake makes a new tunnel; --reuse asks for one that is
+            # already running instead.
+            "args": {"wait_timeout": args.wait_timeout, "reuse": bool(args.reuse)},
             "ts": int(time.time()),
             "ttl": 120,
         })
@@ -424,7 +462,9 @@ def cmd_wake(args):
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2))
         if data.get("state") != "ready":
-            print("error   : %s" % data.get("error", data.get("state")))
+            print("error   : %s" % describe_error(data.get("error", data.get("state"))))
+            if data.get("tunnels"):
+                print_tunnel_list(data["tunnels"])
             return 1
         if not args.json:
             print_tunnel(data)
@@ -433,7 +473,8 @@ def cmd_wake(args):
         client.close()
 
 
-def simple_command(args, action):
+def send_command(args, action, args_payload=None):
+    """Sends one command and waits for its answer."""
     client = build_client(args)
     try:
         client.connect()
@@ -443,19 +484,50 @@ def simple_command(args, action):
         client.subscribe(["mt_control/+/resp"])
         command_id = "%s-%d-%04x" % (action, int(time.time()), random.randint(0, 0xFFFF))
         payload = json.dumps({"id": command_id, "action": action,
+                              "args": args_payload or {},
                               "ts": int(time.time()), "ttl": 120})
         client.publish("mt_control/%s/cmd" % args.device, payload)
-        data = wait_answer(client, args.device, command_id, args.timeout)
-        if args.json:
-            print(json.dumps(data, ensure_ascii=False, indent=2))
-        if data.get("state") in ("failed", "rejected"):
-            print("error   : %s" % data.get("error", data.get("state")))
-            return 1
-        if not args.json and action == "tunnel.stop":
-            print_tunnel(data)
-        return 0
+        return wait_answer(client, args.device, command_id, args.timeout)
     finally:
         client.close()
+
+
+def cmd_stop(args):
+    # A device may run several tunnels: without the session there is no way
+    # to say which one should end.
+    if not args.session:
+        print("error: --session is required: a device may run several tunnels, so the "
+              "session says which one to stop", file=sys.stderr)
+        return 1
+    data = send_command(args, "tunnel.stop", {"session": args.session})
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    if data.get("state") in ("failed", "rejected"):
+        print("error   : %s" % describe_error(data.get("error", data.get("state"))))
+        return 1
+    if not args.json:
+        print("stopped : %s" % args.session)
+    return 0
+
+
+def cmd_status(args):
+    payload = {}
+    if args.session:
+        payload["session"] = args.session
+    data = send_command(args, "status", payload)
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    if data.get("error") == "unknown_session":
+        print("error   : %s" % describe_error("unknown_session"))
+        return 1
+    if data.get("tunnels") is not None:
+        print_tunnel_list(data["tunnels"])
+        return 0
+    print("tunnel  : %s" % data.get("tunnel", "?"))
+    if data.get("session"):
+        print("session : %s" % data["session"])
+    return 0
 
 
 # --------------------------------------------------------------------- main
@@ -513,14 +585,19 @@ def main(argv=None):
                       help="how long the sidecar waits for the client side (default 1800)")
     wake.add_argument("--timeout", type=int, default=60,
                       help="how long to wait for the device to answer (default 60)")
+    wake.add_argument("--reuse", action="store_true",
+                      help="hand out a tunnel that is already running instead of a new one")
 
-    stop = sub.add_parser("stop", help="stop the tunnel on a device", parents=[common])
+    stop = sub.add_parser("stop", help="stop one tunnel on a device", parents=[common])
     stop.add_argument("device")
+    stop.add_argument("--session", help="the session code of the tunnel to stop (required)")
     stop.add_argument("--timeout", type=int, default=30)
 
-    status = sub.add_parser("status", help="ask a device what its tunnel is doing",
+    status = sub.add_parser("status", help="ask a device what its tunnels are doing",
                             parents=[common])
     status.add_argument("device")
+    status.add_argument("--session",
+                        help="ask about this tunnel only (default: every tunnel of the device)")
     status.add_argument("--timeout", type=int, default=30)
 
     args = parser.parse_args(argv)
@@ -534,9 +611,9 @@ def main(argv=None):
         if args.command == "wake":
             return cmd_wake(args)
         if args.command == "stop":
-            return simple_command(args, "tunnel.stop")
+            return cmd_stop(args)
         if args.command == "status":
-            return simple_command(args, "status")
+            return cmd_status(args)
     except MqttError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1

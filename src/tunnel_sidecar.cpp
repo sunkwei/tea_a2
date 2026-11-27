@@ -56,6 +56,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdarg>
@@ -74,6 +75,7 @@
 
 using json = nlohmann::json;
 
+#include "tunnel_idle.h"
 #include "tunnel_net.h"
 #include "tunnel_paths.h"
 #include "tunnel_control_service.h"
@@ -648,6 +650,10 @@ int main(int argc, char** argv) {
   // started on demand (the field staff starts it when access is needed), so
   // the default is five minutes, not "forever".
   int wait_timeout = 300;  // seconds; 0 = wait forever
+  // How long the tunnel may carry no data before the sidecar gives it up.
+  // A tunnel nobody uses still holds a process, a broker room, a TURN
+  // allocation and a relay port. 0 = never.
+  int idle_timeout = 1800;  // seconds
 
   // The role decides who does what: the agent side sits next to the a2 and
   // registers the room, the client side is the one that connects from the
@@ -699,6 +705,8 @@ int main(int argc, char** argv) {
           "                   option is kept so old command lines still work.\n"
           "  --wait-timeout    how long the agent side waits for the peer before giving\n"
           "                   up (default 300 seconds; 0 = wait forever)\n"
+          "  --idle-timeout    how long the tunnel may carry no data before this side\n"
+          "                   gives it up (default 1800 seconds; 0 = never)\n"
           "  --viewer-port <n> the port the browser opens on the control side\n"
           "                     (default 9932)\n"
           "  --width <n>       the widest picture the desktop role hands out\n"
@@ -804,6 +812,7 @@ int main(int argc, char** argv) {
     else if (a == "--tls-pin") tls_pin = next();
     else if (a == "--ice-relay-only") relay_only = true;
     else if (a == "--wait-timeout") wait_timeout = std::atoi(next().c_str());
+    else if (a == "--idle-timeout") idle_timeout = std::atoi(next().c_str());
     else if (a == "--tls") use_tls = true;
     else if (a == "--no-tls") use_tls = false;
     else if (a == "--verbose") verbose = true;
@@ -981,8 +990,19 @@ int main(int argc, char** argv) {
   // a fresh negotiation, and setup_pc() is defined further down.
   std::function<void()> rebuild_tunnel;
 
+  // When the tunnel last carried something. The idle watchdog reads it: a
+  // tunnel that carries no data for a long time is a tunnel nobody uses.
+  auto now_ms = []() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
+  auto last_activity = std::make_shared<std::atomic<long long>>(now_ms());
+  auto note_activity = [last_activity, now_ms]() { last_activity->store(now_ms()); };
+
   auto send_frame = [&](unsigned char type, const std::string& payload) {
     if (!dc) return;
+    note_activity();
     const std::string bytes = frame(type, payload);
     rtc::binary out;
     out.reserve(bytes.size());
@@ -998,6 +1018,7 @@ int main(int argc, char** argv) {
   // keyboard the other.
   auto send_screen_frame = [&](unsigned char type, const std::string& payload) {
     if (!screen_dc) return;
+    note_activity();
     const std::string bytes = frame(type, payload);
     rtc::binary out;
     out.reserve(bytes.size());
@@ -1069,6 +1090,7 @@ int main(int argc, char** argv) {
     channel->onMessage([&, gen](std::variant<rtc::binary, std::string> msg) {
       if (gen != pc_gen) return;
       if (!std::holds_alternative<rtc::binary>(msg)) return;
+      note_activity();
       const rtc::binary& bytes = std::get<rtc::binary>(msg);
       if (bytes.size() < 5) return;
       const char* p = reinterpret_cast<const char*>(bytes.data());
@@ -1258,6 +1280,7 @@ int main(int argc, char** argv) {
     channel->onMessage([&, gen](std::variant<rtc::binary, std::string> msg) {
       if (gen != pc_gen) return;
       if (!std::holds_alternative<rtc::binary>(msg)) return;
+      note_activity();
       const rtc::binary& bytes = std::get<rtc::binary>(msg);
       if (bytes.size() < 5) return;
       const char* p = reinterpret_cast<const char*>(bytes.data());
@@ -1634,6 +1657,34 @@ int main(int argc, char** argv) {
       }
     }
   }).detach();
+
+  // ---- how long may the tunnel stay idle? --------------------------------
+  // A tunnel nobody uses still holds a process, a broker room, a TURN
+  // allocation and a relay port. After --idle-timeout seconds without a
+  // single byte of traffic the sidecar gives it up and says why. The window
+  // slides: every byte that goes through the tunnel starts it over.
+  {
+    const int idle_seconds = idle_timeout > 0 ? idle_timeout : 0;
+    auto activity = last_activity;
+    std::thread([idle_seconds, activity, now_ms]() {
+      // The check runs often enough to be precise about a short timeout and
+      // rarely enough not to wake the machine up for nothing.
+      const int tick = idle_seconds > 0 ? std::min(15, std::max(1, idle_seconds / 4)) : 15;
+      while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(tick));
+        if (idle_seconds <= 0) continue;
+        const long long idle = (now_ms() - activity->load()) / 1000;
+        if (idle < idle_seconds) continue;
+        log_line("sidecar: no data for %llds, giving up\n", static_cast<long long>(idle));
+        std::fprintf(stderr, "  The tunnel carried no data for %llds; exiting.\n",
+                     static_cast<long long>(idle));
+        std::fflush(stderr);
+        // A clean exit with the code the other end reads as "idle": it tells
+        // "the operator walked away" apart from "the sidecar crashed".
+        std::_Exit(tea_tunnel::kIdleExitCode);
+      }
+    }).detach();
+  }
 
   // --host and --port win over the parts of --listen, whatever the order was.
   {

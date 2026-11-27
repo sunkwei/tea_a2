@@ -3632,11 +3632,29 @@ void ApiServer::Impl::install_routes() {
     {
       nlohmann::json mqtt_status;
       if (mqtt) {
-        const TunnelController::Status tunnel = mqtt->tunnel.status();
         mqtt_status["enabled"] = true;
         mqtt_status["connected"] = mqtt->client.connected();
         mqtt_status["name"] = mqtt->client.client_id();
-        mqtt_status["tunnel"] = tunnel.state.empty() ? std::string("stopped") : tunnel.state;
+        // One device may run several tunnels; the old single field stays and
+        // says whether any of them is up.
+        const std::vector<TunnelController::TunnelInfo> tunnels = mqtt->tunnel.list();
+        const long long now = static_cast<long long>(std::time(nullptr));
+        bool any_ready = false;
+        nlohmann::json array = nlohmann::json::array();
+        for (std::vector<TunnelController::TunnelInfo>::const_iterator it = tunnels.begin();
+             it != tunnels.end(); ++it) {
+          if (it->state == "ready") any_ready = true;
+          nlohmann::json item;
+          item["session"] = it->session;
+          item["state"] = it->state;
+          item["wait_timeout"] = it->wait_timeout;
+          item["created_at"] = it->created_at;
+          item["expires_in"] = it->expires_at > now ? it->expires_at - now : 0;
+          array.push_back(item);
+        }
+        mqtt_status["tunnels"] = array;
+        mqtt_status["tunnel"] = any_ready ? std::string("ready") : std::string("stopped");
+        mqtt_status["last_exit_reason"] = mqtt->tunnel.last_exit_reason();
         mqtt_status["last_error"] = mqtt->client.last_error();
       } else {
         mqtt_status["enabled"] = false;
@@ -8098,6 +8116,9 @@ bool ApiServer::start(const ServerOptions& options, std::string* err) {
 #endif
     const std::string target = "127.0.0.1:" + std::to_string(options_.port);
     impl_->mqtt->tunnel.configure(sidecar, target);
+    // A tunnel nobody uses gives up on its own; the sidecar is told how long
+    // it may sit there without traffic.
+    impl_->mqtt->tunnel.set_idle_timeout(settings.idle_timeout);
 
     CommandHandler::Options handler_options;
     handler_options.resp_topic = "mt_control/" + settings.client_name + "/resp";

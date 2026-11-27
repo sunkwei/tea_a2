@@ -285,6 +285,9 @@ void print_usage() {
                   "                             account there)\n"
                   "  --tunnel-broker <host:port> where the sidecar connects (default: the\n"
                   "                             MQTT endpoint above; may differ from it)\n"
+                  "  --mqtt_idle_timeout <s>    how long a woken tunnel may carry no\n"
+                  "                             traffic before it gives up (default 1800;\n"
+                  "                             0 = never)\n"
                   "  --print-registration       print the registration name and exit\n"
                   "\n"
                   "Workspaces\n"
@@ -732,6 +735,19 @@ int tea_agent_main(int argc, char** argv) {
     mqtt.oper_name = args.get("mqtt_oper_name");
     if (mqtt.oper_name.empty()) mqtt.oper_name = args.get("mqtt-oper-name");
     if (mqtt.oper_name.empty()) mqtt.oper_name = "zonekey";
+    // How long a woken tunnel may stay idle before the sidecar gives it up.
+    {
+      const std::string idle = args.get("mqtt_idle_timeout");
+      if (!idle.empty()) {
+        try {
+          mqtt.idle_timeout = std::stoi(idle);
+        } catch (const std::exception&) {
+          console_write_line("error: --mqtt_idle_timeout must be a number of seconds");
+          return 1;
+        }
+        if (mqtt.idle_timeout < 0) mqtt.idle_timeout = 0;
+      }
+    }
 
     const bool asked = !mqtt.host.empty() || !mqtt.user.empty() || !mqtt.password.empty() ||
                        !mqtt.name.empty();

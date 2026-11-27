@@ -75,6 +75,10 @@ HTTP 引擎、可用工具、工作区列表。地址那行就是要打开的。
 内网设备没人守着也能被召唤出一条隧道：a2 注册到一个 `a2_broker`，运维在对面
 发 `tunnel.start`，设备自己拉起 `a2_tunnel`，把 session 码回执过去。
 
+一台设备**最多同时 4 条隧道**：每次 `tunnel.start` 都新建一条（新的 session 码），
+`stop` 必须带 session 才停得掉指定的那一条。隧道连续 30 分钟没有数据会**自己结束**
+（`--mqtt_idle_timeout` 改这个时间，0 = 永不）。
+
 | 参数 | 作用 | 默认 |
 | --- | --- | --- |
 | `--mqtt <host:port>` | 启用控制通道，连这个 broker（**只接受 TLS**） | 不启用 |
@@ -83,6 +87,7 @@ HTTP 引擎、可用工具、工作区列表。地址那行就是要打开的。
 | `--mqtt_name <name>` | 名字；注册名是 `<name>@<IPv4>-<MAC>`（MAC 取默认路由网卡） | — |
 | `--mqtt_oper_name <name>` | 哪个 operator 账号能管这台设备（broker 那边没有这个名字就落回 `zonekey`） | `zonekey` |
 | `--tunnel-broker <host:port>` | 侧载连的隧道 broker（**默认跟随 `--mqtt`**；MQTT 用别的 broker 时才需要给） | 同 `--mqtt` |
+| `--mqtt_idle_timeout <秒>` | 被召唤出来的隧道**多久没有数据就自己结束**（0 = 永不） | 1800 |
 | `--print-registration` | 只打印注册名就退出，部署时用它填 `mqtt_accounts.device_name` | — |
 
 四个 `--mqtt*` 必须同时给；缺一个只报错、不启用控制通道。注册名变了（换网卡）
