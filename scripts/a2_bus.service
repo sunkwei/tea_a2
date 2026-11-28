@@ -1,0 +1,30 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装：
+# 它会把这几个单元装到 ~/.config/systemd/user/ 并把仓库路径换掉。
+#
+# 消息平台：发布/订阅（docs/message-platform.md）。
+#   * 发布：POST /api/publish；订阅：GET /api/subscribe（SSE，带 since）
+#   * 窗口 1000 条 / 60 分钟、retained 各一条 - 只在内存里，重启就清空
+#   * 只听 127.0.0.1，token 在 ~/.tea_agent/bus/token（0600）
+# 先起它，再起 a2_bus_pump / a2_router / a2_watchdog；它们各自重连，顺序不是硬依赖。
+[Unit]
+Description=tea_a2 message platform (publish/subscribe over HTTP)
+Documentation=file://%h/work/git/tea_a2/docs/message-platform.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/bus_server.py
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+StandardOutput=append:%h/.tea_agent/logs/a2_bus.log
+StandardError=append:%h/.tea_agent/logs/a2_bus.log
+
+[Install]
+WantedBy=default.target

@@ -22,7 +22,7 @@ esc=$(printf '%s' "$repo" | sed -e 's/[&|]/\\&/g')
 
 # a2_wechat@ is the template unit: one instance per WeChat account
 # (a2_wechat@alice.service). a2_wechat_pair is the pairing page.
-for unit in a2 a2_task a2_wechat 'a2_wechat@' a2_wechat_mul a2_wechat_pair a2_telegram a2_fleet a2_fleet_collect a2_watchdog a2_router; do
+for unit in a2 a2_task a2_bus a2_bus_pump a2_wechat 'a2_wechat@' a2_wechat_mul a2_wechat_pair a2_telegram a2_fleet a2_fleet_collect a2_watchdog a2_router; do
     src="scripts/$unit.service"
     [ -f "$src" ] || continue
     out="$dest/$unit.service"
@@ -52,6 +52,7 @@ fi
 systemctl --user daemon-reload
 echo ""
 echo "now: systemctl --user enable --now a2 a2_task a2_wechat a2_telegram a2_watchdog a2_router"
+echo "     systemctl --user enable --now a2_bus a2_bus_pump     # the message platform + its bridge"
 echo "     systemctl --user enable --now a2_wechat_pair          # the pairing page"
 echo "     systemctl --user enable --now a2_wechat_mul           # every account in one process"
 echo "     systemctl --user start a2_wechat@alice               # one account"

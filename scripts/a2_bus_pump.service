@@ -1,0 +1,31 @@
+# 模板：路径里的 %h 是「运行这个单元的用户的主目录」，所以这份文件跟机器无关。
+# 仓库不在 ~/work/git/tea_a2 的话，用 scripts/install-units.sh [仓库路径] 装。
+#
+# 桥接：把队列事件流里能映射的那三种（task_created / task_done / task_failed）
+# 发布到消息平台，别人从平台上看活儿在怎么走（docs/message-platform.md FR-07）。
+#   * 队列事件流没有 since：它断过的那段时间补不了，缺口记在
+#     ~/.tea_agent/bus/pump-state.json，`bus_pump.py --status` 能看到
+#   * 它挂了不影响队列和 router；队列是事实源，平台只是分发
+[Unit]
+Description=tea_a2 bus pump (queue events onto the message platform)
+Documentation=file://%h/work/git/tea_a2/docs/message-platform.md
+After=network-online.target
+Wants=network-online.target
+After=a2_bus.service a2_task.service
+Wants=a2_bus.service a2_task.service
+
+[Service]
+Type=exec
+ExecStartPre=/bin/mkdir -p %h/.tea_agent/logs
+ExecStart=/usr/bin/env python3 %h/work/git/tea_a2/sched/bus_pump.py
+WorkingDirectory=%h/work/git/tea_a2
+Environment=HOME=%h
+Environment=LANG=zh_CN.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10s
+StandardOutput=append:%h/.tea_agent/logs/a2_bus_pump.log
+StandardError=append:%h/.tea_agent/logs/a2_bus_pump.log
+
+[Install]
+WantedBy=default.target
