@@ -9,7 +9,8 @@
 #   bus       sched\bus_server.py    publish / subscribe (127.0.0.1:8299)
 #   bus_pump  sched\bus_pump.py      queue events -> the platform
 #   router    sched\router.py        --bus <BusUrl>   (speech + heartbeat)
-#   watchdog  sched\watchdog.py      --bus <BusUrl>   (heartbeats -> alerts)
+#   watchdog  sched\watchdog.py      --bus <BusUrl>   (heartbeats -> alerts:
+#                                    router_missing, pump_missing, bus_missing)
 #
 #   pwsh -File scripts/install-bus-autostart.ps1 -All              # register all four
 #   pwsh -File scripts/install-bus-autostart.ps1 -Name bus,router  # just these
@@ -57,7 +58,7 @@ $components = [ordered]@{
     bus      = @{ Script = 'sched\bus_server.py'; Args = @() }
     bus_pump = @{ Script = 'sched\bus_pump.py'; Args = @() }
     router   = @{ Script = 'sched\router.py'; Args = @('--bus', $BusUrl) }
-    watchdog = @{ Script = 'sched\watchdog.py'; Args = @('--bus', $BusUrl, '--expect-heartbeat', 'a2/heartbeat/router') }
+    watchdog = @{ Script = 'sched\watchdog.py'; Args = @('--bus', $BusUrl, '--expect-heartbeat', 'a2/heartbeat/router', '--expect-heartbeat', 'a2/heartbeat/pump') }
 }
 
 function Get-LauncherDir {

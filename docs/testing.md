@@ -95,9 +95,9 @@ python3 tests/smoke_watchdog.py                             # 看门狗：卡住
 python3 tests/smoke_triggers.py                            # 触发器入口：规则先于模型 / 去重 / 线索 / 老路仍然能排任务
 python3 tests/smoke_router.py                             # Router：线索记住每一步 / 下一个任务被告知之前发生了什么 / 旧进展收拢成摘要
 python3 tests/smoke_bus.py                                # 消息平台：发布/订阅、幂等、窗口、gap、慢订阅者、token、端口冲突、重启
-python3 tests/smoke_bus_pump.py                           # 桥接：三种映射、去重、跳过不能映射的、队列断开记缺口再续上
+python3 tests/smoke_bus_pump.py                           # 桥接：三种映射、去重、跳过不能映射的、队列断开记缺口再续上、心跳说连接状态
 python3 tests/smoke_bus_router.py                         # router 上平台：说的话、心跳、平台挂了照常说话
-python3 tests/smoke_bus_watchdog.py                       # 看门狗上平台：谁不跳了、告警三处一致、冷却、平台挂了仍写审计
+python3 tests/smoke_bus_watchdog.py                       # 看门狗上平台：谁不跳了（router/channel/pump）、告警三处一致、冷却、平台挂了仍写审计
 python3 tests/smoke_channel_heartbeat.py                  # 聊天前端心跳：不配 --bus 不起线程，配了一次心跳
 python3 tests/smoke_bus_e2e.py                            # 端到端：队列事件 -> router 说话 -> 平台 -> 杀掉 router 报 router_missing
 python3 tests/smoke_fleet_tasks.py                        # 任务跑在设备上：target=fleet / 设备的回答收成结果 / 没答上来的设备也在结果里

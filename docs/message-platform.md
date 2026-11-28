@@ -64,7 +64,7 @@ Q1~Q9 全部拍板：Q1 / Q2 / Q7 见 §2.4，其余见 §2.5；一页看完在 
 | 问题 | 结论 | 落地时要看到 |
 |---|---|---|
 | **Q3 桥接** | **独立进程**（`sched/bus_pump.py`：订阅队列 SSE → 发布到平台） | 它挂了不影响队列与 router；恢复后从最后一条续 |
-| **Q4 topic 命名** | **`a2/<来源>/<种类>`** | 固定名单：`a2/queue/task`、`a2/queue/task_done`、`a2/queue/task_failed`、`a2/router/speech`、`a2/watchdog/alert`、`a2/heartbeat/{router,watchdog,bus,channel}`；新增 topic 必须登记在这里 |
+| **Q4 topic 命名** | **`a2/<来源>/<种类>`** | 固定名单：`a2/queue/task`、`a2/queue/task_done`、`a2/queue/task_failed`、`a2/router/speech`、`a2/watchdog/alert`、`a2/heartbeat/{router,watchdog,bus,channel,pump}`；新增 topic 必须登记在这里 |
 | **Q5 认证** | **本机 token 一份**（tea home 里，0600），只监听 `127.0.0.1` | 无 token → 401；`/health` 只读免鉴权 |
 | **Q6 窗口与保留** | **1000 条 / 60 分钟，不落盘** | 重启后窗口与 retain **都清空**；`/health` 与文档都要写清「补不了」 |
 | **Q8 多机** | **先只本机** | 接口留余地（`--host` + token）；TLS 与多机认证不在这一版 |
@@ -105,6 +105,7 @@ Q1~Q9 全部拍板：Q1 / Q2 / Q7 见 §2.4，其余见 §2.5；一页看完在 
 | **since** | 订阅起点（最后收到的消息 id）；用于断线重连。 |
 | **窗口** | 平台保留的最近 N 条 / T 分钟，超出即过期。 |
 | **retain** | 该 topic 只保留最后一条（状态类消息用，例如 `a2/heartbeat/router`）。 |
+| **pump_missing** | 桥接的 `a2/heartbeat/pump` 超时没来：桥接死了。它在 Q4 的固定名单里（2026-11-28 补登记）——原来的名单漏了它，于是桥接死了没人知道。 |
 
 ---
 
@@ -241,7 +242,7 @@ Q1~Q9 全部拍板：Q1 / Q2 / Q7 见 §2.4，其余见 §2.5；一页看完在 
 
 | 编号 | 验收标准 | 在哪验 |
 |---|---|---|
-| AC-09.1 | watchdog 订阅 `a2/heartbeat/#`；某组件心跳超阈值 → 判出 `router_missing` / `channel_missing` / `bus_missing` | 计划用例 |
+| AC-09.1 | watchdog 订阅 `a2/heartbeat/#`；某组件心跳超阈值 → 判出 `router_missing` / `channel_missing` / `pump_missing` / `bus_missing` | 计划用例 |
 | AC-09.2 | 一条告警**同时**出现在三处：平台（`a2/watchdog/alert`）、`audit.jsonl`、现有渠道事件流；三处的检查名/对象/原因一致 | 同上 |
 | AC-09.3 | 同一条告警（同检查 + 同对象）在冷却窗口（默认 10 分钟）内只发一次 | 同上 |
 | AC-09.4 | 平台不在时 watchdog **仍然**巡检队列与 agent，告警写文件（不能因为平台挂了就全哑） | 同上 |

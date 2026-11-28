@@ -78,6 +78,7 @@ CHECK_OF_HEARTBEAT = {
     "a2/heartbeat/watchdog": "watchdog_missing",
     "a2/heartbeat/bus": "bus_missing",
     "a2/heartbeat/channel": "channel_missing",
+    "a2/heartbeat/pump": "pump_missing",
 }
 
 # The model check: is the worker still going the right way? The verdict is

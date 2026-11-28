@@ -39,6 +39,7 @@ except ImportError:  # Python 3.6
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUS = os.path.join(REPO_ROOT, "sched", "bus_server.py")
 ROUTER = os.path.join(REPO_ROOT, "sched", "router.py")
+PUMP = os.path.join(REPO_ROOT, "sched", "bus_pump.py")
 WATCHDOG = os.path.join(REPO_ROOT, "sched", "watchdog.py")
 
 
@@ -274,7 +275,9 @@ def main():
     data = os.path.join(tmp, "bus")
     router_dir = os.path.join(tmp, "router")
     wd_dir = os.path.join(tmp, "watchdog")
+    pump_dir = os.path.join(tmp, "pump")
     os.makedirs(data)
+    os.makedirs(pump_dir)
     bus_port = free_port()
     queue_port = free_port()
     audit_path = os.path.join(wd_dir, "audit.jsonl")
@@ -285,6 +288,7 @@ def main():
             failures.append("%s: %s" % (name, detail))
 
     bus = None
+    pump = None
     router = None
     watchdog = None
     queue = FakeQueue(queue_port)
@@ -301,6 +305,15 @@ def main():
         token = open(os.path.join(data, "token"), encoding="utf-8").read().strip()
 
         queue.start()
+        pump = subprocess.Popen(
+            [sys.executable, PUMP,
+             "--tasks", "http://127.0.0.1:%d" % queue_port,
+             "--bus", "http://127.0.0.1:%d" % bus_port,
+             "--bus-token", token,
+             "--data-dir", pump_dir,
+             "--retry", "0.5", "--max-retry", "1",
+             "--read-timeout", "20", "--bus-heartbeat", "5"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         router = subprocess.Popen(
             [sys.executable, ROUTER,
              "--tasks", "http://127.0.0.1:%d" % queue_port,
@@ -315,6 +328,7 @@ def main():
              "--agent", "http://127.0.0.1:1",
              "--bus", "http://127.0.0.1:%d" % bus_port,
              "--expect-heartbeat", "a2/heartbeat/router",
+             "--expect-heartbeat", "a2/heartbeat/pump",
              "--heartbeat-timeout", "5",
              "--alert-cooldown", "600",
              "--bus-grace", "1",
@@ -335,6 +349,18 @@ def main():
                              where=lambda f: f["data"].get("topic") == "a2/router/speech")
         check("the router's sentence reached the platform", len(speech) >= 1,
               repr(reader.frames[-3:]))
+
+        # ---- the bridge forwards the queue event and says it is alive ----
+        forwarded = reader.wait(
+            1, timeout=15,
+            where=lambda f: f["data"].get("topic") == "a2/queue/task_done")
+        check("the bridge put the queue event on the platform", len(forwarded) >= 1,
+              repr([f["data"].get("topic") for f in reader.frames][-5:]))
+        beats = reader.wait(
+            1, timeout=15,
+            where=lambda f: f["data"].get("topic") == "a2/heartbeat/pump")
+        check("the bridge announced itself", len(beats) >= 1,
+              repr([f["data"].get("topic") for f in reader.frames][-5:]))
 
         # ---- the router is alive: the watchdog must stay quiet ----
         time.sleep(7)
@@ -367,7 +393,7 @@ def main():
     finally:
         if reader is not None:
             reader.close()
-        for proc in (router, watchdog, bus):
+        for proc in (router, watchdog, pump, bus):
             if proc is not None:
                 proc.terminate()
                 try:

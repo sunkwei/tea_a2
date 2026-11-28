@@ -3508,8 +3508,11 @@ python3 sched/telegram_bot.py --bus http://127.0.0.1:8299            # 前端报
   发 `gap` + `reason:no_history`，**不能**当成「从 1 重放」——两者对客户端的意思相反。
 - **回填不能走实时队列**：`since` 的回填单独一条路（只受窗口约束），否则补 1000 条的
   订阅者会先被判「太慢」，连 `gap` 帧都发不出去。
-- **桥接没有心跳 topic**（Q4 的固定名单里没有 `a2/heartbeat/pump`）：桥接死了没人报。
-  补的话要先在需求 §2.5 登记。
+- **桥接的心跳**：第一版漏了（Q4 的固定名单里没有 `a2/heartbeat/pump`，于是桥接
+  死了没人报）。2026-11-28 补上：需求 §2.5 登记 topic → `bus_pump.py` 每 30 秒发
+  retain 心跳（带 `queue_connected` / 计数 / 缺口数）→ watchdog 映射 `pump_missing`。
+  **默认仍只期待 router**：没跑桥接的机器不该被误报，要查就加
+  `--expect-heartbeat a2/heartbeat/pump`（Windows 安装脚本默认加了）。
 - **改这三个文件前先看行尾**：`sched/*.py` 在 Windows 检出是 CRLF，写补丁要「读入→
   归一化成 LF→匹配→写回时还原 CRLF」，否则 `count(old) == 0` 全部 MISS。
 - **看门狗告警的冷却表在 `state.json`**：测试里等「同一个告警再来一次」会等不到，

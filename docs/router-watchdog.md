@@ -387,8 +387,8 @@ python3 sched/watchdog.py --bus http://127.0.0.1:8299 \
 | 加了 `--bus` 之后 | 在哪看 |
 |---|---|
 | router 每说的一句话也发到平台 | `a2/router/speech`（订阅它就能看，不用读 `speech.jsonl`） |
-| router / watchdog / 聊天前端说「我还活着」 | `a2/heartbeat/{router,watchdog,channel}`（retain，晚连上也能看到现状） |
-| 看门狗发现谁不跳了 | `router_missing` / `channel_missing` / `bus_missing`；告警同时进审计、队列事件流、`a2/watchdog/alert` |
+| router / watchdog / 聊天前端 / 桥接说「我还活着」 | `a2/heartbeat/{router,watchdog,channel,pump}`（retain，晚连上也能看到现状） |
+| 看门狗发现谁不跳了 | `router_missing` / `channel_missing` / `pump_missing` / `bus_missing`；告警同时进审计、队列事件流、`a2/watchdog/alert` |
 | 队列里的活儿走到哪了 | `a2/queue/task`、`task_done`、`task_failed`（桥接只转发这三种） |
 
 三条和取舍有关的事实：

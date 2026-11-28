@@ -59,6 +59,7 @@
 | 平台 | `sched/bus_server.py` | 发布请求 / 订阅请求 | 订阅者收到消息 | 订阅方重连、发布方记日志；**告警仍有文件出口** |
 | 桥接 | `sched/bus_pump.py` | 队列 SSE | `a2/queue/*` | 队列照常；恢复后发一条 `gap`（见 §8） |
 | Router | `sched/router.py` | 队列 SSE（不变） | `a2/router/speech` + `a2/heartbeat/router` | 用户听不见；watchdog 报 `router_missing` |
+| Pump | `sched/bus_pump.py` | 队列 SSE（不变） | `a2/queue/*` + `a2/heartbeat/pump` | 外面的人看不见活儿；watchdog 报 `pump_missing` |
 | Watchdog | `sched/watchdog.py` | 队列/agent（不变）+ `a2/heartbeat/#` | `a2/watchdog/alert` + 审计 + 队列事件流 | 没人盯；**Q5「谁看 watchdog」仍未定**，本文只提供心跳（§10.4） |
 
 **启动顺序**：平台 → 桥接 / router / watchdog（后三者各自重连，顺序不是硬依赖）。
@@ -137,6 +138,8 @@
 | `a2/heartbeat/router` | router | `{at, pid, version, uptime_s, queue_url, bus_url}`，retain=true |
 | `a2/heartbeat/watchdog` | watchdog | 同上 |
 | `a2/heartbeat/bus` | bus_server | `{at, pid, version, uptime_s, subscribers, window:{oldest,newest}}`，retain=true |
+| `a2/heartbeat/pump` | bus_pump | `{at, pid, version, uptime_s, queue_connected, last_event_at, published, skipped, failed, gaps}`，retain=true |
+| `a2/heartbeat/channel` | channel（两个 bot） | `{at, pid, version, channel, workspace_id}`，retain=true |
 | `a2/heartbeat/channel` | channel（每个 bot） | `{at, pid, version, channel, workspace_id}`，retain=true |
 
 **命名规则**（发布时校验，坏的一律 400，不静默）：
@@ -487,7 +490,7 @@ data: {"reason":"window","requested":1,"oldest":51}
 | 1 | `bus_server.py` 骨架 + `/health` + 端口独占 + pid + token | `tests/smoke_bus.py` 的 AC-01/05/06 段 |
 | 2 | 发布 / 窗口 / retain / 幂等 | 同文件 AC-02/04 段 |
 | 3 | 订阅 SSE + `since` + gap + 背压 | 同文件 AC-03 段 |
-| 4 | `bus_pump.py` + 映射 + 缺口记录 | `tests/smoke_bus_pump.py` |
+| 4 | `bus_pump.py` + 映射 + 缺口记录（+ 2026-11-28 的 `a2/heartbeat/pump`） | `tests/smoke_bus_pump.py` |
 | 5 | `router.py` 的 `--bus`（输出 + 心跳 + 降级） | `tests/smoke_bus_e2e.py` 的 speech 段；平台关掉跑旧回归 |
 | 6 | `watchdog.py` 的心跳检查 + 告警三处 + 冷却 | e2e 的 `router_missing` 段 |
 | 7 | `channel.py` + 两个 bot 的 `--bus` 心跳 | e2e 里用假 bot 发心跳 → `channel_missing` 段 |
@@ -546,7 +549,7 @@ data: {"reason":"window","requested":1,"oldest":51}
 1. **回填与实时分开**（`Subscriber.put_backlog()`）：`since` 的回填只受窗口约束，不经过实时队列的 `deque(maxlen=N)`。否则一个要补 1000 条的订阅者会被先判成「太慢」——连那条 `gap` 帧都发不出去。
 2. **`since` 大于最新 id**（例如平台重启后客户端还带着旧的大数字）：发一条 `gap` 帧，`reason: no_history`，然后只给新消息。**不能**当成「从 1 开始重放」——那会让客户端以为今天发生的事从没发生过。
 3. **退出时发 `closed` 帧**，再关监听、删 pid：客户端立刻重连，而不是等 keepalive 超时。
-4. **桥接没有自己的心跳 topic**：Q4 的固定名单里只有 `{router,watchdog,bus,channel}`。这是本文 §17 之外的一条已知缺口——桥接死了，watchdog 不会报（`pump-state.json` 的`last_event_at` 会停在死之前的时刻，但要有人去看）。要补，得先在 `docs/message-platform.md` §2.5 登记 `a2/heartbeat/pump`。
+4. **桥接的心跳**（原先的缺口，2026-11-28 补上）：Q4 的固定名单原先只有 `{router,watchdog,bus,channel}`，于是桥接死了没人报。现在 `docs/message-platform.md` §2.5 登记了 `a2/heartbeat/pump`，`bus_pump.py` 每 `--bus-heartbeat`（默认 30）发一条 retain 心跳（带 `queue_connected`、计数、缺口数），watchdog 映射成 `pump_missing`。**默认仍只期待 router**：没跑桥接的机器不该因为「没有心跳」被报警，要看桥接就加 `--expect-heartbeat a2/heartbeat/pump`（Windows 安装脚本已经加上了）。
 5. **router 不订阅平台**（§3.1 的 Q2 解释）：平台是它的输出；输入仍是队列。
 6. **看门狗的冷却表落在 `state.json`**：重启不会把十分钟内说过的话再说一遍；审计里被压掉的告警不写条目，日志里每分钟一行「still going on」。
 7. **告警三处独立投递**：队列投不进去也照写审计（改之前是「队列失败就 return」，于是队列一挂，审计里连一条记录都没有）。

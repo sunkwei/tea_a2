@@ -17,6 +17,11 @@ Everything else stays on the queue stream (the router still reads that one;
 "task_failed" would be a lie, and inventing a topic is not allowed without
 registering it - so those are counted and skipped, not guessed.
 
+It also says it is alive: `a2/heartbeat/pump` (retained, every
+`--bus-heartbeat` seconds) carries the counters and the last event it saw, so
+the watchdog can report `pump_missing` instead of leaving a dead bridge
+invisible (the gap in the first version of the design).
+
 What it cannot do: replay. The queue's stream has no `since`, so when this
 process or the queue was down, the events that happened then are gone. The
 bridge does not pretend otherwise: every reconnect is written down as a gap
@@ -26,6 +31,7 @@ bridge does not pretend otherwise: every reconnect is written down as a gap
 Usage:
 
   python3 sched/bus_pump.py                      # follow the queue, publish to the bus
+  python3 sched/bus_pump.py --bus-heartbeat 10   # say it is alive more often
   python3 sched/bus_pump.py --status             # what did it see, what did it miss
   python3 sched/bus_pump.py --once --once-timeout 3   # for tests
 
@@ -37,6 +43,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -239,8 +246,50 @@ class Pump(object):
         self.state = PumpState(os.path.join(args.data_dir, "pump-state.json"))
         self.stopped = False
         self.gap_from = ""
+        self.started = time.time()
+        self.queue_connected = False
 
     # -- publishing -------------------------------------------------------
+    def publish_bus(self, topic, payload, retain=False):
+        """One publish. Never raises: the heartbeat is a courtesy, the events
+        are the work."""
+        body = {"topic": topic, "payload": payload}
+        if retain:
+            body["retain"] = True
+        headers = {}
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+        status, answer = http_json(self.bus + "/api/publish", "POST", body,
+                                   timeout=self.args.publish_timeout, headers=headers)
+        if status == 200:
+            return True
+        log_throttled("heartbeat", "pump: the bus did not take %s: %s"
+                      % (topic, (answer or {}).get("error") or answer))
+        return False
+
+    def heartbeat(self):
+        """What the watchdog needs to tell 'the bridge died' from 'nobody is
+        working': alive, connected to the queue, and how much it has seen.
+        """
+        data = self.state.data
+        self.publish_bus("a2/heartbeat/pump", {
+            "at": now_iso(), "pid": os.getpid(), "version": VERSION,
+            "uptime_s": int(time.time() - self.started),
+            "queue": self.tasks, "bus": self.bus,
+            "queue_connected": bool(self.queue_connected),
+            "last_event_at": data.get("last_event_at") or "",
+            "published": int(data.get("published") or 0),
+            "skipped": int(data.get("skipped") or 0),
+            "failed": int(data.get("failed") or 0),
+            "gaps": len(data.get("gaps") or []),
+        }, retain=True)
+
+    def heartbeat_forever(self):
+        interval = max(5.0, float(self.args.bus_heartbeat))
+        while not self.stopped:
+            self.heartbeat()
+            time.sleep(interval)
+
     def publish_event(self, event):
         kind = str(event.get("type") or "")
         topic = TOPIC_OF.get(kind)
@@ -281,6 +330,7 @@ class Pump(object):
         req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
         started = time.time()
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            self.queue_connected = True
             for raw in resp:
                 if self.stopped:
                     return
@@ -302,6 +352,10 @@ class Pump(object):
 
     def run(self):
         log("pump %s: %s -> %s" % (VERSION, self.tasks, self.bus))
+        self.heartbeat()          # say "here" before waiting for the first event
+        if not self.args.once:
+            threading.Thread(target=self.heartbeat_forever,
+                             name="pump-heartbeat", daemon=True).start()
         backoff = self.args.retry
         while not self.stopped:
             self.gap_from = self.state.data.get("last_event_at") or ""
@@ -309,6 +363,7 @@ class Pump(object):
                 self.follow_once(self.args.once_timeout if self.args.once else self.args.read_timeout)
                 reason = "stream_ended"
             except Exception as exc:  # noqa: BLE001 - the stream ends all the time
+                self.queue_connected = False
                 reason = "queue_unreachable: %s" % exc
                 log_throttled("queue-down", "pump: the queue is unreachable (%s)" % exc)
             if self.args.once:
@@ -351,6 +406,8 @@ def build_parser():
                         help="seconds before the first reconnect (default 2)")
     parser.add_argument("--max-retry", type=float, default=10.0,
                         help="the longest wait between reconnects (default 10)")
+    parser.add_argument("--bus-heartbeat", type=float, default=30.0,
+                        help="seconds between a2/heartbeat/pump messages (default 30)")
     parser.add_argument("--read-timeout", type=float, default=120.0,
                         help="seconds without a byte before the stream is read again "
                              "(default 120; the queue sends a keepalive every 30)")

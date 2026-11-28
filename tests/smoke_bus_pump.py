@@ -167,12 +167,13 @@ class SseReader(object):
                 except ValueError:
                     frame["data"] = {}
 
-    def wait(self, count, timeout=10.0):
+    def wait(self, count, timeout=10.0, where=None):
         deadline = time.time() + timeout
         with self.cond:
             while True:
-                if len(self.frames) >= count:
-                    return self.frames
+                got = [f for f in self.frames if where is None or where(f)]
+                if len(got) >= count:
+                    return got
                 left = deadline - time.time()
                 if left <= 0:
                     return self.frames
@@ -258,7 +259,8 @@ def main():
              "--tasks", "http://127.0.0.1:%d" % queue_port,
              "--bus", "http://127.0.0.1:%d" % bus_port,
              "--data-dir", data,
-             "--retry", "0.3", "--max-retry", "0.6", "--read-timeout", "20"],
+             "--retry", "0.3", "--max-retry", "0.6", "--read-timeout", "20",
+             "--bus-heartbeat", "5"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
 
         reader = SseReader(bus_port, token, "a2/queue/#", since=0)
@@ -278,6 +280,30 @@ def main():
                   "prompt" not in json.dumps(payload, ensure_ascii=False), repr(payload)[:200])
             check("the message carries a key",
                   bool(frames[0]["data"].get("key")), repr(frames[0]["data"]))
+
+        # ---- the bridge says it is alive (a2/heartbeat/pump) ----
+        hb_reader = SseReader(bus_port, token, "a2/heartbeat/pump", since=0)
+        beats = hb_reader.wait(1, timeout=10)
+        check("the bridge announces itself on a2/heartbeat/pump", len(beats) >= 1,
+              repr(hb_reader.frames[:1]))
+        # The first beat goes out before the queue stream is up - it says so
+        # (queue_connected: false). Wait for the next beat: that one has to
+        # show a connected queue and the event we just published.
+        beats = hb_reader.wait(
+            1, timeout=15,
+            where=lambda f: ((f["data"].get("payload") or {}).get("queue_connected")
+                             is True
+                             and int((f["data"].get("payload") or {})
+                                     .get("published") or 0) >= 1))
+        check("a later heartbeat says the queue is up and counts the event",
+              len(beats) >= 1,
+              repr([f["data"].get("payload") for f in hb_reader.frames][-2:]))
+        if beats:
+            payload = beats[0]["data"].get("payload") or {}
+            check("the heartbeat says who it is",
+                  payload.get("pid") and payload.get("version"), repr(payload))
+            check("the heartbeat remembers the last event it saw",
+                  bool(payload.get("last_event_at")), repr(payload))
 
         # ---- AC-07.2: task_done -> a2/queue/task_done with the result ----
         queue.push({"type": "task_done", "task": task("t_1", result="做完了，报告在这里")})
@@ -319,6 +345,13 @@ def main():
         while time.time() < deadline and not gaps():
             time.sleep(0.3)
         check("the downtime is recorded as a gap", len(gaps()) >= 1, repr(gaps()))
+        beats = hb_reader.wait(
+            1, timeout=10,
+            where=lambda f: (f["data"].get("payload") or {}).get("queue_connected")
+            is False)
+        check("the heartbeat says the queue is gone (not 'all is well')",
+              len(beats) >= 1, repr([f["data"].get("payload") for f
+                                     in hb_reader.frames][-2:]))
 
         queue = FakeQueue(queue_port).start()
         queue.push({"type": "task_failed", "task": task(
@@ -332,6 +365,7 @@ def main():
                   (failed[0]["data"].get("payload") or {}).get("task", {}).get("error")
                   == "the build broke", repr(failed[0]["data"]))
         reader.close()
+        hb_reader.close()
 
         # ---- --status says the same thing the file says ----
         out = subprocess.check_output([sys.executable, PUMP, "--status",

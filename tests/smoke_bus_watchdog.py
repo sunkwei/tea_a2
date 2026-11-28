@@ -6,7 +6,8 @@
 
 Covers FR-09 (docs/message-platform.md): heartbeats are read from
 `a2/heartbeat/#` (retained), a component that goes quiet is reported as
-`router_missing` / `channel_missing` / `bus_missing`, the alert lands in the
+`router_missing` / `channel_missing` / `pump_missing` / `bus_missing`, the
+alert lands in the
 audit log, the queue's event stream *and* `a2/watchdog/alert`, and a repeated
 alert is suppressed for the cooldown.
 
@@ -254,6 +255,7 @@ def main():
     reader = None
     channel_stop = threading.Event()
     router_stop = threading.Event()
+    pump_stop = threading.Event()
     try:
         env = dict(os.environ)
         env["TEA_AGENT_HOME"] = tmp
@@ -296,6 +298,9 @@ def main():
         threading.Thread(target=beat_forever,
                          args=("a2/heartbeat/channel", channel_stop, {"channel": "fake"}),
                          daemon=True).start()
+        threading.Thread(target=beat_forever,
+                         args=("a2/heartbeat/pump", pump_stop, {"published": 3}),
+                         daemon=True).start()
 
         watchdog = subprocess.Popen(
             [sys.executable, WATCHDOG,
@@ -304,6 +309,7 @@ def main():
              "--bus", "http://127.0.0.1:%d" % bus_port,
              "--expect-heartbeat", "a2/heartbeat/router",
              "--expect-heartbeat", "a2/heartbeat/channel",
+             "--expect-heartbeat", "a2/heartbeat/pump",
              "--heartbeat-timeout", "6",
              "--alert-cooldown", "60",
              "--bus-grace", "1",
@@ -355,6 +361,25 @@ def main():
                   payload.get("target") == "a2/heartbeat/channel"
                   and payload.get("reason"), repr(payload))
 
+        # ---- the bridge has its own heartbeat: pump_missing ----
+        pump_stop.set()
+        deadline = time.time() + 30
+        pump_missing = []
+        while time.time() < deadline:
+            pump_missing = [e for e in read_audit(audit_path)
+                            if e.get("check") == "pump_missing"]
+            if pump_missing:
+                break
+            time.sleep(0.5)
+        check("a bridge that stops beating is reported as pump_missing",
+              bool(pump_missing),
+              repr([e.get("check") for e in read_audit(audit_path)][-5:]))
+        check("the pump alert names the topic",
+              bool(pump_missing) and pump_missing[-1].get("target") == "a2/heartbeat/pump",
+              repr(pump_missing[-1:]))
+        check("the pump alert reaches the queue's event stream",
+              bool(queue.posted("pump_missing")), repr(queue.posted()[-2:]))
+
         # ---- AC-09.3: the same alert is not repeated inside the cooldown ----
         time.sleep(8)
         repeated = [e for e in read_audit(audit_path) if e.get("check") == "channel_missing"]
@@ -385,6 +410,7 @@ def main():
     finally:
         channel_stop.set()
         router_stop.set()
+        pump_stop.set()
         if reader is not None:
             reader.close()
         if watchdog is not None:
