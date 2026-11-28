@@ -1406,6 +1406,13 @@ def build_parser():
                         help="let the router speak: the front end delivers the router's sentences instead of translating the queue's events itself")
     parser.add_argument("--triggers", action="store_true",
                         help="go through the queue's trigger entry: the queue decides\n                             (rules first, then the model) whether a message is work")
+    parser.add_argument("--bus", default=os.environ.get("TEA_BUS_URL", ""),
+                        help="the message platform's URL: announce this channel on "
+                             "a2/heartbeat/channel (empty = do not)")
+    parser.add_argument("--bus-token", default="",
+                        help="the platform's token (default: <tea home>/bus/token)")
+    parser.add_argument("--bus-heartbeat", type=float, default=60.0,
+                        help="seconds between a2/heartbeat/channel messages (default 60)")
     parser.add_argument("--cdn-url", default=os.environ.get("TEA_WECHAT_CDN", CDN_BASE_URL),
                         help="the WeChat CDN that stores the media (files)")
     parser.add_argument("--login", action="store_true", help="scan the QR code and exit")

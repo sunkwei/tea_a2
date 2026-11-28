@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -40,6 +41,9 @@ from a2_ext_py import ApiError, Client, Queue as _Queue  # noqa: E402
 
 DEFAULT_AGENT = "http://127.0.0.1:8383"
 DEFAULT_TASKS = "http://127.0.0.1:8283"
+TEA_HOME = os.path.expanduser(os.environ.get(
+    "TEA_AGENT_HOME", os.path.join("~", ".tea_agent")))
+CHANNEL_VERSION = "1.0.0"
 
 # A file bigger than this is not worth moving around.
 MAX_FILE_BYTES = 32 * 1024 * 1024
@@ -57,6 +61,29 @@ KIND_MEDIA = "media"
 
 def log(message):
     print("%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
+
+
+_LOG_LAST = {}
+
+
+def log_throttled(key, message, interval=60.0):
+    now = time.time()
+    last = _LOG_LAST.get(key)
+    if last is not None and (now - last) < interval:
+        return False
+    _LOG_LAST[key] = now
+    log(message)
+    return True
+
+
+def read_bus_token(given=""):
+    if given:
+        return given
+    try:
+        with open(os.path.join(TEA_HOME, "bus", "token"), encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
 
 
 def chunks(text, size):
@@ -368,6 +395,9 @@ class TaskChannel:
         self.agent = Agent(args.agent)
         self.workspace_id = ""
         self.owner = {}          # task id -> the user who queued it
+        self.bus = (getattr(args, "bus", "") or "").rstrip("/")
+        self.bus_token = read_bus_token(getattr(args, "bus_token", ""))
+        self._bus_heartbeat_started = False
 
     # -- the transport ----------------------------------------------------
     def send_text(self, user_id, text):
@@ -954,8 +984,53 @@ class TaskChannel:
                     % (task_id, task.get("question") or "", task_id))
         return self.send_text(user_id, text)
 
+    def publish_bus(self, topic, payload, retain=False):
+        """One publish to the platform. Never raises: a chat front end has
+        work to do and must not die because the bus did."""
+        if not self.bus:
+            return False
+        body = {"topic": topic, "payload": payload}
+        if retain:
+            body["retain"] = True
+        headers = {"Content-Type": "application/json"}
+        if self.bus_token:
+            headers["Authorization"] = "Bearer " + self.bus_token
+        req = urllib.request.Request(self.bus + "/api/publish",
+                                     data=json.dumps(body).encode("utf-8"),
+                                     headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status == 200
+        except Exception as exc:  # noqa: BLE001 - a dead bus is not an error
+            log_throttled("bus-heartbeat", "cannot announce the channel: %s" % exc)
+            return False
+
+    def start_bus_heartbeat(self):
+        """Announce this channel on a2/heartbeat/channel, once.
+
+        The watchdog only reports a channel it was told to expect; without
+        this message it could not tell 'not configured' from 'died'.
+        """
+        if self._bus_heartbeat_started or not self.bus:
+            return
+        self._bus_heartbeat_started = True
+        interval = max(5.0, float(getattr(self.args, "bus_heartbeat", 60.0)))
+
+        def beat():
+            while True:
+                self.publish_bus("a2/heartbeat/channel", {
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "pid": os.getpid(), "version": CHANNEL_VERSION,
+                    "channel": self.channel_name(),
+                    "workspace_id": self.workspace_id,
+                }, retain=True)
+                time.sleep(interval)
+
+        threading.Thread(target=beat, name="channel-heartbeat", daemon=True).start()
+
     def watch_tasks(self):
         """Tell the user when their work is done."""
+        self.start_bus_heartbeat()
         last_speech = 0.0
         while True:
             try:
