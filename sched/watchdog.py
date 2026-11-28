@@ -33,6 +33,16 @@ Usage:
     python3 sched/watchdog.py                       # watch, and only say so
     python3 sched/watchdog.py --once                # one pass and out
     python3 sched/watchdog.py --auto --action fail  # and act on stuck tasks
+    python3 sched/watchdog.py --bus http://127.0.0.1:8299
+                                                    # also watch who is alive
+
+With `--bus` the watchdog subscribes to `a2/heartbeat/#` (the platform keeps
+the last one of each topic, so a fresh subscription knows the current state
+at once) and reports a component that stopped beating as `router_missing`,
+`channel_missing` or `bus_missing`. Its own alerts go to three places: the
+audit log, the queue's event stream, and `a2/watchdog/alert` on the
+platform - a channel that is down must not be the only road for 'the
+channel is down'.
 
 Only the standard library: it has to run on a device where nothing is
 installed (the same rule the queue and the fleet follow).
@@ -44,6 +54,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -54,6 +65,20 @@ DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8383")
 DEFAULT_FLEET = os.environ.get("TEA_FLEET_URL", "")
 DEFAULT_DATA_DIR = os.environ.get(
     "TEA_WATCHDOG_DATA", os.path.join("~", ".tea_agent", "watchdog"))
+DEFAULT_BUS = os.environ.get("TEA_BUS_URL", "")
+TEA_HOME = os.path.expanduser(os.environ.get("TEA_AGENT_HOME",
+                                             os.path.join("~", ".tea_agent")))
+VERSION = "1.0.0"
+
+# Which check name a heartbeat topic maps to. A topic that is not here gets
+# `<topic>_missing`, so a new heartbeat can be watched before this table is
+# touched - but the names above are the ones the docs promise.
+CHECK_OF_HEARTBEAT = {
+    "a2/heartbeat/router": "router_missing",
+    "a2/heartbeat/watchdog": "watchdog_missing",
+    "a2/heartbeat/bus": "bus_missing",
+    "a2/heartbeat/channel": "channel_missing",
+}
 
 # The model check: is the worker still going the right way? The verdict is
 # advice only - the actions stay with the rules. A model that says "drifted"
@@ -119,6 +144,29 @@ def log(message):
     print("%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
 
 
+_LOG_LAST = {}
+
+
+def log_throttled(key, message, interval=60.0):
+    now = time.time()
+    last = _LOG_LAST.get(key)
+    if last is not None and (now - last) < interval:
+        return False
+    _LOG_LAST[key] = now
+    log(message)
+    return True
+
+
+def read_token(given=""):
+    if given:
+        return given
+    try:
+        with open(os.path.join(TEA_HOME, "bus", "token"), encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
 def http_json(url, method="GET", body=None, timeout=10, headers=None):
     """One JSON request. Returns (status, parsed_body).
 
@@ -172,6 +220,11 @@ class Watchdog(object):
         self.state_path = args.state or os.path.join(self.data_dir, "state.json")
         self.state = self._read_state()
         self.findings = []
+        self.bus = (getattr(args, "bus", "") or "").rstrip("/")
+        self.bus_token = read_token(getattr(args, "bus_token", ""))
+        self.started = time.time()
+        self.last_seen = {}          # heartbeat topic -> (epoch, payload)
+        self.bus_ready = threading.Event()
 
     # ---- the state it remembers between passes ----------------------------
     def _read_state(self):
@@ -184,6 +237,7 @@ class Watchdog(object):
             data = {}
         data.setdefault("tasks", {})
         data.setdefault("seen", {})
+        data.setdefault("alerts", {})   # "check|target" -> last time
         return data
 
     def _write_state(self):
@@ -210,30 +264,179 @@ class Watchdog(object):
         return entry
 
     # ---- what it does about a finding -------------------------------------
-    def escalate(self, check, reason, task=None, level="warn"):
-        """Say so: put the alert into the queue's event stream.
+    def _cooldown_ok(self, check, target):
+        """Is this alert due? Same check + same target once per window.
+
+        An alarm that repeats every pass is an alarm nobody reads. The
+        table lives in state.json, so a restart does not re-announce what
+        was already said.
+        """
+        window = float(getattr(self.args, "alert_cooldown", 600.0) or 0.0)
+        if window <= 0:
+            return True
+        key = "%s|%s" % (check, target)
+        alerts = self.state.setdefault("alerts", {})
+        now = time.time()
+        last = alerts.get(key)
+        if last is not None and (now - last) < window:
+            return False
+        alerts[key] = now
+        if len(alerts) > 200:
+            newest = sorted(alerts.items(), key=lambda item: item[1])[-100:]
+            self.state["alerts"] = dict(newest)
+        return True
+
+    @staticmethod
+    def _alert_key(check, target):
+        return "alert:%s:%s:%d" % (check, target, int(time.time() // 600))
+
+    def publish_bus(self, topic, payload, key="", retain=False):
+        """One publish to the platform. Never raises: an alert that cannot
+        be published is still in the audit log."""
+        if not self.bus:
+            return False
+        body = {"topic": topic, "payload": payload}
+        if key:
+            body["key"] = key
+        if retain:
+            body["retain"] = True
+        headers = {"Authorization": "Bearer " + self.bus_token} if self.bus_token else None
+        status, answer = http_json(self.bus + "/api/publish", "POST", body,
+                                   timeout=min(5.0, self.args.timeout),
+                                   headers=headers)
+        if status == 200:
+            return True
+        log_throttled("bus-publish", "watchdog: the platform did not take %s: %s"
+                      % (topic, (answer or {}).get("error") or answer))
+        return False
+
+    def heartbeat_forever(self):
+        """Say the watchdog itself is alive.
+
+        Who watches this heartbeat is still an open question (observer
+        architecture Q5). Publishing it is what this program can do: the
+        input for whatever answers that question later.
+        """
+        interval = max(5.0, float(getattr(self.args, "bus_heartbeat", 30.0)))
+        while True:
+            self.publish_bus("a2/heartbeat/watchdog", {
+                "at": now_iso(), "pid": os.getpid(), "version": VERSION,
+                "uptime_s": int(time.time() - self.started),
+            }, retain=True)
+            time.sleep(interval)
+
+    def follow_heartbeats(self):
+        """Keep `last_seen` fresh from `a2/heartbeat/#`.
+
+        `since=0` on purpose: the platform retains the last message of each
+        heartbeat topic, so the first frames are the current state of every
+        component - no need to wait for the next beat to know who is there.
+        """
+        if not self.bus:
+            return
+        url = (self.bus + "/api/subscribe?filter="
+               + urllib.parse.quote("a2/heartbeat/#", safe="") + "&since=0")
+        headers = {"Accept": "text/event-stream"}
+        if self.bus_token:
+            headers["Authorization"] = "Bearer " + self.bus_token
+        while True:
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=self.args.bus_read_timeout) as resp:
+                    self.bus_ready.set()
+                    for raw in resp:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            message = json.loads(line[5:].strip())
+                        except ValueError:
+                            continue
+                        topic = message.get("topic") or ""
+                        if topic:
+                            self.last_seen[topic] = (time.time(),
+                                                     message.get("payload") or {})
+            except Exception as exc:  # noqa: BLE001 - the stream ends all the time
+                log_throttled("bus-follow", "watchdog: cannot follow the platform (%s)"
+                              % exc)
+            time.sleep(1.0)
+
+    def check_heartbeats(self):
+        """Who stopped beating on the platform?"""
+        if not self.bus:
+            return
+        # Give the retained state a moment: connecting and judging in the
+        # same millisecond would report everybody as missing.
+        self.bus_ready.wait(timeout=max(0.5, float(self.args.bus_grace)))
+        status, _ = http_json(self.bus + "/health",
+                              timeout=min(5.0, self.args.timeout))
+        if status != 200:
+            self.escalate("bus_missing",
+                          "the platform at %s does not answer" % self.bus,
+                          target=self.bus)
+            return
+        now = time.time()
+        limit = max(1.0, float(self.args.heartbeat_timeout))
+        for topic in self.args.expect_heartbeat:
+            check = CHECK_OF_HEARTBEAT.get(
+                topic, topic.replace("/", "_") + "_missing")
+            seen = self.last_seen.get(topic)
+            since = seen[0] if seen else self.started
+            age = now - since
+            if age <= limit:
+                continue
+            if seen:
+                reason = "%s has been quiet for %ds (limit %ds)" % (
+                    topic, int(age), int(limit))
+            else:
+                reason = "no heartbeat on %s since the watchdog started (%ds)" % (
+                    topic, int(age))
+            self.escalate(check, reason, target=topic)
+
+    def escalate(self, check, reason, task=None, level="warn", target=""):
+        """Say so: audit, the queue's event stream, and the platform.
 
         The stream is the road to the person who queued the work: the chat
         front ends (WeChat, Telegram) listen to it and push what they hear
         to the user. An alert without a task is about the whole queue and
         goes to everybody; an alert with a task goes to that task's project.
+
+        Three places, one sentence: the audit is the record that survives a
+        dead channel, the queue stream is what the chat front ends already
+        read, and the platform is the road that does not go through them.
+        A repeated alert is suppressed for --alert-cooldown seconds.
         """
+        target = target or (task or {}).get("id", "")
+        if not self._cooldown_ok(check, target):
+            log_throttled("alert-suppressed-%s-%s" % (check, target),
+                          "watchdog: %s (%s) is still going on - not repeated"
+                          % (check, target or "-"))
+            return False
         body = {"type": "watchdog_alert", "check": check, "level": level,
                 "reason": reason, "action": ESCALATE, "source": "watchdog"}
         if task:
             body["task_id"] = task.get("id")
             body["workspace_id"] = task.get("workspace_id")
+        elif target:
+            body["target"] = target
         status, answer = http_json(self.tasks_url + "/api/events", "POST", body,
                                    timeout=self.args.timeout)
+        queue_ok = 200 <= status < 300
         if status == 0:
-            log("cannot tell the queue about it: %s" % (answer or {}).get("error"))
-            return False
-        if status >= 400:
-            log("the queue refused the alert: HTTP %s %s" % (status, answer))
-            return False
-        self.audit(check, (task or {}).get("id", ""), ESCALATE, reason)
+            log_throttled("queue-alert", "cannot tell the queue about %s: %s"
+                          % (check, (answer or {}).get("error")))
+        elif status >= 400:
+            log_throttled("queue-alert-refused", "the queue refused the alert %s: "
+                          "HTTP %s %s" % (check, status, answer))
+        bus_ok = self.publish_bus("a2/watchdog/alert", {
+            "check": check, "target": target, "level": level, "reason": reason,
+            "at": now_iso(), "task_id": (task or {}).get("id", ""),
+        }, key=self._alert_key(check, target))
+        self.audit(check, target, ESCALATE, reason,
+                   detail=None if (queue_ok and bus_ok)
+                   else {"queue": queue_ok, "bus": bus_ok})
         log("%s: %s" % (check, reason))
-        return True
+        return queue_ok or bus_ok
 
     def fail_task(self, task, reason):
         """Mark a stuck task failed (only with --auto)."""
@@ -609,9 +812,16 @@ class Watchdog(object):
         self.check_plans()
         self.check_running_drift()
         self.check_devices()
+        self.check_heartbeats()
         self._write_state()
 
     def run_forever(self):
+        if self.bus:
+            log("watching the platform too: %s" % self.bus)
+            threading.Thread(target=self.follow_heartbeats,
+                             name="watchdog-heartbeats", daemon=True).start()
+            threading.Thread(target=self.heartbeat_forever,
+                             name="watchdog-heartbeat", daemon=True).start()
         while True:
             try:
                 self.run_once()
@@ -651,6 +861,29 @@ def build_parser():
     parser.add_argument("--auto", action="store_true",
                         help="allow the watchdog to act (fail / retry). Without it the "
                              "watchdog only says so.")
+    parser.add_argument("--bus", default=DEFAULT_BUS,
+                        help="the message platform's URL; empty = do not watch "
+                             "heartbeats (everything else works as before)")
+    parser.add_argument("--bus-token", default="",
+                        help="the platform's token (default: <tea home>/bus/token)")
+    parser.add_argument("--bus-heartbeat", type=float, default=30.0,
+                        help="seconds between a2/heartbeat/watchdog messages (default 30)")
+    parser.add_argument("--bus-grace", type=float, default=2.0,
+                        help="seconds to wait for the retained heartbeats after "
+                             "connecting (default 2)")
+    parser.add_argument("--bus-read-timeout", type=float, default=60.0,
+                        help="seconds without a byte on the heartbeat stream "
+                             "(default 60)")
+    parser.add_argument("--expect-heartbeat", action="append", default=None,
+                        metavar="TOPIC",
+                        help="a heartbeat topic that must keep coming (repeatable; "
+                             "default a2/heartbeat/router)")
+    parser.add_argument("--heartbeat-timeout", type=float, default=180.0,
+                        help="seconds of silence before a component counts as gone "
+                             "(default 180)")
+    parser.add_argument("--alert-cooldown", type=float, default=600.0,
+                        help="seconds before the same alert (check + target) is "
+                             "repeated (default 600, 0 = every pass)")
     parser.add_argument("--once", action="store_true", help="one pass and out")
     parser.add_argument("--timeout", type=float, default=10.0,
                         help="seconds for one HTTP request")
@@ -663,6 +896,8 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if not args.expect_heartbeat:
+        args.expect_heartbeat = ["a2/heartbeat/router"]
     watchdog = Watchdog(args)
     if args.action != ESCALATE and not args.auto:
         # Asking for an action without --auto is a contradiction: say it once
