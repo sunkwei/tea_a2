@@ -12,6 +12,8 @@
 │   ├── index.json            # 会话索引（标题/时间/条数）
 │   └── <session_id>.json     # 完整会话（reasoning、工具调用与结果；分叉会话带 forked_from/fork_turn）
 ├── memory/memory.json        # 长期记忆（结构化条目）
+├── journal/YYYY-MM-DD.md      # 日记层：一天一页（见 [memory-design.md](memory-design.md)）
+├── knowledge/<slug>.md        # 主题层：一主题一页；knowledge/index.md 是它们的目录
 ├── agent.md                  # 本工作区的经验（注入 prompt，见下）
 ├── system_prompt.md          # 工作区级 system prompt 覆盖（空 = 用默认，见下）
 ├── roles/<id>.yaml           # 角色（阶段档案）：人设 + 规矩 + 边界，见下

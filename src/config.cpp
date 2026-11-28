@@ -341,6 +341,8 @@ void apply_settings(Settings& s, const YAML::Node& node,
   if (yhas(node, "max_assistant_content"))
     s.max_assistant_content = yint(node, "max_assistant_content", s.max_assistant_content);
   if (yhas(node, "keep_turns")) s.keep_turns = static_cast<int>(yint(node, "keep_turns", s.keep_turns));
+  if (yhas(node, "memory_catalog_lines"))
+    s.memory_catalog_lines = static_cast<int>(yint(node, "memory_catalog_lines", s.memory_catalog_lines));
   if (yhas(node, "reasoning_effort")) s.reasoning_effort = ystr(node, "reasoning_effort", s.reasoning_effort);
   if (yhas(node, "temperature")) s.temperature = ydouble(node, "temperature", s.temperature);
   if (yhas(node, "top_p")) s.top_p = ydouble(node, "top_p", s.top_p);

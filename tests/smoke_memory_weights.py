@@ -72,17 +72,38 @@ class MockProvider(BaseHTTPRequestHandler):
         except ValueError:
             payload = {}
         messages = payload.get("messages") or []
+        # Every system message: the stable head, and the trailing block
+        # with the notes (which is sent at the end of the context, so a
+        # change to it does not invalidate the cache of the conversation).
         system = ""
         for message in messages:
-            if message.get("role") == "system":
-                system = message.get("content") or ""
-                break
+            if message.get("role") != "system":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                system += content + "\n"
+        system = system.strip()
         with lock:
             seen.append(system)
 
-        last = messages[-1] if messages else {}
-        text = last.get("content") if last.get("role") == "user" else None
-        if isinstance(text, str) and MEMORY_INTENT in text:
+        # The last user message: the trailing context block is a system
+        # message and sits after it.
+        text = None
+        for message in messages:
+            if message.get("role") == "user":
+                text = message.get("content")
+        if not isinstance(text, str):
+            text = None
+        # The tool already ran in this turn: a tool result *after* the
+        # last user message means the marker is already handled. A tool
+        # result from an earlier turn does not - that one is history.
+        last_user = -1
+        for index, message in enumerate(messages):
+            if message.get("role") == "user":
+                last_user = index
+        already_called = any(m.get("role") == "tool"
+                             for m in messages[last_user + 1:])
+        if not already_called and isinstance(text, str) and MEMORY_INTENT in text:
             note = text.split(MEMORY_INTENT, 1)[1].strip()
             self._tool_call("call_mem_1", "toolkit_memory",
                             {"op": "add", "text": note})

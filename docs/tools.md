@@ -11,6 +11,9 @@
 | `toolkit_workspace_search` | 在工作区里搜东西：**文件名 + 文件内容**。查询串按原样逐字节比较（**不做正则/模糊匹配**）；`scope=name\|content\|both`、`exact=true`（完全匹配：路径整串相等 / 整行相等）、`case_sensitive`、`path=`（只搜某个子目录）、`max_results=`、`regex=true`（查询串当 **ECMAScript 正则**，只匹配文件内容；默认关着）。见 [api.md](api.md#工作区搜索get-ap-workspacesidsearch) |
 | `toolkit_history_search` | 搜**历史对话**：会话标题、说过的话、想过的、调用过的工具，以及**轨迹**（命令的输出在那里）。查询串按原样逐字节比较（**不做正则/模糊匹配**）；`scope=all\|title\|messages\|trajectory`、`exact=true`（完全匹配）、`case_sensitive`、`max_results=`。见 [api.md](api.md#历史搜索get-ap-workspacesidsessionssearch) |
 | `toolkit_memory` | 工作区长期记忆的增删查，自动注入 system prompt，跨会话保留偏好与项目事实 |
+| `toolkit_memory_find` | **一次查完四层记忆**：对话原文（会话）、日记（`journal/YYYY-MM-DD.md`）、主题页（`knowledge/<slug>.md`）。查询串**按原样逐字节匹配**（区分大小写，**不做正则/模糊匹配**）——「当时真写的字」是检索唯一能诚实给的东西；`kinds=conversation\|journal\|knowledge`、`from`/`to`（ISO-8601，左闭右开）、`sourceId`、`order=newest\|oldest`、`limit`（默认 8，最多 100）、`cursor`（翻页）。命中带 `ref`，用 `toolkit_memory_read` 读原文；来源读不到时结果里带 `coverage`，**零命中 ≠ 没发生过**。见 [memory-design.md](memory-design.md) |
+| `toolkit_memory_read` | 按 `ref` 读**原文**（不是摘要）：`offset` 从哪开始、`limit` 读多少（默认 2000，最多 16000），返回 `nextOffset` 表示还有后文 |
+| `toolkit_knowledge_open` | 按页名打开一页主题页（`小林` / `[[小林]]` / `小林.md` 都行），并给出它的关系：`links`（它链到的页）、`linkedFrom`（链到它的页）、`missing`（链到了但还没写的页） |
 | `toolkit_agent_doc` | `read` `append` `replace` `scripts`：维护 `.tea_agent_run/agent.md`（本工作区的经验：坑、可复用命令与脚本） |
 | `toolkit_load_image` | 从磁盘加载图片（PNG / JPEG / GIF / WebP）并让模型真正看见它。仅在模型声明 `supports_vision: true` 时出现在工具表里 |
 | `toolkit_todo` | 把复杂任务分解成阶段列表并维护进度：`list` `set`/`replace` `add` `update` `clear`。列表存在会话里、每轮注入 system prompt、每次变更通过 SSE 的 `todo` 事件推给 UI |

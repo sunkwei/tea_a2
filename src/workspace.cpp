@@ -3147,4 +3147,1016 @@ std::string Workspace::derive_title(const std::string& text) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// The four memory layers (docs/memory-design.md)
+//
+// One search covers all of them: the layers differ in where the text lives,
+// not in how it is matched. The match is literal, byte for byte - "the words
+// that were actually written" is the only thing a search can honestly offer,
+// and a rewritten note is not the same note.
+//
+// The layers:
+//
+//   L1 conversation - the sessions and their trajectories
+//   L2 journal      - journal/YYYY-MM-DD.md, one page per day
+//   L3 knowledge    - knowledge/<slug>.md, one page per thing understood
+//   L4 index        - knowledge/index.md, the catalog of L3
+// ---------------------------------------------------------------------------
+namespace {
+
+/// How much of a hit a search shows. The tool result is sent again with every
+/// later step of the turn, so a search that dumps whole pages would cost more
+/// with every step.
+constexpr std::size_t kLayerExcerptChars = 200;
+/// How much one read may return.
+constexpr std::size_t kLayerReadMax = 16000;
+/// How many sessions one search may read.
+constexpr std::size_t kLayerMaxSessions = 200;
+/// A session bigger than this is skipped - and the search says so.
+constexpr std::size_t kLayerMaxSessionBytes = 4u * 1024u * 1024u;
+/// How many hits one file may contribute.
+constexpr std::size_t kLayerMaxHitsPerFile = 20;
+/// How many hits one search may collect before it sorts them.
+constexpr std::size_t kLayerMaxCollected = 5000;
+/// How much of one page a search reads.
+constexpr std::size_t kLayerMaxFileBytes = 4u * 1024u * 1024u;
+
+struct LayerFile {
+  std::string path;
+  std::string name;
+  std::string slug;
+  std::string time;  ///< ISO-8601 UTC
+};
+
+/// The files of one layer directory (one level, markdown or text).
+std::vector<LayerFile> layer_files(const std::string& dir) {
+  std::vector<LayerFile> out;
+  std::vector<DirEntryInfo> entries;
+  if (!list_directory(dir, &entries, nullptr)) return out;
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    const DirEntryInfo& e = entries[i];
+    if (e.is_dir) continue;
+    const std::string ext = path_extension(e.name);
+    if (ext != ".md" && ext != ".txt") continue;
+    LayerFile f;
+    f.path = e.path;
+    f.name = e.name;
+    f.slug = path_stem(e.name);
+    f.time = file_mtime_iso(e.path);
+    out.push_back(f);
+  }
+  return out;
+}
+
+/// The title of a page: its first heading, or the file name.
+std::string layer_title(const std::string& text, const std::string& fallback) {
+  const std::vector<std::string> lines = split_lines(text);
+  for (std::size_t i = 0; i < lines.size() && i < 20; ++i) {
+    const std::string line = trim(lines[i]);
+    if (line.size() >= 2 && line[0] == '#' && (line[1] == ' ' || line[1] == '\t')) {
+      return trim(line.substr(2));
+    }
+  }
+  return fallback;
+}
+
+/// Where the line that holds `at` starts.
+std::size_t layer_line_start(const std::string& text, std::size_t at) {
+  if (at == 0) return 0;
+  const std::size_t p = text.rfind('\n', at - 1);
+  return (p == std::string::npos) ? 0 : p + 1;
+}
+
+/// The excerpt of a hit: the line it sits on, cut around the match.
+std::string layer_excerpt(const std::string& text, std::size_t at, std::size_t hit_len) {
+  const std::size_t ls = layer_line_start(text, at);
+  std::size_t le = text.find('\n', at);
+  if (le == std::string::npos) le = text.size();
+  const std::string line = text.substr(ls, le - ls);
+  if (line.size() <= kLayerExcerptChars) return trim(line);
+  // Too long: keep the hit in the middle of the window.
+  const std::size_t rel = at - ls;
+  const std::size_t before = 60;
+  const std::size_t start = rel > before ? rel - before : 0;
+  std::size_t end = std::min(line.size(), start + kLayerExcerptChars);
+  if (end < rel + hit_len) end = std::min(line.size(), rel + hit_len);
+  std::string out = line.substr(start, end - start);
+  trim_utf8_edges(&out, true);
+  trim_utf8_edges(&out, false);
+  if (start > 0) out = "…" + out;
+  if (end < line.size()) out += "…";
+  return out;
+}
+
+/// Every occurrence of the needle, left to right.
+std::vector<std::size_t> layer_matches(const std::string& text, const std::string& needle,
+                                        bool case_sensitive) {
+  std::vector<std::size_t> out;
+  if (needle.empty()) {
+    out.push_back(0);
+    return out;
+  }
+  if (case_sensitive) {
+    std::size_t at = text.find(needle);
+    while (at != std::string::npos) {
+      out.push_back(at);
+      at = text.find(needle, at + 1);
+    }
+    return out;
+  }
+  const std::string hay = to_lower(text);
+  const std::string need = to_lower(needle);
+  std::size_t at = hay.find(need);
+  while (at != std::string::npos) {
+    out.push_back(at);
+    at = hay.find(need, at + 1);
+  }
+  return out;
+}
+
+/// The [[links]] of a page, in the order they appear.
+std::vector<std::string> layer_links(const std::string& text) {
+  std::vector<std::string> out;
+  std::size_t pos = 0;
+  while ((pos = text.find("[[", pos)) != std::string::npos) {
+    const std::size_t end = text.find("]]", pos + 2);
+    if (end == std::string::npos) break;
+    const std::string title = trim(text.substr(pos + 2, end - pos - 2));
+    if (!title.empty()) {
+      bool seen = false;
+      for (std::size_t i = 0; i < out.size(); ++i) {
+        if (out[i] == title) {
+          seen = true;
+          break;
+        }
+      }
+      if (!seen) out.push_back(title);
+    }
+    pos = end + 2;
+  }
+  return out;
+}
+
+/// The signature of a query. The cursor is bound to it: a cursor from another
+/// query is refused rather than silently pointing somewhere else.
+std::string layer_signature(const MemoryLayerQuery& q) {
+  std::string sig = q.text;
+  sig += "\x1f";
+  for (std::size_t i = 0; i < q.kinds.size(); ++i) {
+    sig += q.kinds[i];
+    sig += ",";
+  }
+  sig += "\x1f";
+  sig += q.from;
+  sig += "\x1f";
+  sig += q.to;
+  sig += "\x1f";
+  sig += q.source_id;
+  sig += "\x1f";
+  sig += q.order;
+  uint64_t h = 1469598103934665603ull;  // FNV-1a
+  for (std::size_t i = 0; i < sig.size(); ++i) {
+    h ^= static_cast<unsigned char>(sig[i]);
+    h *= 1099511628211ull;
+  }
+  static const char* const kDigits = "0123456789abcdef";
+  std::string hex(16, '0');
+  for (int i = 15; i >= 0; --i) {
+    hex[static_cast<std::size_t>(i)] = kDigits[h & 0xFull];
+    h >>= 4;
+  }
+  return hex;
+}
+
+/// Hex, so a ref can travel inside the cursor without a separator in it.
+std::string layer_hex_encode(const std::string& s) {
+  static const char* const kDigits = "0123456789abcdef";
+  std::string out;
+  out.reserve(s.size() * 2);
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    out.push_back(kDigits[(c >> 4) & 0xF]);
+    out.push_back(kDigits[c & 0xF]);
+  }
+  return out;
+}
+
+bool layer_hex_decode(const std::string& hex, std::string* out) {
+  if (hex.size() % 2 != 0) return false;
+  out->clear();
+  out->reserve(hex.size() / 2);
+  for (std::size_t i = 0; i < hex.size(); i += 2) {
+    int value = 0;
+    for (std::size_t k = 0; k < 2; ++k) {
+      const char c = hex[i + k];
+      int digit = 0;
+      if (c >= '0' && c <= '9') {
+        digit = c - '0';
+      } else if (c >= 'a' && c <= 'f') {
+        digit = c - 'a' + 10;
+      } else if (c >= 'A' && c <= 'F') {
+        digit = c - 'A' + 10;
+      } else {
+        return false;
+      }
+      value = value * 16 + digit;
+    }
+    out->push_back(static_cast<char>(value));
+  }
+  return true;
+}
+
+/// Where the last search stopped: the last hit that was returned, bound to
+/// the query. The position is the hit itself, not its number - the list grows
+/// while it is read (a new message is newer than everything that was there),
+/// and a number would point at the wrong hit the next time.
+std::string layer_cursor(int64_t when_ms, const std::string& ref, const std::string& sig) {
+  return sig + "_" + std::to_string(when_ms) + "_" + layer_hex_encode(ref);
+}
+
+bool layer_cursor_parse(const std::string& cursor, const std::string& sig, int64_t* when_ms,
+                        std::string* ref) {
+  const std::size_t first = cursor.find('_');
+  if (first == std::string::npos) return false;
+  const std::size_t second = cursor.find('_', first + 1);
+  if (second == std::string::npos) return false;
+  if (cursor.substr(0, first) != sig) return false;
+  const std::string stamp = cursor.substr(first + 1, second - first - 1);
+  if (stamp.empty() || stamp.size() > 20) return false;
+  int64_t value = 0;
+  for (std::size_t i = 0; i < stamp.size(); ++i) {
+    if (stamp[i] < '0' || stamp[i] > '9') return false;
+    value = value * 10 + static_cast<std::size_t>(stamp[i] - '0');
+  }
+  if (!layer_hex_decode(cursor.substr(second + 1), ref)) return false;
+  *when_ms = value;
+  return true;
+}
+
+/// A piece of text, cut to the window the caller asked for. The cut lands on a
+/// character boundary: half a character in the answer would be a broken
+/// character in the transcript.
+std::string layer_slice(const std::string& text, std::size_t offset, std::size_t limit,
+                         bool* more, std::size_t* next_offset) {
+  if (offset >= text.size()) {
+    if (more) *more = false;
+    if (next_offset) *next_offset = text.size();
+    return std::string();
+  }
+  const std::size_t end = std::min(text.size(), offset + limit);
+  std::string out = text.substr(offset, end - offset);
+  trim_utf8_edges(&out, false);
+  if (more) *more = (offset + out.size()) < text.size();
+  if (next_offset) *next_offset = offset + out.size();
+  return out;
+}
+
+/// Does this page answer to the name? A page is known by its slug and by its
+/// title, case-insensitively.
+bool layer_page_is(const LayerFile& file, const std::string& title, const std::string& page_title) {
+  if (to_lower(file.slug) == to_lower(title)) return true;
+  if (!page_title.empty() && to_lower(page_title) == to_lower(title)) return true;
+  return false;
+}
+
+/// The name a page is called by, without the [[ ]] and without the extension.
+std::string layer_page_name(const std::string& title_in) {
+  std::string t = trim(title_in);
+  if (t.size() >= 4 && t.compare(0, 2, "[[") == 0 && t.compare(t.size() - 2, 2, "]]") == 0) {
+    t = trim(t.substr(2, t.size() - 4));
+  }
+  const std::string ext = path_extension(t);
+  if (ext == ".md" || ext == ".txt") t = path_stem(t);
+  return t;
+}
+
+}  // namespace
+
+std::string Workspace::journal_dir() const { return path_join(run_dir_, "journal"); }
+
+std::string Workspace::knowledge_dir() const { return path_join(run_dir_, "knowledge"); }
+
+MemoryLayerResults Workspace::memory_find_layers(const MemoryLayerQuery& query) const {
+  MemoryLayerResults out;
+  const std::string needle = trim(query.text);
+  const bool cs = query.case_sensitive;
+  const std::string sig = layer_signature(query);
+
+  std::vector<std::string> kinds = query.kinds;
+  if (kinds.empty()) {
+    kinds.push_back("conversation");
+    kinds.push_back("journal");
+    kinds.push_back("knowledge");
+  }
+  const bool want_conv = std::find(kinds.begin(), kinds.end(), "conversation") != kinds.end();
+  const bool want_journal = std::find(kinds.begin(), kinds.end(), "journal") != kinds.end();
+  const bool want_knowledge = std::find(kinds.begin(), kinds.end(), "knowledge") != kinds.end();
+
+  const int64_t from_ms = query.from.empty() ? 0 : memory_iso_ms(query.from);
+  const int64_t to_ms = query.to.empty() ? 0 : memory_iso_ms(query.to);
+  const bool oldest = query.order == "oldest";
+
+  std::vector<MemoryLayerItem> hits;
+
+  // ---- L1: what was said ------------------------------------------------
+  if (want_conv) {
+    const std::vector<SessionInfo> sessions = list_sessions();
+    std::size_t scanned = 0;
+    for (std::size_t s = 0; s < sessions.size(); ++s) {
+      if (scanned >= kLayerMaxSessions) {
+        out.truncated = true;
+        break;
+      }
+      if (hits.size() >= kLayerMaxCollected) {
+        out.truncated = true;
+        break;
+      }
+      const SessionInfo& info = sessions[s];
+      if (!query.source_id.empty() && query.source_id != info.id) continue;
+      ++scanned;
+      const std::string file = session_file_for(sessions_dir(), info.id);
+      if (file_size(file) > kLayerMaxSessionBytes) {
+        out.partial = true;
+        out.failures.push_back("session " + info.id + " is too big to read");
+        continue;
+      }
+      Session session;
+      std::string err;
+      if (!load_session(info.id, &session, &err)) {
+        out.partial = true;
+        out.failures.push_back("session " + info.id + ": " + err);
+        continue;
+      }
+      for (std::size_t m = 0; m < session.messages.size(); ++m) {
+        const Message& msg = session.messages[m];
+        if (msg.role != "user" && msg.role != "assistant") continue;
+        const std::string& text = msg.content;
+        if (text.empty()) continue;
+        const int64_t when = memory_iso_ms(msg.created_at);
+        if (from_ms > 0 && when > 0 && when < from_ms) continue;
+        if (to_ms > 0 && when > 0 && when >= to_ms) continue;
+        std::size_t at = 0;
+        if (!needle.empty()) {
+          const std::vector<std::size_t> ats = layer_matches(text, needle, cs);
+          if (ats.empty()) continue;
+          at = ats[0];
+        }
+        MemoryLayerItem item;
+        item.ref = "conv:" + info.id + "#m" + std::to_string(m);
+        item.kind = "conversation";
+        item.time = msg.created_at.empty() ? info.updated_at : msg.created_at;
+        item.title = info.title;
+        item.who = msg.role;
+        item.text = layer_excerpt(text, at, needle.size());
+        item.source = info.id;
+        hits.push_back(item);
+        if (hits.size() >= kLayerMaxCollected) {
+          out.truncated = true;
+          break;
+        }
+      }
+      // The compacted summary is what is left of the older turns: it is a
+      // record of what was said, too, and it is what the model itself keeps.
+      if (!session.summary.empty()) {
+        const std::vector<std::size_t> ats = layer_matches(session.summary, needle, cs);
+        if (!ats.empty()) {
+          MemoryLayerItem item;
+          item.ref = "conv-summary:" + info.id;
+          item.kind = "conversation";
+          item.time = info.updated_at;
+          item.title = info.title;
+          item.text = layer_excerpt(session.summary, ats[0], needle.size());
+          item.source = info.id;
+          hits.push_back(item);
+        }
+      }
+    }
+  }
+
+  // ---- L2 and L3: what was written down ---------------------------------
+  struct WrittenLayer {
+    const char* kind;
+    const char* dir_kind;  ///< "journal" | "knowledge"
+  };
+  const WrittenLayer written[] = {{"journal", "journal"}, {"knowledge", "knowledge"}};
+  for (std::size_t w = 0; w < 2; ++w) {
+    const bool want = (w == 0) ? want_journal : want_knowledge;
+    if (!want) continue;
+    const std::string dir = (w == 0) ? journal_dir() : knowledge_dir();
+    const std::vector<LayerFile> files = layer_files(dir);
+    for (std::size_t i = 0; i < files.size(); ++i) {
+      if (hits.size() >= kLayerMaxCollected) {
+        out.truncated = true;
+        break;
+      }
+      const LayerFile& f = files[i];
+      if (!query.source_id.empty() && query.source_id != f.name && query.source_id != f.slug) {
+        continue;
+      }
+      std::string text;
+      if (!read_file(f.path, &text, kLayerMaxFileBytes, nullptr)) {
+        out.partial = true;
+        out.failures.push_back(std::string(written[w].dir_kind) + " " + f.name + ": cannot read");
+        continue;
+      }
+      std::string time = f.time;
+      std::string title = f.slug;
+      if (w == 0) {
+        // The day is the file name; the mtime is only a fallback.
+        if (f.slug.size() == 10 && f.slug[4] == '-' && f.slug[7] == '-') {
+          time = f.slug + "T00:00:00Z";
+        }
+        title = f.name;
+      } else {
+        title = layer_title(text, f.slug);
+      }
+      const int64_t when = memory_iso_ms(time);
+      if (from_ms > 0 && when > 0 && when < from_ms) continue;
+      if (to_ms > 0 && when > 0 && when >= to_ms) continue;
+      const std::vector<std::size_t> ats = layer_matches(text, needle, cs);
+      const std::size_t use = needle.empty() ? (ats.empty() ? 0u : 1u) : ats.size();
+      std::size_t taken = 0;
+      for (std::size_t a = 0; a < use && taken < kLayerMaxHitsPerFile; ++a) {
+        const std::size_t at = needle.empty() ? 0 : ats[a];
+        MemoryLayerItem item;
+        const std::size_t line = layer_line_start(text, at);
+        if (w == 0) {
+          item.ref = "journal:" + f.name + "#c" + std::to_string(line);
+        } else {
+          item.ref = "knowledge:" + f.slug + "#c" + std::to_string(line);
+        }
+        item.kind = written[w].kind;
+        item.time = time;
+        item.title = title;
+        item.text = layer_excerpt(text, at, needle.size());
+        item.source = w == 0 ? f.name : f.slug;
+        hits.push_back(item);
+        ++taken;
+      }
+    }
+  }
+
+  // Newest first, unless the caller asked for the oldest.
+  std::stable_sort(hits.begin(), hits.end(),
+                   [&oldest](const MemoryLayerItem& a, const MemoryLayerItem& b) {
+                     const int64_t ta = memory_iso_ms(a.time);
+                     const int64_t tb = memory_iso_ms(b.time);
+                     if (ta != tb) return oldest ? (ta < tb) : (ta > tb);
+                     // Same moment: the order has to be a total one, or the
+                     // cursor would not know which hit it names.
+                     return oldest ? (a.ref < b.ref) : (a.ref > b.ref);
+                   });
+
+  std::size_t start = 0;
+  if (!query.cursor.empty()) {
+    int64_t cursor_time = 0;
+    std::string cursor_ref;
+    if (!layer_cursor_parse(query.cursor, sig, &cursor_time, &cursor_ref)) {
+      out.error = "cursorExpired: the cursor belongs to another query - search again";
+      return out;
+    }
+    // The next page starts after the hit the cursor names.
+    start = hits.size();
+    for (std::size_t i = 0; i < hits.size(); ++i) {
+      const int64_t t = memory_iso_ms(hits[i].time);
+      const bool after =
+          oldest ? (t > cursor_time || (t == cursor_time && hits[i].ref > cursor_ref))
+                 : (t < cursor_time || (t == cursor_time && hits[i].ref < cursor_ref));
+      if (after) {
+        start = i;
+        break;
+      }
+    }
+  }
+  if (start > hits.size()) start = hits.size();
+  const std::size_t limit = query.limit == 0 ? 8 : query.limit;
+  for (std::size_t i = start; i < hits.size() && out.items.size() < limit; ++i) {
+    out.items.push_back(hits[i]);
+  }
+  if (start + out.items.size() < hits.size()) {
+    const MemoryLayerItem& last = out.items[out.items.size() - 1];
+    out.next_cursor = layer_cursor(memory_iso_ms(last.time), last.ref, sig);
+  }
+  return out;
+}
+
+MemoryLayerRead Workspace::memory_read_layer(const std::string& ref, std::size_t offset,
+                                             std::size_t limit) const {
+  MemoryLayerRead out;
+  out.ref = ref;
+  const std::string r = trim(ref);
+  const std::size_t colon = r.find(':');
+  if (colon == std::string::npos) {
+    out.error = "bad ref '" + ref + "': expected conv:<session>, journal:<file> or knowledge:<page>";
+    return out;
+  }
+  const std::string kind = r.substr(0, colon);
+  const std::string rest = r.substr(colon + 1);
+  if (limit == 0 || limit > kLayerReadMax) limit = kLayerReadMax;
+
+  if (kind == "conv") {
+    std::string sid = rest;
+    std::size_t index = 0;
+    bool want_summary = true;
+    const std::size_t hash = rest.rfind('#');
+    if (hash != std::string::npos) {
+      const std::string tail = rest.substr(hash + 1);
+      if (tail.size() > 1 && tail[0] == 'm') {
+        sid = rest.substr(0, hash);
+        index = 0;
+        for (std::size_t i = 1; i < tail.size(); ++i) {
+          if (tail[i] < '0' || tail[i] > '9') {
+            index = 0;
+            break;
+          }
+          index = index * 10 + static_cast<std::size_t>(tail[i] - '0');
+        }
+        want_summary = false;
+      }
+    }
+    Session session;
+    std::string err;
+    if (!load_session(sid, &session, &err)) {
+      out.error = "cannot read session " + sid + ": " + err;
+      return out;
+    }
+    out.kind = "conversation";
+    out.title = session.info.title;
+    out.time = session.info.updated_at;
+    std::string content;
+    if (want_summary) {
+      content = session.summary;
+    } else {
+      if (index >= session.messages.size()) {
+        out.error = "no message " + std::to_string(index) + " in session " + sid;
+        return out;
+      }
+      const Message& msg = session.messages[index];
+      content = msg.content;
+      out.who = msg.role;
+      out.time = msg.created_at.empty() ? out.time : msg.created_at;
+    }
+    out.total_chars = content.size();
+    std::size_t next = 0;
+    out.content = layer_slice(content, offset, limit, &out.has_next, &next);
+    out.offset = offset;
+    out.ok = true;
+    return out;
+  }
+
+  if (kind == "journal" || kind == "knowledge") {
+    std::string name = rest;
+    std::size_t at = 0;
+    const std::size_t hash = rest.rfind('#');
+    if (hash != std::string::npos) {
+      const std::string tail = rest.substr(hash + 1);
+      name = rest.substr(0, hash);
+      if (tail.size() > 1 && tail[0] == 'c') {
+        at = 0;
+        for (std::size_t i = 1; i < tail.size(); ++i) {
+          if (tail[i] < '0' || tail[i] > '9') {
+            at = 0;
+            break;
+          }
+          at = at * 10 + static_cast<std::size_t>(tail[i] - '0');
+        }
+      }
+    }
+    std::string path;
+    if (kind == "journal") {
+      path = path_join(journal_dir(), name);
+    } else {
+      path = path_join(knowledge_dir(), name + ".md");
+      if (!path_exists(path)) path = path_join(knowledge_dir(), name);
+    }
+    std::string text;
+    if (!read_file(path, &text, kLayerMaxFileBytes, nullptr)) {
+      out.error = "cannot read " + kind + " '" + name + "'";
+      return out;
+    }
+    out.kind = kind;
+    out.title = kind == "journal" ? name : layer_title(text, name);
+    out.time = file_mtime_iso(path);
+    out.total_chars = text.size();
+    std::size_t next = 0;
+    out.content = layer_slice(text, at, limit, &out.has_next, &next);
+    out.offset = at;
+    out.ok = true;
+    return out;
+  }
+
+  out.error = "unknown memory layer '" + kind + "'";
+  return out;
+}
+
+MemoryLayerRead Workspace::knowledge_open(const std::string& title_in, std::size_t offset,
+                                          std::size_t limit) const {
+  MemoryLayerRead out;
+  const std::string want = layer_page_name(title_in);
+  if (want.empty()) {
+    out.error = "which page? Give the page name (the title in its '# heading').";
+    return out;
+  }
+  if (limit == 0 || limit > kLayerReadMax) limit = kLayerReadMax;
+
+  const std::vector<LayerFile> files = layer_files(knowledge_dir());
+  LayerFile hit;
+  std::string hit_text;
+  std::string hit_title;
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    std::string text;
+    if (!read_file(files[i].path, &text, kLayerMaxFileBytes, nullptr)) continue;
+    const std::string page_title = layer_title(text, files[i].slug);
+    if (layer_page_is(files[i], want, page_title)) {
+      hit = files[i];
+      hit_text = text;
+      hit_title = page_title;
+      break;
+    }
+  }
+  if (hit.path.empty()) {
+    out.error = "no page named '" + want + "'";
+    std::string known;
+    for (std::size_t i = 0; i < files.size(); ++i) {
+      if (!known.empty()) known += ", ";
+      known += files[i].slug;
+    }
+    if (!known.empty()) out.error += " (there are: " + known + ")";
+    return out;
+  }
+
+  out.kind = "knowledge";
+  out.title = hit_title.empty() ? hit.slug : hit_title;
+  out.time = hit.time;
+  out.total_chars = hit_text.size();
+  std::size_t next = 0;
+  out.content = layer_slice(hit_text, offset, limit, &out.has_next, &next);
+  out.offset = offset;
+
+  // The relations are computed from the pages as they are now: a link that
+  // points at a page nobody wrote is a thing to fix, not to store.
+  const std::vector<std::string> links = layer_links(hit_text);
+  nlohmann::json related = nlohmann::json::object();
+  nlohmann::json link_json = nlohmann::json::array();
+  nlohmann::json missing_json = nlohmann::json::array();
+  nlohmann::json from_json = nlohmann::json::array();
+  for (std::size_t i = 0; i < links.size(); ++i) {
+    const std::string link = links[i];
+    bool found = false;
+    for (std::size_t f = 0; f < files.size(); ++f) {
+      std::string text;
+      if (!read_file(files[f].path, &text, kLayerMaxFileBytes, nullptr)) continue;
+      const std::string page_title = layer_title(text, files[f].slug);
+      if (layer_page_is(files[f], link, page_title)) {
+        found = true;
+        break;
+      }
+    }
+    if (found) {
+      link_json.push_back(link);
+    } else {
+      missing_json.push_back(link);
+    }
+  }
+  // Who links here?
+  for (std::size_t f = 0; f < files.size(); ++f) {
+    if (files[f].path == hit.path) continue;
+    std::string text;
+    if (!read_file(files[f].path, &text, kLayerMaxFileBytes, nullptr)) continue;
+    const std::vector<std::string> other = layer_links(text);
+    for (std::size_t i = 0; i < other.size(); ++i) {
+      if (to_lower(other[i]) == to_lower(out.title) || to_lower(other[i]) == to_lower(hit.slug)) {
+        const std::string page_title = layer_title(text, files[f].slug);
+        from_json.push_back(page_title.empty() ? files[f].slug : page_title);
+        break;
+      }
+    }
+  }
+  if (!link_json.empty()) related["links"] = link_json;
+  if (!from_json.empty()) related["linkedFrom"] = from_json;
+  if (!missing_json.empty()) related["missing"] = missing_json;
+  if (!related.empty()) out.related = related;
+  out.ok = true;
+  return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// The catalog of the knowledge pages (L4).
+//
+// One line per page: the title and what the page is about. The descriptions
+// come from the agent's own index.md; the page list, the order and the "how
+// many pages you did not see" line are computed here, from the pages as they
+// are now.
+//
+// The order matters: the pages that matter for this conversation come first
+// (the same 2-gram relevance the memory notes use), then the ones that were
+// changed last. A catalog in alphabetical order is a catalog the model reads
+// past.
+// ---------------------------------------------------------------------------
+namespace {
+
+/// The descriptions the agent wrote in index.md: title -> one line.
+std::map<std::string, std::string> layer_index_descriptions(const std::string& text) {
+  std::map<std::string, std::string> out;
+  const std::vector<std::string> lines = split_lines(text);
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    std::string line = trim(lines[i]);
+    if (line.empty()) continue;
+    if (line[0] == '-' || line[0] == '*' || line[0] == '+') line = trim(line.substr(1));
+    if (line.empty()) continue;
+    if (line[0] == '#') continue;  // a heading, not an entry
+    std::string title;
+    std::string rest;
+    if (line.compare(0, 2, "[[") == 0) {
+      const std::size_t end = line.find("]]");
+      if (end == std::string::npos) continue;
+      title = trim(line.substr(2, end - 2));
+      rest = trim(line.substr(end + 2));
+    } else {
+      const std::size_t colon = line.find(':');
+      if (colon == std::string::npos) continue;
+      title = trim(line.substr(0, colon));
+      rest = trim(line.substr(colon + 1));
+    }
+    if (title.empty()) continue;
+    // "- Title - description" and "- Title: description" are the same thing.
+    if (!rest.empty() && (rest[0] == '-' || rest[0] == ':')) rest = trim(rest.substr(1));
+    if (!rest.empty() && (rest[0] == '-' || rest[0] == ':')) rest = trim(rest.substr(1));
+    out[to_lower(title)] = rest;
+  }
+  return out;
+}
+
+}  // namespace
+
+KnowledgeCatalog Workspace::knowledge_catalog(const std::string& focus,
+                                              std::size_t max_lines) const {
+  KnowledgeCatalog out;
+  if (max_lines == 0) return out;
+
+  struct Page {
+    std::string title;
+    std::string slug;
+    std::string description;
+    std::string time;
+    double relevance = 0.0;
+  };
+  std::vector<Page> pages;
+  std::string index_text;
+  const std::vector<LayerFile> files = layer_files(knowledge_dir());
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    const LayerFile& f = files[i];
+    if (f.slug == "index") {
+      // The catalog the agent wrote: it holds the descriptions, not a page.
+      std::string text;
+      if (read_file(f.path, &text, kLayerMaxFileBytes, nullptr)) index_text = text;
+      continue;
+    }
+    std::string text;
+    if (!read_file(f.path, &text, kLayerMaxFileBytes, nullptr)) continue;
+    Page p;
+    p.slug = f.slug;
+    p.title = layer_title(text, f.slug);
+    p.time = f.time;
+    pages.push_back(p);
+  }
+  const std::map<std::string, std::string> descriptions = layer_index_descriptions(index_text);
+  const std::vector<char32_t> focus_cps = memory_normalized(focus);
+  for (std::size_t i = 0; i < pages.size(); ++i) {
+    std::map<std::string, std::string>::const_iterator it =
+        descriptions.find(to_lower(pages[i].title));
+    if (it == descriptions.end()) it = descriptions.find(to_lower(pages[i].slug));
+    if (it != descriptions.end()) pages[i].description = it->second;
+    pages[i].relevance = memory_relevance(
+        memory_normalized(pages[i].title + " " + pages[i].description), focus_cps);
+  }
+  std::stable_sort(pages.begin(), pages.end(), [](const Page& a, const Page& b) {
+    if (a.relevance != b.relevance) return a.relevance > b.relevance;
+    if (a.time != b.time) return a.time > b.time;
+    return a.title < b.title;
+  });
+
+  out.pages = static_cast<int>(pages.size());
+  if (pages.empty()) return out;
+
+  std::ostringstream body;
+  std::size_t listed = 0;
+  for (std::size_t i = 0; i < pages.size() && listed < max_lines; ++i) {
+    body << "- [[" << pages[i].title << "]]";
+    if (!pages[i].description.empty()) body << " " << pages[i].description;
+    body << "\n";
+    ++listed;
+  }
+  out.listed = static_cast<int>(listed);
+  const std::size_t hidden = pages.size() - listed;
+
+  std::ostringstream out_text;
+  out_text << "\nKnowledge pages (what this workspace understands about people, things and "
+              "systems - your own notes, one page per thing)\n";
+  out_text << body.str();
+  if (hidden > 0) {
+    out_text << "(" << hidden << " more page" << (hidden == 1 ? "" : "s")
+             << " not listed; ask for one by name, or search with toolkit_memory_find)\n";
+  }
+  out_text << "Read one with toolkit_knowledge_open(\"<title>\"). Write one with the file tools: "
+              ".tea_agent_run/knowledge/<slug>.md, first line \"# Title\", link to another page with "
+              "[[Title]]. A page is for an understanding that lasts; a fact you need every time "
+              "belongs in the notes above.\n";
+  out.text = out_text.str();
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// The knowledge pages, read and written by a human.
+//
+// The agent writes them with the file tools; these functions are what the web
+// UI uses, so a person can read, fix and delete a page without shelling into
+// the device. The program never writes the content of a page itself.
+// ---------------------------------------------------------------------------
+namespace {
+
+/// A page name is a file name: letters, digits, dot, dash, underscore. Nothing
+/// that could walk out of the knowledge directory.
+bool layer_slug_ok(const std::string& slug) {
+  if (slug.empty() || slug.size() > 64) return false;
+  if (slug == "." || slug == "..") return false;
+  for (std::size_t i = 0; i < slug.size(); ++i) {
+    const char c = slug[i];
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+std::vector<nlohmann::json> Workspace::knowledge_pages() const {
+  std::vector<nlohmann::json> out;
+  std::string index_text;
+  const std::vector<LayerFile> files = layer_files(knowledge_dir());
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    if (files[i].slug == "index") {
+      std::string text;
+      if (read_file(files[i].path, &text, kLayerMaxFileBytes, nullptr)) index_text = text;
+    }
+  }
+  const std::map<std::string, std::string> descriptions = layer_index_descriptions(index_text);
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    const LayerFile& f = files[i];
+    std::string text;
+    if (!read_file(f.path, &text, kLayerMaxFileBytes, nullptr)) continue;
+    const std::string title = layer_title(text, f.slug);
+    std::string description;
+    std::map<std::string, std::string>::const_iterator it = descriptions.find(to_lower(title));
+    if (it == descriptions.end()) it = descriptions.find(to_lower(f.slug));
+    if (it != descriptions.end()) description = it->second;
+    nlohmann::json links = nlohmann::json::array();
+    const std::vector<std::string> linked = layer_links(text);
+    for (std::size_t k = 0; k < linked.size(); ++k) links.push_back(linked[k]);
+    nlohmann::json page = nlohmann::json::object();
+    page["slug"] = f.slug;
+    page["title"] = title;
+    page["description"] = description;
+    page["mtime"] = f.time;
+    page["bytes"] = static_cast<long long>(text.size());
+    page["links"] = links;
+    page["is_index"] = (f.slug == "index");
+    out.push_back(page);
+  }
+  std::sort(out.begin(), out.end(),
+            [](const nlohmann::json& a, const nlohmann::json& b) {
+              const std::string ta = a.value("title", std::string());
+              const std::string tb = b.value("title", std::string());
+              return ta < tb;
+            });
+  return out;
+}
+
+bool Workspace::knowledge_read(const std::string& slug, std::string* content,
+                               std::string* title, std::string* err) const {
+  if (!layer_slug_ok(slug)) {
+    if (err) *err = "bad page name";
+    return false;
+  }
+  const std::string path = path_join(knowledge_dir(), slug + ".md");
+  std::string text;
+  if (!read_file(path, &text, kLayerMaxFileBytes, nullptr)) {
+    if (err) *err = "no page named '" + slug + "'";
+    return false;
+  }
+  if (content) *content = text;
+  if (title) *title = layer_title(text, slug);
+  return true;
+}
+
+bool Workspace::knowledge_write(const std::string& slug, const std::string& content,
+                                std::string* err) const {
+  if (!layer_slug_ok(slug)) {
+    if (err) *err = "bad page name";
+    return false;
+  }
+  if (content.size() > 512u * 1024u) {
+    if (err) *err = "the page is too big (512 KB is the ceiling)";
+    return false;
+  }
+  if (!make_dirs(knowledge_dir(), err)) return false;
+  const std::string path = path_join(knowledge_dir(), slug + ".md");
+  if (!write_file_atomic(path, content, err)) return false;
+  return true;
+}
+
+bool Workspace::knowledge_delete(const std::string& slug, std::string* err) const {
+  if (!layer_slug_ok(slug)) {
+    if (err) *err = "bad page name";
+    return false;
+  }
+  const std::string path = path_join(knowledge_dir(), slug + ".md");
+  if (!path_exists(path)) {
+    if (err) *err = "no page named '" + slug + "'";
+    return false;
+  }
+  return remove_path(path, false, err);
+}
+
+// ---------------------------------------------------------------------------
+// The journal (L2): one page per day.
+//
+// The agent writes it with the file tools; these functions are what the web UI
+// and the API use, so a person can read and fix a day without shelling into
+// the device.
+// ---------------------------------------------------------------------------
+namespace {
+
+/// A day is `YYYY-MM-DD`. Nothing else is a day.
+bool layer_date_ok(const std::string& date) {
+  if (date.size() != 10) return false;
+  for (std::size_t i = 0; i < date.size(); ++i) {
+    const char c = date[i];
+    if (i == 4 || i == 7) {
+      if (c != '-') return false;
+      continue;
+    }
+    if (c < '0' || c > '9') return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+std::vector<nlohmann::json> Workspace::journal_days() const {
+  std::vector<nlohmann::json> out;
+  const std::vector<LayerFile> files = layer_files(journal_dir());
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    if (!layer_date_ok(files[i].slug)) continue;
+    std::string text;
+    if (!read_file(files[i].path, &text, kLayerMaxFileBytes, nullptr)) continue;
+    nlohmann::json day = nlohmann::json::object();
+    day["date"] = files[i].slug;
+    day["bytes"] = static_cast<long long>(text.size());
+    day["mtime"] = files[i].time;
+    // The first heading of the page, if there is one: what the day was about.
+    const std::string title = layer_title(text, std::string());
+    if (!title.empty()) day["title"] = title;
+    out.push_back(day);
+  }
+  std::sort(out.begin(), out.end(),
+            [](const nlohmann::json& a, const nlohmann::json& b) {
+              return a.value("date", std::string()) > b.value("date", std::string());
+            });
+  return out;
+}
+
+bool Workspace::journal_read(const std::string& date, std::string* content,
+                             std::string* err) const {
+  if (!layer_date_ok(date)) {
+    if (err) *err = "a day is YYYY-MM-DD";
+    return false;
+  }
+  const std::string path = path_join(journal_dir(), date + ".md");
+  std::string text;
+  if (!read_file(path, &text, kLayerMaxFileBytes, nullptr)) {
+    if (err) *err = "no journal page for " + date;
+    return false;
+  }
+  if (content) *content = text;
+  return true;
+}
+
+bool Workspace::journal_write(const std::string& date, const std::string& content,
+                              std::string* err) const {
+  if (!layer_date_ok(date)) {
+    if (err) *err = "a day is YYYY-MM-DD";
+    return false;
+  }
+  if (content.size() > 512u * 1024u) {
+    if (err) *err = "the page is too big (512 KB is the ceiling)";
+    return false;
+  }
+  if (!make_dirs(journal_dir(), err)) return false;
+  const std::string path = path_join(journal_dir(), date + ".md");
+  if (!write_file_atomic(path, content, err)) return false;
+  return true;
+}
 }  // namespace tea

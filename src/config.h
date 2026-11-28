@@ -262,6 +262,12 @@ struct Settings {
   int64_t max_tool_output = 131072;
   int64_t max_assistant_content = 131072;
   int keep_turns = 10;
+  /// How many lines the catalog of the knowledge pages may take in the
+  /// prompt (one line per page). 0 => do not inject the catalog at all.
+  /// The pages that matter for this conversation come first; when the
+  /// budget is too small the rest is left out **and the model is told how
+  /// many pages it did not see**.
+  int memory_catalog_lines = 40;
   std::string reasoning_effort = "auto";
   double temperature = -1.0;  // < 0 => not set
   double top_p = -1.0;        // < 0 => not set

@@ -47,12 +47,17 @@
 | `GET` | `/api/turns/{turn_id}/events?since=` | **这一轮的事件流**：回放 `since` 之后的事件（`since` 省略 = 全部），然后继续直播；轮次已经跑完也能读（回放缓冲区还在）。每一帧带 `seq`，断线以后拿最后一个 `seq` 接回来就行 |
 | `GET` | `/api/turns/{turn_id}/trajectory` | 单轮完整轨迹（`turn_id` 即 `done` 事件的 `trajectory_id`，也即这一轮的**句柄**） |
 | `GET` / `POST` | `/api/workspaces/{id}/memory` | 工作区长期记忆。`GET` 的每条带 `tier`（`manual`/`strong`/`medium`/`weak`）、`source`、`weight_base`、`weight_effective`（14 天半衰）、`age_days`、`last_write`、`merge_count`；顶层带 `limits`（`manual_cap` 20 / `agent_cap` 100 / 注入预算 24+14+2）与 `evicted`（最近 20 条被挤出的）。`POST {"text":"…"}` 是**人写的记忆**（永久、不衰减），返回 `note` / `merged_into`（相似条目被合并时的 id）/ `evicted`。`DELETE …/memory/{id}` 删一条 |
+| `GET` | `/api/workspaces/{id}/knowledge` | **主题页**（记忆的主题层）：`pages[]` 每页带 `slug` / `title` / `description`（来自 `knowledge/index.md`）/ `mtime` / `bytes` / `links[]` / `is_index`；顶层带 `dir`。页由 agent 用文件工具写，人也能在这里改 |
+| `GET` / `PUT` / `DELETE` | `/api/workspaces/{id}/knowledge/{slug}` | 读 / 写 / 删一页主题页。`PUT {"content":"…"}` 落盘到 `.tea_agent_run/knowledge/<slug>.md`（文件名只允许字母数字、短横线、下划线和点；页大小上限 512 KB）。`DELETE` 删一页 |
+| `GET` | `/api/workspaces/{id}/journal` | **日记**（记忆的日记层）：`days[]` 每项带 `date`（`YYYY-MM-DD`）/ `title` / `bytes` / `mtime`，新的在前 |
+| `GET` / `PUT` | `/api/workspaces/{id}/journal/{date}` | 读 / 写某一天的日记页（`.tea_agent_run/journal/<date>.md`） |
 | `POST` | `/api/llm/chat` | **一次模型调用**（无 agent loop、不执行工具）；见下面的「原语层」 |
 | `POST` | `/api/chat` | agent loop 本身；带 `task_id` + `task_context` 时，这一轮就是「在做某个排队任务」，模型会用 `toolkit_task` 汇报进度。带 **`Idempotency-Key`** 时，同一个键的同一个请求**只做一次**（见下「幂等键」） |
 | `GET` | `/api/workspaces/{id}/logs?tail=300` | 运行日志尾部 |
 | `POST` | `/api/config` | 上传完整 `provider.yaml`（原始 YAML 或 `{"yaml":"…"}`）；先校验再替换，校验失败不会覆盖现有文件。设置页的「重置 provider」走的就是它。配置成功后，**这台机器还没有任何工作区**时，服务端会把 **`$HOME` 注册成一个工作区**（对话、文件、记忆都要有个落脚的地方，默认就用家目录），响应里多一个 `workspace` 字段；已经注册过工作区的机器**不受影响**：原来那个不会被改动，也不会再多出一个。 |
 | `POST` | `/api/config/reload` | **重新读一遍磁盘上的** `provider.yaml` 并热加载（文件是手写或从别处拷过来的时候用；光刷新网页没用，配置在服务端的内存里）。先校验再替换：文件不存在 → 404 `config_missing`，文件坏了 → 400 `invalid_config`（**当前配置不动**）；有轮次在跑时 409 |
 | `POST` | `/api/config/quickstart` | 首次运行快捷通道：`{"provider":"deepseek\|minimax\|mimo","api_key":"sk-…"}` → 生成并应用只含该 provider 的配置（DeepSeek 默认模型 `deepseek-flash`，MiniMax 默认模型 `MiniMax-M3.1-Flash`，小米 MiMo 默认模型 `mimo-v2.6-flash`）；key 不会出现在任何响应里。**生成的配置不查额度**（`supports_usage` 关着）：批量部署时每台设备都去问额度会把账号弄进风控；上传的 `provider.yaml` 不受此限。MiMo 的网关由 key 形状决定：`sk-…` → `api.xiaomimimo.com`，`tp-…`/`ttp-…` → `token-plan-cn.xiaomimimo.com`。配置成功后，**这台机器还没有任何工作区**时，服务端会把 **`$HOME` 注册成一个工作区**（对话、文件、记忆都要有个落脚的地方，默认就用家目录），响应里多一个 `workspace` 字段；已经注册过工作区的机器**不受影响**：原来那个不会被改动，也不会再多出一个。 |
+| `GET` | `/api/workspaces/{id}/prompt` | **下一轮真正会发给模型的东西**：`system_prompt` 是稳定的头部（人设、角色、环境、工作区指令），`tail_context` 是每轮会变的那一块（工作区经验、记忆条目、主题页目录、任务列表）——它**不再放在头部**，这样它变了只废掉缓存的尾巴，不废掉整段对话 |
 | `GET` / `PUT` | `/api/workspaces/{id}/system-prompt` | 读 / 写工作区 system prompt：`current_prompt` 是真正生效的人设，`source` 是 `workspace`/`settings.yaml`/`builtin`，`content` 是磁盘上的覆盖（空 = 无覆盖） |
 | `GET` | `/api/workspaces/{id}/roles` | 这个工作区的**角色**（阶段档案）：`roles[]`（每个角色的解析结果：人设、规矩、工具表、`read_only`、围栏、模型、预算）、`current`（当前角色）、`current_id`、`errors`（读不出来的角色文件）。见下「角色」 |
 | `GET` / `PUT` / `DELETE` | `/api/workspaces/{id}/roles/{name}` | 读 / 写 / 删一个角色。PUT 的 body 是 `{"content":"<YAML>"}`，**先解析再写**（读不出来的角色文件不落盘）；GET 除了解析结果还带原始 YAML（`content`） |

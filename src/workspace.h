@@ -249,6 +249,74 @@ struct MemoryPrompt {
   std::vector<std::string> weak_ids;
 };
 
+/// The four memory layers (docs/memory-design.md).
+///
+///   L1 conversation - the sessions and their trajectories
+///   L2 journal      - journal/YYYY-MM-DD.md, one page per day
+///   L3 knowledge    - knowledge/<slug>.md, one page per thing understood
+///   L4 index        - knowledge/index.md, the catalog of L3
+///
+/// One search covers all of them. The layers differ in where the text lives,
+/// not in how it is matched: the match is literal, byte for byte, because
+/// "the words that were actually written" is the only thing a search can
+/// honestly offer - and a rewritten note is not the same note.
+struct MemoryLayerQuery {
+  std::string text;                   ///< the literal query; empty => browse by time
+  std::vector<std::string> kinds;     ///< conversation | journal | knowledge; empty => all
+  std::string from;                   ///< ISO-8601, inclusive
+  std::string to;                     ///< ISO-8601, exclusive
+  std::string source_id;              ///< session id, journal file name or page slug
+  std::string order;                  ///< "newest" (default) | "oldest"
+  std::size_t limit = 8;
+  std::string cursor;                 ///< where the last search stopped
+  bool case_sensitive = true;         ///< the match is literal
+};
+
+/// One hit: where it is, when it was, and a short excerpt of it.
+struct MemoryLayerItem {
+  std::string ref;    ///< conv:<sid>#m<idx> | journal:<file>#c<off> | knowledge:<slug>#c<off>
+  std::string kind;   ///< conversation | journal | knowledge
+  std::string time;   ///< ISO-8601 UTC
+  std::string title;  ///< the page title, or the session title
+  std::string who;    ///< "user" | "assistant" (empty for the written layers)
+  std::string text;   ///< the excerpt
+  std::string source; ///< the session id, the file name or the slug
+};
+
+/// What one search found - and what it could not read.
+struct MemoryLayerResults {
+  std::vector<MemoryLayerItem> items;
+  std::string next_cursor;
+  bool partial = false;               ///< some source could not be read
+  std::vector<std::string> failures;  ///< what could not be read
+  bool truncated = false;             ///< the caps hid results
+  std::string error;                  ///< why the search could not run
+};
+
+/// The catalog of the knowledge pages: one line per page.
+struct KnowledgeCatalog {
+  std::string text;
+  int pages = 0;   ///< how many pages there are
+  int listed = 0;  ///< how many made it into the text
+};
+
+/// The original text behind a ref, or a knowledge page and its relations.
+struct MemoryLayerRead {
+  std::string ref;
+  std::string kind;
+  std::string title;
+  std::string time;
+  std::string who;
+  std::string content;
+  std::size_t offset = 0;
+  std::size_t total_chars = 0;
+  bool has_next = false;
+  nlohmann::json related;  ///< the links of a knowledge page
+  bool ok = false;
+  std::string error;
+};
+
+
 class Workspace {
  public:
   /// Layering: `base_settings` (builtin defaults + tea_agent.yaml + CLI) is
@@ -307,6 +375,44 @@ class Workspace {
   /// <run_dir>/settings.yaml as `role:`.
   bool set_current_role(const std::string& id, std::string* err);
   std::string sessions_dir() const;
+  /// The journal directory (L2): one page per day.
+  std::string journal_dir() const;
+  /// The knowledge directory (L3 and L4): one page per thing understood, and
+  /// the catalog of them.
+  std::string knowledge_dir() const;
+  /// Search all four layers at once. The match is literal (byte for byte);
+  /// `query` empty means "browse by time".
+  MemoryLayerResults memory_find_layers(const MemoryLayerQuery& query) const;
+  /// Read the original text behind a ref (the text, not a summary).
+  MemoryLayerRead memory_read_layer(const std::string& ref, std::size_t offset,
+                                    std::size_t limit) const;
+  /// Open a knowledge page by its name, with the pages it links to and the
+  /// pages that link to it.
+  MemoryLayerRead knowledge_open(const std::string& title, std::size_t offset,
+                                 std::size_t limit) const;
+  /// The catalog of the knowledge pages (L4): one line per page, the ones
+  /// that matter for this conversation first. `max_lines` is the budget;
+  /// what did not fit is reported, not silently dropped.
+  KnowledgeCatalog knowledge_catalog(const std::string& focus,
+                                     std::size_t max_lines) const;
+  /// The knowledge pages of this workspace: one file per thing understood.
+  std::vector<nlohmann::json> knowledge_pages() const;
+  /// Read one page. The slug is the file name without the extension.
+  bool knowledge_read(const std::string& slug, std::string* content,
+                      std::string* title, std::string* err) const;
+  /// Write (or create) one page. The slug is the file name without the
+  /// extension; the content is Markdown.
+  bool knowledge_write(const std::string& slug, const std::string& content,
+                       std::string* err) const;
+  /// Delete one page.
+  bool knowledge_delete(const std::string& slug, std::string* err) const;
+  /// The days that have a journal page (L2), newest first.
+  std::vector<nlohmann::json> journal_days() const;
+  /// Read one day's page. The date is `YYYY-MM-DD`.
+  bool journal_read(const std::string& date, std::string* content, std::string* err) const;
+  /// Write one day's page.
+  bool journal_write(const std::string& date, const std::string& content,
+                     std::string* err) const;
   std::string memory_file() const;
   /// Where an evicted note is kept (`memory/evicted.jsonl`): the note itself is
   /// gone from memory.json, but a person can still see what was dropped.

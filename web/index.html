@@ -370,6 +370,25 @@
                       placeholder="agent.md 会在每一轮注入 system prompt：记录这个工作区特有的坑、可复用的命令与脚本。"></textarea>
             <div class="doc-scripts" id="agent-doc-scripts"></div>
           </div>
+          <!-- 主题页：这个工作区对人、对事、对系统的当前理解，一页一个主题。
+               agent 用文件工具写，人在这里也能读、改、删。 -->
+          <div class="doc-card">
+            <div class="doc-head">
+              <span class="doc-title">主题页（knowledge/）</span>
+              <span class="doc-path" id="knowledge-path"></span>
+              <span class="doc-actions">
+                <span class="doc-meta" id="knowledge-meta"></span>
+                <button class="btn" id="knowledge-new" type="button">新建</button>
+                <button class="btn" id="knowledge-delete" type="button">删除</button>
+                <button class="btn primary" id="knowledge-save" type="button">保存</button>
+              </span>
+            </div>
+            <input class="ta" id="knowledge-slug" type="text" spellcheck="false"
+                   placeholder="文件名（英文/数字/短横线，如 mqtt-broker；保存时用）" />
+            <div class="note-list" id="knowledge-list"></div>
+            <textarea class="ta doc-editor" id="knowledge-editor" rows="10"
+                      placeholder="第一行写 # 标题；正文里用 [[另一页]] 互相链接。"></textarea>
+          </div>
           <div class="note-add">
             <textarea class="ta" id="memory-input" rows="3" placeholder="记录一条长期记忆（手动添加的永久保留、每轮注入）…"></textarea>
             <button class="btn primary" id="memory-add" type="button">添加</button>

@@ -5268,7 +5268,13 @@ void ApiServer::Impl::install_routes() {
             const std::string prompt = agent.build_system_prompt(ws, session, std::string(),
                                                                 std::string(), role);
             nlohmann::json j = nlohmann::json::object();
+    // The blocks that change during the conversation are not in the system
+    // prompt any more - they are sent as one message at the end of the
+    // context. The preview shows both, because both are what the model gets.
+    const std::string tail = agent.build_tail_block(ws, session);
             j["system_prompt"] = prompt;
+    j["tail_context"] = tail;
+    j["tail_bytes"] = static_cast<long long>(tail.size());
             j["role"] = role ? role->to_json() : nlohmann::json();
             j["role_id"] = role ? role->id : std::string();
             j["bytes"] = static_cast<long long>(prompt.size());
@@ -6137,6 +6143,145 @@ void ApiServer::Impl::install_routes() {
             j["ok"] = true;
             j["path"] = ws.agent_doc_file();
             j["bytes"] = static_cast<long long>(file_size(ws.agent_doc_file()));
+            send_json(res, j);
+          });
+
+  // ---- knowledge pages (L3) ----------------------------------------------
+  // One page per thing this workspace understands. The agent writes them with
+  // the file tools; these routes let a person read, fix and delete a page from
+  // the web UI.
+  svr.Get(R"(/api/workspaces/([^/]+)/knowledge)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            nlohmann::json j = nlohmann::json::object();
+            j["pages"] = ws.knowledge_pages();
+            j["dir"] = ws.display_path(ws.knowledge_dir());
+            send_json(res, j);
+          });
+
+  svr.Get(R"(/api/workspaces/([^/]+)/knowledge/([^/]+))",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            std::string content;
+            std::string title;
+            if (!ws.knowledge_read(req.matches[2].str(), &content, &title, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            nlohmann::json j = nlohmann::json::object();
+            j["slug"] = req.matches[2].str();
+            j["title"] = title;
+            j["content"] = content;
+            j["bytes"] = static_cast<long long>(content.size());
+            send_json(res, j);
+          });
+
+  svr.Put(R"(/api/workspaces/([^/]+)/knowledge/([^/]+))",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            nlohmann::json body;
+            if (!parse_json_body(req, &body, res)) return;
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string content = json_string(body, "content");
+            if (!ws.knowledge_write(req.matches[2].str(), content, &err)) {
+              send_error(res, 400, "bad_request", err);
+              return;
+            }
+            LOG_INFO("knowledge: page '", req.matches[2].str(), "' written from the web UI (",
+                     content.size(), " bytes)");
+            nlohmann::json j = nlohmann::json::object();
+            j["ok"] = true;
+            j["bytes"] = static_cast<long long>(content.size());
+            send_json(res, j);
+          });
+
+  svr.Delete(R"(/api/workspaces/([^/]+)/knowledge/([^/]+))",
+             [this](const httplib::Request& req, httplib::Response& res) {
+               Workspace ws;
+               std::string err;
+               if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+                 send_error(res, 404, "not_found", err);
+                 return;
+               }
+               if (!ws.knowledge_delete(req.matches[2].str(), &err)) {
+                 send_error(res, 404, "not_found", err);
+                 return;
+               }
+               LOG_INFO("knowledge: page '", req.matches[2].str(), "' deleted from the web UI");
+               send_ok(res);
+             });
+
+  // ---- the journal (L2) -------------------------------------------------
+  // One page per day: what happened, in the order it happened. The agent
+  // writes it; a person can read and fix it here.
+  svr.Get(R"(/api/workspaces/([^/]+)/journal)",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            nlohmann::json j = nlohmann::json::object();
+            j["days"] = ws.journal_days();
+            j["dir"] = ws.display_path(ws.journal_dir());
+            send_json(res, j);
+          });
+
+  svr.Get(R"(/api/workspaces/([^/]+)/journal/([^/]+))",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            std::string content;
+            if (!ws.journal_read(req.matches[2].str(), &content, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            nlohmann::json j = nlohmann::json::object();
+            j["date"] = req.matches[2].str();
+            j["content"] = content;
+            j["bytes"] = static_cast<long long>(content.size());
+            send_json(res, j);
+          });
+
+  svr.Put(R"(/api/workspaces/([^/]+)/journal/([^/]+))",
+          [this](const httplib::Request& req, httplib::Response& res) {
+            nlohmann::json body;
+            if (!parse_json_body(req, &body, res)) return;
+            Workspace ws;
+            std::string err;
+            if (!open_workspace(req.matches[1].str(), &ws, &err)) {
+              send_error(res, 404, "not_found", err);
+              return;
+            }
+            const std::string content = json_string(body, "content");
+            if (!ws.journal_write(req.matches[2].str(), content, &err)) {
+              send_error(res, 400, "bad_request", err);
+              return;
+            }
+            LOG_INFO("journal: ", req.matches[2].str(), " written from the web UI (",
+                     content.size(), " bytes)");
+            nlohmann::json j = nlohmann::json::object();
+            j["ok"] = true;
+            j["bytes"] = static_cast<long long>(content.size());
             send_json(res, j);
           });
 

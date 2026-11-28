@@ -74,6 +74,8 @@
     /// 侧栏里的历史搜索（对话 + 轨迹）。null = 没在搜。
     sessionSearch: null,
     memory: [], memoryLimits: null, memoryEvicted: [], logsTimer: null, logsAutoScroll: true,
+    // 主题页（knowledge/）：每页一个主题，agent 写、人也能改。
+    knowledge: [], knowledgeCurrent: '', knowledgeOriginal: null,
     /// 当前会话的任务列表（todo）：agent 用 toolkit_todo 维护，SSE 的 todo 事件
     /// 实时推送。done/total 用于「3/7」这样的进度显示。
     todos: [], todoDone: 0, todoTotal: 0, todoCollapsed: false,
@@ -5858,6 +5860,7 @@
   function loadMemory() {
     if (!state.workspace) return Promise.resolve();
     loadAgentDoc();                       // 经验文件与记忆一起刷新
+    loadKnowledge();                      // 主题页也是记忆的一部分
     return api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/memory').then(function (d) {
       state.memory = d.notes || [];
       state.memoryLimits = d.limits || null;
@@ -6394,6 +6397,113 @@
       row.appendChild(left);
       box.appendChild(row);
     });
+  }
+  /* ---------- 主题页（knowledge/） ---------- */
+  // 一页一个主题：agent 对这个工作区里的人和事的当前理解。agent 用文件工具写，
+  // 人在这里也能读、改、删。目录块（每会话一次）里只有标题和一句话，正文要按需读。
+  function loadKnowledge() {
+    if (!state.workspace) { renderKnowledge(); return Promise.resolve(); }
+    var wsid = state.workspace.id;
+    return api('api/workspaces/' + encodeURIComponent(wsid) + '/knowledge').then(function (d) {
+      if (!state.workspace || state.workspace.id !== wsid) return;   // 期间切了工作区
+      state.knowledge = d.pages || [];
+      renderKnowledge();
+    }, function (e) { toast('读取主题页失败：' + e.message); });
+  }
+  function renderKnowledge() {
+    var box = $('knowledge-list');
+    if (!box) return;
+    clear(box);
+    var pages = state.knowledge || [];
+    if (!pages.length) {
+      box.appendChild(el('div', 'empty-note', '还没有主题页'));
+    } else {
+      pages.forEach(function (p) {
+        var row = el('div', 'note');
+        var left = el('div', 'txt');
+        var head = el('div', 'note-head');
+        var name = el('span', 'note-text', p.title || p.slug);
+        name.style.cursor = 'pointer';
+        name.addEventListener('click', function () { openKnowledge(p.slug); });
+        head.appendChild(name);
+        if (p.is_index) head.appendChild(el('span', 'badge', '目录'));
+        left.appendChild(head);
+        if (p.description) left.appendChild(el('div', 'note-text', p.description));
+        var meta = p.slug + ' · ' + fmtTime(p.mtime) + ' · ' + fmtBytes(p.bytes || 0);
+        if (p.links && p.links.length) meta += ' · 链接 ' + p.links.length;
+        left.appendChild(el('div', 'meta', meta));
+        row.appendChild(left);
+        box.appendChild(row);
+      });
+    }
+    var editor = $('knowledge-editor');
+    var slug = $('knowledge-slug');
+    if (slug && state.knowledgeCurrent && document.activeElement !== slug) {
+      slug.value = state.knowledgeCurrent;
+    }
+    var dirty = editor && state.knowledgeOriginal != null &&
+                editor.value !== state.knowledgeOriginal;
+    var metaBox = $('knowledge-meta');
+    if (metaBox) {
+      metaBox.textContent = state.knowledgeCurrent
+        ? (dirty ? '未保存' : fmtBytes(state.knowledgeOriginal.length))
+        : '新的一页';
+      metaBox.classList.toggle('dirty', !!dirty);
+    }
+    var path = $('knowledge-path');
+    if (path) {
+      path.textContent = state.knowledgeCurrent ? state.knowledgeCurrent + '.md' : '';
+      path.title = path.textContent;
+    }
+  }
+  function openKnowledge(slug) {
+    if (!state.workspace) return;
+    var wsid = state.workspace.id;
+    api('api/workspaces/' + encodeURIComponent(wsid) + '/knowledge/' + encodeURIComponent(slug))
+      .then(function (d) {
+        state.knowledgeCurrent = d.slug;
+        state.knowledgeOriginal = d.content || '';
+        $('knowledge-editor').value = state.knowledgeOriginal;
+        $('knowledge-slug').value = d.slug;
+        renderKnowledge();
+      }, function (e) { toast('读取失败：' + e.message); });
+  }
+  function saveKnowledge() {
+    if (!state.workspace) return;
+    var slug = ($('knowledge-slug').value || '').trim();
+    if (!slug) { toast('先填一个文件名（英文/数字/短横线）'); return; }
+    var content = $('knowledge-editor').value;
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/knowledge/' +
+        encodeURIComponent(slug), { method: 'PUT', body: { content: content } })
+      .then(function () {
+        state.knowledgeCurrent = slug;
+        state.knowledgeOriginal = content;
+        toast('已保存 ' + slug + '.md');
+        loadKnowledge();
+      }, function (e) { toast('保存失败：' + e.message); });
+  }
+  function newKnowledge() {
+    state.knowledgeCurrent = '';
+    state.knowledgeOriginal = '';
+    $('knowledge-editor').value = '';
+    $('knowledge-slug').value = '';
+    renderKnowledge();
+    $('knowledge-slug').focus();
+  }
+  function deleteKnowledge() {
+    if (!state.workspace) return;
+    var slug = ($('knowledge-slug').value || '').trim() || state.knowledgeCurrent;
+    if (!slug) { toast('没有选中一页'); return; }
+    api('api/workspaces/' + encodeURIComponent(state.workspace.id) + '/knowledge/' +
+        encodeURIComponent(slug), { method: 'DELETE' })
+      .then(function () {
+        state.knowledgeCurrent = '';
+        state.knowledgeOriginal = '';
+        $('knowledge-editor').value = '';
+        $('knowledge-slug').value = '';
+        toast('已删除 ' + slug + '.md');
+        loadKnowledge();
+      }, function (e) { toast('删除失败：' + e.message); });
   }
   function addMemory() {
     var ta = $('memory-input');
@@ -8236,6 +8346,10 @@
       renderFiles();
     };
     $('memory-add').onclick = addMemory;
+    $('knowledge-save').onclick = saveKnowledge;
+    $('knowledge-new').onclick = newKnowledge;
+    $('knowledge-delete').onclick = deleteKnowledge;
+    $('knowledge-editor').addEventListener('input', function () { renderKnowledge(); });
     $('memory-refresh').onclick = loadMemory;
     $('system-prompt-save').onclick = saveSystemPrompt;
     $('system-prompt-preview').onclick = previewSystemPrompt;

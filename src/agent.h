@@ -184,12 +184,21 @@ class Agent {
                                const std::string& task_context = std::string(),
                                const Role* role = nullptr) const;
 
+  /// The blocks that change while the conversation goes on: the experience
+  /// log, the memory notes, the catalog of the knowledge pages and the task
+  /// list. They are **not** part of the system prompt: they are sent as one
+  /// message at the end of the context, so a change to any of them costs the
+  /// tail of the prompt cache and not the whole conversation.
+  std::string build_tail_block(const Workspace& workspace, const Session& session,
+                              const std::string& task_context = std::string()) const;
+
  private:
   void build_context(const Workspace& workspace, const Session& session, const ModelInfo* model,
                      std::vector<Message>* out, ContextStats* stats = nullptr,
                      const std::string& persona_override = std::string(),
                      const std::string& task_context = std::string(),
-                     const Role* role = nullptr) const;
+                     const Role* role = nullptr,
+                     std::string* tail_out = nullptr) const;
   bool compact_history(Workspace& workspace, Session* session, const std::string& provider,
                        const std::string& model, const ModelInfo* model_info,
                        std::atomic<bool>* cancel, long long retain_tokens);

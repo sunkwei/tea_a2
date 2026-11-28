@@ -512,112 +512,12 @@ std::string Agent::build_system_prompt(const Workspace& workspace, const Session
     out << instructions << "\n";
   }
 
-  // Experience log: unlike instructions.md (the user's rules, cached for the
-  // process lifetime) this file is written by the agent, so it is read fresh on
-  // every turn. It is injected even when empty, together with the rule for
-  // maintaining it - an empty file that nobody is told about never gets used.
-  {
-    bool doc_truncated = false;
-    std::string doc = workspace.load_agent_doc(&doc_truncated);
-    doc = trim(doc);
-    if (doc.size() > kAgentDocPromptBytes) {
-      bool cut = false;
-      doc = truncate_utf8(doc, kAgentDocPromptBytes, &cut) +
-            "\n... [agent.md truncated for the prompt; read the full file with toolkit_agent_doc]";
-      doc_truncated = true;
-    }
-    out << "\nWorkspace experience (`.tea_agent_run/agent.md`, maintained by you across sessions)\n";
-    if (doc.empty()) {
-      out << "(empty so far)\n";
-    } else {
-      out << doc << "\n";
-    }
-    out << "Keep it current: when you hit something specific to THIS workspace that would save "
-           "time next session - a pitfall, a non-obvious command, a script you wrote - append a "
-           "one-line entry with toolkit_agent_doc (op=append). Put reusable scripts under "
-           "`.tea_agent_run/scripts/` and record their path here. Merge or drop stale entries "
-           "instead of piling up history.";
-    if (doc_truncated) out << " (The copy above is truncated.)";
-    out << "\n";
-  }
-
   if (!session.summary.empty()) {
     out << "\nCompact history (older turns were summarised to save context; treat "
            "these as established facts)\n";
     out << session.summary << "\n";
   }
 
-  // The memory block. What a person wrote down comes first (always in force),
-  // then what the agent has reason to trust, then what looks relevant to this
-  // conversation, then a deterministic sample of the fading notes. The order is
-  // fixed by the workspace (see select_memory_for_prompt) so the block stays
-  // cacheable; the tier of a note, not its position in the file, decides where
-  // it goes.
-  std::string memory_focus;
-  for (std::size_t i = session.messages.size(); i > 0; --i) {
-    const Message& m = session.messages[i - 1];
-    if (m.role == "user" && !m.content.empty()) {
-      memory_focus = m.content;
-      break;
-    }
-  }
-  if (!task_context.empty()) {
-    if (!memory_focus.empty()) memory_focus += "\n";
-    memory_focus += task_context;
-  }
-  if (memory_focus.size() > 8192) memory_focus = truncate_utf8(memory_focus, 8192);
-  const MemoryPrompt memory = workspace.select_memory_for_prompt(
-      memory_focus, workspace.id() + "|" + now_iso8601().substr(0, 10));
-  out << memory.text;
-  if (memory.truncated_strong > 0) {
-    workspace.log("warn", "memory: " + std::to_string(memory.strong_total) +
-                              " strong notes, " + std::to_string(memory.strong) +
-                              " fit the prompt budget (truncated " +
-                              std::to_string(memory.truncated_strong) + ")");
-  }
-
-  // The task list is last on purpose: it is the one block that changes during a
-  // turn, and keeping it behind the (stable) environment/instructions/agent.md
-  // text means a todo update only invalidates the tail of the prompt cache.
-  // It is injected every turn, not just when it changes, so a compacted
-  // conversation or a fresh process still knows what the plan was.
-  if (!session.todos.empty()) {
-    int total = 0, done = 0;
-    todo_counts(session.todos, &total, &done);
-    out << "\nTask list (" << done << "/" << total
-        << " done; maintained with toolkit_todo, shown to the user as live progress)";
-    if (session.todo_resumed) {
-      out << " - these steps were left open when the previous turn ended, so continue"
-             " from where it stopped";
-    }
-    out << "\n";
-    for (std::size_t i = 0; i < session.todos.size(); ++i) {
-      const TodoItem& t = session.todos[i];
-      out << "- [" << (t.status == "done" ? "x" : (t.status == "active" ? "~" : " "))
-          << "] " << t.text;
-      if (t.status == "active") out << "   <- in progress";
-      out << "\n";
-    }
-    out << "Keep it current: mark a step active before starting it and done as soon as it is "
-           "finished (exactly one active at a time). Do not restate the list in your answer - "
-           "the user already sees it. A plan belongs to this turn: it is closed when the turn "
-           "ends, so you never have to clear it yourself. If the work is not going to continue, "
-           "clear the list before you finish the turn - otherwise the steps that are still open "
-           "are handed to the next turn as a note, and the user is told they were left.";
-  }
-
-  // What the last turn left open, when this turn did not take it over (the
-  // plan is only resumed at the start of a turn, so a session that is opened
-  // but never continued still shows what was left).
-  if (!session.todo_carry.empty()) {
-    out << "\nThe previous turn ended before its plan was finished. These steps were left:\n";
-    for (std::size_t i = 0; i < session.todo_carry.size(); ++i) {
-      out << "- [" << (session.todo_carry[i].status == "active" ? "~" : " ") << "] "
-          << session.todo_carry[i].text << "\n";
-    }
-    out << "If the work is still going, continue from there. If it is not needed any more, say so "
-           "and carry on with what the user asked for now.\n";
-  }
 
   // A turn that works on a queued task. The model has to know: without this it
   // treats the work as an ordinary question, never reports progress, and never
@@ -687,10 +587,136 @@ std::string truncate_middle(const std::string& text, std::size_t keep_bytes) {
 
 }  // namespace
 
+std::string Agent::build_tail_block(const Workspace& workspace, const Session& session,
+                                     const std::string& task_context) const {
+  std::ostringstream out;
+
+  // The experience log: unlike instructions.md (the user's rules, cached for
+  // the process lifetime) this file is written by the agent, so it is read
+  // fresh on every turn. It is injected even when empty, together with the
+  // rule for maintaining it - an empty file that nobody is told about never
+  // gets used.
+  {
+    bool doc_truncated = false;
+    std::string doc = workspace.load_agent_doc(&doc_truncated);
+    doc = trim(doc);
+    if (doc.size() > kAgentDocPromptBytes) {
+      bool cut = false;
+      doc = truncate_utf8(doc, kAgentDocPromptBytes, &cut) +
+            "\n... [agent.md truncated for the prompt; read the full file with toolkit_agent_doc]";
+      doc_truncated = true;
+    }
+    out << "Workspace experience (`.tea_agent_run/agent.md`, maintained by you across sessions)\n";
+    if (doc.empty()) {
+      out << "(empty so far)\n";
+    } else {
+      out << doc << "\n";
+    }
+    out << "Keep it current: when you hit something specific to THIS workspace that would save "
+           "time next session - a pitfall, a non-obvious command, a script you wrote - append a "
+           "one-line entry with toolkit_agent_doc (op=append). Put reusable scripts under "
+           "`.tea_agent_run/scripts/` and record their path here. Merge or drop stale entries "
+           "instead of piling up history.";
+    if (doc_truncated) out << " (The copy above is truncated.)";
+    out << "\n";
+  }
+
+  // The focus of this turn: the question that was asked. It decides which
+  // notes are relevant and which pages come first in the catalog.
+  std::string focus;
+  for (std::size_t i = session.messages.size(); i > 0; --i) {
+    const Message& m = session.messages[i - 1];
+    if (m.role == "user" && !m.content.empty()) {
+      focus = m.content;
+      break;
+    }
+  }
+  if (!task_context.empty()) {
+    if (!focus.empty()) focus += "\n";
+    focus += task_context;
+  }
+  if (focus.size() > 8192) focus = truncate_utf8(focus, 8192);
+
+  // The memory block. What a person wrote down comes first (always in force),
+  // then what the agent has reason to trust, then what looks relevant to this
+  // conversation, then a deterministic sample of the fading notes. The order is
+  // fixed by the workspace (see select_memory_for_prompt) so the block stays
+  // cacheable; the tier of a note, not its position in the file, decides where
+  // it goes.
+  const MemoryPrompt memory = workspace.select_memory_for_prompt(
+      focus, workspace.id() + "|" + now_iso8601().substr(0, 10));
+  out << memory.text;
+  if (memory.truncated_strong > 0) {
+    workspace.log("warn", "memory: " + std::to_string(memory.strong_total) +
+                              " strong notes, " + std::to_string(memory.strong) +
+                              " fit the prompt budget (truncated " +
+                              std::to_string(memory.truncated_strong) + ")");
+  }
+
+  // The catalog of the knowledge pages: one line per page, the ones that
+  // matter for this conversation first. The pages themselves are not in the
+  // prompt - they are read on demand.
+  const KnowledgeCatalog catalog = workspace.knowledge_catalog(
+      focus, static_cast<std::size_t>(workspace.settings().memory_catalog_lines));
+  out << catalog.text;
+
+  // The journal: what happened today, in the order it happened. It is the
+  // process, not the conclusion - a conclusion that will be needed every time
+  // is a note above.
+  out << "\nJournal (`.tea_agent_run/journal/YYYY-MM-DD.md`, one page per day): when "
+         "something worth remembering happened today - what was done, what came of "
+         "it, what got in the way - write it on today's page. The process, not the "
+         "conclusion (a conclusion you will need every time is a note above). Use the "
+         "file tools; keep today's page, do not rewrite an earlier one.\n";
+
+  // The task list is last on purpose: it is the one block that changes during a
+  // turn, and it is the block the model updates while it works.
+  if (!session.todos.empty()) {
+    int total = 0, done = 0;
+    todo_counts(session.todos, &total, &done);
+    out << "\nTask list (" << done << "/" << total
+        << " done; maintained with toolkit_todo, shown to the user as live progress)";
+    if (session.todo_resumed) {
+      out << " - these steps were left open when the previous turn ended, so continue"
+             " from where it stopped";
+    }
+    out << "\n";
+    for (std::size_t i = 0; i < session.todos.size(); ++i) {
+      const TodoItem& t = session.todos[i];
+      out << "- [" << (t.status == "done" ? "x" : (t.status == "active" ? "~" : " "))
+          << "] " << t.text;
+      if (t.status == "active") out << "   <- in progress";
+      out << "\n";
+    }
+    out << "Keep it current: mark a step active before starting it and done as soon as it is "
+           "finished (exactly one active at a time). Do not restate the list in your answer - "
+           "the user already sees it. A plan belongs to this turn: it is closed when the turn "
+           "ends, so you never have to clear it yourself. If the work is not going to continue, "
+           "clear the list before you finish the turn - otherwise the steps that are still open "
+           "are handed to the next turn as a note, and the user is told they were left.";
+  }
+
+  // What the last turn left open, when this turn did not take it over (the
+  // plan is only resumed at the start of a turn, so a session that is opened
+  // but never continued still shows what was left).
+  if (!session.todo_carry.empty()) {
+    out << "\nThe previous turn ended before its plan was finished. These steps were left:\n";
+    for (std::size_t i = 0; i < session.todo_carry.size(); ++i) {
+      out << "- [" << (session.todo_carry[i].status == "active" ? "~" : " ") << "] "
+          << session.todo_carry[i].text << "\n";
+    }
+    out << "If the work is still going, continue from there. If it is not needed any more, say so "
+           "and carry on with what the user asked for now.\n";
+  }
+
+  return out.str();
+}
+
 void Agent::build_context(const Workspace& workspace, const Session& session,
                           const ModelInfo* model, std::vector<Message>* out,
                           ContextStats* stats, const std::string& persona_override,
-                          const std::string& task_context, const Role* role) const {
+                          const std::string& task_context, const Role* role,
+                          std::string* tail_out) const {
   const Settings& st = workspace.settings();
   out->clear();
   Message system;
@@ -698,6 +724,14 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
   system.content = build_system_prompt(workspace, session, persona_override, task_context, role);
   system.created_at = now_iso8601();
   out->push_back(system);
+
+  // The blocks that change while the conversation goes on (the experience
+  // log, the memory notes, the catalog of the knowledge pages, the task
+  // list) are **not** part of the system prompt. They go to the end of the
+  // context as one message: a change to any of them then costs the tail of
+  // the prompt cache instead of the whole conversation.
+  const std::string tail_block = build_tail_block(workspace, session, task_context);
+  if (tail_out) *tail_out = tail_block;
 
   const long long max_context =
       (model && model->max_context_tokens > 0) ? model->max_context_tokens : 128000;
@@ -720,7 +754,8 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
   // /api/tools serves, ~4 bytes per token. Provider-scoped web tools add more,
   // which the callers cover by keeping this reserve on the generous side.
   const long long tool_schema_cost = 960;
-  const long long fixed = estimate_tokens(system.content) + tool_schema_cost + 64;
+  const long long fixed =
+      estimate_tokens(system.content) + estimate_tokens(tail_block) + tool_schema_cost + 64;
   long long budget = max_context - max_output - fixed;
   const long long floor_budget = max_context / 5;
   if (budget < floor_budget) budget = floor_budget;
@@ -793,6 +828,14 @@ void Agent::build_context(const Workspace& workspace, const Session& session,
     stats->trimmed = tail.size() < (session.messages.size() - first);
   }
   for (std::size_t i = 0; i < tail.size(); ++i) out->push_back(tail[i]);
+  if (!tail_block.empty()) {
+    Message trailing;
+    trailing.role = "system";
+    trailing.content = tail_block;
+    trailing.created_at = now_iso8601();
+    out->push_back(trailing);
+    used += estimate_tokens(tail_block);
+  }
 }
 /// Where the history is folded: the index of the first message that stays
 /// verbatim. Everything before it goes into the summary.
@@ -858,20 +901,37 @@ bool Agent::compact_history(Workspace& workspace, Session* session, const std::s
   // runs on a long session. Keep the newest part and say so in the transcript.
   const std::size_t kTranscriptLimit = 60000;
   std::ostringstream transcript;
+  // What the folded part was about: the conversation between the two of them.
+  // The output of a tool is **not** part of it - it is noise in the summary
+  // request (every tool result is thousands of characters) and it is not what
+  // the model needs to remember. The tools that ran are listed under the
+  // summary instead, one line: what was done, not how it looked. What they
+  // changed is in the files they wrote, and the model reopens those files when
+  // it needs them.
+  std::vector<std::string> tools_used;
   for (std::size_t i = session->summary_upto; i < split; ++i) {
     const Message& m = session->messages[i];
+    if (m.role == "tool") continue;  // the tool output is not conversation
+    for (std::size_t t = 0; t < m.tool_calls.size(); ++t) {
+      const std::string& name = m.tool_calls[t].name;
+      bool seen = false;
+      for (std::size_t k = 0; k < tools_used.size(); ++k) {
+        if (tools_used[k] == name) {
+          seen = true;
+          break;
+        }
+      }
+      if (!seen) tools_used.push_back(name);
+    }
     std::string content = m.content;
     // The cut has to land on a character boundary: the transcript goes into the
     // prompt, and a half character there is invalid UTF-8 in the request.
     if (content.size() > 4000) content = truncate_utf8(content, 4000) + " ... [truncated]";
+    // A message that is nothing but a tool call says nothing about the
+    // conversation; the tool list below carries it.
+    if (content.empty() && !m.tool_calls.empty()) continue;
     transcript << "[" << m.role;
     if (!m.name.empty()) transcript << " " << m.name;
-    if (!m.tool_calls.empty()) {
-      transcript << " called ";
-      for (std::size_t k = 0; k < m.tool_calls.size(); ++k) {
-        transcript << (k ? ", " : "") << m.tool_calls[k].name;
-      }
-    }
     transcript << "] " << content << "\n";
   }
   std::string segment = transcript.str();
@@ -948,6 +1008,8 @@ bool Agent::compact_history(Workspace& workspace, Session* session, const std::s
           "- If the PRIOR checkpoint exists, do not copy it forward verbatim: keep facts that are "
           "still true, drop stale ones, merge what is new.\n"
           "- Preserve exact file paths, commands, error strings, identifiers and numbers.\n"
+          "- Summarise the conversation only. The tool calls are listed separately below; do not "
+          "describe what a tool printed - the files it wrote are still there and will be reopened.\n"
           "- Do not mention this summarisation request or that the context was compacted.");
   request.messages.push_back(system.to_wire(false));
   request.messages.push_back(user.to_wire(false));
@@ -989,6 +1051,16 @@ bool Agent::compact_history(Workspace& workspace, Session* session, const std::s
   }
   if (summary.empty()) return false;
 
+  // The tools that ran in the folded part, in one line: what was done, not
+  // how every call looked.
+  if (!tools_used.empty()) {
+    std::string line = "\n[tools used before the compaction] ";
+    for (std::size_t i = 0; i < tools_used.size(); ++i) {
+      if (i) line += ", ";
+      line += tools_used[i];
+    }
+    summary += line;
+  }
   session->summary = summary;
   session->summary_upto = split;
   session->info.updated_at = now_iso8601();
@@ -1496,8 +1568,9 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
 
     std::vector<Message> context;
     ContextStats ctx_stats;
+    std::string tail_content;
     build_context(workspace, *session, model_info, &context, &ctx_stats, options.system_prompt,
-                  options.task_context, role);
+                  options.task_context, role, &tail_content);
 
     // The pressure check has to happen *inside* the turn. A long turn grows
     // the context with every tool result, and a check that only runs before
@@ -1611,14 +1684,29 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
     // remember the answer for the rest of the process, and retry.
     ChatResult chat;
     bool overflow_recovered = false;
+    // Set when a provider refused the trailing context block: from then on
+    // the block travels inside the system prompt at the head.
+    bool fold_tail = false;
     // A picture the provider refuses would kill every later request on this
     // session (it stays in the history), so the pictures are dropped from the
     // request and the turn goes on without them.
     bool images_dropped = false;
     for (int attempt = 0;; ++attempt) {
       nlohmann::json wire_messages = nlohmann::json::array();
+      const bool has_tail = !tail_content.empty() && !context.empty() &&
+                            context.back().content == tail_content;
       for (std::size_t i = 0; i < context.size(); ++i) {
+        // The folded variant puts the trailing block back into the head.
+        if (fold_tail && has_tail && i + 1 == context.size()) break;
         wire_messages.push_back(context[i].to_wire(echo_reasoning, &image_urls));
+      }
+      if (fold_tail && has_tail && !wire_messages.empty()) {
+        nlohmann::json head = wire_messages[0];
+        auto content = head.find("content");
+        if (content != head.end() && content->is_string()) {
+          head["content"] = content->get<std::string>() + "\n\n" + tail_content;
+          wire_messages[0] = head;
+        }
       }
       if (images_dropped) strip_image_parts(&wire_messages);
       // A provider maps every tool result back to the call it answers, and the
@@ -1655,6 +1743,16 @@ TurnResult Agent::run_turn(Workspace& workspace, Session* session, const std::st
       // A gateway that does not know `stream_options` answers 400 and says so.
       // Drop the field, remember that for this provider, and try again - one
       // wasted round trip beats failing every turn.
+      if (chat.http_status == 400 && !fold_tail && !tail_content.empty()) {
+        // A gateway that refuses a system message after the history (some
+        // of them want the system message first and only first): fold the
+        // trailing block back into the head and try once more. The cache
+        // costs the whole conversation then, but the turn survives.
+        fold_tail = true;
+        LOG_WARN("llm: the provider refused the trailing context block; folding it into "
+                 "the system prompt");
+        continue;
+      }
       if (chat.http_status == 400 && request.include_usage &&
           rejects_stream_options(chat.error + " " + chat.detail)) {
         request.include_usage = false;
