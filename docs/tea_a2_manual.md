@@ -226,7 +226,7 @@ B=http://127.0.0.1:8383
 
 ```bash
 curl -s $B/api/health
-# {"ok":true,"version":"1.8.6","git_hash":"2e9185f1d5c4","provider":"deepseek",
+# {"ok":true,"version":"1.9.0","git_hash":"2e9185f1d5c4","provider":"deepseek",
 #  "model":"deepseek-flash","http_engine":"auto","tea_home":"/home/me/.tea_agent",
 #  "config_loaded":true,"uptime_s":42.1}
 
