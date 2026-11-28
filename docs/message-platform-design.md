@@ -525,3 +525,28 @@ data: {"reason":"window","requested":1,"oldest":51}
 2. **传播中心 Q2~Q12** 还开着——平台是它的传输层，但它的业务规则不在本文范围；
 3. **MQTT 换传输层**：接口语义已按 MQTT 同形设计（§4.2/§5.2），换的时候只需改
    `bus_server` 的传输实现与 broker 的 topic 白名单。
+
+---
+
+## 18. 实现记录（v1.0 之后补记）
+
+八步按 §15 的顺序落地，一步一个提交：
+
+| 步 | 提交 | 自测 |
+|---|---|---|
+| 1~3 | `03ed6a2` `sched/bus_server.py` | `tests/smoke_bus.py`（3 遍） |
+| 4 | `630bc10` `sched/bus_pump.py` | `tests/smoke_bus_pump.py`（2 遍） |
+| 5 | `332b952` router 的 `--bus` | `tests/smoke_bus_router.py`；`tests/smoke_router.py` 旧回归 |
+| 6 | `73cd1a3` watchdog 的 `--bus` | `tests/smoke_bus_watchdog.py`（2 遍）；`tests/smoke_watchdog.py` 旧回归 |
+| 7 | `dbd4a08` channel 心跳 | `tests/smoke_channel_heartbeat.py`；`tests/smoke_telegram_bot.py` 65/65 |
+| 8 | `231b981` e2e + 单元 + Windows 脚本 | `tests/smoke_bus_e2e.py`（2 遍）；`-All -DryRun` |
+
+实现时定下、本文原先没写死的细节：
+
+1. **回填与实时分开**（`Subscriber.put_backlog()`）：`since` 的回填只受窗口约束，不经过实时队列的 `deque(maxlen=N)`。否则一个要补 1000 条的订阅者会被先判成「太慢」——连那条 `gap` 帧都发不出去。
+2. **`since` 大于最新 id**（例如平台重启后客户端还带着旧的大数字）：发一条 `gap` 帧，`reason: no_history`，然后只给新消息。**不能**当成「从 1 开始重放」——那会让客户端以为今天发生的事从没发生过。
+3. **退出时发 `closed` 帧**，再关监听、删 pid：客户端立刻重连，而不是等 keepalive 超时。
+4. **桥接没有自己的心跳 topic**：Q4 的固定名单里只有 `{router,watchdog,bus,channel}`。这是本文 §17 之外的一条已知缺口——桥接死了，watchdog 不会报（`pump-state.json` 的`last_event_at` 会停在死之前的时刻，但要有人去看）。要补，得先在 `docs/message-platform.md` §2.5 登记 `a2/heartbeat/pump`。
+5. **router 不订阅平台**（§3.1 的 Q2 解释）：平台是它的输出；输入仍是队列。
+6. **看门狗的冷却表落在 `state.json`**：重启不会把十分钟内说过的话再说一遍；审计里被压掉的告警不写条目，日志里每分钟一行「still going on」。
+7. **告警三处独立投递**：队列投不进去也照写审计（改之前是「队列失败就 return」，于是队列一挂，审计里连一条记录都没有）。

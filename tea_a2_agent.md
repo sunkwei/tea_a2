@@ -3478,3 +3478,44 @@ planner 被要求的上限）、`tests/smoke_plan_parallel.py`（19：开关、�
 改完要重新 `cp` + `POST /api/mcp/refresh`；队列侧改的是 `sched/task_server.py`，要换
 那份文件再重启队列。P1-2 之后，**旧版 `a2_ext_py`（没有 `roles()` 接口）会让只读任务以
 `read_only_role_missing` 失败**——换二进制/模块时把 `client.py` 一起换。
+
+### 2026-11-28：消息平台（bus）落地 —— router / watchdog / channel 接入
+
+需求 `docs/message-platform.md`、设计 `docs/message-platform-design.md`，实现分六个提交
+（`03ed6a2` 平台 → `630bc10` 桥接 → `332b952` router → `73cd1a3` watchdog →
+`dbd4a08` channel 心跳 → `231b981` e2e + 单元 + Windows 脚本）。
+
+```bash
+python3 sched/bus_server.py --port 8299 --data-dir ~/.tea_agent/bus   # 平台
+python3 sched/bus_pump.py --status                                    # 桥接看到了什么
+python3 sched/router.py   --bus http://127.0.0.1:8299                 # 说话 + 心跳
+python3 sched/watchdog.py --bus http://127.0.0.1:8299 \
+        --expect-heartbeat a2/heartbeat/router --expect-heartbeat a2/heartbeat/channel
+python3 sched/telegram_bot.py --bus http://127.0.0.1:8299            # 前端报「我在」
+```
+
+测试（都在 `tests/`，本机全过）：`smoke_bus.py`、`smoke_bus_pump.py`、`smoke_bus_router.py`、
+`smoke_bus_watchdog.py`、`smoke_channel_heartbeat.py`、`smoke_bus_e2e.py`。后四个各要
+十几到几十秒（看门狗一轮最快 5 秒，这是它自己的下限）。
+
+坑（都是这次踩到的）：
+
+- **SSE 消息帧的 `data:` 行就是消息本身**（`{"id","topic","at","payload"}`），
+  **没有**再包一层 `data`。我按 `frame["data"]["topic"]` 解析 → `last_seen` 永远是空的
+  → 在发心跳的 router 也被报 `router_missing`。`tests/smoke_bus_watchdog.py` 抓到的。
+  `event: gap` / `event: closed` 是另一种帧（没有 `topic`），只认 `topic` 就不会误收。
+- **`since` 落在窗口外要明说**：`since` 大于最新 id（平台重启后客户端带着旧大数字）时
+  发 `gap` + `reason:no_history`，**不能**当成「从 1 重放」——两者对客户端的意思相反。
+- **回填不能走实时队列**：`since` 的回填单独一条路（只受窗口约束），否则补 1000 条的
+  订阅者会先被判「太慢」，连 `gap` 帧都发不出去。
+- **桥接没有心跳 topic**（Q4 的固定名单里没有 `a2/heartbeat/pump`）：桥接死了没人报。
+  补的话要先在需求 §2.5 登记。
+- **改这三个文件前先看行尾**：`sched/*.py` 在 Windows 检出是 CRLF，写补丁要「读入→
+  归一化成 LF→匹配→写回时还原 CRLF」，否则 `count(old) == 0` 全部 MISS。
+- **看门狗告警的冷却表在 `state.json`**：测试里等「同一个告警再来一次」会等不到，
+  这是设计（默认 600 秒）。
+
+### 2026-11-28：这些 python 测试在本机（Python 3.15t）的已知红
+
+- `tests/smoke_wechat_bot.py`：`bot.login()` 里 `IPv4FirstHandler._check_hostname`，
+  3.15 的 `HTTPSHandler` 不再把这个属性放在子类上。**与业务改动无关**（stash 掉改动同样报）。

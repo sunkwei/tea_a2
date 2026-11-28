@@ -16,7 +16,8 @@
 | --- | --- | --- | --- |
 | **触发器入口** | 外部事件（webhook / 邮件 / 聊天）统一进门：去重 → 规则 → 模型判断 → **受理才变任务** | `sched/triggers.py` + 队列 | 队列的一部分 |
 | **Router** | 把分开的工作区会话串成一条**线索**：记住每一步、收拢旧进展、统一对外说话 | `sched/router.py` | `a2_router.service` |
-| **看门狗** | 在 agent 和队列**外面**盯着：卡住的任务、agent 健康、额度、机群设备；还能问模型「跑偏了没有」 | `sched/watchdog.py` | `a2_watchdog.service` |
+| **看门狗** | 在 agent 和队列**外面**盯着：卡住的任务、agent 健康、额度、机群设备，以及平台上的心跳；还能问模型「跑偏了没有」 | `sched/watchdog.py` | `a2_watchdog.service` |
+| **消息平台** | 发布/订阅（HTTP + SSE）：router 说的话、各组件的**心跳**、看门狗的**告警**都从这里走一遍（可选） | `sched/bus_server.py` + `sched/bus_pump.py` | `a2_bus.service` / `a2_bus_pump.service` |
 | **计划** | 一个复杂活儿拆成几步：步骤之间可以互相等，做完合成一份交付物 | `sched/plans.py` + `sched/planner.py` | 队列的一部分 |
 
 ```
@@ -368,6 +369,35 @@ python3 sched/watchdog.py --fleet http://127.0.0.1:8290   # 连带看机群设�
 
 暂停写在数据目录的 `queue_state.json` 里，**服务重启也还是停着的**：一个「先别干活」的
 决定不该因为进程重启就自己失效。
+
+---
+
+## 消息平台（可选）：说话、心跳、告警的另一个去处
+
+不配平台时，router 和看门狗跟以前一模一样（队列事件流 + `speech.jsonl` + `audit.jsonl`）。配上 `--bus` 之后多三件事：
+
+```bash
+python3 sched/bus_server.py                           # 平台（默认 127.0.0.1:8299）
+python3 sched/bus_pump.py                             # 队列事件 -> a2/queue/*
+python3 sched/router.py   --bus http://127.0.0.1:8299 # 说话 + a2/heartbeat/router
+python3 sched/watchdog.py --bus http://127.0.0.1:8299 \
+        --expect-heartbeat a2/heartbeat/router --expect-heartbeat a2/heartbeat/channel
+```
+
+| 加了 `--bus` 之后 | 在哪看 |
+|---|---|
+| router 每说的一句话也发到平台 | `a2/router/speech`（订阅它就能看，不用读 `speech.jsonl`） |
+| router / watchdog / 聊天前端说「我还活着」 | `a2/heartbeat/{router,watchdog,channel}`（retain，晚连上也能看到现状） |
+| 看门狗发现谁不跳了 | `router_missing` / `channel_missing` / `bus_missing`；告警同时进审计、队列事件流、`a2/watchdog/alert` |
+| 队列里的活儿走到哪了 | `a2/queue/task`、`task_done`、`task_failed`（桥接只转发这三种） |
+
+三条和取舍有关的事实：
+
+- **router 的输入还是队列**：平台只是它的输出。两路输入会让同一件事说两遍，而且队列里有平台不转发的类型（取消、等回答……）；
+- **平台只在内存里**：窗口 1000 条 / 60 分钟，重启清空。`since` 指到重启前会收到一条`gap` 帧（`reason: no_history`），不是静默少给；
+- **桥接补不了**队列断线期间的事件（队列事件流没有 `since`）：缺口记在 `~/.tea_agent/bus/pump-state.json`，`python3 sched/bus_pump.py --status` 能看到。
+
+需求与设计：`docs/message-platform.md`、`docs/message-platform-design.md`。
 
 ---
 

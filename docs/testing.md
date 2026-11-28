@@ -94,6 +94,12 @@ python3 tests/smoke_fleet.py                                 # 机群：台账 +
 python3 tests/smoke_watchdog.py                             # 看门狗：卡住的任务（默认只告警）/ --auto 才判死 / 队列暂停与恢复 / agent 不通
 python3 tests/smoke_triggers.py                            # 触发器入口：规则先于模型 / 去重 / 线索 / 老路仍然能排任务
 python3 tests/smoke_router.py                             # Router：线索记住每一步 / 下一个任务被告知之前发生了什么 / 旧进展收拢成摘要
+python3 tests/smoke_bus.py                                # 消息平台：发布/订阅、幂等、窗口、gap、慢订阅者、token、端口冲突、重启
+python3 tests/smoke_bus_pump.py                           # 桥接：三种映射、去重、跳过不能映射的、队列断开记缺口再续上
+python3 tests/smoke_bus_router.py                         # router 上平台：说的话、心跳、平台挂了照常说话
+python3 tests/smoke_bus_watchdog.py                       # 看门狗上平台：谁不跳了、告警三处一致、冷却、平台挂了仍写审计
+python3 tests/smoke_channel_heartbeat.py                  # 聊天前端心跳：不配 --bus 不起线程，配了一次心跳
+python3 tests/smoke_bus_e2e.py                            # 端到端：队列事件 -> router 说话 -> 平台 -> 杀掉 router 报 router_missing
 python3 tests/smoke_fleet_tasks.py                        # 任务跑在设备上：target=fleet / 设备的回答收成结果 / 没答上来的设备也在结果里
                                                           # + 审计 + 机群服务 API + 真二进制的 /api/status 与 /api/exec
                                                           # + 多级链路（服务器 a2 → toolkit_fleet → 机群服务 → 设备 a2）
@@ -181,6 +187,8 @@ router 每个事件说一句话（`speech.jsonl`）；**router 的话进了队�
 **M3 v3**：线索的完整记录写进了工作区（`.tea_agent_run/threads/<id>.md`），下一个任务被
 告知了这个路径（模型用 `toolkit_file` 就能读）；router 的话里带上了线索的标题
 （「做完了 t_x（字体设置）」）。
+
+`tests/smoke_bus*.py` 与 `tests/smoke_channel_heartbeat.py` 覆盖消息平台（`sched/bus_server.py`、`sched/bus_pump.py`）和三个接入方：平台本体是真进程（发布/订阅/窗口/幂等/慢订阅者/端口与数据目录冲突/重启后 `no_history`）；桥接对着假队列，验证三种映射、幂等键、不能映射的类型被跳过、假队列被杀掉后记 gap 再续上；router 与看门狗各自对着真平台跑，最后一条 e2e 把四个进程串起来——**杀掉 router，看门狗必须报 `router_missing`**，这是「观察者」这件事的底线。
 
 `tests/smoke_fleet_tasks.py` 覆盖「任务跑在设备上」（真的队列 + 假的机群服务 + 假的本机
 agent）：带 `target: fleet` 的任务**不问本机 agent**，设备的回答收成任务的结果；**没答上来

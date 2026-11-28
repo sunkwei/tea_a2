@@ -20,7 +20,9 @@ agent 完全不知道 Python 侧的存在。所以：
 | `task_server.py` | 任务队列（HTTP 服务，8283） | 想让活儿排队、等有额度时再做 | [任务队列](#任务队列) |
 | `task_order.py` | 任务单文本格式的解析 | 想用文件提交任务 | [任务队列](#任务队列) |
 | `task_ui.html` | 队列的网页界面 | 想在浏览器里看队列 | [任务队列](#任务队列) |
-| `watchdog.py` | **任务看门狗**：在 agent 和队列外面盯着卡住的任务、agent 的健康、额度 | 想知道「是不是卡住了」「它还活着吗」 | [任务看门狗](#任务看门狗watchdog) |
+| `watchdog.py` | **任务看门狗**：在 agent 和队列外面盯着卡住的任务、agent 的健康、额度，以及平台上的心跳 | 想知道「是不是卡住了」「它还活着吗」 | [任务看门狗](#任务看门狗watchdog) |
+| `bus_server.py` | **消息平台**：发布/订阅（HTTP + SSE），topic 通配符、窗口、retained、幂等键 | 想让 router/watchdog/传播中心基于一个平台跑 | [消息平台](#消息平台bus) |
+| `bus_pump.py` | **桥接**：把队列事件（task_created / task_done / task_failed）发布到平台，缺口记账 | 想让外面的人看到活儿在怎么走 | [消息平台](#消息平台bus) |
 | `triggers.py` | **触发器入口**：外部事件（webhook / 邮件 / 聊天）的统一入口——去重 + 规则 + 模型判断 | 想让外部系统直接派活儿 | [触发器入口](#触发器入口triggers) |
 | `router.py` | **Router**：把分开的工作区会话串成一条线索——记住每一步、收拢旧进展、给每个事件说一句话 | 想让「接着刚才那件事继续」真的接得上 | [Router](#router) |
 | `planner.py` | **规划器**：一次模型调用把一个复杂活儿拆成几步（写成 JSON 给人改过再交） | 想让复杂活儿自己拆开做 | [计划](#计划plans) |
@@ -79,6 +81,35 @@ python3 sched/task_server.py --submit "把 README 的构建例子跑一遍"
 - 网页界面：`sched/task_ui.html`（由队列服务托管）。
 
 深层说明：`docs/tasks.md`。
+
+## 消息平台（bus）
+
+**给 router、watchdog 和以后的信息传播中心用的一条传输层。** 队列的事件流是实时广播：没有 id、不能续订、断线就丢，订阅者慢了还会把队列的内存撑大。平台补的是这三样：`since` 续订（补不上就**明说**缺口）、topic 通配符（与 MQTT 同语义）、一条本机 token。
+
+```bash
+python3 sched/bus_server.py                    # 平台（默认 127.0.0.1:8299）
+python3 sched/bus_pump.py --status             # 桥接看到/漏掉了什么
+python3 sched/router.py   --bus http://127.0.0.1:8299   # 说的话也上平台 + 心跳
+python3 sched/watchdog.py --bus http://127.0.0.1:8299   # 看心跳、告警三处一致
+```
+
+```bash
+TOKEN=$(cat ~/.tea_agent/bus/token)
+curl -X POST http://127.0.0.1:8299/api/publish \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"topic":"a2/test/hello","payload":{"a":1}}'
+curl -N "http://127.0.0.1:8299/api/subscribe?filter=a2/%23&since=0" \
+     -H "Authorization: Bearer $TOKEN"
+curl http://127.0.0.1:8299/health              # 订阅者、窗口、dropped
+```
+
+- **只在内存里**：窗口 1000 条 / 60 分钟、retained 每个 topic 一条、幂等键表都在内存，重启全清（`/health` 写 `persisted:false`）——要回放历史，回队列那边看；
+- **补齐与实时分开**：`since` 的回填只受窗口约束；实时流量每个订阅者有上限，慢了丢最旧并记 `dropped`；
+- **token 在 `<tea home>/bus/token`（0600）**，只听 `127.0.0.1`；
+- **桥接补不了队列断线期间的事件**（队列事件流没有 `since`）：缺口记在 `~/.tea_agent/bus/pump-state.json`，`--status` 能看到；
+- 哪些事件会转发是**固定名单**（见 `docs/message-platform.md` §2.5），新增要先登记。
+
+深层说明：`docs/message-platform.md`（需求）、`docs/message-platform-design.md`（设计）。
 
 ## 触发器入口（triggers）
 
