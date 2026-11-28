@@ -24,9 +24,17 @@ the queue down with it, and the queue must not wait for it.
 Usage:
     python3 sched/router.py                       # follow the queue's events
     python3 sched/router.py --interval 30 --spill-after 4
+
+With `--bus http://127.0.0.1:8299` every sentence is also published on the
+message platform (`a2/router/speech`) and the router announces itself on
+`a2/heartbeat/router` - that is how the watchdog notices a router that died
+(nobody hears anything then, which is exactly the failure that used to be
+invisible). The input is still the queue: the platform only carries what
+the router says, so an event is never spoken twice.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -39,6 +47,9 @@ DEFAULT_TASKS = os.environ.get("TEA_TASK_URL", "http://127.0.0.1:8283")
 DEFAULT_AGENT = os.environ.get("TEA_AGENT_URL", "http://127.0.0.1:8383")
 DEFAULT_DATA_DIR = os.environ.get(
     "TEA_ROUTER_DATA", os.path.join("~", ".tea_agent", "router"))
+TEA_HOME = os.path.expanduser(os.environ.get("TEA_AGENT_HOME",
+                                             os.path.join("~", ".tea_agent")))
+VERSION = "1.0.0"
 
 SUMMARY_SYSTEM = ("你在替一个 agent 系统整理工作记录。下面是同一件活儿（一条线索）里"
                   "先后发生的若干条进展。请用两三句话把它们收拢成一段摘要：做了什么、"
@@ -51,6 +62,32 @@ def now_iso():
 
 def log(message):
     print("%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
+
+
+_LOG_LAST = {}
+
+
+def log_throttled(key, message, interval=60.0):
+    """A dead platform must not fill the log: one line per minute."""
+    now = time.time()
+    last = _LOG_LAST.get(key)
+    if last is not None and (now - last) < interval:
+        return False
+    _LOG_LAST[key] = now
+    log(message)
+    return True
+
+
+def read_token(given=""):
+    """The platform's token: the file is the real way (not the command line,
+    which every process can read on this machine)."""
+    if given:
+        return given
+    try:
+        with open(os.path.join(TEA_HOME, "bus", "token"), encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
 
 
 def http_json(url, method="GET", body=None, timeout=30, headers=None):
@@ -99,6 +136,9 @@ class Router(object):
         self.data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
         self.speech_path = args.speech or os.path.join(self.data_dir, "speech.jsonl")
         self.summarized = {}     # thread id -> how many entries are done
+        self.bus = (getattr(args, "bus", "") or "").rstrip("/")
+        self.bus_token = read_token(getattr(args, "bus_token", ""))
+        self.started = time.time()
 
     # ---- what the router says --------------------------------------------
     @staticmethod
@@ -154,6 +194,45 @@ class Router(object):
             return "一条线索收拢成了一句摘要"
         return ""
 
+    def publish_bus(self, topic, payload, key="", retain=False):
+        """One publish to the platform. Never raises.
+
+        The speech log is written first and the queue is the source of
+        truth, so a dead platform costs us the copy of a sentence, never
+        the sentence itself.
+        """
+        if not self.bus:
+            return False
+        body = {"topic": topic, "payload": payload}
+        if key:
+            body["key"] = key
+        if retain:
+            body["retain"] = True
+        headers = {"Authorization": "Bearer " + self.bus_token} if self.bus_token else None
+        status, answer = http_json(self.bus + "/api/publish", "POST", body,
+                                   timeout=getattr(self.args, "bus_timeout", 5.0),
+                                   headers=headers)
+        if status == 200:
+            return True
+        log_throttled("bus-publish", "router: the platform did not take %s: %s"
+                      % (topic, (answer or {}).get("error") or answer))
+        return False
+
+    def heartbeat(self):
+        """Announce that the router is alive (retained: a subscriber that
+        connects later sees the current state at once)."""
+        self.publish_bus("a2/heartbeat/router", {
+            "at": now_iso(), "pid": os.getpid(), "version": VERSION,
+            "uptime_s": int(time.time() - self.started),
+            "queue": self.tasks_url, "bus": self.bus,
+        }, retain=True)
+
+    def heartbeat_forever(self):
+        interval = max(5.0, float(getattr(self.args, "bus_heartbeat", 30.0)))
+        while True:
+            self.heartbeat()
+            time.sleep(interval)
+
     def say(self, line, event=None):
         """Write down what the router said, and hand it to the queue.
 
@@ -173,6 +252,18 @@ class Router(object):
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError:
             pass
+        if self.bus:
+            payload = {"line": line, "at": entry["at"]}
+            if event:
+                payload["speech_of"] = event.get("type") or ""
+                task = event.get("task") or {}
+                if task.get("id"):
+                    payload["task_id"] = task.get("id")
+                    payload["workspace_id"] = task.get("workspace_id") or ""
+            key = "speech:" + hashlib.sha1(
+                ("%s|%s|%s" % (line, entry["at"], payload.get("speech_of", ""))
+                 ).encode("utf-8")).hexdigest()[:16]
+            self.publish_bus("a2/router/speech", payload, key)
         if not self.args.publish:
             return
         body = {"type": "speech", "line": line}
@@ -294,6 +385,10 @@ class Router(object):
 
     def run_forever(self):
         log("router: watching %s (agent %s)" % (self.tasks_url, self.agent_url))
+        if self.bus:
+            log("router: speaking on %s" % self.bus)
+            threading.Thread(target=self.heartbeat_forever,
+                             name="router-heartbeat", daemon=True).start()
         # The events are followed in the background: the stream is a long poll
         # that can stay open for hours, and the threads have to be checked
         # every now and then all the same.
@@ -323,6 +418,15 @@ def build_parser():
                         help="seconds between two attempts to follow the event stream")
     parser.add_argument("--interval", type=float, default=30.0,
                         help="seconds between two checks of the threads")
+    parser.add_argument("--bus", default=os.environ.get("TEA_BUS_URL", ""),
+                        help="the message platform's URL; empty = off (the queue stream "
+                             "and speech.jsonl still work as before)")
+    parser.add_argument("--bus-token", default="",
+                        help="the platform's token (default: <tea home>/bus/token)")
+    parser.add_argument("--bus-heartbeat", type=float, default=30.0,
+                        help="seconds between a2/heartbeat/router messages (default 30)")
+    parser.add_argument("--bus-timeout", type=float, default=5.0,
+                        help="seconds for one publish to the platform (default 5)")
     parser.add_argument("--publish", dest="publish", action="store_true", default=True,
                         help="hand every sentence to the queue's event stream, so the chat "
                              "front ends deliver the router's words (default: on)")
